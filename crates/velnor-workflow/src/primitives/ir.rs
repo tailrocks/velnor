@@ -709,9 +709,13 @@ pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
 /// online (`preparation_env`, never `checks_env`) — it is the recovery path
 /// the offline restriction presumes already happened.
 ///
-/// Kind reusables share one YAML body across many units. Fetch the matrix
-/// unit's sources (`inputs.unit`), not the first scanned member's directory.
-pub(crate) fn render_cargo_source_preparation(output: &mut String, members: &[&Unit]) {
+/// Kind reusables share one YAML body across many units. Fetch the current
+/// rendered job's sources, not the first scanned member's directory.
+pub(crate) fn render_cargo_source_preparation(
+    output: &mut String,
+    members: &[&Unit],
+    unit_id: &str,
+) {
     if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
         return;
     }
@@ -735,7 +739,8 @@ pub(crate) fn render_cargo_source_preparation(output: &mut String, members: &[&U
     }
     let _ = writeln!(
         output,
-        "      - name: Prepare Cargo sources\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
+        "      - name: Prepare Cargo sources\n        env:\n          CI_UNIT_ID: {}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
+        yaml_scalar(unit_id),
         preparation_env()
     );
 }
@@ -1740,7 +1745,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 unit.kind.id_prefix()
             );
         }
-        render_cargo_source_preparation(output, members);
+        render_cargo_source_preparation(output, members, &unit.id);
         let unit_id_value =
             input_unit.map_or_else(|| "${{ inputs.unit }}".to_owned(), ToOwned::to_owned);
         let checks_env = checks_env_for_members(unit, members);
@@ -2302,7 +2307,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     unit.id,
                 );
             }
-            render_cargo_source_preparation(output, &[unit]);
+            render_cargo_source_preparation(output, &[unit], &unit.id);
             let base_sha = self.base_sha_expression();
             let _ = writeln!(
                 output,

@@ -151,6 +151,34 @@ jobs:
           key: ci-${{ runner.os }}-rust-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
             ci-${{ runner.os }}-rust-
+      - name: Prepare Cargo sources
+        env:
+          CI_UNIT_ID: rust-policy
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -164,6 +192,9 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -324,6 +355,34 @@ jobs:
           key: ci-${{ runner.os }}-rust-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
             ci-${{ runner.os }}-rust-
+      - name: Prepare Cargo sources
+        env:
+          CI_UNIT_ID: rust-policy
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -337,6 +396,9 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -586,12 +648,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-unit-collector
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'tools/unit-collector' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -600,12 +682,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -768,12 +852,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-unit-collector
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'tools/unit-collector' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -782,12 +886,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1037,12 +1143,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-bench
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-bench' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -1051,12 +1177,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1219,12 +1347,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-bench
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-bench' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -1233,12 +1381,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1488,12 +1638,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-client
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-client' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -1502,12 +1672,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1670,12 +1842,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-client
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-client' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -1684,12 +1876,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1939,12 +2133,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-control
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-control' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -1953,12 +2167,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2121,12 +2337,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-control
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-control' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -2135,12 +2371,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2390,12 +2628,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-model
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-model' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -2404,12 +2662,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2572,12 +2832,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-model
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-model' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -2586,12 +2866,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2841,12 +3123,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-render
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-render' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -2855,12 +3157,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3023,12 +3327,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-render
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-render' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -3037,12 +3361,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3292,12 +3618,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-runner
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-runner' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -3306,12 +3652,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3474,12 +3822,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-runner
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-runner' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -3488,12 +3856,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3743,12 +4113,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-tools
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-tools' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -3757,12 +4147,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3925,12 +4317,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-tools
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-tools' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -3939,12 +4351,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4194,12 +4608,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -4208,12 +4642,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4376,12 +4812,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -4390,12 +4846,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4645,12 +5103,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow-contract
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow-contract' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -4659,12 +5137,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4827,12 +5307,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow-contract
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow-contract' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -4841,12 +5341,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -5096,12 +5598,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnorctl
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnorctl' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -5110,12 +5632,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -5278,12 +5802,32 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnorctl
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnorctl' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -5292,12 +5836,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -5546,11 +6092,31 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-production-topology
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
           cargo fetch --locked
       - name: Run "Rust production topology" checks
         env:
@@ -5560,12 +6126,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -5728,11 +6296,31 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-production-topology
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
           cargo fetch --locked
       - name: Run "Rust production topology" checks
         env:
@@ -5742,12 +6330,14 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?

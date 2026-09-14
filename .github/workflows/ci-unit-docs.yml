@@ -66,13 +66,13 @@ jobs:
         with:
           path: |
             ~/.npm
-          key: ci-${{ runner.os }}-docs-${{ hashFiles('bun.lock', 'package-lock.json') }}
+          key: ci-${{ runner.os }}-docs-${{ hashFiles('package-lock.json', 'bun.lock') }}
           restore-keys: |
             ci-${{ runner.os }}-docs-
       - name: Run Documentation checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: docs
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}

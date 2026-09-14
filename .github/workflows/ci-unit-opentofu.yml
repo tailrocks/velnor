@@ -78,7 +78,7 @@ jobs:
       - name: Run OpenTofu checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: opentofu
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}

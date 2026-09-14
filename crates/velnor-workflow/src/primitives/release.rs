@@ -881,7 +881,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     unit.id
                 );
             }
-            render_cargo_source_preparation(&mut output, &[unit]);
+            render_cargo_source_preparation(&mut output, &[unit], &unit.id);
             let cargo_offline = checks_env(unit);
             let _ = writeln!(
                 output,
@@ -1919,7 +1919,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "f7b75fc505b97d5c4c3e1aee1806cec88fd552799ff7720d8eeae19f144314f5",
+                "d34263f8c8bddd4cc5615eea4aa8e5a866aa2115731a0bfbacd9249d774cce26",
             ),
             (
                 "preview.yml",
@@ -1964,6 +1964,7 @@ mod tests {
         assert!(release.contains("name: Release"), "{release}");
         assert!(release.contains("Publish GitHub release"), "{release}");
         assert!(release.contains("Verify archive checksums"), "{release}");
+        assert!(!release.contains("inputs.unit"), "{release}");
         for (file, marker) in [
             ("preview.yml", "Preview"),
             ("maintenance.yml", "cache"),

@@ -507,8 +507,9 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
         );
     }
     assert!(!workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
-    assert!(workflow.contains("cd -- 'crates/crate00' && cargo fetch --locked"));
-    assert!(workflow.contains("cd -- 'crates/crate01' && cargo fetch --locked"));
+    assert!(!workflow.contains("inputs.unit"));
+    assert!(workflow.contains("'rust-crate00') root='crates/crate00' ;;"));
+    assert!(workflow.contains("'rust-crate01') root='crates/crate01' ;;"));
 }
 
 #[test]

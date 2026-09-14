@@ -184,226 +184,69 @@ jobs:
             echo "required CI prerequisite plan did not pass: $result" >&2
             exit 1
           fi
-          selected=",$SELECTED_UNITS,"
-          if [[ "$selected" == *",bun-velnor,"* ]]; then
-            result="$(result_for_job group-bun)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit bun-velnor did not pass: $result" >&2; exit 1 ;;
-            esac
+          matrix="$(jq -r --arg key 'bun_matrix' '.plan.outputs[$key] // \"[]\"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-bun)"
+          if [[ "$matrix" != '[]' ]]; then
+            if [[ "$result" != success ]]; then
+              echo "selected CI group group-bun did not pass: $result" >&2
+              exit 1
+            fi
           else
-            result="$(result_for_job group-bun)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI group group-bun failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",docker,"* ]]; then
-            result="$(result_for_job group-docker)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit docker did not pass: $result" >&2; exit 1 ;;
-            esac
+          matrix="$(jq -r --arg key 'docker_matrix' '.plan.outputs[$key] // \"[]\"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-docker)"
+          if [[ "$matrix" != '[]' ]]; then
+            if [[ "$result" != success ]]; then
+              echo "selected CI group group-docker did not pass: $result" >&2
+              exit 1
+            fi
           else
-            result="$(result_for_job group-docker)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI group group-docker failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",docs,"* ]]; then
-            result="$(result_for_job group-docs)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit docs did not pass: $result" >&2; exit 1 ;;
-            esac
+          matrix="$(jq -r --arg key 'docs_matrix' '.plan.outputs[$key] // \"[]\"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-docs)"
+          if [[ "$matrix" != '[]' ]]; then
+            if [[ "$result" != success ]]; then
+              echo "selected CI group group-docs did not pass: $result" >&2
+              exit 1
+            fi
           else
-            result="$(result_for_job group-docs)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI group group-docs failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",opentofu,"* ]]; then
-            result="$(result_for_job group-opentofu)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit opentofu did not pass: $result" >&2; exit 1 ;;
-            esac
+          matrix="$(jq -r --arg key 'opentofu_matrix' '.plan.outputs[$key] // \"[]\"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-opentofu)"
+          if [[ "$matrix" != '[]' ]]; then
+            if [[ "$result" != success ]]; then
+              echo "selected CI group group-opentofu did not pass: $result" >&2
+              exit 1
+            fi
           else
-            result="$(result_for_job group-opentofu)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI group group-opentofu failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-policy,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-policy did not pass: $result" >&2; exit 1 ;;
-            esac
+          matrix="$(jq -r --arg key 'rust_matrix' '.plan.outputs[$key] // \"[]\"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-rust)"
+          if [[ "$matrix" != '[]' ]]; then
+            if [[ "$result" != success ]]; then
+              echo "selected CI group group-rust did not pass: $result" >&2
+              exit 1
+            fi
           else
-            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
-              *) echo "unselected CI unit rust-policy failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-unit-collector,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-unit-collector did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-unit-collector failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-bench,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-bench failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-client,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-client did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-client failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-control,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-control did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-control failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-model,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-model did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-model failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-render,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-render did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-render failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-runner,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-runner failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-tools,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-tools failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-workflow,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnorctl,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-velnorctl did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-production-topology,"* ]]; then
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI unit rust-production-topology did not pass: $result" >&2; exit 1 ;;
-            esac
-          else
-            result="$(result_for_job group-rust)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI unit rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;
+              *) echo "unselected CI group group-rust failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
   required:
