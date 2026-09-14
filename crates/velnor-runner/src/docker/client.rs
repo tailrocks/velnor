@@ -1379,7 +1379,8 @@ pub(crate) enum ScriptExecRoute {
     /// zero subprocesses.
     Served(CommandResult),
     /// The step deadline expired on the API leg: the CLI watchdog's own
-    /// 124 result, the container killed the same way. Never a fallback.
+    /// 124 result, the container left running as on the CLI leg. Never a
+    /// fallback.
     Expired(CommandResult),
     /// Any API failure, the API disabled, or a non-host runner: run the
     /// historical CLI call unchanged.
@@ -1585,8 +1586,14 @@ impl<'r> Docker<'r> {
     ///   recorded in the step telemetry, as on the CLI leg.
     /// * [`ScriptExecRoute::Expired`] — the step deadline expired on the
     ///   API leg: the CLI watchdog's own 124 result (same message, same
-    ///   partial streams), after killing the container the same way.
-    ///   Served, never a fallback — expiry must not rerun the step.
+    ///   partial streams). The timed-out attempt is dropped, which closes
+    ///   the exec stream — the API leg's client side — while the container
+    ///   survives, exactly as on the CLI leg, where the watchdog's parser
+    ///   hits the `--` separator and kills only the docker client. Served,
+    ///   never a fallback — expiry must not rerun the step. Like `Served`
+    ///   this records `observe_api` only: `timeouts`/`failures` count host
+    ///   `docker` invocations, and no invocation existed — the 124 lives in
+    ///   the step result, as on the CLI leg.
     /// * [`ScriptExecRoute::UseCli`] — ANY API failure (transport,
     ///   status, framing, JSON, schema, dead runtime, or a job
     ///   cancellation winning the race), the API disabled, or a
@@ -1647,7 +1654,16 @@ impl<'r> Docker<'r> {
                 })
             }
             Some(Err(_)) => {
-                crate::executor::kill_container_best_effort(container);
+                // No container kill: dropping the timed-out attempt above
+                // already closed the exec stream — the API leg's client
+                // side — which is exactly what the CLI watchdog does for
+                // real script-step argv (its parser hits the `--`
+                // separator, resolves no target, and kills only the
+                // docker client). The container and its orphaned step
+                // process survive on both legs, so post/failure/
+                // continue-on-error steps see the same live container.
+                // Nothing here touches the daemon, so 124 always returns
+                // promptly, never behind a wedged-daemon round trip.
                 let result = crate::executor::timeout_command_result(
                     Some(crate::docker::DockerOp::Payload),
                     step_deadline,
@@ -3768,6 +3784,7 @@ Total:\t\t6.054MB
         let _scope = begin_job("exec-expired");
         let cli_args = script_exec_cli_args();
         let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let started = Instant::now();
         let route = {
             let docker = Docker::job(&mut runner);
             docker.try_exec_script(
@@ -3778,6 +3795,7 @@ Total:\t\t6.054MB
                 &mut |_, _| {},
             )
         };
+        let elapsed = started.elapsed();
         // Byte-identical to the CLI watchdog's expiry: code, empty partial
         // stdout, and the payload timeout sentence.
         assert_eq!(
@@ -3795,13 +3813,20 @@ Total:\t\t6.054MB
             0,
             "expiry serves, it never falls back"
         );
+        // Bounded on the job thread: the daemon answers at 500 ms but the
+        // step deadline is 30 ms, and no kill round trip follows — 124 must
+        // return on the deadline, never behind a wedged daemon.
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "expiry must return promptly, took {elapsed:?}"
+        );
         let counts = snapshot();
         assert_eq!(counts.api_calls, 1);
         assert_eq!(counts.api_fallbacks, 0);
     }
 
     #[test]
-    fn script_exec_skips_api_for_test_doubles_and_when_disabled() {
+    fn script_exec_skips_api_for_non_host_runners() {
         // A nonexistent socket proves the negative: any API attempt would
         // surface as a connect fallback, so zero fallbacks means zero
         // attempts.
@@ -3810,6 +3835,31 @@ Total:\t\t6.054MB
         let _guard = EngineTestGuard::serve(missing, None);
         let _scope = begin_job("exec-skip");
         let mut runner = ScriptRunner::scripted(Vec::new());
+        let route = {
+            let docker = Docker::job(&mut runner);
+            docker.try_exec_script(
+                "velnor-job-1",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_secs(60),
+                &mut |_, _| {},
+            )
+        };
+        assert_eq!(route, ScriptExecRoute::UseCli);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 0);
+    }
+
+    #[test]
+    fn script_exec_skips_api_when_disabled() {
+        // The `VELNOR_DOCKER_ENGINE_API=0` early return: a host runner, so
+        // the disabled flag is the only skip reason — zero calls plus zero
+        // fallbacks means the API was never attempted.
+        let cli_args = script_exec_cli_args();
+        let _guard = EngineTestGuard::disabled();
+        let _scope = begin_job("exec-disabled");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
         let route = {
             let docker = Docker::job(&mut runner);
             docker.try_exec_script(
@@ -3962,6 +4012,82 @@ Total:\t\t6.054MB
         summarize(
             "cli ",
             cli.into_iter().map(|(elapsed, _)| elapsed).collect(),
+        );
+    }
+
+    /// Live Engine expiry parity: a timed-out API step returns 124 while
+    /// the job container keeps running — the CLI watchdog shape (client
+    /// killed, container live). Ignored: it needs a live daemon (reuses
+    /// `alpine:3.20` if present, else skips). Run it with:
+    /// `cargo test -p velnor-runner --lib live_exec_expiry_leaves_container_running -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_exec_expiry_leaves_container_running() {
+        use std::os::unix::net::UnixStream;
+        use std::process::Command;
+        const NAME: &str = "velnor-eng4-expiry";
+        let socket = super::super::engine::socket_path();
+        if UnixStream::connect(&socket).is_err() {
+            println!(
+                "live_exec_expiry_leaves_container_running: SKIP, no live daemon at {}",
+                socket.display()
+            );
+            return;
+        }
+        struct ExpiryContainer;
+        impl ExpiryContainer {
+            fn remove() {
+                let _ = Command::new("docker").args(["rm", "-f", NAME]).status();
+            }
+            fn running() -> bool {
+                Command::new("docker")
+                    .args(["inspect", "-f", "{{.State.Running}}", NAME])
+                    .output()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "true")
+                    .unwrap_or(false)
+            }
+        }
+        impl Drop for ExpiryContainer {
+            fn drop(&mut self) {
+                Self::remove();
+            }
+        }
+        let _container = ExpiryContainer;
+        ExpiryContainer::remove();
+        let started = Command::new("docker")
+            .args(["run", "-d", "--name", NAME, "alpine:3.20", "sleep", "300"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !started {
+            println!("live_exec_expiry_leaves_container_running: SKIP, cannot start {NAME}");
+            return;
+        }
+        // Real script-step argv shape: `--` before the container operand.
+        let cli_args: Vec<String> = ["exec", "--workdir", "/tmp", "--", NAME, "sleep", "30"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let config = ExecConfig {
+            cmd: vec!["sleep".into(), "30".into()],
+            env: Vec::new(),
+            workdir: "/tmp".into(),
+        };
+        let _guard = EngineTestGuard::serve(socket, None);
+        let route = Docker::host().try_exec_script(
+            NAME,
+            &cli_args,
+            &config,
+            Duration::from_secs(2),
+            &mut |_, _| {},
+        );
+        let ScriptExecRoute::Expired(result) = route else {
+            panic!("live expiry must expire, got {route:?}");
+        };
+        assert_eq!(result.code, 124);
+        assert!(
+            ExpiryContainer::running(),
+            "expiry must leave the job container running"
         );
     }
 }

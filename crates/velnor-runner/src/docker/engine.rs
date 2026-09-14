@@ -269,6 +269,17 @@ impl EngineTestGuard {
         set_test_overrides(Some(socket), budget_ms);
         Self { _serial: serial }
     }
+
+    /// Force the API path off, pinning the `VELNOR_DOCKER_ENGINE_API=0`
+    /// early return deterministically. The env-to-off mapping itself is
+    /// pinned by `routing_defaults_off_in_tests_and_env_gates_production`;
+    /// together they cover the flag end to end.
+    pub(crate) fn disabled() -> Self {
+        let serial = super::metrics::lock_serial_for_test();
+        ROUTE_OVERRIDE.store(ROUTE_OFF, Ordering::Relaxed);
+        set_test_overrides(None, None);
+        Self { _serial: serial }
+    }
 }
 
 #[cfg(test)]
@@ -1132,40 +1143,44 @@ impl Demux {
     /// header or payload waits for the next push; anything else is skew
     /// the CLI fallback re-derives. Single frames are capped at
     /// [`MAX_BODY_BYTES`]: the daemon writes copy-sized frames, so a
-    /// larger declaration is corruption, not output.
+    /// larger declaration is corruption, not output. Frames are scanned
+    /// behind an offset cursor and the consumed prefix drains once per
+    /// push, so one read carrying many small frames costs one memmove, not
+    /// one per frame.
     fn push(&mut self, bytes: &[u8]) -> FaultResult<Vec<Frame>> {
         const HEADER: usize = 8;
         self.pending.extend_from_slice(bytes);
         let mut frames = Vec::new();
+        let mut consumed = 0;
         loop {
-            if self.pending.len() < HEADER {
-                return Ok(frames);
+            let rest = &self.pending[consumed..];
+            if rest.len() < HEADER {
+                break;
             }
-            let stream = self.pending[0];
+            let stream = rest[0];
             if stream != 1 && stream != 2 {
+                self.pending.drain(..consumed);
                 return Err((
                     EngineFaultKind::Framing,
                     format!("unknown multiplexed stream {stream}"),
                 ));
             }
-            let size = u32::from_be_bytes([
-                self.pending[4],
-                self.pending[5],
-                self.pending[6],
-                self.pending[7],
-            ]) as usize;
+            let size = u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
             if size > MAX_BODY_BYTES {
+                self.pending.drain(..consumed);
                 return Err((
                     EngineFaultKind::TooLarge,
                     format!("multiplexed frame declares {size} payload bytes"),
                 ));
             }
-            if self.pending.len() < HEADER + size {
-                return Ok(frames);
+            if rest.len() < HEADER + size {
+                break;
             }
-            frames.push((stream, self.pending[HEADER..HEADER + size].to_vec()));
-            self.pending.drain(..HEADER + size);
+            frames.push((stream, rest[HEADER..HEADER + size].to_vec()));
+            consumed += HEADER + size;
         }
+        self.pending.drain(..consumed);
+        Ok(frames)
     }
 
     /// True when no partial frame survives: the stream must end on a frame
@@ -2811,6 +2826,25 @@ mod tests {
         let mut demux = Demux::default();
         assert!(demux.push(&[1, 0, 0]).unwrap().is_empty());
         assert!(!demux.is_drained());
+    }
+
+    #[test]
+    fn demux_parses_many_small_frames_in_one_push() {
+        // The offset-cursor shape: hundreds of tiny frames in a single
+        // read each parse in order, with nothing left pending.
+        let mut bytes = Vec::new();
+        for index in 0..512 {
+            let stream = if index % 2 == 0 { 1 } else { 2 };
+            bytes.extend_from_slice(&exec_frame(stream, b"x"));
+        }
+        let mut demux = Demux::default();
+        let frames = demux.push(&bytes).unwrap();
+        assert_eq!(frames.len(), 512);
+        for (index, (stream, payload)) in frames.iter().enumerate() {
+            assert_eq!(*stream, if index % 2 == 0 { 1 } else { 2 });
+            assert_eq!(payload, b"x");
+        }
+        assert!(demux.is_drained());
     }
 
     #[test]
