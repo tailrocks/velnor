@@ -2569,7 +2569,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             lane: github
             runner: ubuntu-24.04
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     timeout-minutes: 90
     permissions:
@@ -2648,7 +2648,7 @@ jobs:
           sbom: true
   guest-payload:
     name: Guest payload ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -2857,7 +2857,7 @@ jobs:
   debian:
     name: Package Debian artifacts
     needs: [admit-runner, verify, build, guest-payload]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false

@@ -574,7 +574,9 @@ fn render_guest_payload_job(config: &ProjectConfig, release: &ReleaseSpec) -> Op
     );
     let matrix = guest_arch_matrix(config);
     Some(format!(
-        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm/*\n          if-no-files-found: error\n"
+        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n    runs-on: {guest_runner}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm/*\n          if-no-files-found: error\n",
+        matrix = matrix,
+        guest_runner = yaml_scalar(&config.github_runner),
     ))
 }
 
@@ -623,8 +625,10 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
     }
     let header = if guest {
         format!(
-            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
+            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
             guest_arch_matrix(config),
+            needs = needs,
+            runner = yaml_scalar(&config.github_runner),
         )
     } else {
         format!(
@@ -680,6 +684,28 @@ fn release_lanes(config: &ProjectConfig, target: &str) -> Vec<(&'static str, Str
     }
 }
 
+/// A release-side matrix may use a literal runner when every row resolves to
+/// the same runner. Keep the `runner` field in each row for the reviewed
+/// matrix contract; only replace the job-level expression when doing so does
+/// not change any row's scheduling semantics. Heterogeneous target runners
+/// retain the expression because one job cannot encode multiple literal
+/// `runs-on` values.
+fn release_matrix_runner(config: &ProjectConfig, targets: &[String]) -> String {
+    let runners = targets
+        .iter()
+        .flat_map(|target| release_lanes(config, target).into_iter())
+        .map(|(_, runner)| runner)
+        .collect::<BTreeSet<_>>();
+    if runners.len() == 1 {
+        runners
+            .into_iter()
+            .next()
+            .expect("one release matrix runner must be present")
+    } else {
+        github_expression("matrix.runner")
+    }
+}
+
 fn canonical_lane(config: &ProjectConfig) -> &'static str {
     if config.runners == RunnerMode::Velnor {
         "velnor"
@@ -727,8 +753,9 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             );
         }
     }
+    let matrix_runner = release_matrix_runner(config, &release.targets);
     let mut output = format!(
-        r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
+        r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
@@ -742,6 +769,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ActionPin::DownloadArtifact.reference(),
         paths = release_watch_paths(config),
         matrix = matrix,
+        matrix_runner = matrix_runner,
     )
     .replace(
         "permissions:\\n  contents: read\\n\\njobs:\\n  build:",
@@ -767,9 +795,9 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     )
     .replace("\\n", "\n")
     .replace(
-        "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 75",
+        &format!("    runs-on: {matrix_runner}\n    timeout-minutes: 75"),
         &format!(
-            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 75",
+            "    runs-on: {matrix_runner}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 75",
             trusted_release_runner_gate(&config.default_branch)
         ),
     )
@@ -1041,9 +1069,10 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             );
         }
     }
+    let matrix_runner = release_matrix_runner(config, &release.targets);
     let _ = writeln!(
         output,
-        "    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Publish GitHub release\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
+        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Publish GitHub release\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
         yaml_scalar(&release.package),
@@ -1053,6 +1082,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ActionPin::Attest.reference(),
         ActionPin::UploadArtifact.reference(),
         ActionPin::DownloadArtifact.reference(),
+        matrix_runner = &matrix_runner,
     );
     if let Some((prefix, build)) = output.split_once("\n  build:") {
         let build = build.replace(
@@ -1063,9 +1093,9 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             ),
         );
         let build = build.replace(
-            "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 90",
+            &format!("    runs-on: {matrix_runner}\n    timeout-minutes: 90"),
             &format!(
-                "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 90",
+                "    runs-on: {matrix_runner}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 90",
                 trusted_release_runner_gate(&config.default_branch)
             ),
         );
@@ -1925,11 +1955,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "609fd04f33b65705c2d07e40a2cb53bc29d2cb42b93fa3d90c8950f38be7732f",
+                "c1e4f9ebb21518d0d92678ca2a6842322830a0a82c0c88139ed448d8ce0f2fae",
             ),
             (
                 "preview.yml",
-                "18d7d8b02afd905fd401b96317ced09086899f6d28f005140035f6606b678448",
+                "5185534f4099d95b748ba437bc0bcfa6d8ee47e4b0c11fda9e0463ba1304350d",
             ),
             (
                 "maintenance.yml",
@@ -2073,6 +2103,14 @@ mod tests {
             assert!(
                 !workflow.contains("runner: { group:"),
                 "release-side artifact matrices must not carry a dynamic Velnor runner: {workflow}"
+            );
+            assert!(
+                !workflow.contains("runs-on: ${{ matrix.runner }}"),
+                "hosted-only release-side matrices must use a literal runner: {workflow}"
+            );
+            assert!(
+                workflow.contains("runs-on: ubuntu-24.04"),
+                "hosted release-side runner must remain configured: {workflow}"
             );
         }
         assert!(
