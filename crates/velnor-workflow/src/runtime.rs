@@ -133,6 +133,8 @@ struct CiUnit {
     tool_version: Option<String>,
     #[serde(default)]
     cache: Option<Cache>,
+    #[serde(default)]
+    workflow_file: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -596,29 +598,36 @@ fn write_kind_matrices(
         .iter()
         .map(|unit| unit.id.as_str())
         .collect::<BTreeSet<_>>();
-    let mut kinds = BTreeSet::new();
+    let mut matrices: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     for unit in &config.unit {
-        if !unit.kind.is_empty() {
-            kinds.insert(unit.kind.as_str());
+        if !selected.contains(unit.id.as_str()) {
+            continue;
         }
+        let kind = unit.kind.as_str();
+        let workflow = unit
+            .workflow_file
+            .clone()
+            .unwrap_or_else(|| format!("ci-unit-{kind}.yml"));
+        let label = if unit.label.is_empty() {
+            unit.id.clone()
+        } else {
+            unit.label.clone()
+        };
+        let matrix_output = workflow
+            .strip_prefix("ci-unit-")
+            .and_then(|value| value.strip_suffix(".yml"))
+            .map(|stem| format!("{stem}_matrix"))
+            .unwrap_or_else(|| format!("{kind}_matrix"));
+        matrices
+            .entry(matrix_output)
+            .or_default()
+            .push(serde_json::json!({ "unit": unit.id, "label": label }));
     }
-    for kind in kinds {
-        let entries = config
-            .unit
-            .iter()
-            .filter(|unit| unit.kind == kind && selected.contains(unit.id.as_str()))
-            .map(|unit| {
-                let label = if unit.label.is_empty() {
-                    unit.id.clone()
-                } else {
-                    unit.label.clone()
-                };
-                serde_json::json!({ "unit": unit.id, "label": label })
-            })
-            .collect::<Vec<_>>();
-        let json = serde_json::to_string(&entries)
-            .map_err(|error| GeneratorError::usage(format!("serialize {kind} matrix: {error}")))?;
-        writeln!(file, "{kind}_matrix={json}")
+    for (matrix_output, entries) in matrices {
+        let json = serde_json::to_string(&entries).map_err(|error| {
+            GeneratorError::usage(format!("serialize {matrix_output}: {error}"))
+        })?;
+        writeln!(file, "{matrix_output}={json}")
             .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
     }
     Ok(())
@@ -847,6 +856,7 @@ mod runner_lane_tests {
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         assert_eq!(
             unit.commands(RunnerLane::Github, Scope::Affected),
@@ -882,6 +892,7 @@ mod runner_lane_tests {
                 depends_on: Vec::new(),
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
             CiUnit {
                 id: "changed".to_owned(),
@@ -896,6 +907,7 @@ mod runner_lane_tests {
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
             CiUnit {
                 id: "sibling".to_owned(),
@@ -910,6 +922,7 @@ mod runner_lane_tests {
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
             CiUnit {
                 id: "leaf".to_owned(),
@@ -924,6 +937,7 @@ mod runner_lane_tests {
                 depends_on: vec!["changed".to_owned()],
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
         ];
         let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
@@ -2639,6 +2653,7 @@ mod tests {
             depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         CiConfig {
             schema: 2,
@@ -2982,6 +2997,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         CiConfig {
             schema: 2,
@@ -3114,8 +3130,8 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
         let output = std::fs::read_to_string(&path)?;
         std::fs::remove_file(&path)?;
         assert!(
-            output.contains("swift_matrix=[]"),
-            "swift matrix must be empty: {output}"
+            !output.contains("swift_matrix=[{"),
+            "swift matrix must be omitted when no swift units are selected: {output}"
         );
         assert!(
             output.contains("rust_matrix=[{")
@@ -3192,6 +3208,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         assert_eq!(
             prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
@@ -3308,6 +3325,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         let mut config = selection_config();
         config.workflow.version_bump_units = vec![

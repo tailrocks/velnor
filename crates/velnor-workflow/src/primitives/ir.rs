@@ -17,15 +17,20 @@ use super::{
     MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::{
-    config_rust_toolchain, github_expression, hosted_mold_setup, lane_supports_unit,
-    nested_unit_workflow_file, rendered_cache_values, sidebar_group_name, stack_group_job_id,
-    unit_group, unit_group_job_id, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
-    workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
-    workflow_selection_artifact_download, workflow_selection_artifact_upload, yaml_scalar,
-    CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain, Unit,
-    UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
-    VELNOR_POLICY_WORKFLOW_REV,
+    config_rust_toolchain, github_expression, hosted_mold_setup, kind_unit_workflow_shard_file,
+    lane_supports_unit, nested_unit_workflow_file,
+    rendered_cache_values, sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id,
+    unit_job_id, unit_needs, velnor_runner, velnor_runner_group, workflow_runtime_artifact_upload,
+    workflow_runtime_download, workflow_runtime_setup, workflow_selection_artifact_download,
+    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
+    ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER,
+    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
 };
+
+/// GitHub rejects reusable workflow files above this size.
+pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
+/// Leave headroom for parser overhead and future pin growth.
+const KIND_WORKFLOW_SHARD_BUDGET: usize = 480_000;
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
@@ -742,6 +747,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
+    pub(crate) default_dispatch_runner: String,
     pub(crate) runners: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
@@ -790,9 +796,16 @@ fn workflow_dispatch_inputs(
     default_scope: &str,
     default_branch: &str,
     extra_inputs: &str,
+    runners: RunnerMode,
+    default_dispatch_runner: &str,
 ) -> String {
+    let options = crate::dispatch_runner_options(runners)
+        .iter()
+        .map(|option| format!("          - {option}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
+        "  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: true\n        default: {default_dispatch_runner}\n        type: choice\n        options:\n{options}\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
     )
 }
 
@@ -800,6 +813,7 @@ fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
     runners: RunnerMode,
+    default_dispatch_runner: &str,
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
         WorkflowKind::PullRequest => {
@@ -815,7 +829,13 @@ fn aggregate_triggers(
                 "CI / PR",
                 format!(
                     "on:\n  pull_request:\n{merge_group}{}",
-                    workflow_dispatch_inputs("affected", default_branch, "")
+                    workflow_dispatch_inputs(
+                        "affected",
+                        default_branch,
+                        "",
+                        runners,
+                        default_dispatch_runner,
+                    )
                 ),
                 "true",
             )
@@ -826,7 +846,13 @@ fn aggregate_triggers(
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
                 yaml_scalar(default_branch),
-                workflow_dispatch_inputs("full", default_branch, "")
+                workflow_dispatch_inputs(
+                    "full",
+                    default_branch,
+                    "",
+                    runners,
+                    default_dispatch_runner,
+                )
             ),
             "true",
         ),
@@ -839,6 +865,8 @@ fn aggregate_triggers(
                     "full",
                     default_branch,
                     "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
+                    runners,
+                    default_dispatch_runner,
                 )
             ),
             "true",
@@ -928,6 +956,7 @@ impl WorkflowIr {
             } else {
                 VelnorPullRequest::TrustedOnly
             },
+            default_dispatch_runner: config.default_dispatch_runner.clone(),
             runners: config.runners,
             tools,
             mise_present,
@@ -940,8 +969,12 @@ impl WorkflowIr {
 
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
+            kind,
+            &self.default_branch,
+            self.runners,
+            &self.default_dispatch_runner,
+        );
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
@@ -1046,8 +1079,12 @@ impl WorkflowIr {
     /// simply has no caller and no required-check branch.
     pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
+            kind,
+            &self.default_branch,
+            self.runners,
+            &self.default_dispatch_runner,
+        );
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
@@ -1316,38 +1353,51 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         )
     }
 
-    /// One reusable workflow for every unit of `kind`. The caller supplies the
-    /// unit id through `workflow_call` inputs so a monorepo does not emit one
-    /// unique reusable file per unit.
-    pub(crate) fn render_kind_units(
-        &self,
-        kind: UnitKind,
-        contracts: Option<&BTreeMap<String, UnitContract>>,
-    ) -> String {
-        let members = self
-            .units
-            .iter()
-            .filter(|unit| unit.kind == kind)
-            .collect::<Vec<_>>();
-        if members.is_empty() {
-            return String::new();
-        }
+    fn render_kind_units_header(&self, kind: UnitKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
             "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string\n\njobs:",
             yaml_scalar(unit_group(kind))
         );
+        output
+    }
+
+    /// One reusable workflow for every unit of `kind`. The caller supplies the
+    /// unit id through `workflow_call` inputs so a monorepo does not emit one
+    /// unique reusable file per unit. When the rendered surface exceeds
+    /// GitHub's byte limit, units are packed into additional shard files.
+    pub(crate) fn render_kind_unit_workflows(
+        &self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        let members = self
+            .units
+            .iter()
+            .filter(|unit| unit.kind == kind)
+            .collect::<Vec<_>>();
+        let mut files = BTreeMap::new();
+        let mut assignments = BTreeMap::new();
+        if members.is_empty() {
+            return (files, assignments);
+        }
+        let header = self.render_kind_units_header(kind);
+        let mut shard_index = 0_usize;
+        let mut current_file = kind_unit_workflow_shard_file(kind, shard_index);
+        let mut current = header.clone();
+
         for unit in members {
             let contract = contracts
                 .and_then(|contracts| contracts.get(&unit.id))
                 .cloned()
                 .unwrap_or_else(|| self.default_unit_contract(unit, true));
+            let mut unit_body = String::new();
             for job in &contract.lanes {
                 if lane_supports_unit(job.lane, unit) {
                     let job_id = unit_job_id(job.lane, &unit.id);
                     self.render_lane_job_for_input(
-                        &mut output,
+                        &mut unit_body,
                         *job,
                         unit,
                         &contract,
@@ -1356,28 +1406,58 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     );
                 }
             }
+            if current.len() > header.len()
+                && current.len() + unit_body.len() > KIND_WORKFLOW_SHARD_BUDGET
+            {
+                files.insert(current_file.clone(), current);
+                shard_index += 1;
+                current_file = kind_unit_workflow_shard_file(kind, shard_index);
+                current = header.clone();
+            }
+            current.push_str(&unit_body);
+            assignments.insert(unit.id.clone(), current_file.clone());
         }
-        output
+        if current.len() > header.len() {
+            files.insert(current_file, current);
+        }
+        (files, assignments)
+    }
+
+    /// Legacy entry point returning one unsplit kind workflow.
+    #[cfg(test)]
+    pub(crate) fn render_kind_units(
+        &self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> String {
+        self.render_kind_unit_workflows(kind, contracts)
+            .0
+            .into_values()
+            .next()
+            .unwrap_or_default()
     }
 
     pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        if tools.contains(&ToolRequirement::Sccache)
-            || tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_present
-        {
-            output.push_str("\nenv:\n");
-            if tools.contains(&ToolRequirement::Sccache) {
-                output.push_str(
-                    "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
-                );
-            }
-            if self.mise_present {
-                output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
-            }
-            if tools.contains(&ToolRequirement::OpenTofu) {
-                output.push_str("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
-            }
+        let mut entries = Vec::new();
+        if tools.contains(&ToolRequirement::Sccache) {
+            entries.push("  CARGO_INCREMENTAL: \"0\"");
+            entries.push("  RUSTC_WRAPPER: sccache");
+            entries.push("  SCCACHE_GHA_ENABLED: \"true\"");
+        }
+        if self.mise_present && unit.kind != UnitKind::Swift {
+            entries.push("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"");
+        }
+        if tools.contains(&ToolRequirement::OpenTofu) {
+            entries.push("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache");
+        }
+        if entries.is_empty() {
+            return;
+        }
+        output.push_str("\nenv:\n");
+        for entry in entries {
+            output.push_str(entry);
+            output.push('\n');
         }
     }
 
@@ -1497,40 +1577,41 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             .services
             .iter()
             .find(|service| service.name == "postgres");
-        if tools.contains(&ToolRequirement::Sccache)
-            || tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_present
-            || postgres.is_some()
+        let mut entries = Vec::<String>::new();
+        if tools.contains(&ToolRequirement::Sccache) {
+            entries.push("      CARGO_INCREMENTAL: \"0\"".to_owned());
+            entries.push("      RUSTC_WRAPPER: sccache".to_owned());
+            entries.push("      SCCACHE_GHA_ENABLED: \"true\"".to_owned());
+        }
+        if self.mise_present && unit.kind != UnitKind::Swift {
+            entries.push("      RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"".to_owned());
+        }
+        if tools.contains(&ToolRequirement::OpenTofu) {
+            entries.push("      TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache".to_owned());
+        }
+        if lane == RunnerMode::Velnor
+            && let Some(service) = postgres
         {
-            output.push_str("    env:\n");
-            if tools.contains(&ToolRequirement::Sccache) {
-                output.push_str(
-                    "      CARGO_INCREMENTAL: \"0\"\n      RUSTC_WRAPPER: sccache\n      SCCACHE_GHA_ENABLED: \"true\"\n",
-                );
-            }
-            if self.mise_present {
-                output.push_str("      RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
-            }
-            if tools.contains(&ToolRequirement::OpenTofu) {
-                output.push_str("      TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
-            }
-            if lane == RunnerMode::Velnor
-                && let Some(service) = postgres
-            {
-                output.push_str("      POSTGRESQL_DB_HOST: postgres\n");
-                let container_port = service
-                    .ports
-                    .first()
-                    .and_then(|mapping| mapping.split_once(':'))
-                    .map(|(_, container)| container)
-                    .filter(|port| !port.is_empty())
-                    .unwrap_or("5432");
-                let _ = writeln!(
-                    output,
-                    "      POSTGRESQL_DB_PORT: {}",
-                    yaml_scalar(container_port)
-                );
-            }
+            entries.push("      POSTGRESQL_DB_HOST: postgres".to_owned());
+            let container_port = service
+                .ports
+                .first()
+                .and_then(|mapping| mapping.split_once(':'))
+                .map(|(_, container)| container)
+                .filter(|port| !port.is_empty())
+                .unwrap_or("5432");
+            entries.push(format!(
+                "      POSTGRESQL_DB_PORT: {}",
+                yaml_scalar(container_port)
+            ));
+        }
+        if entries.is_empty() {
+            return;
+        }
+        output.push_str("    env:\n");
+        for entry in entries {
+            output.push_str(&entry);
+            output.push('\n');
         }
     }
 
@@ -1617,12 +1698,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
         ];
-        let mut kinds = BTreeSet::new();
+        let mut matrix_outputs = BTreeSet::new();
         for unit in &self.units {
-            kinds.insert(unit.kind);
+            matrix_outputs.insert(kind_matrix_output_from_file(&nested_unit_workflow_file(
+                unit,
+            )));
         }
-        for kind in kinds {
-            let name = kind_matrix_output(kind);
+        for name in matrix_outputs {
             outputs.push(format!(
                 "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
             ));

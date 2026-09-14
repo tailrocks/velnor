@@ -7,6 +7,8 @@ repository = "tailrocks/velnor"
 # labels the trust-gated Velnor lane selects by.
 [workflow]
 runners = "velnor"
+default_dispatch_runner = "github"
+automatic_lanes = "github"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
@@ -246,7 +248,7 @@ jobs:
       - name: Validate requested lanes and required capabilities
         id: route
         env:
-          REQUESTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || 'github' }}
+          REQUESTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || __VELNOR_AUTOMATIC_LANES_DEFAULT__ }}
         shell: bash
         run: |
           set -euo pipefail

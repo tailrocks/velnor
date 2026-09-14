@@ -513,6 +513,7 @@ fn analyze_rust_manifests(
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
+            workflow_file: None,
         });
     }
 
@@ -568,6 +569,7 @@ fn analyze_rust_manifests(
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
+            workflow_file: None,
         });
     }
 

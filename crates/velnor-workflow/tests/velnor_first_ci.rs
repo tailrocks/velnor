@@ -159,7 +159,7 @@ fn dispatch_exposes_runner_and_scope_without_committed_flips() {
     for name in ["ci-pr.yml", "ci-main.yml"] {
         let workflow = generated.workflow(name);
         assert!(workflow.contains("workflow_dispatch:"), "{name}");
-        assert!(workflow.contains("default: velnor"), "{name}");
+        assert!(workflow.contains("default: github"), "{name}");
         assert!(workflow.contains("- github"), "{name}");
         assert!(workflow.contains("- both"), "{name}");
         assert!(
@@ -180,6 +180,39 @@ fn dispatch_exposes_runner_and_scope_without_committed_flips() {
     assert!(pr.contains("github.event.before || 'refs/heads/main'"));
     let main = generated.workflow("ci-main.yml");
     assert!(main.contains("default: full"));
+}
+
+#[test]
+fn dispatch_runner_default_is_configurable() {
+    let root = unique_dir("dispatch-default");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\ndefault_dispatch_runner = \"velnor\"\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    for name in ["ci-pr.yml", "ci-main.yml"] {
+        let workflow = generated.workflow(name);
+        assert!(workflow.contains("default: velnor"), "{name}");
+    }
+}
+
+#[test]
+fn github_only_runners_limit_dispatch_runner_options() {
+    let root = unique_dir("dispatch-github-only");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    let main = generated.workflow("ci-main.yml");
+    assert!(main.contains("default: github"));
+    assert!(main.contains("options:\n          - github"));
+    assert!(!main.contains("options:\n          - velnor"));
+    assert!(!main.contains("\n  velnor-"));
 }
 
 #[test]
@@ -314,8 +347,14 @@ fn fifty_one_units_stay_under_github_unique_reusable_limit() {
         "unique reusable workflows {} exceed GitHub's limit: {unique:?}",
         unique.len()
     );
-    assert_eq!(unique, BTreeSet::from(["ci-unit-rust.yml"]));
+    assert!(
+        unique.iter().all(|file| file.starts_with("ci-unit-rust")),
+        "rust units must stay on kind shards, not per-unit files: {unique:?}"
+    );
     assert!(pr.contains("fromJSON(needs.plan.outputs.rust_matrix)"));
+    if unique.len() > 1 {
+        assert!(pr.contains("fromJSON(needs.plan.outputs.rust-2_matrix)"));
+    }
     assert!(!generated
         .output
         .join(".github/workflows/ci-rust-crate00.yml")

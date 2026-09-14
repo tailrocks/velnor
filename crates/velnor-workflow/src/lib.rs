@@ -216,6 +216,14 @@ impl ActionPin {
     }
 }
 
+/// Default `workflow_dispatch` runner choice when the generation config omits
+/// `[workflow] default_dispatch_runner`.
+pub(crate) const DEFAULT_DISPATCH_RUNNER: &str = "github";
+
+/// Fallback automatic lane selection when a static workflow reads
+/// `vars.VELNOR_AUTOMATIC_LANES` and the repository variable is unset.
+pub(crate) const DEFAULT_AUTOMATIC_LANES: &str = "github";
+
 /// Which generated runner lanes are enabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum RunnerMode {
@@ -511,6 +519,11 @@ pub struct Unit {
     /// before steps; commands consume them at the scanned host/port.
     #[serde(skip_serializing)]
     pub(crate) services: Vec<UnitService>,
+    /// The reusable workflow shard that owns this unit when a kind workflow
+    /// exceeds GitHub's byte limit. Omitted when the unit uses the canonical
+    /// kind file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_file: Option<String>,
 }
 
 /// A GitHub Actions service container one unit job starts.
@@ -690,6 +703,11 @@ pub struct ProjectConfig {
     pub(crate) velnor_runner_group: Option<String>,
     /// Automatic `pull_request` executes on the Velnor lane. Default false.
     pub(crate) pull_request_on_velnor: bool,
+    /// Default `runner` choice for generated CI `workflow_dispatch` inputs.
+    pub(crate) default_dispatch_runner: String,
+    /// Fallback lane selection for automatic static workflows that read
+    /// `vars.VELNOR_AUTOMATIC_LANES`.
+    pub(crate) automatic_lanes: String,
     /// Repository-local files the generated output owns verbatim, read from
     /// the declared sources at scan time.
     pub(crate) static_files: Vec<StaticFile>,
@@ -837,6 +855,9 @@ impl ProjectConfig {
                 write_toml_array(&mut output, "key_files", &cache.key_files);
                 write_toml_array(&mut output, "paths", &cache.paths);
             }
+            if let Some(workflow_file) = &unit.workflow_file {
+                write_toml_string(&mut output, "workflow_file", workflow_file);
+            }
         }
         output
     }
@@ -905,6 +926,7 @@ fn scan_target(
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
     }
+    validate_dispatch_runner_for_runners(config.runners, &config.default_dispatch_runner)?;
     // A repo-owned config can add Rust units the scan did not produce. They
     // compile with the repository's own pinned toolchain like every scanned
     // Rust unit, so the parsed pin is stamped onto any Rust unit that lacks
@@ -1414,7 +1436,7 @@ fn validate_config_text(value: &str, field: &str) -> Result<(), GeneratorError> 
     Ok(())
 }
 
-fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorError> {
+pub(crate) fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorError> {
     match value {
         "github" => Ok(RunnerMode::Github),
         "velnor" => Ok(RunnerMode::Velnor),
@@ -1423,6 +1445,40 @@ fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorError> {
             "[workflow] runners must be one of: github, velnor, both; found `{value}`"
         ))),
     }
+}
+
+pub(crate) fn validate_lane_selection(
+    value: &str,
+    field: &str,
+) -> Result<(), GeneratorError> {
+    match value {
+        "github" | "velnor" | "both" => Ok(()),
+        _ => Err(GeneratorError::usage(format!(
+            "{field} must be one of: github, velnor, both; found `{value}`"
+        ))),
+    }
+}
+
+pub(crate) fn dispatch_runner_options(runners: RunnerMode) -> &'static [&'static str] {
+    match runners {
+        RunnerMode::Github => &["github"],
+        RunnerMode::Velnor | RunnerMode::Both => &["velnor", "github", "both"],
+    }
+}
+
+pub(crate) fn validate_dispatch_runner_for_runners(
+    runners: RunnerMode,
+    default_dispatch_runner: &str,
+) -> Result<(), GeneratorError> {
+    let options = dispatch_runner_options(runners);
+    if options.contains(&default_dispatch_runner) {
+        return Ok(());
+    }
+    Err(GeneratorError::usage(format!(
+        "[workflow] default_dispatch_runner `{default_dispatch_runner}` is not available when runners = `{}`; available: {}",
+        runners.as_str(),
+        options.join(", ")
+    )))
 }
 
 fn apply_generation_config(
@@ -1460,6 +1516,17 @@ fn apply_generation_config(
     }
     if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
         config.pull_request_on_velnor = pull_request_on_velnor;
+    }
+    if let Some(default_dispatch_runner) = generation.default_dispatch_runner() {
+        validate_lane_selection(
+            default_dispatch_runner,
+            "[workflow] default_dispatch_runner",
+        )?;
+        default_dispatch_runner.clone_into(&mut config.default_dispatch_runner);
+    }
+    if let Some(automatic_lanes) = generation.automatic_lanes() {
+        validate_lane_selection(automatic_lanes, "[workflow] automatic_lanes")?;
+        automatic_lanes.clone_into(&mut config.automatic_lanes);
     }
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
@@ -1590,6 +1657,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             mise_tools: row.mise_tools().unwrap_or_default().to_vec(),
             toolchain: None,
             services: Vec::new(),
+            workflow_file: None,
         });
         return;
     };
@@ -1856,13 +1924,24 @@ pub(crate) fn sidebar_group_name(unit: &Unit) -> String {
 }
 
 pub(crate) fn nested_unit_workflow_file(unit: &Unit) -> String {
-    kind_unit_workflow_file(unit.kind)
+    unit.workflow_file
+        .clone()
+        .unwrap_or_else(|| kind_unit_workflow_file(unit.kind))
 }
 
 /// One reusable workflow per unit kind. GitHub allows 50 unique reusable
 /// workflow files per caller; a monorepo with one file per unit exceeds that.
 pub(crate) fn kind_unit_workflow_file(kind: UnitKind) -> String {
     format!("ci-unit-{}.yml", kind.id_prefix())
+}
+
+/// A shard file for a kind workflow that exceeded GitHub's byte limit.
+pub(crate) fn kind_unit_workflow_shard_file(kind: UnitKind, shard_index: usize) -> String {
+    if shard_index == 0 {
+        kind_unit_workflow_file(kind)
+    } else {
+        format!("ci-unit-{}-{}.yml", kind.id_prefix(), shard_index + 1)
+    }
 }
 
 fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
@@ -1900,6 +1979,7 @@ const TRUSTED_PINNED_TOOLCHAIN_STEPS_PLACEHOLDER: &str =
 /// frozen-snapshot defect this generator refuses.
 const SNAPSHOT_COMPATIBILITY_PLACEHOLDER: &str = "__VELNOR_SNAPSHOT_COMPATIBILITY__";
 const SNAPSHOT_STATE_PLACEHOLDER: &str = "__VELNOR_SNAPSHOT_STATE__";
+const AUTOMATIC_LANES_DEFAULT_PLACEHOLDER: &str = "__VELNOR_AUTOMATIC_LANES_DEFAULT__";
 
 /// The Rust toolchain a config's units record, when any Rust unit does. The
 /// scan stamps every Rust unit with the repository's parsed pin, so this is
@@ -2107,6 +2187,10 @@ pub(crate) fn render_static_template_for_config(
     } else {
         template
     };
+    let template = template.replace(
+        AUTOMATIC_LANES_DEFAULT_PLACEHOLDER,
+        &format!("'{}'", config.automatic_lanes),
+    );
     // Snapshot identity is filled after the static-template pass, so a
     // canonical step the pass inserts carries the markers too; the pinned
     // toolchain fill runs last and refuses any marker that survives.
@@ -2697,18 +2781,17 @@ fn render_policy_entrypoint(config: &ProjectConfig) -> String {
 }
 
 pub(crate) fn stack_group_job_id(kind: UnitKind) -> String {
-    let key = match kind {
-        UnitKind::Rust => "rust",
-        UnitKind::Gradle => "gradle",
-        UnitKind::Node => "node",
-        UnitKind::Bun => "bun",
-        UnitKind::Swift => "swift",
-        UnitKind::OpenTofu => "opentofu",
-        UnitKind::Docker => "docker",
-        UnitKind::Homebrew => "homebrew",
-        UnitKind::Docs => "docs",
-    };
-    format!("group-{key}")
+    stack_group_job_id_for_file(&kind_unit_workflow_file(kind))
+}
+
+/// The aggregate caller job for one kind workflow file, including shard files
+/// such as `ci-unit-rust-2.yml` → `group-rust-2`.
+pub(crate) fn stack_group_job_id_for_file(file: &str) -> String {
+    let stem = file
+        .strip_prefix("ci-unit-")
+        .and_then(|value| value.strip_suffix(".yml"))
+        .unwrap_or("unit");
+    format!("group-{stem}")
 }
 
 pub(crate) fn unit_group_job_id(unit: &Unit) -> String {
@@ -2964,43 +3047,83 @@ fn generated_files_with_surface(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
-    let workflow = WorkflowIr::from_config(config);
-    primitives::validate_cache_transports(&workflow)?;
+    let mut config = config.clone();
+    let initial = WorkflowIr::from_config(&config);
+    primitives::validate_cache_transports(&initial)?;
     // The toolchain contract is a generation precondition, checked here so no
     // rendering path — scanned or declared — can emit a Rust job without a
     // pin or a release matrix the pin does not declare.
-    validate_rust_units_are_pinned(config)?;
-    validate_release_targets_are_pinned(config)?;
+    validate_rust_units_are_pinned(&config)?;
+    validate_release_targets_are_pinned(&config)?;
     let mut files = BTreeMap::new();
     files.insert(
         PathBuf::from(".github/actionlint.yaml"),
-        render_actionlint_config(config),
+        render_actionlint_config(&config),
     );
+    if !config.adopted_workflow_surface {
+        for kind in config.units.iter().map(|unit| unit.kind).collect::<BTreeSet<_>>() {
+            let (kind_files, assignments) = initial.render_kind_unit_workflows(
+                kind,
+                surface.map(|surface| &surface.contracts),
+            );
+            for (unit_id, workflow_file) in assignments {
+                if let Some(unit) = config
+                    .units
+                    .iter_mut()
+                    .find(|unit| unit.id == unit_id)
+                {
+                    unit.workflow_file = Some(workflow_file);
+                }
+            }
+            for (filename, content) in kind_files {
+                if content.len() > primitives::GITHUB_WORKFLOW_BYTE_LIMIT {
+                    return Err(GeneratorError::usage(format!(
+                        "rendered `{filename}` is {} bytes, above GitHub's {}-byte workflow limit",
+                        content.len(),
+                        primitives::GITHUB_WORKFLOW_BYTE_LIMIT
+                    )));
+                }
+                files.insert(PathBuf::from(".github/workflows").join(filename), content);
+            }
+        }
+    }
+    let workflow = WorkflowIr::from_config(&config);
     files.insert(PathBuf::from(".github/ci/project.toml"), config.toml());
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
-        if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
-            files.insert(path, content.clone());
-            continue;
-        }
-        let content = config
-            .workflow_templates
-            .get(workflow_file)
-            .map(|template| render_static_template_for_config(config, workflow_file, template))
-            .transpose()?
-            .or_else(|| match workflow_file.as_str() {
+        let content = if !config.adopted_workflow_surface {
+            match workflow_file.as_str() {
                 "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
-                "ci-policy.yml" => Some(generated_ci_policy(config)),
-                "ci-release-package-signer.yml" => Some(generated_release_package_signer()),
                 "ci-main.yml" => Some(generated_ci_main(&workflow)),
                 "nightly.yml" => Some(generated_nightly(&workflow)),
-                "maintenance.yml" => Some(generated_maintenance(config)),
-                "preview.yml" => Some(generated_preview(config)),
-                "release.yml" => generated_release(config),
-                // Catalog data is code-owned; ignore no unknown runtime path and never
-                // let configuration turn into an arbitrary filesystem write.
                 _ => None,
-            });
+            }
+        } else {
+            None
+        }
+        .or_else(|| {
+            surface.and_then(|surface| surface.files.get(&path).cloned())
+        })
+        .or({
+            config
+                .workflow_templates
+                .get(workflow_file)
+                .map(|template| render_static_template_for_config(&config, workflow_file, template))
+                .transpose()?
+        })
+        .or_else(|| match workflow_file.as_str() {
+            "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
+            "ci-policy.yml" => Some(generated_ci_policy(&config)),
+            "ci-release-package-signer.yml" => Some(generated_release_package_signer()),
+            "ci-main.yml" => Some(generated_ci_main(&workflow)),
+            "nightly.yml" => Some(generated_nightly(&workflow)),
+            "maintenance.yml" => Some(generated_maintenance(&config)),
+            "preview.yml" => Some(generated_preview(&config)),
+            "release.yml" => generated_release(&config),
+            // Catalog data is code-owned; ignore no unknown runtime path and never
+            // let configuration turn into an arbitrary filesystem write.
+            _ => None,
+        });
         if let Some(content) = content {
             files.insert(path, content);
         }
@@ -3008,20 +3131,8 @@ fn generated_files_with_surface(
     for (name, template) in &config.workflow_templates {
         files.insert(
             PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name),
-            render_static_template_for_config(config, name, template)?,
+            render_static_template_for_config(&config, name, template)?,
         );
-    }
-    if !config.adopted_workflow_surface {
-        let mut kinds = BTreeSet::new();
-        for unit in &config.units {
-            if kinds.insert(unit.kind) {
-                files.insert(
-                    PathBuf::from(".github/workflows").join(kind_unit_workflow_file(unit.kind)),
-                    workflow
-                        .render_kind_units(unit.kind, surface.map(|surface| &surface.contracts)),
-                );
-            }
-        }
     }
     for owned in &config.static_files {
         files.insert(PathBuf::from(&owned.path), owned.content.clone());
@@ -3051,11 +3162,14 @@ fn legacy_plan(workflow: &WorkflowIr) -> Vec<crate::primitives::GraphNode> {
         workflow
             .units
             .iter()
-            .map(|unit| crate::primitives::GraphNode::Unit {
-                unit_id: unit.id.clone(),
-                job_id: stack_group_job_id(unit.kind),
-                name: sidebar_group_name(unit),
-                file: nested_unit_workflow_file(unit),
+            .map(|unit| {
+                let file = nested_unit_workflow_file(unit);
+                crate::primitives::GraphNode::Unit {
+                    unit_id: unit.id.clone(),
+                    job_id: stack_group_job_id_for_file(&file),
+                    name: sidebar_group_name(unit),
+                    file,
+                }
             }),
     );
     nodes
@@ -5498,6 +5612,21 @@ mod tests {
     }
 
     #[test]
+    fn static_templates_render_automatic_lane_fallback_from_config() {
+        let mut config = scanned_fixture(RunnerMode::Github);
+        config.automatic_lanes = "velnor".to_owned();
+        let rendered = must(
+            render_static_template_for_config(
+                &config,
+                "release.yml",
+                "REQUESTED_LANES: ${{ vars.VELNOR_AUTOMATIC_LANES || __VELNOR_AUTOMATIC_LANES_DEFAULT__ }}",
+            ),
+            "render automatic lane fallback",
+        );
+        assert!(rendered.contains("vars.VELNOR_AUTOMATIC_LANES || 'velnor'"));
+    }
+
+    #[test]
     fn omitted_runner_flag_defaults_to_velnor() {
         let cli = must(
             Cli::parse_args([OsString::from("generate"), OsString::from(".")]),
@@ -6377,6 +6506,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
+            workflow_file: None,
         });
         config.units.push(Unit {
             id: "rust-declared-base".to_owned(),
@@ -6397,6 +6527,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
+            workflow_file: None,
         });
         config.units.push(Unit {
             id: "rust-declared-mise-free".to_owned(),
@@ -6417,6 +6548,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain),
             services: Vec::new(),
+            workflow_file: None,
         });
         let ir = WorkflowIr::from_config(&config);
         let step = |unit: &str| {
@@ -8336,6 +8468,7 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
+            workflow_file: None,
         };
         let config = ProjectConfig {
             repository: String::new(),
@@ -8373,6 +8506,8 @@ channel = "stable"
             package_update_channels: None,
             velnor_runner_group: None,
             pull_request_on_velnor: false,
+            default_dispatch_runner: DEFAULT_DISPATCH_RUNNER.to_owned(),
+            automatic_lanes: DEFAULT_AUTOMATIC_LANES.to_owned(),
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -8803,7 +8938,7 @@ channel = "stable"
         ));
         assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));
-        assert!(velnor_pr.contains("default: velnor"));
+        assert!(velnor_pr.contains("default: github"));
         assert!(velnor_pr.contains("default: affected"));
 
         let both =
@@ -9414,6 +9549,7 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain,
             services: Vec::new(),
+            workflow_file: None,
         });
         let ir = WorkflowIr::from_config(&config);
         let rust = must_some(
