@@ -2161,6 +2161,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
     }
 
+    fn velnor_lane_event_expression(&self, dispatch: &str) -> String {
+        format!("{} || ({dispatch})", self.automatic_event_expression())
+    }
+
     pub(crate) fn render_verify_github(
         &self,
         output: &mut String,

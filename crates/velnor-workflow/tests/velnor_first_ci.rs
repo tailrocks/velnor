@@ -259,6 +259,10 @@ fn automatic_pr_schedules_github_hosted_unit_jobs() {
         !unit.contains("default: velnor"),
         "generated YAML must not default to velnor: {unit}"
     );
+    assert!(
+        unit.contains("github.event_name == 'pull_request'"),
+        "automatic PR must enable the Velnor lane: {unit}"
+    );
 }
 
 #[test]

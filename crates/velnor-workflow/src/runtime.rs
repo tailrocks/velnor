@@ -4040,7 +4040,7 @@ jobs:
     }
 
     #[test]
-    fn policy_rejects_untrusted_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
+    fn policy_accepts_fail_closed_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
         let workflow = r"
 name: Velnor PR
 on:
@@ -4048,7 +4048,7 @@ on:
 jobs:
   verify:
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
@@ -4061,12 +4061,12 @@ on: push
 jobs:
   verify:
     if: ${{ always() && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request-aggregate", workflow, "velnor")?;
-        assert!(!run_policy(root)?);
+        assert!(run_policy(root)?);
 
         let workflow = r"
 name: Velnor kind reusable
@@ -4074,11 +4074,25 @@ on: workflow_call
 jobs:
   verify:
     if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
         let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Generic self-hosted PR
+on:
+  pull_request:
+jobs:
+  verify:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: [self-hosted, example-runner]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("generic-self-hosted-pr", workflow, "velnor")?;
         assert!(!run_policy(root)?);
         Ok(())
     }
