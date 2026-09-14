@@ -1404,7 +1404,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_present {
+            if self.mise_present && unit.kind != UnitKind::Swift {
                 output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
@@ -1540,7 +1540,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     "      CARGO_INCREMENTAL: \"0\"\n      RUSTC_WRAPPER: sccache\n      SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_present {
+            if self.mise_present && unit.kind != UnitKind::Swift {
                 output.push_str("      RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
