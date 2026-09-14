@@ -13,8 +13,8 @@ on:
         default: both
         type: choice
         options:
-          - github
           - velnor
+          - github
           - both
       scope:
         description: Verification scope

@@ -310,6 +310,39 @@ fn dispatch_defaults_to_github_and_omitted_runner_selects_github() {
 }
 
 #[test]
+fn dispatch_runner_default_is_configurable() {
+    let root = unique_dir("dispatch-default");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\ndefault_dispatch_runner = \"velnor\"\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    for name in ["ci-pr.yml", "ci-main.yml"] {
+        let workflow = generated.workflow(name);
+        assert!(workflow.contains("default: velnor"), "{name}");
+    }
+}
+
+#[test]
+fn github_only_runners_limit_dispatch_runner_options() {
+    let root = unique_dir("dispatch-github-only");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    let main = generated.workflow("ci-main.yml");
+    assert!(main.contains("default: github"));
+    assert!(main.contains("options:\n          - github"));
+    assert!(!main.contains("options:\n          - velnor"));
+    assert!(!main.contains("\n  velnor-"));
+}
+
+#[test]
 fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     let root = unique_dir("pr-on-velnor");
     write_rust_fixture(&root, 2);
@@ -618,6 +651,10 @@ fn unique_reusable_calls_stay_under_github_limit() {
         calls.len() <= 50,
         "unique reusable calls {} exceed GitHub's limit: {calls:?}",
         calls.len()
+    );
+    assert!(
+        calls.iter().all(|file| file.starts_with("ci-unit-rust")),
+        "rust units must stay on kind shards, not per-unit files: {calls:?}"
     );
     assert!(calls.contains("ci-unit-rust.yml"));
     assert!(pr.contains("needs.plan.outputs.rust_matrix != '[]'"));

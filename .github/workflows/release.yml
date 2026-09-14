@@ -1669,10 +1669,10 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-5becfb95f1c9-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ hashFiles('./**/*.rs', 'crates/**', 'crates/velnor-workflow/src/runtime.rs', 'docker/**', 'microvm/**', 'mise.lock', 'tools/**') }}
+          cache-key: velnor-mbx-v3-35a1a860e58a-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ hashFiles('./**/*.rs', 'crates/**', 'crates/velnor-workflow/src/runtime.rs', 'docker/**', 'microvm/**', 'mise.lock', 'tools/**') }}
           restore-keys: |
-            velnor-mbx-v3-5becfb95f1c9-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
-            velnor-mbx-v3-5becfb95f1c9-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-
+            velnor-mbx-v3-35a1a860e58a-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
+            velnor-mbx-v3-35a1a860e58a-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache

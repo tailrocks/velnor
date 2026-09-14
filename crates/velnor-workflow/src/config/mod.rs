@@ -169,6 +169,15 @@ struct WorkflowSection {
     /// false: self-hosted jobs stay on the trusted default-branch gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pull_request_on_velnor: Option<bool>,
+    /// Default `runner` choice for `workflow_dispatch` on generated CI
+    /// aggregates. Absent keeps the generator default (`github`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_dispatch_runner: Option<String>,
+    /// Fallback lane selection for automatic release and other static
+    /// workflows that read `vars.VELNOR_AUTOMATIC_LANES`. Absent keeps the
+    /// generator default (`github`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic_lanes: Option<String>,
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -542,6 +551,15 @@ impl RepoGenerationConfig {
         self.workflow.velnor_runner_group.as_deref()
     }
 
+    /// The declared default `workflow_dispatch` runner choice.
+    pub(crate) fn default_dispatch_runner(&self) -> Option<&str> {
+        self.workflow.default_dispatch_runner.as_deref()
+    }
+
+    /// The declared automatic lane fallback for static workflows.
+    pub(crate) fn automatic_lanes(&self) -> Option<&str> {
+        self.workflow.automatic_lanes.as_deref()
+    }
     /// The declared profile label.
     pub(crate) fn profile(&self) -> Option<&str> {
         self.workflow.profile.as_deref()
@@ -835,6 +853,29 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
         return Err(GeneratorError::usage(
             "[workflow] templates is not supported; imported workflow bodies are not a generation input",
         ));
+    }
+    for (field, value) in [
+        (
+            "[workflow] default_dispatch_runner",
+            workflow.default_dispatch_runner.as_deref(),
+        ),
+        (
+            "[workflow] automatic_lanes",
+            workflow.automatic_lanes.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            crate::validate_lane_selection(value, field)?;
+        }
+    }
+    if let (Some(runners), Some(default_dispatch_runner)) = (
+        workflow.runners.as_deref(),
+        workflow.default_dispatch_runner.as_deref(),
+    ) {
+        crate::validate_dispatch_runner_for_runners(
+            crate::parse_runner_mode(runners)?,
+            default_dispatch_runner,
+        )?;
     }
     Ok(())
 }
@@ -1473,6 +1514,39 @@ mod tests {
                 "validate accepted workflow runner mode",
             );
         }
+    }
+
+    #[test]
+    fn workflow_dispatch_and_automatic_lane_defaults_are_optional() {
+        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(config.default_dispatch_runner(), None);
+        assert_eq!(config.automatic_lanes(), None);
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ndefault_dispatch_runner = \"github\"\nautomatic_lanes = \"velnor\"\n",
+        );
+        assert_eq!(declared.default_dispatch_runner(), Some("github"));
+        assert_eq!(declared.automatic_lanes(), Some("velnor"));
+        must(
+            declared.validate(&[], &[], &BTreeSet::new()),
+            "validate declared lane defaults",
+        );
+    }
+
+    #[test]
+    fn workflow_dispatch_runner_must_match_declared_runners() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"github\"\ndefault_dispatch_runner = \"velnor\"\n",
+        );
+        let error = must_fail(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "dispatch default incompatible with github-only runners",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("default_dispatch_runner `velnor` is not available"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

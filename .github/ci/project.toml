@@ -44,6 +44,7 @@ velnor_full_commands = ["bun install --frozen-lockfile", "bun run typecheck", "b
 [unit.cache]
 key_files = ["package.json", "bun.lock"]
 paths = ["~/.bun/install/cache"]
+workflow_file = "ci-unit-bun.yml"
 
 [[unit]]
 id = "docker"
@@ -58,6 +59,7 @@ velnor_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerf
 [unit.cache]
 key_files = ["Cargo.lock", "Dockerfile", "docker/build-mise.lock", "docker/build-mise.toml", "rust-toolchain.toml"]
 paths = [".velnor-docker-cache"]
+workflow_file = "ci-unit-docker.yml"
 
 [[unit]]
 id = "docs"
@@ -72,6 +74,7 @@ velnor_full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_
 [unit.cache]
 key_files = ["package-lock.json", "bun.lock"]
 paths = ["~/.npm"]
+workflow_file = "ci-unit-docs.yml"
 
 [[unit]]
 id = "opentofu"
@@ -86,6 +89,7 @@ velnor_full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATIO
 [unit.cache]
 key_files = ["**/.terraform.lock.hcl"]
 paths = ["~/.terraform.d/plugin-cache"]
+workflow_file = "ci-unit-opentofu.yml"
 
 [[unit]]
 id = "rust-policy"
@@ -100,6 +104,7 @@ velnor_full_commands = ["mbx deny check"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-unit-collector"
@@ -114,6 +119,7 @@ velnor_full_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "tools/unit-collector/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-bench"
@@ -129,6 +135,7 @@ depends_on = ["rust-velnor-model", "rust-velnor-runner"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-bench/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-client"
@@ -144,6 +151,7 @@ depends_on = ["rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-client/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-control"
@@ -159,6 +167,7 @@ depends_on = ["rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-control/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-model"
@@ -173,6 +182,7 @@ velnor_full_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-model/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-render"
@@ -188,6 +198,7 @@ depends_on = ["rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-render/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-runner"
@@ -203,6 +214,7 @@ depends_on = ["rust-velnor-control", "rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-runner/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-tools"
@@ -218,6 +230,7 @@ depends_on = ["rust-velnor-client", "rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-tools/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-workflow"
@@ -233,6 +246,7 @@ depends_on = ["rust-velnor-runner"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-workflow/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-workflow-contract"
@@ -247,6 +261,7 @@ velnor_full_commands = ["cd -- 'crates/velnor-workflow-contract' && mbx fmt --ma
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-workflow-contract/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnorctl"
@@ -262,6 +277,7 @@ depends_on = ["rust-velnor-client", "rust-velnor-control", "rust-velnor-model", 
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnorctl/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-production-topology"
@@ -269,10 +285,11 @@ label = "Rust production topology"
 kind = "rust"
 root = "."
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/**", "crates/velnor-workflow/src/runtime.rs", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "tools/**"]
-github_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-github_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-velnor_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-velnor_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+github_full_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
 [unit.cache]
 key_files = ["Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+workflow_file = "ci-unit-rust.yml"
