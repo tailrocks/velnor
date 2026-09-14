@@ -216,6 +216,14 @@ impl ActionPin {
     }
 }
 
+/// Default `workflow_dispatch` runner choice when the generation config omits
+/// `[workflow] default_dispatch_runner`.
+pub(crate) const DEFAULT_DISPATCH_RUNNER: &str = "github";
+
+/// Fallback automatic lane selection when a static workflow reads
+/// `vars.VELNOR_AUTOMATIC_LANES` and the repository variable is unset.
+pub(crate) const DEFAULT_AUTOMATIC_LANES: &str = "github";
+
 /// Which generated runner lanes are enabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum RunnerMode {
@@ -690,6 +698,11 @@ pub struct ProjectConfig {
     pub(crate) velnor_runner_group: Option<String>,
     /// Automatic `pull_request` executes on the Velnor lane. Default false.
     pub(crate) pull_request_on_velnor: bool,
+    /// Default `runner` choice for generated CI `workflow_dispatch` inputs.
+    pub(crate) default_dispatch_runner: String,
+    /// Fallback lane selection for automatic static workflows that read
+    /// `vars.VELNOR_AUTOMATIC_LANES`.
+    pub(crate) automatic_lanes: String,
     /// Repository-local files the generated output owns verbatim, read from
     /// the declared sources at scan time.
     pub(crate) static_files: Vec<StaticFile>,
@@ -905,6 +918,7 @@ fn scan_target(
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
     }
+    validate_dispatch_runner_for_runners(config.runners, &config.default_dispatch_runner)?;
     // A repo-owned config can add Rust units the scan did not produce. They
     // compile with the repository's own pinned toolchain like every scanned
     // Rust unit, so the parsed pin is stamped onto any Rust unit that lacks
@@ -1414,7 +1428,7 @@ fn validate_config_text(value: &str, field: &str) -> Result<(), GeneratorError> 
     Ok(())
 }
 
-fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorError> {
+pub(crate) fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorError> {
     match value {
         "github" => Ok(RunnerMode::Github),
         "velnor" => Ok(RunnerMode::Velnor),
@@ -1423,6 +1437,40 @@ fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorError> {
             "[workflow] runners must be one of: github, velnor, both; found `{value}`"
         ))),
     }
+}
+
+pub(crate) fn validate_lane_selection(
+    value: &str,
+    field: &str,
+) -> Result<(), GeneratorError> {
+    match value {
+        "github" | "velnor" | "both" => Ok(()),
+        _ => Err(GeneratorError::usage(format!(
+            "{field} must be one of: github, velnor, both; found `{value}`"
+        ))),
+    }
+}
+
+pub(crate) fn dispatch_runner_options(runners: RunnerMode) -> &'static [&'static str] {
+    match runners {
+        RunnerMode::Github => &["github"],
+        RunnerMode::Velnor | RunnerMode::Both => &["velnor", "github", "both"],
+    }
+}
+
+pub(crate) fn validate_dispatch_runner_for_runners(
+    runners: RunnerMode,
+    default_dispatch_runner: &str,
+) -> Result<(), GeneratorError> {
+    let options = dispatch_runner_options(runners);
+    if options.contains(&default_dispatch_runner) {
+        return Ok(());
+    }
+    Err(GeneratorError::usage(format!(
+        "[workflow] default_dispatch_runner `{default_dispatch_runner}` is not available when runners = `{}`; available: {}",
+        runners.as_str(),
+        options.join(", ")
+    )))
 }
 
 fn apply_generation_config(
@@ -1460,6 +1508,17 @@ fn apply_generation_config(
     }
     if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
         config.pull_request_on_velnor = pull_request_on_velnor;
+    }
+    if let Some(default_dispatch_runner) = generation.default_dispatch_runner() {
+        validate_lane_selection(
+            default_dispatch_runner,
+            "[workflow] default_dispatch_runner",
+        )?;
+        default_dispatch_runner.clone_into(&mut config.default_dispatch_runner);
+    }
+    if let Some(automatic_lanes) = generation.automatic_lanes() {
+        validate_lane_selection(automatic_lanes, "[workflow] automatic_lanes")?;
+        automatic_lanes.clone_into(&mut config.automatic_lanes);
     }
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
@@ -1900,6 +1959,7 @@ const TRUSTED_PINNED_TOOLCHAIN_STEPS_PLACEHOLDER: &str =
 /// frozen-snapshot defect this generator refuses.
 const SNAPSHOT_COMPATIBILITY_PLACEHOLDER: &str = "__VELNOR_SNAPSHOT_COMPATIBILITY__";
 const SNAPSHOT_STATE_PLACEHOLDER: &str = "__VELNOR_SNAPSHOT_STATE__";
+const AUTOMATIC_LANES_DEFAULT_PLACEHOLDER: &str = "__VELNOR_AUTOMATIC_LANES_DEFAULT__";
 
 /// The Rust toolchain a config's units record, when any Rust unit does. The
 /// scan stamps every Rust unit with the repository's parsed pin, so this is
@@ -2107,6 +2167,10 @@ pub(crate) fn render_static_template_for_config(
     } else {
         template
     };
+    let template = template.replace(
+        AUTOMATIC_LANES_DEFAULT_PLACEHOLDER,
+        &format!("'{}'", config.automatic_lanes),
+    );
     // Snapshot identity is filled after the static-template pass, so a
     // canonical step the pass inserts carries the markers too; the pinned
     // toolchain fill runs last and refuses any marker that survives.
@@ -5498,6 +5562,21 @@ mod tests {
     }
 
     #[test]
+    fn static_templates_render_automatic_lane_fallback_from_config() {
+        let mut config = scanned_fixture(RunnerMode::Github);
+        config.automatic_lanes = "velnor".to_owned();
+        let rendered = must(
+            render_static_template_for_config(
+                &config,
+                "release.yml",
+                "REQUESTED_LANES: ${{ vars.VELNOR_AUTOMATIC_LANES || __VELNOR_AUTOMATIC_LANES_DEFAULT__ }}",
+            ),
+            "render automatic lane fallback",
+        );
+        assert!(rendered.contains("vars.VELNOR_AUTOMATIC_LANES || 'velnor'"));
+    }
+
+    #[test]
     fn omitted_runner_flag_defaults_to_velnor() {
         let cli = must(
             Cli::parse_args([OsString::from("generate"), OsString::from(".")]),
@@ -8373,6 +8452,8 @@ channel = "stable"
             package_update_channels: None,
             velnor_runner_group: None,
             pull_request_on_velnor: false,
+            default_dispatch_runner: DEFAULT_DISPATCH_RUNNER.to_owned(),
+            automatic_lanes: DEFAULT_AUTOMATIC_LANES.to_owned(),
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -8803,7 +8884,7 @@ channel = "stable"
         ));
         assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));
-        assert!(velnor_pr.contains("default: velnor"));
+        assert!(velnor_pr.contains("default: github"));
         assert!(velnor_pr.contains("default: affected"));
 
         let both =

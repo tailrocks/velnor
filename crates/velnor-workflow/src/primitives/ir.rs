@@ -742,6 +742,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
+    pub(crate) default_dispatch_runner: String,
     pub(crate) runners: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
@@ -790,9 +791,16 @@ fn workflow_dispatch_inputs(
     default_scope: &str,
     default_branch: &str,
     extra_inputs: &str,
+    runners: RunnerMode,
+    default_dispatch_runner: &str,
 ) -> String {
+    let options = crate::dispatch_runner_options(runners)
+        .iter()
+        .map(|option| format!("          - {option}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
+        "  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: true\n        default: {default_dispatch_runner}\n        type: choice\n        options:\n{options}\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
     )
 }
 
@@ -800,6 +808,7 @@ fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
     runners: RunnerMode,
+    default_dispatch_runner: &str,
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
         WorkflowKind::PullRequest => {
@@ -815,7 +824,13 @@ fn aggregate_triggers(
                 "CI / PR",
                 format!(
                     "on:\n  pull_request:\n{merge_group}{}",
-                    workflow_dispatch_inputs("affected", default_branch, "")
+                    workflow_dispatch_inputs(
+                        "affected",
+                        default_branch,
+                        "",
+                        runners,
+                        default_dispatch_runner,
+                    )
                 ),
                 "true",
             )
@@ -826,7 +841,13 @@ fn aggregate_triggers(
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
                 yaml_scalar(default_branch),
-                workflow_dispatch_inputs("full", default_branch, "")
+                workflow_dispatch_inputs(
+                    "full",
+                    default_branch,
+                    "",
+                    runners,
+                    default_dispatch_runner,
+                )
             ),
             "true",
         ),
@@ -839,6 +860,8 @@ fn aggregate_triggers(
                     "full",
                     default_branch,
                     "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
+                    runners,
+                    default_dispatch_runner,
                 )
             ),
             "true",
@@ -928,6 +951,7 @@ impl WorkflowIr {
             } else {
                 VelnorPullRequest::TrustedOnly
             },
+            default_dispatch_runner: config.default_dispatch_runner.clone(),
             runners: config.runners,
             tools,
             mise_present,
@@ -940,8 +964,12 @@ impl WorkflowIr {
 
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
+            kind,
+            &self.default_branch,
+            self.runners,
+            &self.default_dispatch_runner,
+        );
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
@@ -1046,8 +1074,12 @@ impl WorkflowIr {
     /// simply has no caller and no required-check branch.
     pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+        let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
+            kind,
+            &self.default_branch,
+            self.runners,
+            &self.default_dispatch_runner,
+        );
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
