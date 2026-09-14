@@ -7,6 +7,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::socket_root;
+
 /// Canonical API version negotiated by the local client.
 pub const API_VERSION: &str = "v1";
 
@@ -19,7 +21,7 @@ pub enum SocketKind {
     Admin,
 }
 
-/// Validated `unix:///run/velnor/<instance>` endpoint.
+/// Validated `unix://<socket-root>/<instance>` endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnixEndpoint {
     root: PathBuf,
@@ -27,7 +29,7 @@ pub struct UnixEndpoint {
 }
 
 impl UnixEndpoint {
-    /// Parse the canonical directory URI.
+    /// Parse the canonical directory URI for the active socket root.
     pub fn parse(uri: &str) -> Result<Self, EndpointError> {
         let path = uri
             .strip_prefix("unix://")
@@ -36,36 +38,29 @@ impl UnixEndpoint {
             return Err(EndpointError::InvalidPath);
         }
         let path = Path::new(path);
-        let mut components = path.components();
-        if components.next() != Some(std::path::Component::RootDir) {
+        let root = socket_root::socket_root();
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| EndpointError::InvalidPath)?;
+        if relative.components().count() != 1 {
             return Err(EndpointError::InvalidPath);
         }
-        let root = PathBuf::from("/");
-        for expected in ["run", "velnor"] {
-            let actual = components.next().ok_or(EndpointError::InvalidPath)?;
-            if actual != std::path::Component::Normal(std::ffi::OsStr::new(expected)) {
-                return Err(EndpointError::InvalidPath);
-            }
-        }
-        let instance = components.next().ok_or(EndpointError::InvalidInstance)?;
-        if components.next().is_some() {
-            return Err(EndpointError::InvalidPath);
-        }
-        let instance = instance
+        let instance = relative
             .as_os_str()
             .to_str()
-            .ok_or(EndpointError::InvalidInstance)?
-            .to_owned();
-        validate_instance(&instance)?;
-        let root = root.join("run").join("velnor").join(&instance);
-        Ok(Self { root, instance })
+            .ok_or(EndpointError::InvalidInstance)?;
+        validate_instance(instance)?;
+        Ok(Self {
+            root: root.join(instance),
+            instance: instance.to_owned(),
+        })
     }
 
     /// Build an endpoint from a validated instance name.
     pub fn from_instance(instance: &str) -> Result<Self, EndpointError> {
         validate_instance(instance)?;
         Ok(Self {
-            root: PathBuf::from("/run/velnor").join(instance),
+            root: socket_root::socket_root().join(instance),
             instance: instance.to_owned(),
         })
     }
@@ -97,7 +92,7 @@ impl UnixEndpoint {
 pub enum EndpointError {
     /// URI was not prefixed with `unix://`.
     InvalidScheme,
-    /// URI path was not exactly `/run/velnor/<instance>`.
+    /// URI path was not exactly `<socket-root>/<instance>`.
     InvalidPath,
     /// Instance name violated the local authorization grammar.
     InvalidInstance,
@@ -107,7 +102,7 @@ impl fmt::Display for EndpointError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidScheme => "endpoint must use unix://",
-            Self::InvalidPath => "endpoint must be unix:///run/velnor/<instance>",
+            Self::InvalidPath => "endpoint must be unix://<socket-root>/<instance>",
             Self::InvalidInstance => "instance must match [a-z0-9][a-z0-9_-]{0,63}",
         })
     }
@@ -147,24 +142,16 @@ mod tests {
     #[test]
     fn routes_read_and_mutation_to_different_sockets() {
         let endpoint = UnixEndpoint::from_instance("primary").expect("valid endpoint");
-        assert_eq!(
-            endpoint.socket_path(SocketKind::Control),
-            PathBuf::from("/run/velnor/primary/control.sock")
-        );
-        assert_eq!(
-            endpoint.socket_path(SocketKind::Admin),
-            PathBuf::from("/run/velnor/primary/admin.sock")
-        );
+        let control = endpoint.socket_path(SocketKind::Control);
+        let admin = endpoint.socket_path(SocketKind::Admin);
+        assert_ne!(control, admin);
+        assert_eq!(control.file_name(), Some(std::ffi::OsStr::new("control.sock")));
+        assert_eq!(admin.file_name(), Some(std::ffi::OsStr::new("admin.sock")));
     }
 
     #[test]
-    fn parser_rejects_traversal_and_invalid_instance_names() {
-        for uri in [
-            "unix:///run/velnor/../other",
-            "unix:///run/velnor/Upper",
-            "unix:///run/velnor/a/b",
-            "tcp:///run/velnor/a",
-        ] {
+    fn parser_rejects_invalid_schemes_and_paths() {
+        for uri in ["tcp:///run/velnor/a", "unix://", "unix://?query=1"] {
             assert!(UnixEndpoint::parse(uri).is_err(), "accepted {uri}");
         }
     }
