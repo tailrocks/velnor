@@ -41,10 +41,10 @@ github_pr_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun
 github_full_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
 velnor_pr_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
 velnor_full_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
+workflow_file = "ci-unit-bun.yml"
 [unit.cache]
 key_files = ["package.json", "bun.lock"]
 paths = ["~/.bun/install/cache"]
-workflow_file = "ci-unit-bun.yml"
 
 [[unit]]
 id = "docker"
@@ -56,10 +56,10 @@ github_pr_commands = ["docker build --target ci --file 'Dockerfile' --tag local-
 github_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.' --build-context velnor-cache-seed='.velnor-docker-cache/seed'", "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --build-context velnor-cache-seed='.velnor-docker-cache/seed' --file 'Dockerfile' '.'"]
 velnor_pr_commands = ["docker build --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 velnor_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+workflow_file = "ci-unit-docker.yml"
 [unit.cache]
 key_files = ["Cargo.lock", "Dockerfile", "docker/build-mise.lock", "docker/build-mise.toml", "rust-toolchain.toml"]
 paths = [".velnor-docker-cache"]
-workflow_file = "ci-unit-docker.yml"
 
 [[unit]]
 id = "docs"
@@ -71,10 +71,10 @@ github_pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_mo
 github_full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\" \"#migrations/**\""]
 velnor_pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\" \"#migrations/**\""]
 velnor_full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\" \"#migrations/**\""]
+workflow_file = "ci-unit-docs.yml"
 [unit.cache]
 key_files = ["package-lock.json", "bun.lock"]
 paths = ["~/.npm"]
-workflow_file = "ci-unit-docs.yml"
 
 [[unit]]
 id = "opentofu"
@@ -86,10 +86,10 @@ github_pr_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=
 github_full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
 velnor_pr_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
 velnor_full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
+workflow_file = "ci-unit-opentofu.yml"
 [unit.cache]
 key_files = ["**/.terraform.lock.hcl"]
 paths = ["~/.terraform.d/plugin-cache"]
-workflow_file = "ci-unit-opentofu.yml"
 
 [[unit]]
 id = "rust-policy"
@@ -101,10 +101,10 @@ github_pr_commands = ["mbx deny check"]
 github_full_commands = ["mbx deny check"]
 velnor_pr_commands = ["mbx deny check"]
 velnor_full_commands = ["mbx deny check"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-unit-collector"
@@ -116,10 +116,10 @@ github_pr_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path '
 github_full_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector' --no-tests pass"]
 velnor_pr_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector' --no-tests pass"]
 velnor_full_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector' --no-tests pass"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "tools/unit-collector/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-bench"
@@ -132,10 +132,10 @@ github_full_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 
 velnor_pr_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench' --no-tests pass"]
 depends_on = ["rust-velnor-model", "rust-velnor-runner"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-bench/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-client"
@@ -148,10 +148,10 @@ github_full_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path
 velnor_pr_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client' --no-tests pass"]
 depends_on = ["rust-velnor-model"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-client/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-control"
@@ -164,10 +164,10 @@ github_full_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-pat
 velnor_pr_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control' --no-tests pass"]
 depends_on = ["rust-velnor-model"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-control/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-model"
@@ -179,10 +179,10 @@ github_pr_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'C
 github_full_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model' --no-tests pass"]
 velnor_pr_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model' --no-tests pass"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-model/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-render"
@@ -195,10 +195,10 @@ github_full_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path
 velnor_pr_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render' --no-tests pass"]
 depends_on = ["rust-velnor-model"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-render/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-runner"
@@ -211,10 +211,10 @@ github_full_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path
 velnor_pr_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner' --no-tests pass"]
 depends_on = ["rust-velnor-control", "rust-velnor-model"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-runner/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-tools"
@@ -227,10 +227,10 @@ github_full_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 
 velnor_pr_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools' --no-tests pass"]
 depends_on = ["rust-velnor-client", "rust-velnor-model"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-tools/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-workflow"
@@ -243,10 +243,10 @@ github_full_commands = ["cd -- 'crates/velnor-workflow' && mbx run --locked --ma
 velnor_pr_commands = ["cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass"]
 depends_on = ["rust-velnor-runner"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-workflow/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnor-workflow-contract"
@@ -258,10 +258,10 @@ github_pr_commands = ["cd -- 'crates/velnor-workflow-contract' && mbx fmt --mani
 github_full_commands = ["cd -- 'crates/velnor-workflow-contract' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow-contract' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow-contract' -- -D warnings", "cd -- 'crates/velnor-workflow-contract' && mbx nextest run --locked --all-features --package 'velnor-workflow-contract' --no-tests pass"]
 velnor_pr_commands = ["cd -- 'crates/velnor-workflow-contract' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow-contract' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow-contract' -- -D warnings", "cd -- 'crates/velnor-workflow-contract' && mbx nextest run --locked --all-features --package 'velnor-workflow-contract' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnor-workflow-contract' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow-contract' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow-contract' -- -D warnings", "cd -- 'crates/velnor-workflow-contract' && mbx nextest run --locked --all-features --package 'velnor-workflow-contract' --no-tests pass"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-workflow-contract/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-velnorctl"
@@ -274,10 +274,10 @@ github_full_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Ca
 velnor_pr_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl' --no-tests pass"]
 velnor_full_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl' --no-tests pass"]
 depends_on = ["rust-velnor-client", "rust-velnor-control", "rust-velnor-model", "rust-velnor-render", "rust-velnor-runner"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnorctl/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"
 
 [[unit]]
 id = "rust-production-topology"
@@ -289,7 +289,7 @@ github_pr_commands = ["cargo check --workspace --all-targets --locked", "mise ru
 github_full_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
 velnor_pr_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
 velnor_full_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = ["Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
-workflow_file = "ci-unit-rust.yml"

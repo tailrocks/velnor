@@ -870,13 +870,13 @@ impl ProjectConfig {
             if let Some(version) = &unit.tool_version {
                 write_toml_string(&mut output, "tool_version", version);
             }
+            if let Some(workflow_file) = &unit.workflow_file {
+                write_toml_string(&mut output, "workflow_file", workflow_file);
+            }
             if let Some(cache) = &unit.cache {
                 output.push_str("[unit.cache]\n");
                 write_toml_array(&mut output, "key_files", &cache.key_files);
                 write_toml_array(&mut output, "paths", &cache.paths);
-            }
-            if let Some(workflow_file) = &unit.workflow_file {
-                write_toml_string(&mut output, "workflow_file", workflow_file);
             }
         }
         output
@@ -8324,6 +8324,40 @@ channel = "stable"
         assert!(workflow.contains("tofu_wrapper: false"));
         assert!(workflow.contains("name: Prepare Linuxbrew path"));
         assert!(workflow.contains("Homebrew unavailable: install brew or expose it on PATH"));
+    }
+
+    #[test]
+    fn generated_config_keeps_unit_workflow_file_outside_cache_table() {
+        let mut config = scanned_fixture(RunnerMode::Github);
+        let unit = must_some(
+            config.units.iter_mut().find(|unit| unit.cache.is_some()),
+            "fixture must include a cached unit",
+        );
+        let unit_id = unit.id.clone();
+        unit.workflow_file = Some("ci-unit-bun.yml".to_owned());
+
+        let parsed: toml::Value = must(toml::from_str(&config.toml()), "parse generated config");
+        let serialized_unit = must_some(
+            parsed
+                .get("unit")
+                .and_then(toml::Value::as_array)
+                .and_then(|units| {
+                    units.iter().find(|candidate| {
+                        candidate.get("id").and_then(toml::Value::as_str) == Some(unit_id.as_str())
+                    })
+                }),
+            "serialized unit is missing",
+        );
+        assert_eq!(
+            serialized_unit
+                .get("workflow_file")
+                .and_then(toml::Value::as_str),
+            Some("ci-unit-bun.yml")
+        );
+        assert!(serialized_unit
+            .get("cache")
+            .and_then(|cache| cache.get("workflow_file"))
+            .is_none());
     }
 
     #[test]
