@@ -2781,18 +2781,17 @@ fn render_policy_entrypoint(config: &ProjectConfig) -> String {
 }
 
 pub(crate) fn stack_group_job_id(kind: UnitKind) -> String {
-    let key = match kind {
-        UnitKind::Rust => "rust",
-        UnitKind::Gradle => "gradle",
-        UnitKind::Node => "node",
-        UnitKind::Bun => "bun",
-        UnitKind::Swift => "swift",
-        UnitKind::OpenTofu => "opentofu",
-        UnitKind::Docker => "docker",
-        UnitKind::Homebrew => "homebrew",
-        UnitKind::Docs => "docs",
-    };
-    format!("group-{key}")
+    stack_group_job_id_for_file(&kind_unit_workflow_file(kind))
+}
+
+/// The aggregate caller job for one kind workflow file, including shard files
+/// such as `ci-unit-rust-2.yml` → `group-rust-2`.
+pub(crate) fn stack_group_job_id_for_file(file: &str) -> String {
+    let stem = file
+        .strip_prefix("ci-unit-")
+        .and_then(|value| value.strip_suffix(".yml"))
+        .unwrap_or("unit");
+    format!("group-{stem}")
 }
 
 pub(crate) fn unit_group_job_id(unit: &Unit) -> String {
@@ -3049,8 +3048,8 @@ fn generated_files_with_surface(
     surface: Option<&primitives::Surface>,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     let mut config = config.clone();
-    let workflow = WorkflowIr::from_config(&config);
-    primitives::validate_cache_transports(&workflow)?;
+    let initial = WorkflowIr::from_config(&config);
+    primitives::validate_cache_transports(&initial)?;
     // The toolchain contract is a generation precondition, checked here so no
     // rendering path — scanned or declared — can emit a Rust job without a
     // pin or a release matrix the pin does not declare.
@@ -3063,7 +3062,7 @@ fn generated_files_with_surface(
     );
     if !config.adopted_workflow_surface {
         for kind in config.units.iter().map(|unit| unit.kind).collect::<BTreeSet<_>>() {
-            let (kind_files, assignments) = workflow.render_kind_unit_workflows(
+            let (kind_files, assignments) = initial.render_kind_unit_workflows(
                 kind,
                 surface.map(|surface| &surface.contracts),
             );
@@ -3088,31 +3087,43 @@ fn generated_files_with_surface(
             }
         }
     }
+    let workflow = WorkflowIr::from_config(&config);
     files.insert(PathBuf::from(".github/ci/project.toml"), config.toml());
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
-        if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
-            files.insert(path, content.clone());
-            continue;
-        }
-        let content = config
-            .workflow_templates
-            .get(workflow_file)
-            .map(|template| render_static_template_for_config(&config, workflow_file, template))
-            .transpose()?
-            .or_else(|| match workflow_file.as_str() {
+        let content = if !config.adopted_workflow_surface {
+            match workflow_file.as_str() {
                 "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
-                "ci-policy.yml" => Some(generated_ci_policy(&config)),
-                "ci-release-package-signer.yml" => Some(generated_release_package_signer()),
                 "ci-main.yml" => Some(generated_ci_main(&workflow)),
                 "nightly.yml" => Some(generated_nightly(&workflow)),
-                "maintenance.yml" => Some(generated_maintenance(&config)),
-                "preview.yml" => Some(generated_preview(&config)),
-                "release.yml" => generated_release(&config),
-                // Catalog data is code-owned; ignore no unknown runtime path and never
-                // let configuration turn into an arbitrary filesystem write.
                 _ => None,
-            });
+            }
+        } else {
+            None
+        }
+        .or_else(|| {
+            surface.and_then(|surface| surface.files.get(&path).cloned())
+        })
+        .or({
+            config
+                .workflow_templates
+                .get(workflow_file)
+                .map(|template| render_static_template_for_config(&config, workflow_file, template))
+                .transpose()?
+        })
+        .or_else(|| match workflow_file.as_str() {
+            "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
+            "ci-policy.yml" => Some(generated_ci_policy(&config)),
+            "ci-release-package-signer.yml" => Some(generated_release_package_signer()),
+            "ci-main.yml" => Some(generated_ci_main(&workflow)),
+            "nightly.yml" => Some(generated_nightly(&workflow)),
+            "maintenance.yml" => Some(generated_maintenance(&config)),
+            "preview.yml" => Some(generated_preview(&config)),
+            "release.yml" => generated_release(&config),
+            // Catalog data is code-owned; ignore no unknown runtime path and never
+            // let configuration turn into an arbitrary filesystem write.
+            _ => None,
+        });
         if let Some(content) = content {
             files.insert(path, content);
         }
@@ -3151,11 +3162,14 @@ fn legacy_plan(workflow: &WorkflowIr) -> Vec<crate::primitives::GraphNode> {
         workflow
             .units
             .iter()
-            .map(|unit| crate::primitives::GraphNode::Unit {
-                unit_id: unit.id.clone(),
-                job_id: stack_group_job_id(unit.kind),
-                name: sidebar_group_name(unit),
-                file: nested_unit_workflow_file(unit),
+            .map(|unit| {
+                let file = nested_unit_workflow_file(unit);
+                crate::primitives::GraphNode::Unit {
+                    unit_id: unit.id.clone(),
+                    job_id: stack_group_job_id_for_file(&file),
+                    name: sidebar_group_name(unit),
+                    file,
+                }
             }),
     );
     nodes
@@ -8313,7 +8327,10 @@ channel = "stable"
         assert!(root.lines().all(|line| {
             !(line.contains("needs['group-unit-") && line.contains("result == 'success'"))
         }));
-        assert!(root.contains("uses: ./.github/workflows/${{ matrix.workflow }}"));
+        assert!(root.contains(&format!(
+            "uses: ./.github/workflows/{}",
+            nested_unit_workflow_file(rust_unit)
+        )));
         assert!(!files.contains_key(&PathBuf::from(".github/workflows/ci-rust.yml")));
         let crate_workflow = must_some(
             files

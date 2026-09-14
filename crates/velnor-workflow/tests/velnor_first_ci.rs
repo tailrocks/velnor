@@ -347,8 +347,14 @@ fn fifty_one_units_stay_under_github_unique_reusable_limit() {
         "unique reusable workflows {} exceed GitHub's limit: {unique:?}",
         unique.len()
     );
-    assert_eq!(unique, BTreeSet::from(["ci-unit-rust.yml"]));
+    assert!(
+        unique.iter().all(|file| file.starts_with("ci-unit-rust")),
+        "rust units must stay on kind shards, not per-unit files: {unique:?}"
+    );
     assert!(pr.contains("fromJSON(needs.plan.outputs.rust_matrix)"));
+    if unique.len() > 1 {
+        assert!(pr.contains("fromJSON(needs.plan.outputs.rust-2_matrix)"));
+    }
     assert!(!generated
         .output
         .join(".github/workflows/ci-rust-crate00.yml")

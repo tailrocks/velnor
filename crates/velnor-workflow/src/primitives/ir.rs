@@ -1160,19 +1160,19 @@ impl WorkflowIr {
         output: &mut String,
         include_policy: bool,
     ) {
-        let mut groups: BTreeMap<&str, Vec<(&str, &str, &str)>> = BTreeMap::new();
+        let mut groups: BTreeMap<(&str, &str), Vec<(&str, &str)>> = BTreeMap::new();
         for (unit_id, job_id, name, file) in nodes.iter().filter_map(GraphNode::as_unit) {
             groups
-                .entry(job_id)
+                .entry((job_id, file))
                 .or_default()
-                .push((unit_id, name, file));
+                .push((unit_id, name));
         }
-        for (job_id, units) in groups {
+        for ((job_id, file), _units) in groups {
             let mut needs = vec!["plan".to_owned()];
             if include_policy {
                 needs.push("policy".to_owned());
             }
-            let matrix_output = kind_matrix_output_from_file(units[0].2);
+            let matrix_output = kind_matrix_output_from_file(file);
             let mut conditions = vec![
                 "always()".to_owned(),
                 "needs.plan.result == 'success'".to_owned(),
@@ -1183,7 +1183,7 @@ impl WorkflowIr {
             conditions.push(format!("needs.plan.outputs.{matrix_output} != '[]'"));
             let _ = writeln!(
                 output,
-                "  {job_id}:\n    name: ${{{{ matrix.label }}}}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    strategy:\n      fail-fast: false\n      matrix:\n        include: ${{{{ fromJSON(needs.plan.outputs.{matrix_output}) }}}}\n    uses: ./.github/workflows/${{{{ matrix.workflow }}}}\n    with:\n      unit: ${{{{ matrix.unit }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
+                "  {job_id}:\n    name: ${{{{ matrix.label }}}}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    strategy:\n      fail-fast: false\n      matrix:\n        include: ${{{{ fromJSON(needs.plan.outputs.{matrix_output}) }}}}\n    uses: ./.github/workflows/{file}\n    with:\n      unit: ${{{{ matrix.unit }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
                 conditions.join(" && "),
                 needs.join(", "),
             );
@@ -1698,12 +1698,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
         ];
-        let mut kinds = BTreeSet::new();
+        let mut matrix_outputs = BTreeSet::new();
         for unit in &self.units {
-            kinds.insert(unit.kind);
+            matrix_outputs.insert(kind_matrix_output_from_file(&nested_unit_workflow_file(
+                unit,
+            )));
         }
-        for kind in kinds {
-            let name = kind_matrix_output(kind);
+        for name in matrix_outputs {
             outputs.push(format!(
                 "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
             ));
