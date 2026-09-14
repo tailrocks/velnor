@@ -463,3 +463,50 @@ pub enum DockerAction {
     Report,
     Status,
 }
+
+/// On-demand host operations.
+#[derive(Debug, Args)]
+pub struct HostArgs {
+    #[command(subcommand)]
+    pub command: HostCommand,
+}
+
+/// On-demand host verbs.
+#[derive(Debug, Subcommand)]
+pub enum HostCommand {
+    /// Start foreground, repository-scoped, Docker-backed capacity.
+    Start(HostStartArgs),
+    /// Show the selected host, Docker endpoint, and execution platform.
+    Status,
+    /// Explain how to drain a foreground host session.
+    Drain,
+    /// Explain how to stop a foreground host session.
+    Stop,
+}
+
+/// Start one repository-scoped recovery host.
+#[derive(Debug, Args)]
+pub struct HostStartArgs {
+    /// GitHub repository as owner/name. Defaults to tailrocks/velnor.
+    #[arg(long, value_name = "OWNER/NAME")]
+    pub repo: Option<String>,
+    /// Full repository URL. Must be owner/name, never an org pool.
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+    /// Local runner/instance name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Bounded slot count.
+    #[arg(long, default_value_t = 1)]
+    pub slots: usize,
+    /// PR number to document targeting semantics for. GitHub stays the scheduler.
+    #[arg(long, value_name = "NUMBER")]
+    pub pr: Option<u64>,
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+    /// Path the Docker daemon uses for --work-dir when it differs from the host.
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
+}

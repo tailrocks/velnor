@@ -2,102 +2,62 @@
 
 Binding spec: `velnor-recovery-goal.md`. Update at meaningful milestones.
 
-## Live snapshot (2026-09-15 UTC+7)
+## Live snapshot (2026-09-15)
 
 | Item | Value |
 |---|---|
-| **main** | `ad5fc59d6d47f24177c725d7a5c6286388e5e014` |
-| **PR #812** | `991d86bd` — `codex/velnor-macos-action-portability-20260915` — portable setup action + generator scan fix |
-| **PR #814** | `ce2e783e` (+ local `a249a9e0` daemon fix) — `codex/velnorctl-macos-support-20260915` — macOS velnorctl diagnostics |
-| **PR #815** | `781f0e32` (+ local `215358da` daemon fix) — `recovery/pr812` — integration branch (#812 + #814 + docs) |
-| **Shared ancestry** | all three branch from merge-all base `fb9a31a6` |
-| **Sentry artifact** | `velnor-runner 0.1.274~preview.145+d3e441f` @ `d3e441fb` |
+| **main** | `ad5fc59d` |
+| **PR #809** | `fb9a31a6` `codex/merge-all-velnor-20260914` — OPEN, BLOCKED |
+| **PR #812** | `991d86bd` `codex/velnor-macos-action-portability-20260915` — OPEN, BLOCKED, DCO fail |
+| **PR #814** | `ce2e783e` + local host/socket work `codex/velnorctl-macos-support-20260915` — OPEN, BLOCKED |
+| **PR #815** | `781f0e32` `recovery/pr812` — OPEN, BLOCKED, DCO fail |
+| **Sentry** | `velnor-runner 0.1.274~preview.145+d3e441f` @ `d3e441fb`; tailrocks fleet down |
 
-### PR stack relationship
+## Related PR stack
 
 ```
-fb9a31a6 (merge-all base)
-├── #812: 21822888 (portable setup action) → 991d86bd (generator scan fix)
-└── #814: ce2e783e (macOS velnorctl diagnostics) → a249a9e0 (dev-host socket fix, local)
-    #815 recovery/pr812 = #812 commits + #814 commits + docs + daemon fix
+main@d3e441fb  (#809/#812 base)
+main@ad5fc59d  (#814/#815 base; +#811 +#813)
+
+#809 fb9a31a6  integration
+ ├─ #812 21822888 portable setup-runtime
+ │    └─ 991d86bd scan-input record (DCO unsigned)
+ │         └─ #815 cdbf0399 macOS docker diagnostics
+ │              └─ 781f0e32 recovery docs
+ └─ #814 ce2e783e macOS docker diagnostics (sibling of #812, not stacked)
+      └─ local: socket-root + host start
 ```
 
-## Failure graph (verified)
+Unique work:
+- **#809:** shared integration (ci-required, runner, generator rev 32)
+- **#812:** setup-runtime portability + generator scan hash
+- **#814:** native macOS velnorctl Docker diagnostics + on-demand host
+- **#815:** #812 unique + #814 diagnostics + recovery docs
 
-### PR #809 run [34862656273](https://github.com/tailrocks/velnor/actions/runs/34862656273) @ `fb9a31a6`
+Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redundant.
 
-| Lane | Result | Root cause |
+## Failure graph
+
+| Surface | Result | Cause |
 |---|---|---|
-| GitHub (18 jobs) | **PASS** | — |
-| Velnor (17 jobs) | **CANCELLED** after ~2h47m | No runner assigned (`runner_id=0`); labels `[self-hosted, velnor-target-mvp]` |
-| Policy, DCO | **PASS** | — |
-
-### PR #812 run [34882110261](https://github.com/tailrocks/velnor/actions/runs/34882110261) @ `21822888`
-
-| Lane | Result | Root cause |
-|---|---|---|
-| GitHub | 17 PASS, **1 FAIL** | `rust-velnor-workflow`: scan input drift `a2f70c15…` → `861def8a…` |
-| Velnor (17 jobs) | **QUEUED** | No runner assigned |
-| Policy, DCO | **PASS** | — |
-
-**Fix applied:** regenerate scan hash → `861def8a99c861c2` in commit `991d86bd` on #812/#815.
-
-### Sentry (read-only SSH 2026-09-14)
-
-| Pool | registered_slots | routing_valid | Can serve velnor-target-mvp? |
-|---|---|---|---|
-| `velnor-daemon@tailrocks` (org) | **0** | **false** | **No** — stale DB phases (teardown/recycling), no broker sessions post-upgrade |
-| `velnor-daemon@dogfood` (repo) | 4 | true | **Limited** — ~3 idle; degraded; not org-trusted path |
-
-Package upgraded ~15:08 UTC; tailrocks pool never re-registered after restart.
-
-## Dependency-ordered tasks
-
-| # | Task | Owner | Status | Evidence |
-|---|---|---|---|---|
-| 1 | Live failure graph + execution record | agent | **DONE** | this file |
-| 2 | Fix #812 generator scan drift | agent | **DONE** | `991d86bd` on #812/#815 |
-| 3 | macOS dev-host daemon socket startup | agent | **DONE local** | `a249a9e0`/#814, `215358da`/#815 |
-| 4 | Push #812/#814/#815 branches | agent | **IN PROGRESS** | this turn |
-| 5 | Local macOS bootstrap host (break circular dep) | agent | **NEXT** | daemon + real job |
-| 6 | macOS velnorctl on-demand host CLI | agent | pending | extend #814 |
-| 7 | Merge #812 → #814 → #815 with green checks | agent | pending | — |
-| 8 | Main verify + release + artifact install | agent | pending | — |
-| 9 | Sentry deploy + rollback prep | agent | pending | — |
-| 10 | Scenarios A–D evidence matrix | agent | pending | — |
+| #809 Velnor jobs | cancelled/queued | `group: velnor-trusted` empty (all org runners offline) |
+| #812 GitHub rust-velnor-workflow @ 21822888 | fail | scan input `a2f70c15` → `861def8a`; recorded in 991d86bd |
+| #812/#814/#815 Velnor jobs | queued | same org-group dependency |
+| #812/#815 DCO | fail | `991d86bd` (and some local socket commits) lack Signed-off-by |
+| Sentry tailrocks | fleet down | JIT wedge, 0/8 registered after 15:11 restart |
+| Repo-scoped dogfood | cannot claim PR CI | jobs require `velnor-trusted` group |
 
 ## Decisions
 
-- **Integration order:** #812 (setup action) → #814 (macOS velnorctl) → #815 (combined recovery); all share merge-all base `fb9a31a6`.
-- **Recovery first:** bootstrap temporary macOS host from source before Sentry repair; do not wait for release.
-- **Pre-merge candidate:** build from pinned PR branch SHA; replace with merged release before Sentry deploy.
+- Recovery hosts stay repository-scoped and refuse org URLs.
+- Linux containers on macOS are Linux jobs, not native macOS jobs.
+- `velnorctl host start` is the operator entry point on #814.
+- Do not force-push unsigned history; add signed follow-up commits. #812 DCO still needs a signed replacement of `991d86bd` (requires operator force-with-lease).
 
-## Blockers
+## Next
 
-| Blocker | Mitigation |
-|---|---|
-| No Velnor runners for PR CI | Local macOS temporary host + Sentry tailrocks pool repair |
-| macOS velnorctl blocked (`/run/velnor`, socket groups) | **Fixed locally** in `a249a9e0`/`215358da`; push + verify daemon startup |
-| #812 behind main by 2 commits | Rebase after generator fix push |
-| Sentry tailrocks 0 registered slots | Separate repair track after recovery path proven |
-
-## Reproduction commands
-
-```bash
-# Generator drift (PR #812 head)
-cd crates/velnor-workflow && cargo run --locked -- --plain --check ../..
-
-# Fix
-cargo run --locked -- --plain --force ../.. && cargo run --locked -- --plain --check ../..
-
-# Sentry tailrocks health (redacted)
-ssh sentry 'cat /var/lib/velnor-tailrocks/runner/daemons/velnor-tailrocks/health.json'
-```
-
-## Next steps
-
-1. Push #812, #814, #815 with latest commits.
-2. Verify `velnorctl daemon` starts on macOS; run repo-scoped temporary host.
-3. Rebase all three onto current `main` when CI green on GitHub lane.
-4. Execute real Velnor-lane job on temporary host; repair Sentry tailrocks pool.
-5. Implement `host start` entry point on #814.
+1. Push #814 host/socket work; verify `velnorctl host start --help` on macOS.
+2. Start repo-scoped capacity; prove a real Docker-backed job (label-only or new run).
+3. Keep #809→#812 merge order once `ci-required` can run.
+4. Rebase #814 onto merged #812 so portability + host land together.
+5. Sentry deploy only from the final merged/released SHA.

@@ -117,6 +117,7 @@ pub struct DaemonArgs {
 /// cleanup on normal exit, cancellation, and partial startup failure.
 pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     enforce_admission()?;
+    velnor_client::ensure_socket_root()?;
     crate::http::validate_socket_groups()?;
     let instance = args.name.as_deref().unwrap_or("default");
     // `--name` is the GitHub runner/socket identity. Durable runner rows use

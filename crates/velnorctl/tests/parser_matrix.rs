@@ -359,6 +359,31 @@ fn docker_diagnostics_parse_as_typed_values_and_keep_path_mapping_explicit() {
         }
         other => panic!("expected Docker, got {other:?}"),
     }
+    match parse(&[
+        "host",
+        "start",
+        "--repo",
+        "tailrocks/velnor",
+        "--slots",
+        "2",
+        "--pr",
+        "812",
+    ])
+    .expect("host start")
+    {
+        Cli {
+            command: Command::Host(args),
+            ..
+        } => match args.command {
+            velnorctl::commands::HostCommand::Start(start) => {
+                assert_eq!(start.repo.as_deref(), Some("tailrocks/velnor"));
+                assert_eq!(start.slots, 2);
+                assert_eq!(start.pr, Some(812));
+            }
+            other => panic!("expected host start, got {other:?}"),
+        },
+        other => panic!("expected Host, got {other:?}"),
+    }
     match parse(&["docker", "status"]).expect("docker status") {
         Cli {
             command: Command::Docker(args),

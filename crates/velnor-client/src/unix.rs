@@ -145,7 +145,10 @@ mod tests {
         let control = endpoint.socket_path(SocketKind::Control);
         let admin = endpoint.socket_path(SocketKind::Admin);
         assert_ne!(control, admin);
-        assert_eq!(control.file_name(), Some(std::ffi::OsStr::new("control.sock")));
+        assert_eq!(
+            control.file_name(),
+            Some(std::ffi::OsStr::new("control.sock"))
+        );
         assert_eq!(admin.file_name(), Some(std::ffi::OsStr::new("admin.sock")));
     }
 

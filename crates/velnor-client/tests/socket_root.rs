@@ -26,10 +26,7 @@ fn package_mode_uses_run_velnor() {
         assert!(is_package_socket_mode());
         assert_eq!(socket_root(), PathBuf::from("/run/velnor"));
         let endpoint = UnixEndpoint::from_instance("primary").expect("valid endpoint");
-        assert_eq!(
-            endpoint.uri(),
-            "unix:///run/velnor/primary".to_owned()
-        );
+        assert_eq!(endpoint.uri(), "unix:///run/velnor/primary".to_owned());
     });
 }
 

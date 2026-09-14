@@ -6,11 +6,22 @@ Docker/OrbStack VM without claiming that the VM can host the Linux runner.
 ## Commands
 
 ```text
+velnorctl host start [--repo tailrocks/velnor] [--slots 1] [--pr 812]
+velnorctl host status
+velnorctl host drain
+velnorctl host stop
 velnorctl preflight [--config-dir DIR] [--work-dir DIR]
 velnorctl status [--config-dir DIR]
 velnorctl docker report [--check-bind-mount] [--image IMAGE]
 velnorctl storage paths [--config-dir DIR]
 ```
+
+`host start` is the on-demand entry point. It registers repository-scoped
+runners only and refuses organization URLs so recovery cannot join
+`velnor-trusted`. Export `GITHUB_TOKEN`; never pass a token as a flag.
+Linux container jobs on macOS stay Linux jobs. `--pr` prints scheduling
+semantics; GitHub remains the scheduler and already-queued
+`group: velnor-trusted` jobs cannot be claimed by this host.
 
 `velnorctl docker` and `velnorctl docker status` are equivalent to `docker
 report`. Add `--output json` for a stable diagnostic object. A failed

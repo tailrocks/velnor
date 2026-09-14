@@ -91,6 +91,7 @@ fn cli_migrated_legacy_names_are_first_class_subcommands() {
         "capabilities",
         "configure",
         "docker",
+        "host",
         "doctor",
         "preflight",
         "remove",
@@ -127,6 +128,15 @@ fn cli_run_worker_is_not_a_public_command() {
 }
 
 #[test]
+fn cli_host_start_has_actionable_help() {
+    let output = run(&["host", "start", "--help"]);
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    let help = text(&output.stdout);
+    assert!(help.contains("--repo"), "{help}");
+    assert!(help.contains("--pr"), "{help}");
+    assert!(help.contains("--slots"), "{help}");
+}
+
 fn cli_macos_docker_diagnostics_have_actionable_help() {
     let output = run(&["docker", "report", "--help"]);
     assert_eq!(code(&output), 0, "{}", text(&output.stderr));
