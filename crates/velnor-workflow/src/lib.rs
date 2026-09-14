@@ -7551,6 +7551,13 @@ channel = "stable"
         )
     }
 
+    fn guest_seed_job() -> String {
+        guest_seed_job_with_prefix().replace(
+            "          restore-keys: |\n            guest-seed-${{ matrix.arch }}-\n",
+            "",
+        )
+    }
+
     #[test]
     fn guest_seed_lifecycle_requires_trusted_exact_miss_save() {
         must(
