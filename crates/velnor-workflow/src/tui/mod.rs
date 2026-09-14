@@ -977,6 +977,7 @@ mod tests {
                 profile: None,
             }),
             services: Vec::new(),
+            workflow_file: None,
         }
     }
 

@@ -723,6 +723,7 @@ mod tests {
                 profile: None,
             }),
             services: Vec::new(),
+            workflow_file: None,
         };
         let config = crate::ProjectConfig {
             repository: "example/project".to_owned(),

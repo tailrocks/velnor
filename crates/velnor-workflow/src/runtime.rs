@@ -133,6 +133,8 @@ struct CiUnit {
     tool_version: Option<String>,
     #[serde(default)]
     cache: Option<Cache>,
+    #[serde(default)]
+    workflow_file: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -613,7 +615,11 @@ fn write_kind_matrices(
                 } else {
                     unit.label.clone()
                 };
-                serde_json::json!({ "unit": unit.id, "label": label })
+                let workflow = unit
+                    .workflow_file
+                    .clone()
+                    .unwrap_or_else(|| format!("ci-unit-{kind}.yml"));
+                serde_json::json!({ "unit": unit.id, "label": label, "workflow": workflow })
             })
             .collect::<Vec<_>>();
         let json = serde_json::to_string(&entries)
@@ -847,6 +853,7 @@ mod runner_lane_tests {
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         assert_eq!(
             unit.commands(RunnerLane::Github, Scope::Affected),
@@ -882,6 +889,7 @@ mod runner_lane_tests {
                 depends_on: Vec::new(),
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
             CiUnit {
                 id: "changed".to_owned(),
@@ -896,6 +904,7 @@ mod runner_lane_tests {
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
             CiUnit {
                 id: "sibling".to_owned(),
@@ -910,6 +919,7 @@ mod runner_lane_tests {
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
             CiUnit {
                 id: "leaf".to_owned(),
@@ -924,6 +934,7 @@ mod runner_lane_tests {
                 depends_on: vec!["changed".to_owned()],
                 tool_version: None,
                 cache: None,
+                workflow_file: None,
             },
         ];
         let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
@@ -2639,6 +2650,7 @@ mod tests {
             depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         CiConfig {
             schema: 2,
@@ -2982,6 +2994,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         CiConfig {
             schema: 2,
@@ -3192,6 +3205,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         assert_eq!(
             prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
@@ -3308,6 +3322,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            workflow_file: None,
         };
         let mut config = selection_config();
         config.workflow.version_bump_units = vec![

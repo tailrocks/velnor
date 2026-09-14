@@ -519,6 +519,11 @@ pub struct Unit {
     /// before steps; commands consume them at the scanned host/port.
     #[serde(skip_serializing)]
     pub(crate) services: Vec<UnitService>,
+    /// The reusable workflow shard that owns this unit when a kind workflow
+    /// exceeds GitHub's byte limit. Omitted when the unit uses the canonical
+    /// kind file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_file: Option<String>,
 }
 
 /// A GitHub Actions service container one unit job starts.
@@ -849,6 +854,9 @@ impl ProjectConfig {
                 output.push_str("[unit.cache]\n");
                 write_toml_array(&mut output, "key_files", &cache.key_files);
                 write_toml_array(&mut output, "paths", &cache.paths);
+            }
+            if let Some(workflow_file) = &unit.workflow_file {
+                write_toml_string(&mut output, "workflow_file", workflow_file);
             }
         }
         output
@@ -1649,6 +1657,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             mise_tools: row.mise_tools().unwrap_or_default().to_vec(),
             toolchain: None,
             services: Vec::new(),
+            workflow_file: None,
         });
         return;
     };
@@ -1915,13 +1924,24 @@ pub(crate) fn sidebar_group_name(unit: &Unit) -> String {
 }
 
 pub(crate) fn nested_unit_workflow_file(unit: &Unit) -> String {
-    kind_unit_workflow_file(unit.kind)
+    unit.workflow_file
+        .clone()
+        .unwrap_or_else(|| kind_unit_workflow_file(unit.kind))
 }
 
 /// One reusable workflow per unit kind. GitHub allows 50 unique reusable
 /// workflow files per caller; a monorepo with one file per unit exceeds that.
 pub(crate) fn kind_unit_workflow_file(kind: UnitKind) -> String {
     format!("ci-unit-{}.yml", kind.id_prefix())
+}
+
+/// A shard file for a kind workflow that exceeded GitHub's byte limit.
+pub(crate) fn kind_unit_workflow_shard_file(kind: UnitKind, shard_index: usize) -> String {
+    if shard_index == 0 {
+        kind_unit_workflow_file(kind)
+    } else {
+        format!("ci-unit-{}-{}.yml", kind.id_prefix(), shard_index + 1)
+    }
 }
 
 fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
@@ -3028,18 +3048,46 @@ fn generated_files_with_surface(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
-    let workflow = WorkflowIr::from_config(config);
+    let mut config = config.clone();
+    let workflow = WorkflowIr::from_config(&config);
     primitives::validate_cache_transports(&workflow)?;
     // The toolchain contract is a generation precondition, checked here so no
     // rendering path — scanned or declared — can emit a Rust job without a
     // pin or a release matrix the pin does not declare.
-    validate_rust_units_are_pinned(config)?;
-    validate_release_targets_are_pinned(config)?;
+    validate_rust_units_are_pinned(&config)?;
+    validate_release_targets_are_pinned(&config)?;
     let mut files = BTreeMap::new();
     files.insert(
         PathBuf::from(".github/actionlint.yaml"),
-        render_actionlint_config(config),
+        render_actionlint_config(&config),
     );
+    if !config.adopted_workflow_surface {
+        for kind in config.units.iter().map(|unit| unit.kind).collect::<BTreeSet<_>>() {
+            let (kind_files, assignments) = workflow.render_kind_unit_workflows(
+                kind,
+                surface.map(|surface| &surface.contracts),
+            );
+            for (unit_id, workflow_file) in assignments {
+                if let Some(unit) = config
+                    .units
+                    .iter_mut()
+                    .find(|unit| unit.id == unit_id)
+                {
+                    unit.workflow_file = Some(workflow_file);
+                }
+            }
+            for (filename, content) in kind_files {
+                if content.len() > primitives::GITHUB_WORKFLOW_BYTE_LIMIT {
+                    return Err(GeneratorError::usage(format!(
+                        "rendered `{filename}` is {} bytes, above GitHub's {}-byte workflow limit",
+                        content.len(),
+                        primitives::GITHUB_WORKFLOW_BYTE_LIMIT
+                    )));
+                }
+                files.insert(PathBuf::from(".github/workflows").join(filename), content);
+            }
+        }
+    }
     files.insert(PathBuf::from(".github/ci/project.toml"), config.toml());
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
@@ -3050,17 +3098,17 @@ fn generated_files_with_surface(
         let content = config
             .workflow_templates
             .get(workflow_file)
-            .map(|template| render_static_template_for_config(config, workflow_file, template))
+            .map(|template| render_static_template_for_config(&config, workflow_file, template))
             .transpose()?
             .or_else(|| match workflow_file.as_str() {
                 "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
-                "ci-policy.yml" => Some(generated_ci_policy(config)),
+                "ci-policy.yml" => Some(generated_ci_policy(&config)),
                 "ci-release-package-signer.yml" => Some(generated_release_package_signer()),
                 "ci-main.yml" => Some(generated_ci_main(&workflow)),
                 "nightly.yml" => Some(generated_nightly(&workflow)),
-                "maintenance.yml" => Some(generated_maintenance(config)),
-                "preview.yml" => Some(generated_preview(config)),
-                "release.yml" => generated_release(config),
+                "maintenance.yml" => Some(generated_maintenance(&config)),
+                "preview.yml" => Some(generated_preview(&config)),
+                "release.yml" => generated_release(&config),
                 // Catalog data is code-owned; ignore no unknown runtime path and never
                 // let configuration turn into an arbitrary filesystem write.
                 _ => None,
@@ -3072,20 +3120,8 @@ fn generated_files_with_surface(
     for (name, template) in &config.workflow_templates {
         files.insert(
             PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name),
-            render_static_template_for_config(config, name, template)?,
+            render_static_template_for_config(&config, name, template)?,
         );
-    }
-    if !config.adopted_workflow_surface {
-        let mut kinds = BTreeSet::new();
-        for unit in &config.units {
-            if kinds.insert(unit.kind) {
-                files.insert(
-                    PathBuf::from(".github/workflows").join(kind_unit_workflow_file(unit.kind)),
-                    workflow
-                        .render_kind_units(unit.kind, surface.map(|surface| &surface.contracts)),
-                );
-            }
-        }
     }
     for owned in &config.static_files {
         files.insert(PathBuf::from(&owned.path), owned.content.clone());
@@ -6456,6 +6492,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
+            workflow_file: None,
         });
         config.units.push(Unit {
             id: "rust-declared-base".to_owned(),
@@ -6476,6 +6513,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
+            workflow_file: None,
         });
         config.units.push(Unit {
             id: "rust-declared-mise-free".to_owned(),
@@ -6496,6 +6534,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain),
             services: Vec::new(),
+            workflow_file: None,
         });
         let ir = WorkflowIr::from_config(&config);
         let step = |unit: &str| {
@@ -8274,10 +8313,7 @@ channel = "stable"
         assert!(root.lines().all(|line| {
             !(line.contains("needs['group-unit-") && line.contains("result == 'success'"))
         }));
-        assert!(root.contains(&format!(
-            "uses: ./.github/workflows/{}",
-            nested_unit_workflow_file(rust_unit)
-        )));
+        assert!(root.contains("uses: ./.github/workflows/${{ matrix.workflow }}"));
         assert!(!files.contains_key(&PathBuf::from(".github/workflows/ci-rust.yml")));
         let crate_workflow = must_some(
             files
@@ -8415,6 +8451,7 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
+            workflow_file: None,
         };
         let config = ProjectConfig {
             repository: String::new(),
@@ -9495,6 +9532,7 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain,
             services: Vec::new(),
+            workflow_file: None,
         });
         let ir = WorkflowIr::from_config(&config);
         let rust = must_some(
