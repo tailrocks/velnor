@@ -9,8 +9,9 @@ Binding spec: `velnor-recovery-goal.md`. Update at meaningful milestones.
 | **main** | `ad5fc59d` |
 | **PR #809** | `fb9a31a6` `codex/merge-all-velnor-20260914` — OPEN, BLOCKED |
 | **PR #812** | `991d86bd` `codex/velnor-macos-action-portability-20260915` — OPEN, BLOCKED, DCO fail |
-| **PR #814** | `ce2e783e` + local host/socket work `codex/velnorctl-macos-support-20260915` — OPEN, BLOCKED |
-| **PR #815** | `781f0e32` `recovery/pr812` — OPEN, BLOCKED, DCO fail |
+| **PR #814** | macOS `velnorctl` + host start — `codex/velnorctl-macos-support-20260915` — OPEN, BLOCKED |
+| **PR #815** | #812 + #814 combo `recovery/pr812` — OPEN, BLOCKED, DCO fail |
+| **Focused branch** | **`velnor-macos-host`** — continue macOS Docker-backed Velnor here |
 | **Sentry** | `velnor-runner 0.1.274~preview.145+d3e441f` @ `d3e441fb`; tailrocks fleet down |
 
 ## Related PR stack
@@ -31,8 +32,9 @@ main@ad5fc59d  (#814/#815 base; +#811 +#813)
 Unique work:
 - **#809:** shared integration (ci-required, runner, generator rev 32)
 - **#812:** setup-runtime portability + generator scan hash
-- **#814:** native macOS velnorctl Docker diagnostics + on-demand host
+- **#814:** native macOS velnorctl Docker diagnostics + on-demand host (source of `velnor-macos-host`)
 - **#815:** #812 unique + #814 diagnostics + recovery docs
+- **`velnor-macos-host`:** the branch for running Velnor from macOS. Other agents keep #812/#814/#815.
 
 Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redundant.
 
@@ -54,10 +56,28 @@ Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redund
 - `velnorctl host start` is the operator entry point on #814.
 - Do not force-push unsigned history; add signed follow-up commits. #812 DCO still needs a signed replacement of `991d86bd` (requires operator force-with-lease).
 
+## macOS host progress (`velnor-macos-host`)
+
+| Step | Status | Evidence |
+|---|---|---|
+| `velnorctl docker report` | **PASS** | OrbStack linux/arm64, `velnorCompatible=true` |
+| Dev socket root | **PASS** | `~/Library/Application Support/velnor/…` |
+| `state.db` resolution | **PASS** | uses `config_dir/state.db`, not `/var/lib/velnor` |
+| macOS cgroup probe skip | **PASS** | `execution/docker.rs` skips systemd slice on macOS |
+| `host start` preflight | **PASS** | writes `execution.toml`, checks job image |
+| `host start` daemon | **BLOCKED** | `velnor/job-ubuntu:26.04` missing locally |
+
+Bootstrap job image:
+```bash
+docker build --file docker/job-ubuntu.Dockerfile --tag velnor/job-ubuntu:26.04 .
+export GITHUB_TOKEN=$(gh auth token)
+velnorctl host start --repo tailrocks/velnor --work-dir ~/.velnor-recovery/work
+```
+
 ## Next
 
-1. Push #814 host/socket work; verify `velnorctl host start --help` on macOS.
-2. Start repo-scoped capacity; prove a real Docker-backed job (label-only or new run).
-3. Keep #809→#812 merge order once `ci-required` can run.
-4. Rebase #814 onto merged #812 so portability + host land together.
+1. Build/pull `velnor/job-ubuntu:26.04`; complete `host start` daemon registration.
+2. Prove one real Docker-backed repository job from macOS.
+3. Sync `velnor-macos-host` → #814; keep #815 as integration branch.
+4. Keep #809→#812 merge order once `ci-required` can run.
 5. Sentry deploy only from the final merged/released SHA.
