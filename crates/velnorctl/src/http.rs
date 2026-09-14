@@ -188,6 +188,9 @@ pub fn prepare_instance_dir(path: &FsPath) -> Result<(), std::io::Error> {
 
 /// Verify that package-owned socket groups exist before daemon readiness.
 pub fn validate_socket_groups() -> Result<(), std::io::Error> {
+    if !velnor_client::is_package_socket_mode() {
+        return Ok(());
+    }
     for name in [CONTROL_GROUP, ADMIN_GROUP] {
         if group_id(name).is_none() {
             return Err(std::io::Error::new(
@@ -199,9 +202,80 @@ pub fn validate_socket_groups() -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// Dev-host socket mode: owner-only access without package groups.
+pub const DEV_SOCKET_MODE: u32 = 0o600;
+
 /// Bind one exact Unix socket path without following or deleting foreign
 /// filesystem objects.
 pub fn bind_unix(
+    path: &FsPath,
+    mode: u32,
+    group_name: &str,
+) -> Result<tokio::net::UnixListener, std::io::Error> {
+    if velnor_client::is_package_socket_mode() {
+        bind_unix_package(path, mode, group_name)
+    } else {
+        bind_unix_dev(path)
+    }
+}
+
+fn bind_unix_dev(path: &FsPath) -> Result<tokio::net::UnixListener, std::io::Error> {
+    use std::os::unix::io::AsRawFd;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket must have a parent",
+        )
+    })?;
+    inspect_directory_chain(parent)?;
+    let listener = tokio::net::UnixListener::bind(path)?;
+    let bound_socket = match socket_identity(path) {
+        Some(identity) => identity,
+        None => {
+            drop(listener);
+            return Err(std::io::Error::other(
+                "bound control socket identity could not be verified",
+            ));
+        }
+    };
+    let fd = listener.as_raw_fd();
+    let uid = current_uid();
+    let gid = current_gid();
+    // SAFETY: `fd` is borrowed from the live listener.
+    if unsafe { libc::fchown(fd, uid, gid) } != 0 {
+        let error = std::io::Error::last_os_error();
+        cleanup_failed_bind(path, listener, bound_socket);
+        return Err(error);
+    }
+    // SAFETY: `fd` is a live Unix listener descriptor.
+    if unsafe { libc::fchmod(fd, DEV_SOCKET_MODE as libc::mode_t) } != 0 {
+        let error = std::io::Error::last_os_error();
+        cleanup_failed_bind(path, listener, bound_socket);
+        return Err(error);
+    }
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` points to writable storage of the required size.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        cleanup_failed_bind(path, listener, bound_socket);
+        return Err(error);
+    }
+    // SAFETY: fstat initialized `stat` on success.
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_uid != uid
+        || stat.st_gid != gid
+        || u64::from(stat.st_mode) & 0o777 != u64::from(DEV_SOCKET_MODE)
+    {
+        cleanup_failed_bind(path, listener, bound_socket);
+        return Err(std::io::Error::other(
+            "bound control socket ownership or mode was not enforced",
+        ));
+    }
+    Ok(listener)
+}
+
+fn bind_unix_package(
     path: &FsPath,
     mode: u32,
     group_name: &str,
@@ -493,6 +567,11 @@ pub struct PeerCredentials {
 fn current_uid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() as u32 }
+}
+
+fn current_gid() -> u32 {
+    // SAFETY: getegid has no preconditions and cannot fail.
+    unsafe { libc::getegid() as u32 }
 }
 
 #[derive(Debug, Clone, Copy)]

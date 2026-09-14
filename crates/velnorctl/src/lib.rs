@@ -652,7 +652,8 @@ fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, 
             .or_else(|| std::env::var("VELNOR_INSTANCE").ok());
         (
             format!(
-                "unix:///run/velnor/{}",
+                "unix://{}/{}",
+                velnor_client::socket_root().display(),
                 instance.as_deref().unwrap_or("default")
             ),
             false,
@@ -1526,7 +1527,7 @@ mod tests {
 
     #[test]
     fn explicit_instance_rejects_a_different_context_endpoint() {
-        let endpoint = velnor_client::UnixEndpoint::parse("unix:///run/velnor/primary")
+        let endpoint = velnor_client::UnixEndpoint::from_instance("primary")
             .expect("valid context endpoint");
 
         let error = validate_context_instance(&endpoint, Some("secondary"))
