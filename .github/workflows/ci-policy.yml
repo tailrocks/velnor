@@ -15,8 +15,7 @@ permissions:
 jobs:
   policy:
     name: Policy
-    if: ${{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -27,15 +26,19 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: policy-checkout
+          sparse-checkout: |
+            .github/workflows
+          sparse-checkout-cone-mode: true
           fetch-depth: 1
           persist-credentials: false
-          # Velnor's native checkout uses its supported full-repository fetch.
+          # Static policy validation only; fork head checkout is intentional.
+          allow-unsafe-pr-checkout: true
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
           version: 1.8.3
-          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-6017727759da543800c90be401c60c7f0d42092b
+          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-0fa68740830638a3e16437400ff3fc1729f31fcd
           restore-keys: |
             velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -54,7 +57,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 6017727759da543800c90be401c60c7f0d42092b \
+            --rev 0fa68740830638a3e16437400ff3fc1729f31fcd \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -62,5 +65,5 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
-          VELNOR_WORKFLOW_POLICY_REVISION: 6017727759da543800c90be401c60c7f0d42092b
+          VELNOR_WORKFLOW_POLICY_REVISION: 0fa68740830638a3e16437400ff3fc1729f31fcd
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"

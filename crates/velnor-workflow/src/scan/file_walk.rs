@@ -57,15 +57,37 @@ fn exclude_set(patterns: &[String]) -> Result<GlobSet, GeneratorError> {
 /// Tracked files under `root`, relative to it. `Ok(None)` means `root` is not
 /// inside a git repository (no `git` binary, not a work tree, or a work tree
 /// with no tracked files under `root`) and the physical walk should decide.
+fn inside_git_work_tree(root: &Path) -> bool {
+    Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        })
+}
+
 fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
+    let in_git = inside_git_work_tree(root);
     let Ok(output) = Command::new("git")
         .current_dir(root)
         .args(["ls-files", "-z"])
         .output()
     else {
+        if in_git {
+            return Err(GeneratorError::usage(
+                "git ls-files could not run inside a git work tree; scan will not walk the filesystem",
+            ));
+        }
         return Ok(None);
     };
     if !output.status.success() {
+        if in_git {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(GeneratorError::usage(format!(
+                "git ls-files failed inside a git work tree; scan will not walk the filesystem: {stderr}"
+            )));
+        }
         return Ok(None);
     }
     let mut files = Vec::new();
@@ -98,7 +120,7 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
         }
         files.push(normalize_relative_path(relative)?);
     }
-    if files.is_empty() {
+    if files.is_empty() && !in_git {
         return Ok(None);
     }
     Ok(Some(files))
@@ -297,6 +319,20 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_fail<T: std::fmt::Debug, E: std::fmt::Display>(
+        result: Result<T, E>,
+        context: &str,
+    ) -> String {
+        match result {
+            Err(error) => error.to_string(),
+            Ok(value) => panic!("{context}: {value:?}"),
+        }
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-workflow-file-walk-{name}-{}",
@@ -352,6 +388,39 @@ mod tests {
 
         let files = must(repository_files(&root, &[]), "scan tracked repository");
         assert_eq!(files, vec!["tracked.txt".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_work_tree_does_not_filesystem_walk_when_ls_files_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("ls-files-fail");
+        git(&root, &["init", "-q"]);
+        must(
+            fs::write(root.join("tracked.txt"), "tracked"),
+            "write tracked",
+        );
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-qm", "tracked"]);
+        must(
+            fs::write(root.join("untracked.txt"), "untracked"),
+            "write untracked",
+        );
+        let index = root.join(".git/index");
+        let metadata = must(fs::metadata(&index), "stat git index");
+        let mut mode = metadata.permissions();
+        mode.set_mode(0o000);
+        must(fs::set_permissions(&index, mode), "lock git index");
+        let result = repository_files(&root, &[]);
+        let mut restore = must(fs::metadata(&index), "re-stat git index").permissions();
+        restore.set_mode(0o644);
+        let _ = fs::set_permissions(&index, restore);
+        let error = must_fail(result, "filesystem walk ran after git ls-files failed");
+        assert!(
+            error.contains("git ls-files"),
+            "must fail closed on the index: {error}"
+        );
     }
 
     #[test]

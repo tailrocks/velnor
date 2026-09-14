@@ -206,6 +206,10 @@ impl From<RepositoryShape> for ProjectConfig {
             version_bump_units: Vec::new(),
             default_branch: shape.default_branch,
             runners: shape.runners,
+            automatic: match shape.runners {
+                RunnerMode::Both => RunnerMode::Github,
+                other => other,
+            },
             github_runner: "ubuntu-24.04".to_owned(),
             macos_runner: "macos-15".to_owned(),
             velnor_labels: Vec::new(),

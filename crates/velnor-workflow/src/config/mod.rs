@@ -128,6 +128,11 @@ struct WorkflowSection {
     /// Generated runner lanes. Absent keeps the generator's current default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runners: Option<String>,
+    /// Lanes that run on `pull_request`/`push`/`schedule` without a dispatch choice.
+    /// Must be a subset of `runners`. Absent infers `github` when GitHub is
+    /// available, otherwise the sole configured backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic: Option<String>,
     /// Velnor runner labels for self-hosted lanes. A surface that renders
     /// self-hosted jobs without them is a configuration error, never an empty
     /// `runs-on`.
@@ -224,6 +229,12 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
+    /// Workspace-wide `cargo check`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_check: Option<bool>,
+    /// Named mise tasks that exist in `mise.toml`. Not a shell-command array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ci_tasks: Option<Vec<String>>,
     /// Additional mise tool ids the unit's jobs install when the scanner
     /// cannot observe a runtime-invoked tool. Each id renders verbatim into
     /// `install_args`, so it must equal a key the root `mise.lock` pins, bare
@@ -395,6 +406,14 @@ impl UnitSection {
         self.tool_version.as_deref()
     }
 
+    pub(crate) fn workspace_check(&self) -> bool {
+        self.workspace_check == Some(true)
+    }
+
+    pub(crate) fn ci_tasks(&self) -> &[String] {
+        self.ci_tasks.as_deref().unwrap_or(&[])
+    }
+
     pub(crate) fn mise_tools(&self) -> Option<&[String]> {
         self.mise_tools.as_deref()
     }
@@ -503,6 +522,16 @@ impl RepoGenerationConfig {
         self.workflow.runners.as_deref()
     }
 
+    /// The declared automatic lanes, if any.
+    pub(crate) fn automatic(&self) -> Option<&str> {
+        self.workflow.automatic.as_deref()
+    }
+
+    /// When true, automatic `pull_request` runs on the Velnor lane.
+    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
+        self.workflow.pull_request_on_velnor
+    }
+
     /// The declared self-hosted runner labels.
     pub(crate) fn velnor_labels(&self) -> Option<&[String]> {
         self.workflow.velnor_labels.as_deref()
@@ -511,10 +540,6 @@ impl RepoGenerationConfig {
     /// The declared self-hosted runner group.
     pub(crate) fn velnor_runner_group(&self) -> Option<&str> {
         self.workflow.velnor_runner_group.as_deref()
-    }
-
-    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
-        self.workflow.pull_request_on_velnor
     }
 
     /// The declared profile label.
@@ -745,6 +770,13 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+fn automatic_fits_runners(runners: &str, automatic: &str) -> bool {
+    match (runners, automatic) {
+        ("both", _) => true,
+        (runners, automatic) => runners == automatic,
+    }
+}
+
 fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     if workflow.github_runner.as_deref().is_some_and(str::is_empty) {
         return Err(GeneratorError::usage(
@@ -761,6 +793,21 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     {
         return Err(GeneratorError::usage(format!(
             "[workflow] runners must be one of: github, velnor, both; found `{runners}`"
+        )));
+    }
+    if let Some(automatic) = workflow.automatic.as_deref()
+        && !matches!(automatic, "github" | "velnor" | "both")
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] automatic must be one of: github, velnor, both; found `{automatic}`"
+        )));
+    }
+    if let (Some(runners), Some(automatic)) =
+        (workflow.runners.as_deref(), workflow.automatic.as_deref())
+        && !automatic_fits_runners(runners, automatic)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] automatic = `{automatic}` is not available when runners = `{runners}`"
         )));
     }
     if let Some(labels) = &workflow.velnor_labels {
@@ -782,6 +829,11 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     {
         return Err(GeneratorError::usage(
             "[workflow] velnor_runner_group must not be empty",
+        ));
+    }
+    if workflow.templates.is_some() {
+        return Err(GeneratorError::usage(
+            "[workflow] templates is not supported; imported workflow bodies are not a generation input",
         ));
     }
     Ok(())
@@ -981,6 +1033,17 @@ fn validate_units(
                     UNIT_KIND_PREFIXES.join(", ")
                 )));
         }
+        if row.pr_commands.is_some()
+            || row.full_commands.is_some()
+            || row.github_pr_commands.is_some()
+            || row.github_full_commands.is_some()
+            || row.velnor_pr_commands.is_some()
+            || row.velnor_full_commands.is_some()
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[unit]] {id} declares command arrays; generation config is not a workflow programming language. Detected work uses typed capabilities; remove pr_commands, full_commands, and lane-specific command overrides"
+            )));
+        }
         if let Some(cache) = &row.cache
             && (cache.key_files.as_ref().is_none_or(std::vec::Vec::is_empty)
                 || cache.paths.as_ref().is_none_or(std::vec::Vec::is_empty))
@@ -1110,7 +1173,14 @@ fn is_contained_repository_path(path: &str) -> bool {
 
 /// The publishers the renderer implements, and the contract fields each one
 /// renders from.
-const RELEASE_KINDS: &[&str] = &["crates", "rust-binary", "pages"];
+const RELEASE_KINDS: &[&str] = &[
+    "crates",
+    "rust-binary",
+    "native",
+    "pages",
+    "homebrew",
+    "apt",
+];
 
 /// A `kind` the renderer does not implement has no rendered `release.yml`: it
 /// is accepted only from a repository that renders its own publisher verbatim
@@ -1139,6 +1209,37 @@ impl RepoGenerationConfig {
                 .artifact_path
                 .as_deref()
                 .is_some_and(|value| !value.is_empty()),
+            "native" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .binary
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    && !release.targets.is_empty()
+            }
+            "homebrew" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .source_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
+            "apt" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .consumer_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
             _ => false,
         };
         if complete {
@@ -1402,6 +1503,39 @@ mod tests {
                 "unexpected error for {runners}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn workflow_automatic_must_be_a_subset_of_runners() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"github\"\n",
+        );
+        assert_eq!(config.automatic(), Some("github"));
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "both+github automatic is valid",
+        );
+
+        let both = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\n",
+        );
+        assert_eq!(both.automatic(), Some("both"));
+        must(
+            both.validate(&[], &[], &BTreeSet::new()),
+            "both+both automatic is valid",
+        );
+
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"github\"\nautomatic = \"velnor\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "github runners cannot enable velnor automatic",
+        );
+        assert!(
+            error.to_string().contains("[workflow] automatic"),
+            "{error}"
+        );
     }
 
     #[test]

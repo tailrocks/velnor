@@ -1155,8 +1155,7 @@ pub(crate) fn container_rm_args_with_claimed_ids(
     args: NonEmptyDockerArgs<'_>,
     ids: &[String],
 ) -> Vec<String> {
-    let first = args.first;
-    let mut claimed = vec![first.clone()];
+    let mut claimed = vec![args.first.clone()];
     claimed.extend(args.rest.iter().filter(|arg| arg.starts_with('-')).cloned());
     claimed.extend(ids.iter().cloned());
     claimed
@@ -2023,7 +2022,7 @@ mod tests {
     /// invocation of the exact argument vector the parser consumes.
 
     #[test]
-    fn docker_rm_helpers_enforce_non_empty_argv() {
+    fn empty_argv_cannot_form_a_claimed_rm_argument_view() {
         assert!(NonEmptyDockerArgs::new(&[]).is_none());
         let argv = vec!["rm".to_string(), "-f".to_string(), "stale".to_string()];
         assert_eq!(

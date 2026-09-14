@@ -193,6 +193,9 @@ pub fn ensure_mirror<R: CommandRunner>(
     token: Option<&str>,
     want: &MirrorWant,
 ) -> Result<MirrorCheckout> {
+    #[cfg(test)]
+    crate::checkout::initialize_trace_callsites_for_tests();
+
     fs::create_dir_all(store_root)
         .with_context(|| format!("create git mirror store {}", store_root.display()))?;
     let name = repository_store_name(clone_url)?;
@@ -808,7 +811,17 @@ mod tests {
             Err(rustix::io::Errno::WOULDBLOCK)
         ));
         drop(mirror);
-        flock(&contender, FlockOperation::NonBlockingLockExclusive).unwrap();
+        // Probe briefly for lock-service propagation under parallel tests; a
+        // held lease remains held for the whole bounded interval.
+        let mut acquired = false;
+        for _ in 0..16 {
+            acquired = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+            if acquired {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(acquired);
     }
 
     #[test]

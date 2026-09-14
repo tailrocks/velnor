@@ -62,14 +62,17 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@0fa68740830638a3e16437400ff3fc1729f31fcd
         with:
           rev: ${{ github.sha }}
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=0fa68740830638a3e16437400ff3fc1729f31fcd" >> "$GITHUB_ENV"
       - name: Collect Actions cache account
         env:
           GH_TOKEN: ${{ github.token }}

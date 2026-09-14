@@ -41,11 +41,8 @@ impl Primitive for UnitAggregation {
         })?;
         // The plan job is a contributed node, not something the aggregate
         // renders for itself: an aggregate without a plan is a broken graph.
-        let plan = ctx
-            .nodes
-            .iter()
-            .any(|node| matches!(node, GraphNode::Plan { .. }));
-        if !plan {
+        let plan = ctx.nodes.iter().find_map(GraphNode::plan_job);
+        if plan.is_none() {
             return Err(GeneratorError::usage(format!(
                 "`{UNIT_AGGREGATION}` needs a declared `{}` row before it can compose the graph",
                 super::AFFECTED_PLAN
