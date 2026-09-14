@@ -256,7 +256,11 @@ pub(crate) struct BuildkitBuilderNotFound {
 
 impl std::fmt::Display for BuildkitBuilderNotFound {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "BuildKit builder '{}' does not exist", self.builder)
+        write!(
+            formatter,
+            "BuildKit builder '{}' does not exist",
+            self.builder
+        )
     }
 }
 
@@ -265,7 +269,9 @@ impl std::error::Error for BuildkitBuilderNotFound {}
 /// True when `error` is a daemon positive-missing answer surfaced through this
 /// client — the only signal any caller may treat as proof of absence.
 pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| cause.downcast_ref::<NotFound>().is_some())
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<NotFound>().is_some())
 }
 
 /// True when a Docker command positively reported its target as stopped.
@@ -441,16 +447,16 @@ impl DockerCommandError {
 pub(crate) fn docker_error_category(error: &anyhow::Error) -> DockerErrorCategory {
     let mut category = DockerErrorCategory::Terminal;
     for cause in error.chain() {
-        let candidate = cause
-            .downcast_ref::<DockerCommandError>()
-            .map_or_else(
-                || {
-                    cause
-                        .downcast_ref::<NotFound>()
-                        .map_or(DockerErrorCategory::Terminal, |_| DockerErrorCategory::Conflict)
-                },
-                DockerCommandError::category,
-            );
+        let candidate = cause.downcast_ref::<DockerCommandError>().map_or_else(
+            || {
+                cause
+                    .downcast_ref::<NotFound>()
+                    .map_or(DockerErrorCategory::Terminal, |_| {
+                        DockerErrorCategory::Conflict
+                    })
+            },
+            DockerCommandError::category,
+        );
         if candidate.precedence() > category.precedence() {
             category = candidate;
         }
@@ -1444,8 +1450,8 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
                 object: args.join(" "),
             }));
         }
-        if let Some(builder) = buildkit_builder_from_args(args)
-            .filter(|_| detail.contains("no builder"))
+        if let Some(builder) =
+            buildkit_builder_from_args(args).filter(|_| detail.contains("no builder"))
         {
             return Err(anyhow::Error::new(BuildkitBuilderNotFound { builder }));
         }
@@ -1477,9 +1483,7 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
 
 fn buildkit_builder_from_args(args: &[String]) -> Option<String> {
     if !args.first().is_some_and(|arg| arg == "buildx")
-        || !args
-            .get(1)
-            .is_some_and(|arg| arg == "du" || arg == "prune")
+        || !args.get(1).is_some_and(|arg| arg == "du" || arg == "prune")
     {
         return None;
     }
