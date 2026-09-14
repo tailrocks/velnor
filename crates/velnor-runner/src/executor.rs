@@ -26259,6 +26259,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
             ExecutableStep::JavaScript {
                 step_id: "guarded".into(),
