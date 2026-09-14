@@ -708,8 +708,8 @@ pub static ACTIONS: &[ActionCapability] = &[
         repository: "tailrocks/velnor",
         adapter: ActionAdapter::Composite,
         allowed_refs: &[allowed(
-            "6017727759da543800c90be401c60c7f0d42092b",
-            "hosted runtime pin (#796)",
+            "0fa68740830638a3e16437400ff3fc1729f31fcd",
+            "hosted runtime source pin",
         )],
         allowed_subpaths: &[".github/actions/setup-velnor-workflow"],
         inputs: &[InputRule::Any("rev")],
