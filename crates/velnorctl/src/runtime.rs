@@ -138,7 +138,8 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let _instance_lock = InstanceLock::acquire(&control_path)?;
     crate::http::remove_stale_socket(&control_path)?;
     crate::http::remove_stale_socket(&admin_path)?;
-    let state_path = resolve_state_db_path(args.state_db.as_deref());
+    let state_path = resolve_state_db_path(args.state_db.as_deref(), args.config_dir.as_deref());
+    ensure_state_db_parent(&state_path)?;
     // Carry the resolved path in the typed daemon context. This keeps daemon
     // initialization deterministic without mutating process-global state.
     let mut legacy_args: rt::DaemonArgs = args.clone().into();
@@ -198,10 +199,29 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     result
 }
 
-fn resolve_state_db_path(explicit: Option<&Path>) -> PathBuf {
-    explicit
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH))
+fn resolve_state_db_path(explicit: Option<&Path>, config_dir: Option<&Path>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path.to_path_buf();
+    }
+    if let Some(env) = std::env::var_os("VELNOR_STATE_DB").filter(|v| !v.is_empty()) {
+        return PathBuf::from(env);
+    }
+    if let Some(dir) = config_dir {
+        return dir.join("state.db");
+    }
+    if !velnor_client::is_package_socket_mode() {
+        if let Ok(dir) = velnor_runner::config_dir(None) {
+            return dir.join("state.db");
+        }
+    }
+    PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH)
+}
+
+fn ensure_state_db_parent(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 /// Owns a bound Unix listener and the pathname that must disappear with it.
@@ -850,7 +870,7 @@ mod tests {
     #[test]
     fn explicit_state_db_path_is_carried_without_environment_mutation() {
         let explicit = Path::new("/tmp/velnor-test/state.db");
-        assert_eq!(resolve_state_db_path(Some(explicit)), explicit);
+        assert_eq!(resolve_state_db_path(Some(explicit), None), explicit);
     }
 
     #[test]

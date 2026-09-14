@@ -16,6 +16,8 @@ velnorctl docker report [--check-bind-mount] [--image IMAGE]
 velnorctl storage paths [--config-dir DIR]
 ```
 
+Focused development branch: `velnor-macos-host` (from PR #814).
+
 `host start` is the on-demand entry point. It registers repository-scoped
 runners only and refuses organization URLs so recovery cannot join
 `velnor-trusted`. Export `GITHUB_TOKEN`; never pass a token as a flag.

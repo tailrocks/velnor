@@ -509,4 +509,7 @@ pub struct HostStartArgs {
     /// Path the Docker daemon uses for --work-dir when it differs from the host.
     #[arg(long)]
     pub docker_host_work_dir: Option<PathBuf>,
+    /// Job image. Defaults to velnor/job-ubuntu:26.04. Must already exist locally.
+    #[arg(long)]
+    pub docker_image: Option<String>,
 }

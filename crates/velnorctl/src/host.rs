@@ -61,9 +61,28 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     }
     println!("  drain/stop       Ctrl-C this process, or `velnorctl host drain` then Ctrl-C");
 
+    let config_dir = match args.config_dir.clone() {
+        Some(dir) => dir,
+        None => velnor_runner::config_dir(None).map_err(|error| {
+            CommandError::new(
+                ExitClass::Usage,
+                "host.config_dir_missing",
+                format!("pass --config-dir or set HOME: {error}"),
+            )
+        })?,
+    };
+    ensure_docker_execution_file(&config_dir)?;
+    let docker_image = args
+        .docker_image
+        .clone()
+        .unwrap_or_else(|| "velnor/job-ubuntu:26.04".into());
+    ensure_local_job_image(&docker_image)?;
+    println!("  config_dir       {}", config_dir.display());
+    println!("  job_image        {docker_image}");
+
     let mut daemon = DaemonArgs {
         state_db: None,
-        config_dir: args.config_dir,
+        config_dir: Some(config_dir),
         url: Some(url),
         pat: github_pat(),
         name: Some(name),
@@ -83,7 +102,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         execute_scripts: false,
         dry_run_jobs: false,
         dump_job_message: None,
-        docker_image: "velnor/job-ubuntu:26.04".into(),
+        docker_image,
         job_cpus: String::new(),
         job_memory: String::new(),
         trust: velnor_runner::trust_scope::TrustScopeArg {
@@ -177,6 +196,54 @@ fn github_repo_path(url: &str) -> Option<&str> {
         .map(|path| path.trim_matches('/'))
 }
 
+fn ensure_docker_execution_file(config_dir: &std::path::Path) -> Result<(), CommandError> {
+    std::fs::create_dir_all(config_dir).map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.config_dir_unwritable",
+            format!("cannot create {}: {error}", config_dir.display()),
+        )
+    })?;
+    let path = config_dir.join("execution.toml");
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(&path, "[execution]\nbackend = \"docker\"\n").map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.execution_toml_unwritable",
+            format!("cannot write {}: {error}", path.display()),
+        )
+    })?;
+    println!("  wrote            {}", path.display());
+    Ok(())
+}
+
+fn ensure_local_job_image(image: &str) -> Result<(), CommandError> {
+    let output = std::process::Command::new("docker")
+        .args(["image", "inspect", image])
+        .output()
+        .map_err(|error| {
+            CommandError::new(
+                ExitClass::Condition,
+                "host.docker_unavailable",
+                format!("docker image inspect failed to start: {error}. Start OrbStack/Docker."),
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(CommandError::new(
+        ExitClass::Condition,
+        "host.job_image_missing",
+        format!(
+            "job image {image} is not on this Docker daemon. Source-bootstrap it from this repository, then rerun host start:\n\
+             docker build --file docker/job-ubuntu.Dockerfile --tag {image} .\n\
+             The final image stage also needs release-binaries/$TARGETARCH/velnor-workflow."
+        ),
+    ))
+}
+
 fn github_pat() -> Option<String> {
     env::var("GITHUB_TOKEN")
         .ok()
@@ -250,6 +317,7 @@ mod tests {
             work_dir: None,
             config_dir: None,
             docker_host_work_dir: None,
+            docker_image: None,
         })
         .expect("default repo");
         assert_eq!(default, "https://github.com/tailrocks/velnor");
@@ -263,6 +331,7 @@ mod tests {
             work_dir: None,
             config_dir: None,
             docker_host_work_dir: None,
+            docker_image: None,
         })
         .expect("named repo");
         assert_eq!(named, "https://github.com/tailrocks/velnor");
@@ -279,6 +348,7 @@ mod tests {
             work_dir: None,
             config_dir: None,
             docker_host_work_dir: None,
+            docker_image: None,
         })
         .expect_err("org URL");
         assert_eq!(error.reason, "host.org_scope_refused");

@@ -132,6 +132,13 @@ impl DockerBackend {
 pub(crate) fn verify_docker_job_cgroup_boundary(
     runner: &mut dyn CommandRunner,
 ) -> Result<(), ExecutionError> {
+    // Packaged Linux hosts pin jobs under velnor-jobs.slice with systemd
+    // cgroup v2. A macOS process talking to Docker Desktop/OrbStack has a
+    // Linux VM with cgroupfs; the slice and systemd probe do not exist on
+    // the Mac. Skip the Linux-host invariant; do not claim systemd readiness.
+    if cfg!(target_os = "macos") {
+        return Ok(());
+    }
     // A fact learned through a runner that does not spawn host processes is not
     // a fact about this host, so it is never cached as one.
     let host_runner = runner.is_host_process_runner();
