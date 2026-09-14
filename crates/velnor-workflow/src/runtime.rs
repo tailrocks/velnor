@@ -4040,7 +4040,7 @@ jobs:
     }
 
     #[test]
-    fn policy_accepts_fail_closed_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
+    fn policy_rejects_untrusted_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
         let workflow = r"
 name: Velnor PR
 on:
@@ -4066,7 +4066,7 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request-aggregate", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        assert!(!run_policy(root)?);
 
         let workflow = r"
 name: Velnor kind reusable
@@ -4079,7 +4079,7 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        assert!(!run_policy(root)?);
 
         let workflow = r"
 name: Generic self-hosted PR

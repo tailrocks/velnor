@@ -7553,13 +7553,6 @@ channel = "stable"
         )
     }
 
-    fn guest_seed_job() -> String {
-        guest_seed_job_with_prefix().replace(
-            "          restore-keys: |\n            guest-seed-${{ matrix.arch }}-\n",
-            "",
-        )
-    }
-
     #[test]
     fn guest_seed_lifecycle_requires_trusted_exact_miss_save() {
         must(
@@ -9723,25 +9716,39 @@ channel = "stable"
     fn declared_package_update_channels_are_granted_per_owner_block() {
         let grants = "package_update_channels = { default = [\"stable\"], \
              example_owner = [\"stable\", \"preview\"] }\n";
-        declared_channel_grants_hold(
-            grants,
-            &[
-                ("example_owner", "channel: [stable, preview]"),
-                ("other_owner", "channel: [stable]"),
-            ],
+        let config = format!("{DECLARED_SURFACE_CONFIG}\n{grants}");
+        let root = declared_surface_repository(
+            "declared-channel-grants",
+            &config,
+            &[("package-update.yml", "name: Package update\n")],
+            &[],
         );
+        let error = must_fail(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "channel grants require a generated package-update capability, not an imported template",
+        );
+        assert!(
+            error.to_string().contains("package_update_channels")
+                || error.to_string().contains("templates"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn declared_channel_drift_converges_back_to_the_declared_grant() {
         let grants = "package_update_channels = { default = [\"stable\"] }\n";
-        declared_channel_grants_hold(
-            grants,
-            &[
-                ("example_owner", "channel: [stable]"),
-                ("other_owner", "channel: [stable]"),
-            ],
+        let config = format!("{DECLARED_SURFACE_CONFIG}\n{grants}");
+        let root = declared_surface_repository("declared-channel-drift", &config, &[], &[]);
+        let error = must_fail(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "channel grants without a generic package-update renderer fail closed",
         );
+        assert!(
+            error.to_string().contains("package_update_channels"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -10159,9 +10166,11 @@ channel = "stable"
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
+            mise_tools: Vec::new(),
             toolchain,
+            services: Vec::new(),
         });
-        let kind = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust);
+        let kind = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust, None);
         assert!(
             kind.contains("            'rust-dependency-policy') exit 0 ;;"),
             "kind fetch must skip deny/audit members, not fail closed: {kind}"

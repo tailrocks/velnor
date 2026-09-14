@@ -1552,57 +1552,6 @@ enum UmbrellaVerdict {
     EvalFailed { display: String, message: String },
 }
 
-/// One registered post step on the unified LIFO stack.
-///
-/// Upstream keeps a single `Stack<IStep> PostJobSteps` on the job context
-/// (`src/Runner.Worker/ExecutionContext.cs:222`) which StepsRunner drains
-/// with `TryPop` (`src/Runner.Worker/StepsRunner.cs`), so a mixed job runs
-/// native and JavaScript posts in exact reverse registration order. Two
-/// separately-reversed lists ran every native post before every JavaScript
-/// post regardless of registration order; this enum is what makes that
-/// mis-ordering unrepresentable — there is only one stack to drain.
-#[derive(Debug, Clone)]
-enum PostAction {
-    JavaScript(PostJavaScriptAction),
-    Native(PostNativeAction),
-}
-
-impl PostAction {
-    fn condition(&self) -> Option<&str> {
-        match self {
-            PostAction::JavaScript(post) => post.condition.as_deref(),
-            PostAction::Native(post) => post.condition.as_deref(),
-        }
-    }
-
-    #[cfg(test)]
-    fn step_id(&self) -> &str {
-        match self {
-            PostAction::JavaScript(post) => post.step_id.as_str(),
-            PostAction::Native(post) => post.step_id.as_str(),
-        }
-    }
-
-    fn display_name(&self) -> &str {
-        match self {
-            PostAction::JavaScript(post) => post.display_name.as_str(),
-            PostAction::Native(post) => post.display_name.as_str(),
-        }
-    }
-}
-
-/// One LIFO drain position after its post condition was evaluated.
-///
-/// A post whose condition cannot be evaluated is not dropped: upstream fails
-/// the post step (`src/Runner.Worker/StepsRunner.cs:231-242`), so the drain
-/// emits a failed record in position and keeps draining — the failed result
-/// flips the job conclusion exactly like a main-step failure.
-#[derive(Debug, Clone)]
-enum PostDrainItem {
-    Run(PostAction),
-    ConditionFailed { action: PostAction, message: String },
-}
-
 impl ExecutableStep {
     pub(crate) fn id(&self) -> &str {
         match self {

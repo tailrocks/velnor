@@ -402,44 +402,6 @@ fn create_pinned_dir_all(workspace_host: &Path, destination: &Path) -> Result<()
     Ok(())
 }
 
-/// Refuse a checkout destination that escapes `workspace_host` through a
-/// symlink, before anything is created or credentialed there.
-///
-/// `checkout_path` rejects absolute paths and `..` lexically, but the
-/// destination is created and written host-side (`create_dir_all`, git, the
-/// `.git/config` credential write), which all follow symlinks. A second
-/// checkout whose `path:` traverses a link an earlier checkout's repo content
-/// planted (`first/link/escape`) is lexically clean yet lands outside the
-/// workspace. This runs at execution time — plan time cannot see links that
-/// do not exist yet — and mirrors the pages/artifact containment in
-/// `executor.rs`: canonicalize both sides, require prefix containment.
-/// Missing trailing components cannot hide a symlink, so only the nearest
-/// existing ancestor is resolved.
-fn ensure_checkout_destination_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(workspace_host)
-        .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
-    let workspace = fs::canonicalize(workspace_host)
-        .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
-    let mut existing: &Path = destination;
-    while !existing.exists() {
-        existing = existing.parent().with_context(|| {
-            format!(
-                "checkout destination '{}' has no existing ancestor",
-                destination.display()
-            )
-        })?;
-    }
-    let canonical = fs::canonicalize(existing)
-        .with_context(|| format!("resolve checkout destination '{}'", destination.display()))?;
-    if !canonical.starts_with(&workspace) {
-        bail!(
-            "refusing checkout destination '{}': resolves outside the workspace",
-            destination.display()
-        );
-    }
-    Ok(())
-}
-
 fn mirror_want(plan: &CheckoutPlan) -> crate::git_mirror::MirrorWant {
     crate::git_mirror::MirrorWant {
         git_ref: plan.version.clone().unwrap_or_else(|| "HEAD".to_string()),

@@ -1430,7 +1430,7 @@ impl WorkflowIr {
         let needs_json = github_expression("toJSON(needs)");
         let _ = writeln!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}",
             needs.join(", "),
             self.runner_for(self.control_plane_lane())
         );
@@ -1468,7 +1468,7 @@ impl WorkflowIr {
             let matrix = kind_matrix_output_from_file(file);
             let _ = writeln!(
                 output,
-                "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
+                "          matrix=\"$(jq -r --arg key '{matrix}' '.plan.outputs[$key] // \\\"[]\\\"' <<<\"$NEEDS_JSON\")\"\n          result=\"$(result_for_job {job_id})\"\n          if [[ \"$matrix\" != '[]' ]]; then\n            if [[ \"$result\" != success ]]; then\n              echo \"selected CI group {job_id} did not pass: $result\" >&2\n              exit 1\n            fi\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI group {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
             );
         }
         if check_name == "ci-required" {
@@ -1618,7 +1618,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "name: {}\non:\n  workflow_call:\n    inputs:\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n\njobs:",
             yaml_scalar(unit_group(kind))
         );
-        for unit in members {
+        for unit in &members {
             let contract = contracts
                 .and_then(|contracts| contracts.get(&unit.id))
                 .cloned()
@@ -1633,6 +1633,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                         &contract,
                         &job_id,
                         Some(&unit.id),
+                        &members,
                     );
                 }
             }
@@ -1674,7 +1675,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         members: &[&Unit],
     ) {
         let id = job.lane.as_str();
-        self.render_lane_job_for_input(output, job, unit, contract, id, None);
+        self.render_lane_job_for_input(output, job, unit, contract, id, None, members);
     }
 
     fn render_lane_job_for_input(
@@ -1685,6 +1686,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         contract: &UnitContract,
         id: &str,
         input_unit: Option<&str>,
+        members: &[&Unit],
     ) {
         let lane = job.lane;
         let cache_save = job.cache_save && contract.cache_save;
@@ -1738,14 +1740,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 unit.kind.id_prefix()
             );
         }
-        render_cargo_source_preparation(output, unit);
+        render_cargo_source_preparation(output, members);
         let unit_id_value =
             input_unit.map_or_else(|| "${{ inputs.unit }}".to_owned(), ToOwned::to_owned);
+        let checks_env = checks_env_for_members(unit, members);
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{}          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
             yaml_scalar(&unit.label),
-            checks_env(unit),
+            checks_env,
+            cargo_offline_run_prelude(members),
         );
         render_phase_report_step(
             output,
@@ -2161,10 +2165,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
     }
 
-    fn velnor_lane_event_expression(&self, dispatch: &str) -> String {
-        format!("{} || ({dispatch})", self.automatic_event_expression())
-    }
-
     pub(crate) fn render_verify_github(
         &self,
         output: &mut String,
@@ -2302,7 +2302,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     unit.id,
                 );
             }
-            render_cargo_source_preparation(output, unit);
+            render_cargo_source_preparation(output, &[unit]);
             let base_sha = self.base_sha_expression();
             let _ = writeln!(
                 output,
