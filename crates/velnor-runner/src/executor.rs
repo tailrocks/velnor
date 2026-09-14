@@ -5954,7 +5954,7 @@ where
                     std::slice::from_ref(&container.network),
                 )) {
                     Ok(_) => true,
-                    Err(error) => error.to_string().contains("not found"),
+                    Err(error) => crate::docker::client::is_not_found(&error),
                 };
             if removed {
                 self.defuse_job_network_guard();
