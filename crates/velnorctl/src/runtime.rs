@@ -729,7 +729,7 @@ impl From<RemoveArgs> for rt::RemoveArgs {
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct StatusArgs {
     /// Store configuration under this directory.
     #[arg(long)]

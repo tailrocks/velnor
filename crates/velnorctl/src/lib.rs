@@ -23,6 +23,8 @@ use velnor_render::{ColorPolicy, OutputFormat};
 pub mod commands;
 pub mod completion;
 pub mod http;
+#[cfg(target_os = "macos")]
+pub mod local_diagnostics;
 pub mod man;
 pub mod runtime;
 
@@ -247,6 +249,8 @@ pub enum Command {
     Doctor(Box<runtime::DoctorArgs>),
     /// Validate the selected execution backend before polling GitHub for jobs.
     Preflight(Box<runtime::PreflightArgs>),
+    /// Report the local Docker endpoint and Velnor-relevant capabilities.
+    Docker(commands::DockerArgs),
     /// Remove local runner configuration.
     Remove(Box<runtime::RemoveArgs>),
     /// Print local runner configuration status.
@@ -511,7 +515,29 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Doctor((*args).into())).await
         }
         Command::Preflight(args) => {
-            run_runtime(velnor_runner::args::Command::Preflight((*args).into())).await
+            #[cfg(target_os = "macos")]
+            {
+                return local_diagnostics::preflight(&globals, &args);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                run_runtime(velnor_runner::args::Command::Preflight((*args).into())).await
+            }
+        }
+        Command::Docker(args) => {
+            #[cfg(target_os = "macos")]
+            {
+                local_diagnostics::docker_report(&globals, &args)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = args;
+                Err(CommandError::new(
+                    ExitClass::Condition,
+                    "docker.report_platform_unsupported",
+                    "the local Docker report is implemented for macOS diagnostics; use the Linux runner preflight on a Linux host",
+                ))
+            }
         }
         Command::Remove(args) => {
             validate_remove_target_selectors(&globals)?;
@@ -521,12 +547,23 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             if args.json || globals.output_format().is_machine() {
                 return status_health_json(&args);
             }
+            #[cfg(target_os = "macos")]
+            {
+                let runtime_args = velnor_runner::args::Command::Status((*args).clone().into());
+                let runner_result = run_status(runtime_args).await;
+                return local_diagnostics::status(&globals, &args, runner_result);
+            }
+            #[cfg(not(target_os = "macos"))]
             run_status(velnor_runner::args::Command::Status((*args).into())).await
         }
         Command::Daemon(args) => runtime::run_daemon((*args).clone())
             .await
             .map_err(|_| CommandError::operation("daemon.start_failed: unable to start daemon")),
         Command::Storage(args) => {
+            #[cfg(target_os = "macos")]
+            if matches!(&args.command, runtime::StorageCommand::Paths) {
+                return local_diagnostics::paths(&globals, &args);
+            }
             if matches!(
                 &args.command,
                 runtime::StorageCommand::Du
