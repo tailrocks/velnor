@@ -2566,15 +2566,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             lane: github
             runner: ubuntu-24.04
-          - target: x86_64-unknown-linux-gnu
-            lane: velnor
-            runner: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
           - target: aarch64-unknown-linux-gnu
             lane: github
             runner: ubuntu-24.04
-          - target: aarch64-unknown-linux-gnu
-            lane: velnor
-            runner: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
     runs-on: ${{ matrix.runner }}
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     timeout-minutes: 90

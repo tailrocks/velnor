@@ -667,10 +667,16 @@ fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
 fn release_lanes(config: &ProjectConfig, target: &str) -> Vec<(&'static str, String)> {
     let github = || release_runner(config, target);
     let velnor = || configured_runner(config, RunnerMode::Velnor);
+    // Release and preview artifact builders stay GitHub-hosted for a
+    // dual-lane repository. The dual-lane contract still applies to core CI
+    // and the literal Velnor release verification jobs below, while the
+    // release-side matrix must not carry a self-hosted value behind
+    // `matrix.runner`: the pinned policy runtime validates that raw value and
+    // cannot prove a matrix entry is the approved runner mapping. Explicit
+    // Velnor-only repositories retain their trusted Velnor release lane.
     match config.runners {
-        RunnerMode::Github => vec![("github", github())],
+        RunnerMode::Github | RunnerMode::Both => vec![("github", github())],
         RunnerMode::Velnor => vec![("velnor", velnor())],
-        RunnerMode::Both => vec![("github", github()), ("velnor", velnor())],
     }
 }
 
@@ -1919,11 +1925,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "d34263f8c8bddd4cc5615eea4aa8e5a866aa2115731a0bfbacd9249d774cce26",
+                "609fd04f33b65705c2d07e40a2cb53bc29d2cb42b93fa3d90c8950f38be7732f",
             ),
             (
                 "preview.yml",
-                "c69d765692650d8da97a755e646ca79a00b2ed5a02f2d37b42d177d913be9ebe",
+                "18d7d8b02afd905fd401b96317ced09086899f6d28f005140035f6606b678448",
             ),
             (
                 "maintenance.yml",
@@ -2043,6 +2049,36 @@ mod tests {
                 "no hardcoded arm label may survive: {workflow}"
             );
         }
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn dual_lane_release_publishers_stay_hosted_while_verification_stays_dual_lane() {
+        let cfg = config(&["preview.yml", "release.yml"], Some(binary_spec()));
+        let Some(release) = cfg.release.as_ref() else {
+            panic!("release fixture must carry a release contract");
+        };
+        let preview = super::render_preview(&cfg, Some(release));
+        let release_workflow = super::render_release(&cfg, release);
+
+        for workflow in [&preview, &release_workflow] {
+            assert!(workflow.contains("lane: github"), "{workflow}");
+            assert!(
+                !workflow.contains("lane: velnor"),
+                "release-side artifact matrices must stay hosted: {workflow}"
+            );
+            assert!(
+                !workflow.contains("runner: { group:"),
+                "release-side artifact matrices must not carry a dynamic Velnor runner: {workflow}"
+            );
+        }
+        assert!(
+            release_workflow.contains("release-velnor-rust-example"),
+            "dual-lane release verification must retain its literal Velnor job: {release_workflow}"
+        );
     }
 
     #[test]
