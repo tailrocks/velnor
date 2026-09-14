@@ -1494,8 +1494,9 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 /// Maintenance keeps closed-PR pruning on the hosted image. The cache-budget
 /// lane follows the configured CI mode: Velnor for `runners = "velnor"`, and
 /// hosted otherwise. `uses:` stays on the `SOURCE_REV` pin (GitHub Actions
-/// rejects expressions in `uses:` versions). `rev:` is `${{ github.sha }}`
-/// only when this repository owns the setup action.
+/// rejects expressions in `uses:` versions). `rev:` uses a context-gated
+/// `${{ github.sha }}` with a static fallback when this repository owns the
+/// setup action.
 fn render_maintenance(config: &ProjectConfig) -> String {
     let cache_lane = if config.runners == RunnerMode::Velnor {
         RunnerMode::Velnor
@@ -1706,10 +1707,14 @@ mod tests {
             ),
             "cache retention must keep schedule and dispatch: {workflow}"
         );
-        assert!(
-            !workflow.contains("github.event_name == 'push'"),
-            "maintenance must not inherit the Velnor trusted-event gate: {workflow}"
-        );
+        if config.repository == crate::workflow_setup_action_repository() {
+            assert!(
+                workflow.contains("github.event_name == 'push'")
+                    && workflow.contains("github.event.repository.default_branch")
+                    && workflow.contains(crate::VELNOR_WORKFLOW_SOURCE_REV),
+                "owned maintenance must use the context-gated runtime revision: {workflow}"
+            );
+        }
     }
 
     /// Every maintenance step that calls `gh api` must carry `GH_TOKEN`: an
@@ -2188,8 +2193,11 @@ mod tests {
         let workflow = super::render_maintenance(&cfg);
         assert_maintenance_is_github_hosted(&workflow, &cfg);
         assert!(
-            workflow.contains(&format!("rev: {}", github_expression("github.sha"))),
-            "the setup-action owner installs HEAD: {workflow}"
+            workflow.contains(&format!(
+                "rev: {}",
+                crate::workflow_setup_install_rev(crate::workflow_setup_action_repository())
+            )),
+            "the setup-action owner uses a context-gated HEAD fallback: {workflow}"
         );
     }
 

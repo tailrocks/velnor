@@ -70,10 +70,10 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-894c2d2f7410-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
+          key: velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
           restore-keys: |
-            velnor-docker-seed-v3-894c2d2f7410-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
-            velnor-docker-seed-v3-894c2d2f7410-${{ runner.os }}-${{ runner.arch }}-docker-
+            velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
+            velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-
       - name: Prepare Docker build seed context
         env:
           MISE_AUTO_INSTALL: "false"
@@ -245,7 +245,7 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-894c2d2f7410-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
+          key: velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
 
   velnor-docker:
     name: "Velnor / docker"

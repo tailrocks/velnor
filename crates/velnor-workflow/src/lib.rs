@@ -1680,6 +1680,15 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
     }
 }
 
+fn docker_pull_request_command(command: &str) -> String {
+    if command.contains("--target ci") {
+        return command.to_owned();
+    }
+    command
+        .replace("docker buildx build ", "docker buildx build --target ci ")
+        .replace("docker build ", "docker build --target ci ")
+}
+
 /// Fill unit commands from typed capabilities. Generation config cannot supply
 /// shell command arrays; this is the only writer of the runtime command lists.
 fn materialize_capability_commands(
@@ -1694,6 +1703,19 @@ fn materialize_capability_commands(
                 .as_ref()
                 .is_some_and(|cache| cache.mutable_mount_seed)
         {
+            for command in &mut unit.pr_commands {
+                *command = docker_pull_request_command(command);
+            }
+            if let Some(commands) = &mut unit.github_pr_commands {
+                for command in commands {
+                    *command = docker_pull_request_command(command);
+                }
+            }
+            if let Some(commands) = &mut unit.velnor_pr_commands {
+                for command in commands {
+                    *command = docker_pull_request_command(command);
+                }
+            }
             let dockerfile = if unit.root == "." {
                 "Dockerfile".to_owned()
             } else {
@@ -2886,8 +2908,9 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
 }
 
 /// Hosted `rev:` for `setup-velnor-workflow`. The setup action lives in this
-/// repository; only that owner may cargo-install `${{ github.sha }}`. Every
-/// other caller installs [`VELNOR_WORKFLOW_SOURCE_REV`].
+/// repository; the owner may install its event SHA only where the action's
+/// controlled-bootstrap gate permits it. Fork PRs, merge queues, and
+/// non-default-branch dispatches install [`VELNOR_WORKFLOW_SOURCE_REV`].
 pub(crate) fn workflow_setup_action_repository() -> &'static str {
     match VELNOR_WORKFLOW_SETUP_ACTION.split_once("/.github/") {
         Some((repository, _)) => repository,
@@ -2897,7 +2920,9 @@ pub(crate) fn workflow_setup_action_repository() -> &'static str {
 
 pub(crate) fn workflow_setup_install_rev(repository: &str) -> String {
     if !repository.is_empty() && repository == workflow_setup_action_repository() {
-        github_expression("github.sha")
+        format!(
+            "${{{{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '{VELNOR_WORKFLOW_SOURCE_REV}' }}}}"
+        )
     } else {
         VELNOR_WORKFLOW_SOURCE_REV.to_owned()
     }
@@ -2905,9 +2930,9 @@ pub(crate) fn workflow_setup_install_rev(repository: &str) -> String {
 
 /// Hosted runtime install. `uses:` is always [`VELNOR_WORKFLOW_SOURCE_REV`]:
 /// GitHub Actions rejects expressions in `uses:` versions (HTTP 422). `rev:` is
-/// `install_rev`. Same-repo Planning and Maintenance pass `${{ github.sha }}`
-/// so this repository's `plan` understands generation-time fields; consumers
-/// keep the published pin.
+/// `install_rev`. Same-repo Planning and Maintenance use a context-gated
+/// `${{ github.sha }}` with a static fallback; consumers keep the published
+/// pin.
 fn workflow_runtime_setup_with_install_rev(lane: RunnerMode, install_rev: &str) -> String {
     if lane != RunnerMode::Github {
         return String::new();
@@ -5451,8 +5476,11 @@ mod tests {
         let home_workflow = WorkflowIr::from_config(&home).render(WorkflowKind::Main);
         let home_plan = yaml_job(&home_workflow, "plan");
         assert!(
-            home_plan.contains(&format!("rev: {}", github_expression("github.sha"))),
-            "the setup-action owner installs HEAD so plan parses automatic: {home_plan}"
+            home_plan.contains(&format!(
+                "rev: {}",
+                workflow_setup_install_rev(workflow_setup_action_repository())
+            )),
+            "the setup-action owner uses a context-gated HEAD fallback: {home_plan}"
         );
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
@@ -5516,9 +5544,17 @@ mod tests {
         let home_workflow = WorkflowIr::from_config(&home).render(WorkflowKind::Main);
         let home_plan = yaml_job(&home_workflow, "plan");
         assert!(
-            home_plan.contains(&format!("rev: {head_rev}")),
-            "the setup-action owner installs HEAD: {home_plan}"
+            home_plan.contains(&format!(
+                "rev: {}",
+                workflow_setup_install_rev(workflow_setup_action_repository())
+            )),
+            "the setup-action owner uses a context-gated HEAD fallback: {home_plan}"
         );
+        let owned_rev = workflow_setup_install_rev(workflow_setup_action_repository());
+        assert!(owned_rev.contains("github.event_name == 'pull_request'"));
+        assert!(owned_rev.contains("github.event.repository.default_branch"));
+        assert!(owned_rev.contains(VELNOR_WORKFLOW_SOURCE_REV));
+        assert_ne!(owned_rev, head_rev);
     }
 
     #[test]

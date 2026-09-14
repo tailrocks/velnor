@@ -64,7 +64,7 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@0fa68740830638a3e16437400ff3fc1729f31fcd
         with:
-          rev: ${{ github.sha }}
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '0fa68740830638a3e16437400ff3fc1729f31fcd' }}
       - name: Set trusted workflow policy revision
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=0fa68740830638a3e16437400ff3fc1729f31fcd" >> "$GITHUB_ENV"
       - name: Select affected units

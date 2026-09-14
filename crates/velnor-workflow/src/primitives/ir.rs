@@ -1907,8 +1907,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // Planning follows `[workflow] automatic`. `automatic = velnor` keeps
         // the control plane off GitHub-hosted runners. `automatic = both`
         // plans on GitHub so this repository can compare lanes. GitHub
-        // planning pins `uses:` to SOURCE_REV. `rev:` is `${{ github.sha }}`
-        // only when this repository owns the setup action.
+        // planning pins `uses:` to SOURCE_REV. `rev:` uses a context-gated
+        // `${{ github.sha }}` with a static fallback when this repository owns
+        // the setup action.
         let runners = self.control_plane_lane();
         let gate = if runners == RunnerMode::Velnor {
             format!(
