@@ -30,7 +30,16 @@ jobs:
     steps:
       - name: Mark CI job start
         if: always()
-        run: echo "VELNOR_JOB_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,7 +47,16 @@ jobs:
           ref: ${{ inputs.head_sha }}
       - name: Mark runner setup end
         if: always()
-        run: echo "VELNOR_RUNNER_SETUP_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Materialize Velnor CI selection
         shell: bash
         env:
@@ -60,16 +78,52 @@ jobs:
           } > .velnor-ci-selection/velnor-ci-selection
       - name: Mark selection transport end
         if: always()
-        run: echo "VELNOR_SELECTION_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Mark tool bootstrap end
         if: always()
-        run: echo "VELNOR_TOOL_BOOTSTRAP_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Mark cache prep end
         if: always()
-        run: echo "VELNOR_CACHE_PREP_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Mark cargo fetch end
         if: always()
-        run: echo "VELNOR_CARGO_FETCH_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CARGO_FETCH_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Run Docker checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -83,14 +137,39 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
-          echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
-          echo "VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
           exit $rc
       - name: Mark cleanup end
         if: always()
-        run: echo "VELNOR_CLEANUP_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
       - name: Report phase timings and cache outcomes
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes

@@ -85,7 +85,7 @@ fn cache_path_is_lexically_valid(path: &str) -> bool {
             .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
         && path
             .split('/')
-            .skip(if path.starts_with('/') { 1 } else { 0 })
+            .skip(usize::from(path.starts_with('/')))
             .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 

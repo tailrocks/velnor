@@ -12,7 +12,7 @@ use super::{Args, Primitive, RenderCtx, Rendered, WATCH_GRAPH};
 use crate::scan::file_walk::{has_extension, is_test_support_path};
 use crate::{GeneratorError, Unit, UnitKind};
 
-/// Whole-tree crate globs duplicate per-crate units; workspace_check gates
+/// Whole-tree crate globs duplicate per-crate units; `workspace_check` gates
 /// validate topology on manifests, release infra, and explicit additions.
 fn is_broad_per_crate_source_watch(path: &str) -> bool {
     matches!(path, "crates/**" | "tools/**")

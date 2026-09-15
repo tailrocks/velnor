@@ -122,6 +122,7 @@ on:
       - "crates/velnor-workflow/src/runtime.rs"
       - "crates/velnor-workflow/templates/**"
       - "crates/velnor-workflow/templates/release-package-signer.yml"
+      - "crates/velnor-workflow/templates/report-velnor-ci-outcomes/action.yml"
       - "crates/velnor-workflow/tests/**"
       - "crates/velnorctl/**"
       - "crates/velnorctl/**/*.rs"

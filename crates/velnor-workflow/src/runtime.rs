@@ -1653,7 +1653,7 @@ enum PumpEvent {
 /// heartbeats. Runs detached: it exits on pipe EOF (or when the guard drops
 /// the receiver), so a wedged grandchild holding the pipe cannot hang the
 /// stall kill.
-fn pump_child_stream<R, W>(mut reader: R, mut writer: W, sender: mpsc::Sender<PumpEvent>)
+fn pump_child_stream<R, W>(mut reader: R, mut writer: W, sender: &mpsc::Sender<PumpEvent>)
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -1661,7 +1661,7 @@ where
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer) {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(read) => {
                 let _ = writer.write_all(&buffer[..read]);
                 let _ = writer.flush();
@@ -1669,7 +1669,6 @@ where
                     break;
                 }
             }
-            Err(_) => break,
         }
     }
     let _ = sender.send(PumpEvent::Eof);
@@ -1709,12 +1708,12 @@ fn run_command_with_stall_guard(
     if let Some(stdout) = child.stdout.take() {
         expected_eof += 1;
         let sender = sender.clone();
-        thread::spawn(move || pump_child_stream(stdout, std::io::stdout(), sender));
+        thread::spawn(move || pump_child_stream(stdout, std::io::stdout(), &sender));
     }
     if let Some(stderr) = child.stderr.take() {
         expected_eof += 1;
         let sender = sender.clone();
-        thread::spawn(move || pump_child_stream(stderr, std::io::stderr(), sender));
+        thread::spawn(move || pump_child_stream(stderr, std::io::stderr(), &sender));
     }
     drop(sender);
     let pid = child.id();

@@ -22,51 +22,111 @@ runs:
         VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}
       run: |
         set -uo pipefail
+        max_telemetry_seconds=$((7 * 24 * 60 * 60))
+        timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
         job_ended="$(date +%s)"
         log="$RUNNER_TEMP/velnor-unit-log.txt"
         log_present=false
         if [[ -s "$log" ]]; then log_present=true; fi
+        read_marker() {
+          local marker="$1"
+          local value=""
+          if [[ -r "$timing_dir/$marker" ]]; then
+            IFS= read -r value < "$timing_dir/$marker" || true
+          fi
+          printf '%s' "$value"
+        }
+        valid_epoch() {
+          [[ "${1:-}" =~ ^[1-9][0-9]{9}$ ]]
+        }
+        bounded_duration() {
+          local duration="${1:-}"
+          [[ "$duration" =~ ^[0-9]+$ ]] || return 1
+          [[ "${#duration}" -le 6 ]] || return 1
+          (( 10#$duration <= max_telemetry_seconds ))
+        }
         phase_seconds() {
           local start="${1:-}" end="${2:-}"
-          if [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$end" -ge "$start" ]]; then
-            echo $((end - start))
+          if valid_epoch "$start" && valid_epoch "$end" && valid_epoch "$job_ended" \
+            && (( 10#$end >= 10#$start && 10#$end <= 10#$job_ended \
+              && 10#$job_ended - 10#$start <= max_telemetry_seconds )); then
+            local duration=$((10#$end - 10#$start))
+            if bounded_duration "$duration"; then
+              echo "$duration"
+              return 0
+            fi
           fi
+          return 1
         }
-        job_started="${VELNOR_JOB_STARTED_EPOCH:-$job_ended}"
-        if [[ ! "$job_started" =~ ^[0-9]+$ ]]; then job_started="$job_ended"; fi
-        runner_setup_end="${VELNOR_RUNNER_SETUP_ENDED_EPOCH:-}"
-        selection_end="${VELNOR_SELECTION_ENDED_EPOCH:-}"
-        tool_bootstrap_end="${VELNOR_TOOL_BOOTSTRAP_ENDED_EPOCH:-}"
-        cache_prep_end="${VELNOR_CACHE_PREP_ENDED_EPOCH:-}"
-        cargo_fetch_end="${VELNOR_CARGO_FETCH_ENDED_EPOCH:-}"
-        checks_started="${VELNOR_CHECKS_STARTED_EPOCH:-}"
-        checks_ended="${VELNOR_CHECKS_ENDED_EPOCH:-}"
-        cleanup_end="${VELNOR_CLEANUP_ENDED_EPOCH:-}"
-        runner_setup="$(phase_seconds "$job_started" "$runner_setup_end")"
-        selection_transport="$(phase_seconds "$runner_setup_end" "$selection_end")"
-        tool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end")"
-        cache_prep="$(phase_seconds "$tool_bootstrap_end" "$cache_prep_end")"
-        cargo_fetch="$(phase_seconds "$cache_prep_end" "$cargo_fetch_end")"
-        checks_wall="$(phase_seconds "$checks_started" "$checks_ended")"
-        cleanup="$(phase_seconds "$checks_ended" "$cleanup_end")"
-        total="$(phase_seconds "$job_started" "$job_ended")"
+        job_started="$(read_marker JOB_STARTED)"
+        job_started_usable=false
+        total_source="unusable_job_start"
+        total=""
+        if valid_epoch "$job_started"; then
+          total_candidate="$(phase_seconds "$job_started" "$job_ended" || true)"
+          if [[ -n "$total_candidate" ]]; then
+            total="$total_candidate"
+            job_started_usable=true
+            total_source="job_markers"
+          fi
+        fi
+        runner_setup_end="$(read_marker RUNNER_SETUP_ENDED)"
+        selection_end="$(read_marker SELECTION_ENDED)"
+        tool_bootstrap_end="$(read_marker TOOL_BOOTSTRAP_ENDED)"
+        cache_prep_end="$(read_marker CACHE_PREP_ENDED)"
+        cargo_fetch_end="$(read_marker CARGO_FETCH_ENDED)"
+        checks_started="$(read_marker CHECKS_STARTED)"
+        checks_ended="$(read_marker CHECKS_ENDED)"
+        cleanup_end="$(read_marker CLEANUP_ENDED)"
+        runner_setup="$(phase_seconds "$job_started" "$runner_setup_end" || true)"
+        selection_transport="$(phase_seconds "$runner_setup_end" "$selection_end" || true)"
+        tool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end" || true)"
+        cache_prep="$(phase_seconds "$tool_bootstrap_end" "$cache_prep_end" || true)"
+        cargo_fetch="$(phase_seconds "$cache_prep_end" "$cargo_fetch_end" || true)"
+        checks_wall="$(phase_seconds "$checks_started" "$checks_ended" || true)"
+        cleanup="$(phase_seconds "$checks_ended" "$cleanup_end" || true)"
         queue=""
         queue_source=""
         job_name="${VELNOR_JOB_NAME:-}"
         run_started="${VELNOR_CONTEXT_RUN_STARTED_AT:-${VELNOR_RUN_STARTED_AT:-}}"
         queue_at="${VELNOR_JOB_QUEUED_AT:-}"
-        if command -v jq >/dev/null 2>&1 && [[ -n "$run_started" && "$job_started" =~ ^[0-9]+$ ]]; then
-          queue_candidate="$(jq -nr --argjson job "$job_started" --arg run "$run_started" 'try ($job - ($run | fromdateiso8601)) catch empty' 2>/dev/null || true)"
-          if [[ "$queue_candidate" =~ ^[0-9]+$ ]]; then
-            queue="$queue_candidate"
-            queue_source="workflow_run_started_at"
+        rfc3339_epoch() {
+          local value="${1:-}"
+          [[ -n "$value" ]] || return 1
+          jq -nr --arg value "$value" '
+            try ($value | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
+            catch empty
+          ' 2>/dev/null
+        }
+        queue_seconds_from_timestamp() {
+          local timestamp="${1:-}"
+          local queued_epoch=""
+          local queue_candidate=""
+          queued_epoch="$(rfc3339_epoch "$timestamp" || true)"
+          if valid_epoch "$queued_epoch" && [[ "$job_started_usable" == true ]] \
+            && (( 10#$job_started >= 10#$queued_epoch )); then
+            queue_candidate=$((10#$job_started - 10#$queued_epoch))
+            if bounded_duration "$queue_candidate"; then
+              echo "$queue_candidate"
+              return 0
+            fi
           fi
-        fi
-        if command -v jq >/dev/null 2>&1 && [[ -z "$queue" && -n "$queue_at" && "$job_started" =~ ^[0-9]+$ ]]; then
-          queue_candidate="$(jq -nr --argjson job "$job_started" --arg queued "$queue_at" 'try ($job - ($queued | fromdateiso8601)) catch empty' 2>/dev/null || true)"
-          if [[ "$queue_candidate" =~ ^[0-9]+$ ]]; then
-            queue="$queue_candidate"
-            queue_source="job_queue_time"
+          return 1
+        }
+        if command -v jq >/dev/null 2>&1 && [[ "$job_started_usable" == true ]]; then
+          if [[ -n "$queue_at" ]]; then
+            queue_candidate="$(queue_seconds_from_timestamp "$queue_at" || true)"
+            if bounded_duration "$queue_candidate"; then
+              queue="$queue_candidate"
+              queue_source="job_queue_time"
+            fi
+          fi
+          if [[ -z "$queue" && -n "$run_started" ]]; then
+            queue_candidate="$(queue_seconds_from_timestamp "$run_started" || true)"
+            if bounded_duration "$queue_candidate"; then
+              queue="$queue_candidate"
+              queue_source="workflow_run_started_at"
+            fi
           fi
         fi
         if [[ -z "$job_name" ]]; then
@@ -97,6 +157,7 @@ runs:
           --arg job "$job_name" \
           --arg queue "$queue" \
           --arg queue_source "$queue_source" \
+          --arg total_source "$total_source" \
           --arg runner_setup "$runner_setup" \
           --arg selection_transport "$selection_transport" \
           --arg tool_bootstrap "$tool_bootstrap" \
@@ -119,6 +180,7 @@ runs:
             log_present: $log_present,
             queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
             queue_source: ($queue_source | if length > 0 then . else null end),
+            total_source: $total_source,
             runner_setup_seconds: ($runner_setup | if test("^[0-9]+$") then tonumber else null end),
             selection_transport_seconds: ($selection_transport | if test("^[0-9]+$") then tonumber else null end),
             tool_bootstrap_seconds: ($tool_bootstrap | if test("^[0-9]+$") then tonumber else null end),

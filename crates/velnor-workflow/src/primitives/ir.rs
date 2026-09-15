@@ -300,11 +300,29 @@ fn unit_snapshot(ir: &WorkflowIr, unit: &Unit, namespace: &str) -> (String, Stri
     )
 }
 
-/// Append one epoch marker step for CI phase timing.
+const VELNOR_CI_TIMING_DIR: &str =
+    "$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}";
+
+fn render_epoch_marker_commands(epoch_key: &str, indent: &str) -> String {
+    format!(
+        "{indent}timing_dir=\"{VELNOR_CI_TIMING_DIR}\"\n\
+         {indent}umask 077\n\
+         {indent}mkdir -p \"$timing_dir\"\n\
+         {indent}marker=\"$timing_dir/{epoch_key}\"\n\
+         {indent}if [[ ! -e \"$marker\" ]]; then\n\
+         {indent}  if (set -C; printf '%s\\n' \"$(date +%s)\" > \"$marker\") 2>/dev/null; then\n\
+         {indent}    chmod 0444 \"$marker\" 2>/dev/null || true\n\
+         {indent}  fi\n\
+         {indent}fi"
+    )
+}
+
+/// Append one immutable file marker step for CI phase timing.
 fn render_phase_epoch_marker(output: &mut String, epoch_key: &str, step_name: &str) {
+    let marker = render_epoch_marker_commands(epoch_key, "          ");
     let _ = writeln!(
         output,
-        "      - name: {step_name}\n        if: always()\n        run: echo \"VELNOR_{epoch_key}_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\""
+        "      - name: {step_name}\n        if: always()\n        run: |\n{marker}"
     );
 }
 
@@ -614,7 +632,7 @@ pub(crate) fn cargo_deny_tool_id(lock_keys: &BTreeSet<String>) -> Option<String>
 }
 
 /// Tool ids the Velnor lane installs explicitly. The job image already pins
-/// common CI tools (Bun, OpenTofu, mold, Mr. Boxington); this list covers
+/// common CI tools (Bun, `OpenTofu`, mold, Mr. Boxington); this list covers
 /// only what a unit's commands or repo declarations pull from the root lock,
 /// plus policy tools the hosted lane supplies through dedicated setup actions.
 pub(crate) fn velnor_mise_install_tool_ids(
@@ -622,10 +640,10 @@ pub(crate) fn velnor_mise_install_tool_ids(
     lock_keys: &BTreeSet<String>,
 ) -> Vec<String> {
     let mut tools = mise_tool_ids(unit, lock_keys);
-    if needs_cargo_deny(unit) {
-        if let Some(deny) = cargo_deny_tool_id(lock_keys) {
-            push_mise_tool(&mut tools, deny);
-        }
+    if needs_cargo_deny(unit)
+        && let Some(deny) = cargo_deny_tool_id(lock_keys)
+    {
+        push_mise_tool(&mut tools, deny);
     }
     tools
 }
@@ -705,9 +723,11 @@ pub(crate) fn render_cargo_source_preparation(
     if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
         return;
     }
-    let cache_hit_gate = skip_on_cache_hit
-        .then_some("        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n")
-        .unwrap_or_default();
+    let cache_hit_gate = if skip_on_cache_hit {
+        "        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n"
+    } else {
+        ""
+    };
     if !runtime_unit_id {
         let Some(active) = members.iter().find(|member| member.id == unit_id) else {
             return;
@@ -752,7 +772,7 @@ pub(crate) fn render_cargo_source_preparation(
 
 fn render_cargo_fetch_body(skip_when_offline_ready: bool) -> String {
     if skip_when_offline_ready {
-        "          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then\n            echo \"Cargo sources warm; skipping fetch\"\n          else\n            cargo fetch --locked\n          fi\n".to_owned()
+        "          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then\n            echo \"Cargo sources warm; skipping fetch\"\n          else\n            cargo fetch --locked\n          fi\n".to_owned()
     } else {
         "          cargo fetch --locked\n".to_owned()
     }
@@ -780,6 +800,40 @@ fn cargo_lockfile_root(member: &Unit) -> String {
     }
 }
 
+/// Rust units with a workspace Cargo lockfile mutate the same managed target
+/// root on Velnor. Keep those mutations behind the existing workspace-wide
+/// check, without turning the workspace gate into a self-dependency or
+/// changing the semantic `depends_on` graph.
+fn velnor_rust_workspace_check_needs(lane: RunnerMode, unit: &Unit, units: &[Unit]) -> Vec<String> {
+    if lane != RunnerMode::Velnor
+        || unit.kind != UnitKind::Rust
+        || unit.workspace_check
+        || !cargo_network_is_restricted(unit)
+    {
+        return Vec::new();
+    }
+    let lockfile_root = cargo_lockfile_root(unit);
+    units
+        .iter()
+        .filter(|candidate| {
+            candidate.id != unit.id
+                && candidate.kind == UnitKind::Rust
+                && candidate.workspace_check
+                && lane_supports_unit(lane, candidate)
+                && cargo_lockfile_root(candidate) == lockfile_root
+        })
+        .map(|candidate| unit_job_id(lane, &candidate.id))
+        .collect()
+}
+
+fn append_unique_needs(needs: &mut Vec<String>, additional: impl IntoIterator<Item = String>) {
+    for need in additional {
+        if !needs.contains(&need) {
+            needs.push(need);
+        }
+    }
+}
+
 fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
     let mut roots = BTreeSet::new();
     for member in members {
@@ -791,7 +845,7 @@ fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
     if roots.remove(".") {
         ordered.push(".".to_owned());
     }
-    ordered.extend(roots.into_iter());
+    ordered.extend(roots);
     ordered
 }
 
@@ -959,6 +1013,10 @@ pub(crate) fn render_retained_output_cache_note(
 /// Rendering is kept separate from scanning so output policy is inspectable
 /// and unit-tested.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these independent switches are the stable generated workflow contract"
+)]
 pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) github_runner: String,
@@ -1536,10 +1594,11 @@ impl WorkflowIr {
             if include_policy {
                 needs.push("policy".to_owned());
             }
-            if self.runners == RunnerMode::Velnor && self.velnor_serial_stack_groups {
-                if let Some(previous) = &previous_group {
-                    needs.push(previous.clone());
-                }
+            if self.runners == RunnerMode::Velnor
+                && self.velnor_serial_stack_groups
+                && let Some(previous) = &previous_group
+            {
+                needs.push(previous.clone());
             }
             let matrix_output = kind_matrix_output_from_file(file);
             let mut conditions = vec![
@@ -1910,10 +1969,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     cache_unit.kind.id_prefix()
                 );
             }
-            let cache_hit_gate = CacheBackend::Detected
-                .lane_enables_actions_cache(lane, self, cache_unit)
-                .then_some("        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n")
-                .unwrap_or_default();
+            let cache_hit_gate =
+                if CacheBackend::Detected.lane_enables_actions_cache(lane, self, cache_unit) {
+                    "        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n"
+                } else {
+                    ""
+                };
             let _ = write!(
                 output,
                 "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n{fetch_script}",
@@ -1973,6 +2034,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         self.render_lane_job_for_input(output, job, unit, contract, None, members);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each generated lane job keeps its complete setup and execution contract together"
+    )]
     fn render_lane_job_for_input(
         &self,
         output: &mut String,
@@ -2009,12 +2074,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if uses_lane_cargo_prep {
             needs.push(format!("{}-prepare-cargo-sources", lane.as_str()));
         }
-        needs.extend(velnor_rust_dependency_needs(
-            lane,
-            unit,
-            self.velnor_rust_needs,
-            &self.units,
-        ));
+        if input_unit.is_some() {
+            append_unique_needs(
+                &mut needs,
+                velnor_rust_workspace_check_needs(lane, unit, &self.units),
+            );
+        }
+        append_unique_needs(
+            &mut needs,
+            velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units),
+        );
         if !needs.is_empty() {
             let _ = writeln!(output, "    needs: [{}]", needs.join(", "));
         }
@@ -2101,9 +2170,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             String::new()
         };
+        let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
+        let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{offline_prelude}          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{offline_prelude}{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
             yaml_scalar(&unit.label),
             checks_env,
         );
@@ -2580,6 +2651,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the lane renderer emits one complete, inspectable verification job"
+    )]
     pub(crate) fn render_verify_lane(
         &self,
         output: &mut String,
@@ -2595,12 +2670,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         {
             let id = unit_job_id(lane, &unit.id);
             let lane_label = lane.display_name();
-            let needs = unit_needs(
+            let mut needs = unit_needs(
                 lane,
                 unit,
                 include_policy,
                 self.velnor_rust_needs,
                 &self.units,
+            );
+            append_unique_needs(
+                &mut needs,
+                velnor_rust_workspace_check_needs(lane, unit, &self.units),
             );
             let runner = self.runner_for_unit(lane, unit);
             let group = unit_group(unit.kind);
@@ -2677,9 +2756,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
             render_ci_cargo_fetch_end_marker(output);
             let base_sha = self.base_sha_expression();
+            let checks_started_marker =
+                render_epoch_marker_commands("CHECKS_STARTED", "          ");
+            let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
             let _ = writeln!(
                 output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
                 verify_name,
                 yaml_scalar(&unit.id),
                 base_sha,
