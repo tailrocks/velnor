@@ -21,5 +21,5 @@ generator	37
 .github/workflows/ci-unit-rust.yml	7cdf86c0d27001e9
 .github/workflows/maintenance.yml	ad76c8e6dc556ee0
 .github/workflows/nightly.yml	71f93f8fd12ed03a
-.github/workflows/preview.yml	e548b8ec79ad8f07
+.github/workflows/preview.yml	a791c2c099adc48e
 .github/workflows/release.yml	a0a4674e088e2352
