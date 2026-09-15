@@ -689,8 +689,7 @@ impl RepoGenerationConfig {
     /// Explicit policy excludes plus every owned static workflow file.
     pub(crate) fn effective_policy_exclude_workflows(&self) -> BTreeSet<String> {
         let mut excludes = self
-            .policy
-            .exclude_workflows
+            .policy_exclude_workflows()
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
