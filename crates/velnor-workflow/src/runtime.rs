@@ -745,8 +745,7 @@ fn unit_matrix_output(unit: &CiUnit) -> String {
     let workflow = unit
         .workflow_file
         .as_deref()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("ci-unit-{kind}.yml"));
+        .map_or_else(|| format!("ci-unit-{kind}.yml"), str::to_owned);
     workflow
         .strip_prefix("ci-unit-")
         .and_then(|value| value.strip_suffix(".yml"))
@@ -3087,17 +3086,14 @@ fn strip_selected_units_selector(value: &str) -> Option<&str> {
 
 fn is_selected_units_selector(value: &str) -> bool {
     const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
-    let rest = match value.strip_prefix(PREFIX) {
-        Some(rest) => rest,
-        None => return false,
+    let Some(rest) = value.strip_prefix(PREFIX) else {
+        return false;
     };
-    let rest = match rest.strip_prefix(',') {
-        Some(rest) => rest,
-        None => return false,
+    let Some(rest) = rest.strip_prefix(',') else {
+        return false;
     };
-    let separator = match rest.find(",')") {
-        Some(separator) => separator,
-        None => return false,
+    let Some(separator) = rest.find(",')") else {
+        return false;
     };
     is_unit_id(&rest[..separator])
 }
