@@ -57,9 +57,17 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
           cd -- 'crates/velnor-workflow-contract'
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
           cd -- "$GITHUB_WORKSPACE"
   velnor-rust-policy:
     name: "Velnor / rust-policy"

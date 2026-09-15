@@ -16,10 +16,13 @@ runs:
       shell: bash
       env:
         VELNOR_JOB_NAME: ${{ inputs.job_label }}
-        VELNOR_RUN_STARTED_AT: ${{ github.run_started_at }}
+        # Hosted Actions supplies this context value. Velnor supplies the
+        # runner-owned VELNOR_* timing env instead; keep this name distinct so
+        # an empty hosted expression cannot overwrite it.
+        VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}
       run: |
         set -uo pipefail
-        echo "VELNOR_JOB_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        job_ended="$(date +%s)"
         log="$RUNNER_TEMP/velnor-unit-log.txt"
         log_present=false
         if [[ -s "$log" ]]; then log_present=true; fi
@@ -29,7 +32,8 @@ runs:
             echo $((end - start))
           fi
         }
-        job_started="${VELNOR_JOB_STARTED_EPOCH:-}"
+        job_started="${VELNOR_JOB_STARTED_EPOCH:-$job_ended}"
+        if [[ ! "$job_started" =~ ^[0-9]+$ ]]; then job_started="$job_ended"; fi
         runner_setup_end="${VELNOR_RUNNER_SETUP_ENDED_EPOCH:-}"
         selection_end="${VELNOR_SELECTION_ENDED_EPOCH:-}"
         tool_bootstrap_end="${VELNOR_TOOL_BOOTSTRAP_ENDED_EPOCH:-}"
@@ -38,7 +42,6 @@ runs:
         checks_started="${VELNOR_CHECKS_STARTED_EPOCH:-}"
         checks_ended="${VELNOR_CHECKS_ENDED_EPOCH:-}"
         cleanup_end="${VELNOR_CLEANUP_ENDED_EPOCH:-}"
-        job_ended="${VELNOR_JOB_ENDED_EPOCH:-}"
         runner_setup="$(phase_seconds "$job_started" "$runner_setup_end")"
         selection_transport="$(phase_seconds "$runner_setup_end" "$selection_end")"
         tool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end")"
@@ -48,12 +51,22 @@ runs:
         cleanup="$(phase_seconds "$checks_ended" "$cleanup_end")"
         total="$(phase_seconds "$job_started" "$job_ended")"
         queue=""
+        queue_source=""
         job_name="${VELNOR_JOB_NAME:-}"
-        run_started="${VELNOR_RUN_STARTED_AT:-}"
+        run_started="${VELNOR_CONTEXT_RUN_STARTED_AT:-${VELNOR_RUN_STARTED_AT:-}}"
+        queue_at="${VELNOR_JOB_QUEUED_AT:-}"
         if command -v jq >/dev/null 2>&1 && [[ -n "$run_started" && "$job_started" =~ ^[0-9]+$ ]]; then
           queue_candidate="$(jq -nr --argjson job "$job_started" --arg run "$run_started" 'try ($job - ($run | fromdateiso8601)) catch empty' 2>/dev/null || true)"
           if [[ "$queue_candidate" =~ ^[0-9]+$ ]]; then
             queue="$queue_candidate"
+            queue_source="workflow_run_started_at"
+          fi
+        fi
+        if command -v jq >/dev/null 2>&1 && [[ -z "$queue" && -n "$queue_at" && "$job_started" =~ ^[0-9]+$ ]]; then
+          queue_candidate="$(jq -nr --argjson job "$job_started" --arg queued "$queue_at" 'try ($job - ($queued | fromdateiso8601)) catch empty' 2>/dev/null || true)"
+          if [[ "$queue_candidate" =~ ^[0-9]+$ ]]; then
+            queue="$queue_candidate"
+            queue_source="job_queue_time"
           fi
         fi
         if [[ -z "$job_name" ]]; then
@@ -83,6 +96,7 @@ runs:
         report_json="$(jq -nc \
           --arg job "$job_name" \
           --arg queue "$queue" \
+          --arg queue_source "$queue_source" \
           --arg runner_setup "$runner_setup" \
           --arg selection_transport "$selection_transport" \
           --arg tool_bootstrap "$tool_bootstrap" \
@@ -104,6 +118,7 @@ runs:
             job: $job,
             log_present: $log_present,
             queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
+            queue_source: ($queue_source | if length > 0 then . else null end),
             runner_setup_seconds: ($runner_setup | if test("^[0-9]+$") then tonumber else null end),
             selection_transport_seconds: ($selection_transport | if test("^[0-9]+$") then tonumber else null end),
             tool_bootstrap_seconds: ($tool_bootstrap | if test("^[0-9]+$") then tonumber else null end),

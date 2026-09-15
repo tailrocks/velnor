@@ -13,8 +13,8 @@ use super::snapshot::{
     CompatibilityFacts, SNAPSHOT_SCHEMA,
 };
 use super::{
-    cache::velnor_skips_pinned_rust_toolchain, CacheBackend, GraphNode, LaneJob, Pins,
-    UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES, MUTABLE_MOUNT_HOST_DIR,
+    cache::{cache_is_velnor_host_persistent, velnor_skips_pinned_rust_toolchain}, CacheBackend,
+    GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES, MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::{
     config_rust_toolchain, github_expression, hosted_mold_setup, kind_unit_workflow_shard_file,
@@ -699,6 +699,7 @@ pub(crate) fn render_cargo_source_preparation(
     unit_id: &str,
     runtime_unit_id: bool,
     skip_on_cache_hit: bool,
+    skip_when_offline_ready: bool,
 ) {
     if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
         return;
@@ -714,9 +715,10 @@ pub(crate) fn render_cargo_source_preparation(
             return;
         }
         let root = yaml_scalar(&active.root);
+        let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
         let _ = write!(
             output,
-            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked\n",
+            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}",
             preparation_env()
         );
         return;
@@ -739,11 +741,20 @@ pub(crate) fn render_cargo_source_preparation(
             );
         }
     }
+    let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
     let _ = write!(
         output,
-        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked\n",
+        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}",
         preparation_env()
     );
+}
+
+fn render_cargo_fetch_body(skip_when_offline_ready: bool) -> String {
+    if skip_when_offline_ready {
+        "          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then\n            echo \"Cargo sources warm; skipping fetch\"\n          else\n            cargo fetch --locked\n          fi\n".to_owned()
+    } else {
+        "          cargo fetch --locked\n".to_owned()
+    }
 }
 
 /// Unique manifest roots that need `cargo fetch --locked` for `members`.
@@ -810,17 +821,17 @@ fn cargo_prep_cache_unit<'a>(members: &[&'a Unit]) -> Option<&'a Unit> {
         })
 }
 
-fn render_cargo_fetch_roots_script(roots: &[String]) -> String {
+fn render_cargo_fetch_roots_script(roots: &[String], skip_when_offline_ready: bool) -> String {
+    let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
     let mut script = String::from("          set -euo pipefail\n");
     for root in roots {
         let quoted = crate::shell_quote(root);
         if root == "." {
-            let _ = writeln!(script, "          cargo fetch --locked");
+            script.push_str(&fetch_body);
         } else {
-            let _ = writeln!(
-                script,
-                "          cd -- {quoted}\n          cargo fetch --locked\n          cd -- \"$GITHUB_WORKSPACE\""
-            );
+            let _ = writeln!(script, "          cd -- {quoted}");
+            script.push_str(&fetch_body);
+            let _ = writeln!(script, "          cd -- \"$GITHUB_WORKSPACE\"");
         }
     }
     script
@@ -1839,7 +1850,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let Some(cache_unit) = cargo_prep_cache_unit(members) else {
             return;
         };
-        let fetch_script = render_cargo_fetch_roots_script(&roots);
+        let skip_when_offline_ready = cache_unit
+            .cache
+            .as_ref()
+            .is_some_and(cache_is_velnor_host_persistent);
+        let fetch_script = render_cargo_fetch_roots_script(&roots, skip_when_offline_ready);
         // Only Velnor runners share persistent Cargo stores between jobs.
         // GitHub-hosted jobs must fetch into their own ephemeral workspace.
         for lane in [RunnerMode::Velnor] {
@@ -2058,12 +2073,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         render_ci_cache_prep_end_marker(output);
         let runtime_unit_id = input_unit.is_none();
         if !uses_lane_cargo_prep {
+            let skip_when_offline_ready = lane == RunnerMode::Velnor
+                && unit
+                    .cache
+                    .as_ref()
+                    .is_some_and(cache_is_velnor_host_persistent);
             render_cargo_source_preparation(
                 output,
                 members,
                 &unit.id,
                 runtime_unit_id,
                 skip_fetch_on_cache_hit,
+                skip_when_offline_ready,
             );
             render_ci_cargo_fetch_end_marker(output);
         }
@@ -2640,7 +2661,19 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 false
             };
             render_ci_cache_prep_end_marker(output);
-            render_cargo_source_preparation(output, &[unit], &unit.id, false, cargo_cache_restored);
+            let skip_when_offline_ready = lane == RunnerMode::Velnor
+                && unit
+                    .cache
+                    .as_ref()
+                    .is_some_and(cache_is_velnor_host_persistent);
+            render_cargo_source_preparation(
+                output,
+                &[unit],
+                &unit.id,
+                false,
+                cargo_cache_restored,
+                skip_when_offline_ready,
+            );
             render_ci_cargo_fetch_end_marker(output);
             let base_sha = self.base_sha_expression();
             let _ = writeln!(

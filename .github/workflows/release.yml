@@ -247,7 +247,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: full
@@ -290,7 +294,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: full
@@ -333,7 +341,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: full
@@ -376,7 +388,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: full
@@ -419,7 +435,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: full
@@ -462,7 +482,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: full
@@ -505,7 +529,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: full
@@ -548,7 +576,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: full
@@ -591,7 +623,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
@@ -634,7 +670,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: full
@@ -677,7 +717,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: full
@@ -716,7 +760,11 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
+          if cargo metadata --locked --offline --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
       - name: Run "Rust production topology" checks
         env:
           CI_SCOPE: full
