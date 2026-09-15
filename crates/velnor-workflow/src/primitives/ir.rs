@@ -751,14 +751,40 @@ pub(crate) fn render_cargo_source_preparation(
 }
 
 /// Unique manifest roots that need `cargo fetch --locked` for `members`.
+///
+/// Workspace members share one lockfile at the repository root: one fetch at
+/// `.` covers them. Independent manifest trees keep an additional root when
+/// their watch graph names a lockfile under their own directory.
+fn cargo_lockfile_root(member: &Unit) -> String {
+    if member.root == "." {
+        return ".".to_owned();
+    }
+    let local_lock = format!("{}/Cargo.lock", member.root);
+    if member
+        .cache
+        .as_ref()
+        .is_some_and(|cache| cache.key_files.iter().any(|key| key == &local_lock))
+        || member.watch.iter().any(|path| path == &local_lock)
+    {
+        member.root.clone()
+    } else {
+        ".".to_owned()
+    }
+}
+
 fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
     let mut roots = BTreeSet::new();
     for member in members {
         if cargo_network_is_restricted(member) {
-            roots.insert(member.root.clone());
+            roots.insert(cargo_lockfile_root(member));
         }
     }
-    roots.into_iter().collect()
+    let mut ordered = Vec::new();
+    if roots.remove(".") {
+        ordered.push(".".to_owned());
+    }
+    ordered.extend(roots.into_iter());
+    ordered
 }
 
 /// Selection gate for a lane-level cargo prep job: any restricted unit selected.
