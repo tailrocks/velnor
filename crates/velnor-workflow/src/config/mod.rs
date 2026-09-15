@@ -1247,6 +1247,44 @@ pub(crate) fn parse_mise_lock_keys(lock_toml: &str) -> Result<BTreeSet<String>, 
         .unwrap_or_default())
 }
 
+/// The actionlint version the root `mise.lock` pins under either spelling of
+/// its key (`actionlint` or `aqua:rhysd/actionlint`), or `None` when the lock
+/// is absent or does not pin it.
+///
+/// # Errors
+/// Returns an I/O error when the lock cannot be read, and a usage error when
+/// it is not valid UTF-8 TOML.
+pub(crate) fn mise_lock_actionlint_version(root: &Path) -> Result<Option<String>, GeneratorError> {
+    let path = root.join(MISE_LOCK_PATH);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GeneratorError::io("read mise.lock", &path, &error)),
+    };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!("parse mise.lock {}: {error}", path.display()))
+    })?;
+    let table: toml::Table = text.parse().map_err(|error| {
+        GeneratorError::usage(format!("{}: parse lock TOML: {error}", path.display()))
+    })?;
+    let Some(tools) = table.get("tools").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
+    let entry = ["actionlint", "aqua:rhysd/actionlint"]
+        .iter()
+        .find_map(|key| tools.get(*key));
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let version = entry
+        .as_array()
+        .and_then(|rows| rows.first())
+        .or(Some(entry))
+        .and_then(|row| row.get("version"))
+        .and_then(toml::Value::as_str);
+    Ok(version.map(str::to_owned))
+}
+
 /// Read the committed tool keys from the root `mise.lock`.
 ///
 /// A missing lock is a valid outcome — the repository does not pin mise tools,

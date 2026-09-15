@@ -2,7 +2,7 @@
 schema = 2
 [inputs]
 config	f02255a0a780701a
-scan	e7c772e4d8d3cae2
+scan	84d88cc78558bad6
 generator	44
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
@@ -10,53 +10,17 @@ generator	44
 .github/actions/setup-velnor-workflow/action.yml	9aa9c8647f90b8a4
 .github/ci/project.toml	d06bf0bdc1948590
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-<<<<<<< HEAD
-.github/workflows/ci-main.yml	e44a83ec098b54dd
-.github/workflows/ci-policy.yml	1e53e583be8cef2b
-.github/workflows/ci-pr.yml	7fda23e19e7548ee
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-.github/workflows/ci-main.yml	854cd829d0edf01c
-.github/workflows/ci-policy.yml	99ac468f61f8c267
-.github/workflows/ci-pr.yml	3f863882709ccd1f
-=======
-.github/workflows/ci-main.yml	cfa6ffff2f931ef6
-.github/workflows/ci-policy.yml	826a50945061674a
+.github/workflows/ci-main.yml	59bf6085b659d4c4
+.github/workflows/ci-policy.yml	43028904a246f960
 .github/workflows/ci-pr.yml	74f3688fe30e3df8
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-<<<<<<< HEAD
-.github/workflows/ci-unit-bun.yml	d31a22d09b6acda0
-.github/workflows/ci-unit-docker.yml	1a38c0df181295a7
-.github/workflows/ci-unit-docs.yml	8b8e1e3d6d51ecda
-.github/workflows/ci-unit-opentofu.yml	83fc254b4fb2a730
-.github/workflows/ci-unit-rust-2.yml	30d0cd907a475366
-.github/workflows/ci-unit-rust-3.yml	3245806048b72675
-.github/workflows/ci-unit-rust.yml	b50e527bee52689d
-.github/workflows/maintenance.yml	4eae4e3b5f9b80bc
-.github/workflows/nightly.yml	2057397bf0480d73
-.github/workflows/preview.yml	4ae72a778bc23ff6
-.github/workflows/release.yml	c94f2153e7fc18fe
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-.github/workflows/ci-unit-bun.yml	7e5c950bf527a634
-.github/workflows/ci-unit-docker.yml	a12627dc8a140dc3
-.github/workflows/ci-unit-docs.yml	c5a1e14a258029fe
-.github/workflows/ci-unit-opentofu.yml	3bf6e9a7197fd430
-.github/workflows/ci-unit-rust-2.yml	e538205d27ec937e
-.github/workflows/ci-unit-rust-3.yml	9b2df281a0c90581
-.github/workflows/ci-unit-rust.yml	a51c6217dd4df37d
-.github/workflows/maintenance.yml	3d302371555121bc
-.github/workflows/nightly.yml	2057397bf0480d73
-.github/workflows/preview.yml	d23417336f37cb66
-.github/workflows/release.yml	ba75cc6767894d2a
-=======
 .github/workflows/ci-unit-bun.yml	9a34e84fb0056400
 .github/workflows/ci-unit-docker.yml	e67b800320dc64e5
 .github/workflows/ci-unit-docs.yml	25b84368bc3ce00a
 .github/workflows/ci-unit-opentofu.yml	3cebd4ecd1ee342c
 .github/workflows/ci-unit-rust.yml	c0cad12e66a8ecaa
 .github/workflows/maintenance.yml	15492efda53d5071
-.github/workflows/nightly.yml	7d5bc46775d96fad
+.github/workflows/nightly.yml	086936ca5ac04acb
 .github/workflows/preview.yml	ebb171f6bc179da1
 .github/workflows/release.yml	29b9cab21f3d80d6
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
 config/fleet/velnor-host.env	d14b419216449423

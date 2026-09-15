@@ -92,6 +92,11 @@ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // that changes the workflow runtime contract.
 const VELNOR_WORKFLOW_SOURCE_REV: &str = "643f33123abe01adee09662a366cb9a5d2b3c3bf";
 const MR_BOXINGTON_VERSION: &str = "1.11.1";
+/// The actionlint release the policy job lints generated workflows with,
+/// installed through mise (`aqua:rhysd/actionlint`). A root `mise.lock` that
+/// pins actionlint at another version is refused at scan time so the local
+/// task and the policy job never lint with different releases.
+pub(crate) const ACTIONLINT_VERSION: &str = "1.7.12";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
 const MOLD_AARCH64_SHA256: &str =
@@ -1035,6 +1040,7 @@ fn scan_target(
     // `config::mise_lock_keys_for_root` for the per-unit-lock gap.
     let mise_lock_keys = config::mise_lock_keys_for_root(root)?;
     config.mise_lock_keys.clone_from(&mise_lock_keys);
+    validate_actionlint_pin_coherence(root)?;
     // The repo-owned config is validated against the resolved surface before
     // it can influence anything: a declared unit the scan did not find, or a
     // channel grant for an owner block the render does not declare, is a hard
@@ -3012,20 +3018,57 @@ pub(crate) fn inline_policy_job_for_lane(
         "          # Velnor's native checkout uses its supported full-repository fetch.\n"
     };
     let rendered = format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout caller workflow data\n        uses: {}\n        with:\n          repository: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n          ref: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          path: policy-checkout\n          sparse-checkout: |\n            .github/workflows\n            .github-gen\n          sparse-checkout-cone-mode: true\n          fetch-depth: 1\n          persist-credentials: false\n{checkout_safety}      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: {cache_backend}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{revision}\n          restore-keys: |\n            velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-\n      - name: Install pinned Velnor workflow runtime\n        env:\n          CARGO_HOME: ${{{{ runner.temp }}}}/velnor-workflow-cargo-home\n          CARGO_TARGET_DIR: ${{{{ runner.temp }}}}/velnor-workflow-cargo-target\n          VELNOR_WORKFLOW_INSTALL_DIR: ${{{{ runner.temp }}}}/velnor-workflow-install\n          VELNOR_WORKFLOW_ROOT: ${{{{ runner.temp }}}}/velnor-workflow\n        run: |\n          set -euo pipefail\n          install -d -m 700 \\\n            \"$CARGO_HOME\" \\\n            \"$CARGO_TARGET_DIR\" \\\n            \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cd \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \\\n            cargo install \\\n            --locked \\\n            --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} \\\n            --rev {revision} \\\n            --root \"$VELNOR_WORKFLOW_ROOT\" \\\n            velnor-workflow \\\n            --bin velnor-workflow\n          echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\"\n      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: velnor-workflow policy --workflow-root \"$WORKFLOW_ROOT\"\n",
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout caller workflow data\n        uses: {}\n        with:\n          repository: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n          ref: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          path: policy-checkout\n          sparse-checkout: |\n            .github/workflows\n            .github/actions\n            .github-gen\n          sparse-checkout-cone-mode: true\n          fetch-depth: 1\n          persist-credentials: false\n{checkout_safety}      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: {cache_backend}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{revision}\n          restore-keys: |\n            velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-\n      - name: Install pinned Velnor workflow runtime\n        env:\n          CARGO_HOME: ${{{{ runner.temp }}}}/velnor-workflow-cargo-home\n          CARGO_TARGET_DIR: ${{{{ runner.temp }}}}/velnor-workflow-cargo-target\n          VELNOR_WORKFLOW_INSTALL_DIR: ${{{{ runner.temp }}}}/velnor-workflow-install\n          VELNOR_WORKFLOW_ROOT: ${{{{ runner.temp }}}}/velnor-workflow\n        run: |\n          set -euo pipefail\n          install -d -m 700 \\\n            \"$CARGO_HOME\" \\\n            \"$CARGO_TARGET_DIR\" \\\n            \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cd \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \\\n            cargo install \\\n            --locked \\\n            --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} \\\n            --rev {revision} \\\n            --root \"$VELNOR_WORKFLOW_ROOT\" \\\n            velnor-workflow \\\n            --bin velnor-workflow\n          echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\"\n      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: velnor-workflow policy --workflow-root \"$WORKFLOW_ROOT\"\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
         ActionPin::MrBoxington.reference(),
+        actionlint_setup = actionlint_setup_step(cache_backend),
     );
     if cache_backend == "local" {
         rendered
             .replace(
-                "          sparse-checkout: |\n            .github/workflows\n            .github-gen\n",
+                "          sparse-checkout: |\n            .github/workflows\n            .github/actions\n            .github-gen\n",
                 "",
             )
             .replace("          sparse-checkout-cone-mode: true\n", "")
     } else {
         rendered
     }
+}
+
+/// The step that provisions the pinned actionlint for the policy job. The
+/// hosted lane installs it through `jdx/mise-action` (no `mise.toml` sits in
+/// the workspace; the checkout lives under `policy-checkout`, so
+/// `install_args` names the exact tool); the Velnor lane uses the host's mise
+/// directly because `mise-action` is not admitted there. Both lanes run the
+/// binary through `mise exec actionlint@<version>` so no config lookup is
+/// involved.
+fn actionlint_setup_step(cache_backend: &str) -> String {
+    if cache_backend == "github" {
+        format!(
+            "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n",
+            ActionPin::Mise.reference()
+        )
+    } else {
+        format!(
+            "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n"
+        )
+    }
+}
+
+/// Refuse a root `mise.lock` that pins actionlint at a version other than the
+/// one the policy job installs: two pins for one tool with no coherence check
+/// is the P0-5 bug class, and the local `mise run actionlint` task must lint
+/// with the same release the policy job enforces.
+fn validate_actionlint_pin_coherence(root: &Path) -> Result<(), GeneratorError> {
+    let Some(version) = config::mise_lock_actionlint_version(root)? else {
+        return Ok(());
+    };
+    if version == ACTIONLINT_VERSION {
+        return Ok(());
+    }
+    Err(GeneratorError::usage(format!(
+        "mise.lock pins actionlint {version} but the generated policy job installs actionlint {ACTIONLINT_VERSION}; align the lock (`mise use actionlint@{ACTIONLINT_VERSION}`) or bump `ACTIONLINT_VERSION` in the generator"
+    )))
 }
 
 /// The workflow names the inline policy job renders under: the advisory lane in
@@ -10239,6 +10282,81 @@ channel = "stable"
         assert!(actionlint.contains("    - self-hosted\n"));
         assert!(actionlint.contains("    - ubuntu-24.04\n"));
         assert!(actionlint.contains("    - example-runner-label\n"));
+    }
+
+    #[test]
+    fn generated_actionlint_config_suppresses_nothing() {
+        // No generated workflow emits syntax actionlint's schema lags, so the
+        // configuration carries no `ignore:` rules; a suppression must be
+        // added deliberately together with the syntax that needs it.
+        let config = scanned_fixture(RunnerMode::Both);
+        let actionlint = render_actionlint_config(&config);
+        assert!(!actionlint.contains("ignore:"), "{actionlint}");
+        assert!(!actionlint.contains("paths:"), "{actionlint}");
+    }
+
+    #[test]
+    fn policy_jobs_lint_caller_workflows_with_the_pinned_actionlint() {
+        let hosted = inline_policy_job("Policy", "0".repeat(40).as_str());
+        assert!(
+            hosted.contains(&format!(
+                "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n      - name: Lint caller workflows\n        working-directory: policy-checkout\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+                ActionPin::Mise.reference()
+            )),
+            "{hosted}"
+        );
+        let velnor = inline_policy_job_for_lane(
+            "Policy",
+            "0".repeat(40).as_str(),
+            "[self-hosted]",
+            "local",
+            None,
+        );
+        assert!(
+            velnor.contains(&format!(
+                "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n      - name: Lint caller workflows\n"
+            )),
+            "{velnor}"
+        );
+        assert!(!velnor.contains("jdx/mise-action"), "{velnor}");
+    }
+
+    #[test]
+    fn actionlint_pin_coherence_refuses_a_drifted_lock() {
+        let root = temporary_repository("actionlint-pin");
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.actionlint]]\nversion = \"1.0.0\"\nbackend = \"aqua:rhysd/actionlint\"\n",
+            ),
+            "write mise.lock",
+        );
+        let error = must_fail(
+            validate_actionlint_pin_coherence(&root),
+            "a drifted actionlint pin must be refused",
+        )
+        .to_string();
+        assert!(error.contains("mise.lock pins actionlint 1.0.0"), "{error}");
+        assert!(error.contains(ACTIONLINT_VERSION), "{error}");
+
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                format!(
+                    "[[tools.\"aqua:rhysd/actionlint\"]]\nversion = \"{ACTIONLINT_VERSION}\"\n"
+                ),
+            ),
+            "write mise.lock",
+        );
+        must(
+            validate_actionlint_pin_coherence(&root),
+            "a matching qualified pin passes",
+        );
+        must(fs::remove_file(root.join("mise.lock")), "remove mise.lock");
+        must(
+            validate_actionlint_pin_coherence(&root),
+            "an absent lock has nothing to contradict",
+        );
     }
 
     #[test]
