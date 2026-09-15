@@ -276,7 +276,11 @@ fn write_member_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(),
 }
 
 /// Write one member through an in-directory temp file plus rename, so a
-/// reader never observes a partial page; mode is fixed at 0644.
+/// reader never observes a partial page; mode is forced to 0644 after create.
+///
+/// `OpenOptions::mode` is umask-masked, so a process umask of 077 would leave
+/// 0600. `chmod` after create sets the advertised mode regardless of umask,
+/// and runs on the temp file so the destination never appears narrower.
 ///
 /// The caller's existence validation is best-effort: nothing re-checks the
 /// destination between validation and this final rename, so under concurrent
@@ -284,7 +288,7 @@ fn write_member_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(),
 /// check-then-rename gap is the accepted single-writer stance; the rename
 /// itself never follows a symbolic link at the destination path.
 fn write_and_rename(temp: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -292,6 +296,7 @@ fn write_and_rename(temp: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Re
         .open(temp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
     drop(file);
     std::fs::rename(temp, final_path)
 }
