@@ -558,6 +558,18 @@ impl Store {
                 instance_slug,
             ],
         )?;
+        // An accepted intent is complete only after the controller has
+        // durably observed the requested state. Match the exact resource
+        // version and desired state: a newer intent must remain pending, and
+        // an old accepted row must not be completed by a later convergence.
+        transaction.execute(
+            "UPDATE lifecycle_operations SET phase = 'completed'
+             WHERE instance_slug = ?1
+               AND resource_version = ?2
+               AND desired_state = ?3
+               AND phase COLLATE NOCASE = 'accepted'",
+            params![instance_slug, expected_version as i64, observed_state],
+        )?;
         transaction.commit()?;
         Ok((
             LifecycleInstanceRow {
@@ -3330,6 +3342,52 @@ mod lifecycle_tests {
         assert!(fresh);
         assert_eq!(rewritten.observed_state, "ready");
         assert_eq!(rewritten.resource_version, 3);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn observed_write_completes_only_the_exact_accepted_lifecycle_operation() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-observed-operation-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store = Store::open(directory.join("state.db")).expect("open store");
+        let request = LifecycleOperationRequest {
+            instance_slug: "primary".to_owned(),
+            kind: "cordon".to_owned(),
+            target: "primary".to_owned(),
+            reason: "test".to_owned(),
+            idempotency_key: "cordon-operation".to_owned(),
+            desired_state: "cordoned".to_owned(),
+            desired_slots: None,
+            expected_version: None,
+            operation_id: "operation-1".to_owned(),
+            created_at: Timestamp::now(),
+        };
+        let (accepted, fresh) = store
+            .record_lifecycle_operation(&request)
+            .expect("record operation");
+        assert!(fresh);
+        assert_eq!(accepted.phase, "accepted");
+        store
+            .record_lifecycle_observed("primary", "cordoned", accepted.resource_version)
+            .expect("record observation");
+        let conn = test_connection(&store);
+        let phase: String = conn
+            .query_row(
+                "SELECT phase FROM lifecycle_operations
+                 WHERE instance_slug = 'primary' AND idempotency_key = 'cordon-operation'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read operation phase");
+        assert_eq!(phase, "completed");
+        drop(conn);
         let _ = std::fs::remove_dir_all(directory);
     }
 

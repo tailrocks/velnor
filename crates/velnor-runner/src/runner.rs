@@ -2665,6 +2665,10 @@ const DRAIN_HINT_TTL: Duration = Duration::from_secs(2);
 /// a daemon owns one journal, and a path switch simply re-reads.
 static DRAIN_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> =
     std::sync::Mutex::new(None);
+/// Last soft-admission verdict. Keep this separate from the hard-drain cache:
+/// a cordon must stop new work without making the daemon exit.
+static ADMISSION_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> =
+    std::sync::Mutex::new(None);
 
 /// Non-blocking journal-drain hint for slot and daemon poll boundaries.
 /// False on any read failure or when no marker is latched; never blocks on a
@@ -2693,6 +2697,41 @@ pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
 /// name their journal.
 pub(crate) fn effective_draining(journal_path: Option<&Path>) -> bool {
     draining() || journal_path.is_some_and(journal_drain_hint)
+}
+
+/// Non-blocking soft-admission hint. An existing but unreadable journal is a
+/// fail-closed fence; a missing journal is the explicit-local/one-shot mode,
+/// which has no lifecycle ledger to consult and therefore remains usable.
+pub(crate) fn journal_admission_blocked_hint(journal_path: &Path) -> bool {
+    let now = Instant::now();
+    if let Ok(cache) = ADMISSION_HINT_CACHE.try_lock()
+        && let Some((path, hint, at)) = cache.as_ref()
+        && path == journal_path
+        && now.duration_since(*at) < DRAIN_HINT_TTL
+    {
+        return *hint;
+    }
+    let hint = if !journal_path.exists() {
+        false
+    } else {
+        match velnor_control::journal::read_admission_state(journal_path) {
+            Ok(state) => state.is_some(),
+            Err(_) => true,
+        }
+    };
+    if let Ok(mut cache) = ADMISSION_HINT_CACHE.try_lock() {
+        *cache = Some((journal_path.to_path_buf(), hint, now));
+    }
+    hint
+}
+
+/// Effective admission fence at a poll boundary. Hard drain includes the
+/// process signal; soft cordon only stops idle admission and lets in-flight
+/// work finish.
+pub(crate) fn effective_capacity_blocked(journal_path: Option<&Path>) -> bool {
+    draining()
+        || journal_path
+            .is_some_and(|path| journal_drain_hint(path) || journal_admission_blocked_hint(path))
 }
 
 /// Best-effort journal path for gates that hold typed daemon args but no
@@ -2735,6 +2774,9 @@ pub(crate) fn reset_drain_hint_cache_for_tests() {
     // Test-only: a blocking lock is fine here (and must not silently skip
     // the reset). The production path above uses `try_lock` exclusively.
     if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
+        *cache = None;
+    }
+    if let Ok(mut cache) = ADMISSION_HINT_CACHE.lock() {
         *cache = None;
     }
 }
@@ -2822,11 +2864,12 @@ fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
     }
 }
 
-/// Cancel an in-flight acquire when the daemon drains. The journal leg is
+/// Cancel an in-flight acquire when capacity is cordoned or the daemon drains.
+/// The journal leg is
 /// TTL-cached, so this 100ms poll costs one zero-timeout `SELECT` per TTL
 /// window at most.
-async fn wait_for_drain_signal_in(journal_path: Option<&Path>) {
-    while !effective_draining(journal_path) {
+async fn wait_for_capacity_block_signal_in(journal_path: Option<&Path>) {
+    while !effective_capacity_blocked(journal_path) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -3450,7 +3493,7 @@ pub(crate) async fn run_daemon_slot(
         crate::host_capacity::DiskPressure::new(crate::host_capacity::DiskPolicy::default());
     let drain_journal_path = config_base.join("journal.db");
     loop {
-        if slot_action_on_poll(effective_draining(Some(&drain_journal_path)), false)
+        if slot_action_on_poll(effective_capacity_blocked(Some(&drain_journal_path)), false)
             == SlotAction::DeregisterAndExit
         {
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
@@ -3715,11 +3758,10 @@ pub(crate) async fn run_daemon_slot(
         if args.once {
             return Ok(());
         }
-        if slot_action_on_poll(effective_draining(Some(&drain_journal_path)), true)
-            == SlotAction::FinishJobThenExit
-        {
-            let note =
-                format!("slot-{slot_index} cycle {cycle} finished during drain: deregistering");
+        if effective_capacity_blocked(Some(&drain_journal_path)) {
+            let note = format!(
+                "slot-{slot_index} cycle {cycle} finished during capacity fence: deregistering"
+            );
             println!("{note}");
             daemon_forensic_log(&config_base, &note);
             cleanup_failed_daemon_slot(
@@ -4880,7 +4922,7 @@ fn maybe_startup_host_docker_reclaim(
         backend,
         daemon_id,
         config_base,
-        |daemon_id, config_base| prune_stale_velnor_docker_resources(daemon_id, config_base),
+        prune_stale_velnor_docker_resources,
         |id| crate::docker_lease::reclaim_daemon_orphan_jobs(id, crate::docker::client::host_call),
     );
 }
@@ -4996,28 +5038,22 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str, config_base: &Path) {
     ]));
     container_ids.sort();
     container_ids.dedup();
-    const STARTUP_CONTAINER_INSPECT_FORMAT: &str =
-        r#"{{ index .Config.Labels "velnor.daemon-id" }}{{ "\t" }}{{ index .Config.Labels "velnor.job-id" }}"#;
+    const STARTUP_CONTAINER_INSPECT_FORMAT: &str = r#"{{ index .Config.Labels "velnor.daemon-id" }}{{ "\t" }}{{ index .Config.Labels "velnor.job-id" }}"#;
     let containers = container_ids
         .into_iter()
         .filter(|id| {
-            docker(&[
-                "inspect",
-                "--format",
-                STARTUP_CONTAINER_INSPECT_FORMAT,
-                id,
-            ])
-            .filter(|output| output.status.success())
-            .is_some_and(|output| {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let mut parts = text.trim().split('\t');
-                let owner = parts.next().unwrap_or("");
-                let job_container = parts.next().unwrap_or("");
-                if !job_container.is_empty() && live_job_containers.contains(job_container) {
-                    return false;
-                }
-                daemon_owns_resource(owner, daemon_id)
-            })
+            docker(&["inspect", "--format", STARTUP_CONTAINER_INSPECT_FORMAT, id])
+                .filter(|output| output.status.success())
+                .is_some_and(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let mut parts = text.trim().split('\t');
+                    let owner = parts.next().unwrap_or("");
+                    let job_container = parts.next().unwrap_or("");
+                    if !job_container.is_empty() && live_job_containers.contains(job_container) {
+                        return false;
+                    }
+                    daemon_owns_resource(owner, daemon_id)
+                })
         })
         .collect::<Vec<_>>();
     if !containers.is_empty() {
@@ -5571,7 +5607,7 @@ async fn run_v2(
 
             let Some(message) = message else {
                 println!("No broker message received.");
-                if slot_action_on_poll(effective_draining(Some(&poll_drain_journal)), false)
+                if slot_action_on_poll(effective_capacity_blocked(Some(&poll_drain_journal)), false)
                     == SlotAction::DeregisterAndExit
                 {
                     // Daemon drain (SIGTERM): an idle slot exits at the poll
@@ -6310,6 +6346,18 @@ async fn handle_v2_message(
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
+    let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
+    // A cordoned slot must leave the broker session before acknowledging or
+    // acquiring a request. The scheduler can then redeliver to another
+    // eligible runner; this slot never claims and discards unrelated work.
+    if effective_capacity_blocked(Some(&acquisition_drain_journal)) {
+        forensics.broker(&format!(
+            "acquire SKIPPED request={} admission fence active",
+            reference.runner_request_id
+        ));
+        return Ok(V2MessageAction::Shutdown);
+    }
     if reference.should_acknowledge
         && let Err(error) = broker
             .acknowledge_runner_request(
@@ -6344,17 +6392,15 @@ async fn handle_v2_message(
     // and the job lost until its lease expired. If the intent cannot be
     // recorded, do not make the request: an unrecorded acquisition is the exact
     // failure this write exists to prevent, and the broker redelivers.
-    let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
-    // Unified drain: never start an acquisition while draining. The broker
-    // redelivers to a live runner; this slot exits at its next idle poll
-    // boundary.
-    let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
-    if journal_drain_hint(&acquisition_drain_journal) {
+    // Unified capacity fence: never start an acquisition while cordoned or
+    // draining. The broker redelivers to a live runner; this slot exits at
+    // its next idle poll boundary.
+    if effective_capacity_blocked(Some(&acquisition_drain_journal)) {
         forensics.broker(&format!(
-            "acquire SKIPPED request={} journal drain active",
+            "acquire SKIPPED request={} capacity fence active",
             reference.runner_request_id
         ));
-        return Ok(V2MessageAction::None);
+        return Ok(V2MessageAction::Shutdown);
     }
     if let Err(error) = intend_run_service_acquisition_in_journal(
         &acquisition_journal_dir,
@@ -6386,7 +6432,7 @@ async fn handle_v2_message(
             reference.billing_owner_id.as_deref(),
         )
         .instrument(pickup_span) => result,
-        _ = wait_for_drain_signal_in(Some(&acquisition_drain_journal)) => {
+        _ = wait_for_capacity_block_signal_in(Some(&acquisition_drain_journal)) => {
             forensics.lifecycle(&format!(
                 "acquire canceled by daemon drain request={}",
                 reference.runner_request_id
@@ -15545,6 +15591,36 @@ mod tests {
         // No journal path degrades to the static latch however the latch is
         // set, so latch-only paths observe no behavior change.
         assert_eq!(effective_draining(None), draining());
+    }
+
+    #[test]
+    fn admission_fence_hint_round_trips_and_fails_closed_on_corruption() {
+        reset_drain_hint_cache_for_tests();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-admission-hint-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        let mut journal = velnor_control::journal::Journal::open(&path).unwrap();
+        assert!(!journal_admission_blocked_hint(&path));
+        journal.set_admission_blocked(7).unwrap();
+        reset_drain_hint_cache_for_tests();
+        assert!(journal_admission_blocked_hint(&path));
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = 'broken' WHERE key = 'admission'",
+                [],
+            )
+            .unwrap();
+        reset_drain_hint_cache_for_tests();
+        assert!(journal_admission_blocked_hint(&path));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

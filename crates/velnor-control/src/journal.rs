@@ -136,6 +136,13 @@ pub struct FleetState {
     /// Lifecycle resource version that requested the drain. Observability
     /// only; staleness is settled by the lifecycle ledger, not this value.
     pub drain_version: u64,
+    /// Durable soft admission fence (`meta[admission]`). A cordon stops new
+    /// registration and job acquisition while preserving the daemon and any
+    /// in-flight work. It is separate from `drain_active`: drain exits the
+    /// process, cordon does not.
+    pub admission_blocked: bool,
+    /// Lifecycle resource version that requested the admission fence.
+    pub admission_version: u64,
     pub desired_ready: u32,
     pub canary: CanaryStatus,
     pub package_generation: u64,
@@ -164,6 +171,8 @@ impl Default for FleetState {
             runner_group_valid: false,
             drain_active: false,
             drain_version: 0,
+            admission_blocked: false,
+            admission_version: 0,
             desired_ready: 0,
             canary: CanaryStatus::Unknown,
             package_generation: 0,
@@ -188,7 +197,11 @@ impl FleetState {
             .filter(|slot| slot.phase.counts_as_ready())
             .count() as u32;
         let registered = self.slots.iter().filter(|slot| slot.registered).count() as u32;
-        let permits = self.slots.iter().filter(|slot| slot.permit_held).count() as u32;
+        let permits = if self.admission_blocked || self.drain_active {
+            0
+        } else {
+            self.slots.iter().filter(|slot| slot.permit_held).count() as u32
+        };
         let executor_ready = self
             .slots
             .iter()
@@ -225,7 +238,7 @@ impl FleetState {
 
     #[must_use]
     pub fn advertised_capacity(&self) -> u32 {
-        if self.capacity_invalid {
+        if self.capacity_invalid || self.admission_blocked || self.drain_active {
             return 0;
         }
         self.slots
@@ -252,6 +265,10 @@ fn pending_outbox_blocks_admission(
         }
         !outbox_owner_is_proven(state, row)
     })
+}
+
+fn fleet_admission_blocked(state: &FleetState) -> bool {
+    state.admission_blocked || state.drain_active
 }
 
 fn outbox_owner_is_proven(state: &FleetState, row: &OutboxRecord) -> bool {
@@ -760,18 +777,17 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let routing = state.routing_valid && state.runner_group_valid;
-            let admission_blocked = slot_has_active_job(&state, &slot_id)
+            let slot_admission_blocked = slot_has_active_job(&state, &slot_id)
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
-            // A latched drain stops new capacity, never in-flight work: no
-            // fresh permit may spawn a slot while the fleet is draining.
-            // Deliberately unconditional (no flag check): a marker present
-            // in state always gates new work, even with the flag off
-            // (fail-closed; see the controller's flag-off drain arm).
-            let drain_active = state.drain_active;
+            // A drain or cordon stops new capacity, never in-flight work: no
+            // fresh permit may spawn a slot while admission is fenced.
+            // Deliberately unconditional: a durable marker in state always
+            // gates new work (fail-closed).
+            let admission_blocked = fleet_admission_blocked(&state);
             let slot = state.slot_mut(&slot_id);
             if generation < slot.generation
+                || slot_admission_blocked
                 || admission_blocked
-                || drain_active
                 || (generation == slot.generation && slot.phase == SlotPhase2::Fenced)
             {
                 rejected = true;
@@ -825,12 +841,14 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
-            let admission_blocked = slot_has_active_job(&state, &slot_id)
+            let slot_admission_blocked = slot_has_active_job(&state, &slot_id)
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
+            let fleet_blocked = fleet_admission_blocked(&state);
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
                 || slot.phase == SlotPhase2::Fenced
-                || admission_blocked
+                || slot_admission_blocked
+                || fleet_blocked
                 || slot.ready_proof().is_err()
             {
                 rejected = true;
@@ -845,12 +863,14 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
-            let admission_blocked = slot_has_active_job(&state, &slot_id)
+            let slot_admission_blocked = slot_has_active_job(&state, &slot_id)
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
+            let fleet_blocked = fleet_admission_blocked(&state);
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
                 || slot.phase == SlotPhase2::Fenced
-                || admission_blocked
+                || slot_admission_blocked
+                || fleet_blocked
             {
                 rejected = true;
             } else {
@@ -890,13 +910,15 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
-            let admission_blocked = slot_has_active_job(&state, &slot_id)
+            let slot_admission_blocked = slot_has_active_job(&state, &slot_id)
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
+            let fleet_blocked = fleet_admission_blocked(&state);
             {
                 let slot = state.slot_mut(&slot_id);
                 if generation != slot.generation
                     || slot.phase == SlotPhase2::Fenced
-                    || admission_blocked
+                    || slot_admission_blocked
+                    || fleet_blocked
                 {
                     rejected = true;
                 } else if slot.ready_proof().is_ok() && slot.registered {
@@ -925,15 +947,14 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             // to be accepted — while the job row it creates is deliberately
             // provisional: it is not proof of ownership and cannot back a
             // completion.
-            // A latched drain stops new acquisitions, never in-flight work:
+            // A drain or cordon stops new acquisitions, never in-flight work:
             // an already-intended job still resolves, owns, and completes.
-            // Deliberately unconditional (no flag check): fail-closed like
-            // the `PermitReserved` arm above.
-            let drain_active = state.drain_active;
+            // Deliberately unconditional: fail-closed like the permit arm.
+            let admission_blocked = fleet_admission_blocked(&state);
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
                 || slot.phase != SlotPhase2::Ready
-                || drain_active
+                || admission_blocked
                 || state.jobs.iter().any(|job| job.job_id == job_id)
             {
                 rejected = true;
@@ -1771,6 +1792,75 @@ impl Journal {
         transaction.commit()?;
         Ok(true)
     }
+
+    /// Remove a durable drain request when an explicit restart/resume has
+    /// taken ownership of this journal. Idempotent: a missing marker is
+    /// already clear. The caller must establish its process ownership before
+    /// invoking this method; this API never guesses which daemon to resume.
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn clear_drain(&mut self) -> StoreResult<bool> {
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let removed = transaction.execute("DELETE FROM meta WHERE key = 'drain'", [])? > 0;
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    /// Latch a soft admission fence at `version`. Unlike drain, this keeps
+    /// the daemon alive and lets in-flight jobs finish; all new registration,
+    /// permits, and acquisitions are rejected until `clear_admission_blocked`.
+    /// The version never regresses across retries.
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn set_admission_blocked(&mut self, version: u64) -> StoreResult<bool> {
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'admission'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let effective = match existing.as_deref() {
+            None => version,
+            Some(value) => parse_admission_value(value)
+                .ok_or_else(|| invalid_materialized("admission", value))?
+                .version
+                .max(version),
+        };
+        let value = format!("blocked:{effective}");
+        if existing.as_deref() == Some(value.as_str()) {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO meta (key, value) VALUES ('admission', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![value],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Clear a soft admission fence. Idempotent and independent from the
+    /// process-exit drain marker.
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn clear_admission_blocked(&mut self) -> StoreResult<bool> {
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let removed = transaction.execute("DELETE FROM meta WHERE key = 'admission'", [])? > 0;
+        transaction.commit()?;
+        Ok(removed)
+    }
 }
 
 /// Durable fleet drain request read without a journal handle.
@@ -1808,6 +1898,54 @@ fn parse_drain_value(value: &str) -> Option<DrainState> {
         active: true,
         version,
     })
+}
+
+/// Durable soft admission fence read without a journal handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionState {
+    /// Lifecycle resource version that requested the fence.
+    pub version: u64,
+}
+
+/// Why a soft admission marker could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionStateReadError {
+    /// The journal could not be opened or queried.
+    Unavailable,
+    /// The marker exists but is not a valid `blocked:<version>` value.
+    Malformed,
+}
+
+/// Read the soft admission marker with a zero-timeout read-only connection.
+/// An error is distinct from an absent marker so runner admission can fail
+/// closed on a malformed or inaccessible journal instead of accepting work
+/// without a durable cordon decision.
+pub fn read_admission_state(
+    path: &Path,
+) -> Result<Option<AdmissionState>, AdmissionStateReadError> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| AdmissionStateReadError::Unavailable)?;
+    conn.busy_timeout(Duration::ZERO)
+        .map_err(|_| AdmissionStateReadError::Unavailable)?;
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'admission'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| AdmissionStateReadError::Unavailable)?;
+    match value {
+        None => Ok(None),
+        Some(value) => parse_admission_value(&value)
+            .map(Some)
+            .ok_or(AdmissionStateReadError::Malformed),
+    }
+}
+
+fn parse_admission_value(value: &str) -> Option<AdmissionState> {
+    let version = value.strip_prefix("blocked:")?.parse::<u64>().ok()?;
+    Some(AdmissionState { version })
 }
 
 fn is_transient_contention(error: &StoreError) -> bool {
@@ -2006,6 +2144,22 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
                 state.drain_version = drain.version;
             }
             None => return Err(invalid_materialized("drain", value)),
+        },
+    }
+    // Absent on journals written before soft admission fencing. A malformed
+    // marker is a materialized-state error: controller callers must not
+    // accept work when the durable admission decision cannot be decoded.
+    match meta.get("admission") {
+        None => {
+            state.admission_blocked = false;
+            state.admission_version = 0;
+        }
+        Some(value) => match parse_admission_value(value) {
+            Some(admission) => {
+                state.admission_blocked = true;
+                state.admission_version = admission.version;
+            }
+            None => return Err(invalid_materialized("admission", value)),
         },
     }
 
@@ -2366,23 +2520,25 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
             (state.capacity_declared as u8).to_string(),
         ),
     ];
-    // Every `apply` loads the materialized state (drain included) under the
-    // same immediate transaction it persists under, so re-emitting the drain
-    // marker from state keeps a latched drain sticky across unrelated event
-    // writes with no new event and no schema bump. Absent when inactive, so
-    // pre-drain journals keep their exact meta shape.
+    // Every `apply` loads the materialized state (drain and admission
+    // included) under the same immediate transaction it persists under, so
+    // re-emitting both markers from state keeps them sticky across unrelated
+    // event writes with no new event and no schema bump. Absent when inactive,
+    // so old journals keep their exact meta shape.
     //
     // Mixed-version warning: this rewrite drops every `meta` key it does
-    // not know, and a pre-drain binary's `persist_state` does not know the
-    // drain key — any write by an older binary clears a latched marker
-    // (unlatches the drain). Forward tolerance is read-only: old binaries
-    // open drained journals fine but must not share one journal with a
-    // draining new binary across an upgrade. A cleared marker re-latches
-    // on the next flag-on drain edge that observes draining.
+    // not know, and an older binary's `persist_state` does not know the
+    // drain/admission keys — any write by an older binary clears a latched
+    // marker. Forward tolerance is read-only: old binaries open fenced
+    // journals fine but must not share one journal with a newer lifecycle
+    // writer across an upgrade.
     let drain = state
         .drain_active
         .then(|| ("drain", format!("requested:{}", state.drain_version)));
-    for (key, value) in meta.into_iter().chain(drain) {
+    let admission = state
+        .admission_blocked
+        .then(|| ("admission", format!("blocked:{}", state.admission_version)));
+    for (key, value) in meta.into_iter().chain(drain).chain(admission) {
         tx.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)",
             params![key, value],
@@ -3105,6 +3261,15 @@ mod tests {
             let outcome = journal.apply(event).unwrap();
             assert!(!outcome.rejected);
         }
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: s,
+                    generation: g,
+                })
+                .unwrap()
+                .rejected
+        );
     }
 
     /// Drive one slot to a running job so completion tests start from the
@@ -3188,6 +3353,55 @@ mod tests {
         let state = journal.materialized_state().unwrap();
         assert!(state.drain_active);
         assert_eq!(state.drain_version, 9);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn admission_fence_round_trips_persists_and_clears() {
+        let (dir, mut journal) = open_tmp("admission-fence");
+        prime_ready(&mut journal, "s-1");
+        assert!(journal.set_admission_blocked(3).unwrap());
+        assert!(!journal.set_admission_blocked(2).unwrap());
+        let fenced = journal.materialized_state().unwrap();
+        assert!(fenced.admission_blocked);
+        assert_eq!(fenced.admission_version, 3);
+        assert_eq!(fenced.advertised_capacity(), 0);
+        assert_eq!(fenced.health().capacity_permits, 0);
+        assert_eq!(
+            read_admission_state(&dir.join("journal.db")).unwrap(),
+            Some(AdmissionState { version: 3 })
+        );
+
+        assert!(
+            journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("s-1"),
+                    job_id: job("blocked-job"),
+                    generation: r#gen(),
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal.clear_admission_blocked().unwrap());
+        assert!(!journal.clear_admission_blocked().unwrap());
+        assert!(!journal.materialized_state().unwrap().admission_blocked);
+        assert_eq!(read_admission_state(&dir.join("journal.db")).unwrap(), None);
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("s-1"),
+                    job_id: job("released-job"),
+                    generation: r#gen(),
+                    message_id: "msg-2".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3338,6 +3552,30 @@ mod tests {
         let garbage = dir.join("garbage.db");
         std::fs::write(&garbage, b"not a sqlite database").unwrap();
         assert_eq!(read_drain_state(&garbage), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_admission_state_distinguishes_absent_from_corrupt() {
+        let (dir, mut journal) = open_tmp("admission-read");
+        let path = dir.join("journal.db");
+        assert_eq!(read_admission_state(&path).unwrap(), None);
+        journal.set_admission_blocked(5).unwrap();
+        assert_eq!(
+            read_admission_state(&path).unwrap(),
+            Some(AdmissionState { version: 5 })
+        );
+        journal
+            .conn
+            .execute(
+                "UPDATE meta SET value = 'not-a-fence' WHERE key = 'admission'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            read_admission_state(&path),
+            Err(AdmissionStateReadError::Malformed)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -371,6 +371,11 @@ const MAX_LIFECYCLE_TEXT_BYTES: usize = 512;
 const MAX_SCALE_SLOTS: u32 = 4_096;
 
 fn validate_request(request: &MutationRequest) -> Result<(), PortError> {
+    if !supports_mutation(&request.kind) {
+        return Err(PortError::Unsupported {
+            operation: kind_name(&request.kind).to_owned(),
+        });
+    }
     validate_bounded_text("reason", &request.reason, true)?;
     validate_bounded_text("idempotency_key", &request.idempotency_key, true)?;
     match (&request.kind, request.scale_to) {
@@ -389,6 +394,17 @@ fn validate_request(request: &MutationRequest) -> Result<(), PortError> {
         }),
         (_, None) => Ok(()),
     }
+}
+
+/// Only mutations with a live actuator may enter the durable ledger. The
+/// former implementation accepted recycle/scale/reconcile/restart and left
+/// those intents permanently in `accepted` with no controller that could
+/// perform them.
+fn supports_mutation(kind: &MutationKind) -> bool {
+    matches!(
+        kind,
+        MutationKind::Cordon | MutationKind::Uncordon | MutationKind::Drain | MutationKind::Resume
+    )
 }
 
 fn validate_bounded_text(
@@ -589,6 +605,31 @@ mod tests {
         oversized_scale.kind = MutationKind::Scale;
         oversized_scale.scale_to = Some(MAX_SCALE_SLOTS + 1);
         assert!(service.mutate(oversized_scale).is_err());
+    }
+
+    #[test]
+    fn mutations_without_an_actuator_are_rejected_before_durable_acceptance() {
+        let service = LifecycleService::new();
+        service.register("primary").expect("register");
+        for kind in [
+            MutationKind::Restart,
+            MutationKind::Recycle,
+            MutationKind::Scale,
+            MutationKind::Reconcile,
+        ] {
+            let error = service
+                .mutate(MutationRequest {
+                    kind,
+                    target: "primary".to_owned(),
+                    reason: "test".to_owned(),
+                    idempotency_key: "unsupported-operation".to_owned(),
+                    expected_version: None,
+                    scale_to: Some(2),
+                })
+                .expect_err("unsupported mutation must fail closed");
+            assert!(matches!(error, PortError::Unsupported { .. }));
+        }
+        assert_eq!(service.get("primary").unwrap().desired, "ready");
     }
 
     #[test]
