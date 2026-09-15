@@ -3418,11 +3418,11 @@ fn generated_files_with_surface(
             workflow_file.as_str(),
             "ci-pr.yml" | "ci-pull-request.yml" | "ci-main.yml" | "nightly.yml"
         );
-        if !surface_aggregates_predates_shards {
-            if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
-                files.insert(path, content.clone());
-                continue;
-            }
+        if !surface_aggregates_predates_shards
+            && let Some(content) = surface.and_then(|surface| surface.files.get(&path))
+        {
+            files.insert(path, content.clone());
+            continue;
         }
         let content = config
             .workflow_templates
@@ -7492,16 +7492,18 @@ channel = "stable"
             "nextest must pass the empty collection: {}",
             rust.pr_commands.join(" | ")
         );
-        let nextest_index = rust
-            .pr_commands
-            .iter()
-            .position(|command| command.contains(" nextest "))
-            .expect("nextest command");
-        let clippy_index = rust
-            .pr_commands
-            .iter()
-            .position(|command| command.contains(" clippy "))
-            .expect("clippy command");
+        let nextest_index = must_some(
+            rust.pr_commands
+                .iter()
+                .position(|command| command.contains(" nextest ")),
+            "nextest command",
+        );
+        let clippy_index = must_some(
+            rust.pr_commands
+                .iter()
+                .position(|command| command.contains(" clippy ")),
+            "clippy command",
+        );
         assert!(
             nextest_index < clippy_index,
             "nextest must run before clippy so rustc test artifacts are reused: {}",
@@ -10237,13 +10239,9 @@ channel = "stable"
         assert!(policy.contains("echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\""));
         assert!(policy.contains("install -Dm0755 \"$VELNOR_WORKFLOW_ROOT/bin/velnor-workflow\" \"$STAGED_POLICY_RUNTIME\""));
         assert!(policy.contains("mv -f \"$STAGED_POLICY_RUNTIME\" \"$CACHED_POLICY_RUNTIME\""));
-        let guard = policy
-            .find("CACHED_POLICY_RUNTIME=")
-            .expect("reuse guard renders");
-        let install = policy.find("cargo install").expect("cargo install renders");
-        let persist = policy
-            .find("install -Dm0755")
-            .expect("cache persist renders");
+        let guard = must_some(policy.find("CACHED_POLICY_RUNTIME="), "reuse guard renders");
+        let install = must_some(policy.find("cargo install"), "cargo install renders");
+        let persist = must_some(policy.find("install -Dm0755"), "cache persist renders");
         assert!(guard < install && install < persist);
         assert!(policy.contains("--locked"));
         assert!(policy.contains("--rev abc123"));
