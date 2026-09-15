@@ -12,6 +12,12 @@ use super::{Args, Primitive, RenderCtx, Rendered, WATCH_GRAPH};
 use crate::scan::file_walk::{has_extension, is_test_support_path};
 use crate::{GeneratorError, Unit, UnitKind};
 
+/// Whole-tree crate globs duplicate per-crate units; workspace_check gates
+/// validate topology on manifests, release infra, and explicit additions.
+fn is_broad_per_crate_source_watch(path: &str) -> bool {
+    matches!(path, "crates/**" | "tools/**")
+}
+
 /// Declare the repository's watch graph.
 pub(crate) struct WatchGraph;
 
@@ -47,7 +53,14 @@ impl Primitive for WatchGraph {
             ) || (unit.kind == UnitKind::Docker && unit.root == ".");
             let mut watch = BTreeSet::new();
             if !derived {
-                watch.extend(unit.watch.iter().cloned());
+                watch.extend(
+                    unit.watch
+                        .iter()
+                        .filter(|path| {
+                            !(unit.workspace_check && is_broad_per_crate_source_watch(path))
+                        })
+                        .cloned(),
+                );
             }
             if unit.kind == UnitKind::Docker && unit.root == "." {
                 watch.extend(docker_watch.iter().cloned());
@@ -111,7 +124,14 @@ impl Primitive for WatchGraph {
             }
             watch.extend(runtime_inputs.iter().cloned());
             if let Some(paths) = additions.get(&unit.id) {
-                watch.extend(paths.iter().cloned());
+                watch.extend(
+                    paths
+                        .iter()
+                        .filter(|path| {
+                            !(unit.workspace_check && is_broad_per_crate_source_watch(path))
+                        })
+                        .cloned(),
+                );
             }
             unit.watch = watch.into_iter().collect();
             units.push(unit);
@@ -269,4 +289,17 @@ pub(crate) fn validate_canonical_release_products(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_broad_per_crate_source_watch;
+
+    #[test]
+    fn workspace_topology_gate_ignores_whole_crate_trees() {
+        assert!(is_broad_per_crate_source_watch("crates/**"));
+        assert!(is_broad_per_crate_source_watch("tools/**"));
+        assert!(!is_broad_per_crate_source_watch("crates/velnor-runner/**"));
+        assert!(!is_broad_per_crate_source_watch("docker/**"));
+    }
 }

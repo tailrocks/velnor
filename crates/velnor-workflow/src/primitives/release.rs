@@ -1766,7 +1766,10 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
             );
             WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
             workflow.render_tool_provisioning(&mut output, lane, unit, false);
-            if CacheBackend::Detected.enables_actions_cache(&workflow, unit)
+            let cargo_cache_restored = CacheBackend::Detected
+                .lane_enables_actions_cache(lane, &workflow, unit)
+                && unit.cache.is_some();
+            if cargo_cache_restored
                 && let Some(cache) = &unit.cache
             {
                 render_retained_output_cache_note(&mut output, &workflow, unit, cache);
@@ -1779,7 +1782,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     unit.id
                 );
             }
-            render_cargo_source_preparation(&mut output, &[unit], &unit.id);
+            render_cargo_source_preparation(&mut output, &[unit], &unit.id, false, cargo_cache_restored);
             let cargo_offline = checks_env(unit);
             let _ = writeln!(
                 output,
@@ -2854,6 +2857,7 @@ mod tests {
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: false,
+            workspace_check: false,
         }
     }
 
@@ -3004,7 +3008,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "02c3a4b180ae74d52bd37f34c6eefd52f42ef7cd9e6ee51402c5928d7f2667f1",
+                "eb49a016197916b73dd525862d4481032317de233b61427726f79586b29aa912",
             ),
             (
                 "preview.yml",
@@ -3076,7 +3080,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "dbdc90dfa35e9fb09d5ee3ddbf340eb756fa5bbbe25aca08e93c7787da5b0f64",
+                "30d9ba3a9aec077f5a4e44633aaeb975cbacec60f37ddcc4cf497d19031afced",
             ),
             (
                 "preview.yml",

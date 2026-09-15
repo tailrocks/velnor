@@ -21,7 +21,6 @@ on:
       - bun.lock
       - bun.lockb
       - "content/docs/**/*.mdx"
-      - "crates/**"
       - "crates/velnor-bench/**/*.rs"
       - "crates/velnor-bench/Cargo.toml"
       - "crates/velnor-bench/benches/**"
@@ -151,9 +150,10 @@ on:
       - "schemas/**"
       - "schemas/velnor.telemetry.v1.json"
       - "scripts/**"
+      - "scripts/check-release-feature-boundary.sh"
+      - "scripts/test-check-release-feature-boundary.sh"
       - source.config.ts
       - "src/**"
-      - "tools/**"
       - "tools/unit-collector/**"
       - "tools/unit-collector/**/*.rs"
       - "tools/unit-collector/Cargo.toml"
