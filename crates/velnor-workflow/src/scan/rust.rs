@@ -463,15 +463,19 @@ fn analyze_rust_manifests(
                 "{command_prefix}cargo test {cargo_lock_flag} --all-features {package_selector}"
             )
         };
+        let clippy_command = format!(
+            "{command_prefix}cargo clippy {cargo_lock_flag} --profile test --no-deps --all-targets --all-features {package_selector} -- -D warnings"
+        );
+        // Nextest before clippy: rustc test-profile artifacts are reused by
+        // clippy, avoiding a separate dev-profile compile plus a clippy-driver
+        // rebuild that nextest would not share anyway.
         let commands = vec![
             format!(
                 "{command_prefix}cargo fmt --manifest-path {} -- --check",
                 shell_quote("Cargo.toml")
             ),
-            format!(
-                "{command_prefix}cargo clippy {cargo_lock_flag} --no-deps --all-targets --all-features {package_selector} -- -D warnings"
-            ),
             test_command,
+            clippy_command,
         ];
         let mut watch = vec![
             manifest_path.clone(),
