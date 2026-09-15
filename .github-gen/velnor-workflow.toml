@@ -184,10 +184,10 @@ docker_closure = [
 "rust-velnor-runner" = [
   ".github-gen/velnor-workflow.toml",
   "microvm/**",
-  "fleet/**",
+  "config/fleet/**",
 ]
 "rust-velnorctl" = ["microvm/**"]
-"rust-velnor-tools" = ["fleet/**"]
+"rust-velnor-tools" = ["config/fleet/**"]
 "rust-velnor-model" = ["schemas/**"]
 
 # Regeneration gate: the workflow crate owns the generated surface, so its

@@ -234,7 +234,7 @@ All 20 migration targets that belong to tailrocks or jackin-project are in the o
 ### Docs / fleet config clues (not live-probed on sentry)
 
 - Desired policy JSONs: group `velnor-trusted`, labels `velnor-target-mvp`, visibility selected, `restricted_to_workflows=true`.
-- `fleet/ci-cd-cache-architecture-evidence.md`: Velnor on `sentry.tailrocks.internal` installed **only** via apt `https://velnor-apt.tailrocks.com/`. Documented fleet still **v0.1.274** until a tagged runner is published and installed. WP6 job-log protocol blocked on that version (2026-09-13).
+- Velnor on `sentry.tailrocks.internal` is installed **only** via apt `https://velnor-apt.tailrocks.com/`. Runner version on fleet hosts must be verified live (not from removed evidence docs).
 - Live runner names now are `velnor-{org}-slot-N` (and fixture microvm slots), not the `velnor-dogfood-slot-*` names in the WP6 note. Version of the currently-online runners was **not** read from job logs in this preflight.
 
 ## Deletion targets — can DELETE?
