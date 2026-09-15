@@ -877,4 +877,4 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Duplicate collapsed step ids (HTTP 422) | V | unit-prefixed step ids via `qualified_step_id`; reverted per-job verify sharding (`630b264e`) |
 | Invalid workflow-level / caller `cache-mode: read` | V | removed; PR triggers default to read-only cache |
 | Pins @ `6c51eceb` (D19) | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 453 passed |
-| PR CI jobs start (not `startup_failure`) | U | pending dispatch after push |
+| PR CI jobs start (not `startup_failure`) | V | run 35027858205: 41 jobs scheduled (was 0 / `startup_failure`); no `Maximum object size exceeded` |
