@@ -2211,10 +2211,24 @@ impl WorkflowIr {
             }
             let velnor_job = job_id.starts_with("velnor-");
             if velnor_job {
-                let _ = writeln!(
-                    output,
-                    "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-                );
+                let accept_skip = self
+                    .units
+                    .iter()
+                    .find(|unit| unit.id == *unit_id)
+                    .is_some_and(|unit| {
+                        self.trust_gated_velnor_job_skipped(RunnerMode::Velnor, unit)
+                    });
+                if accept_skip {
+                    let _ = writeln!(
+                        output,
+                        "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+                    );
+                } else {
+                    let _ = writeln!(
+                        output,
+                        "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+                    );
+                }
             } else {
                 let _ = writeln!(
                     output,
@@ -3655,6 +3669,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         lane == RunnerMode::Velnor && unit.requires_trusted && !self.velnor_trusted_runner_online
     }
 
+    fn velnor_aggregate_accepts_selected_skip(&self, unit: &Unit, fork_pr_trusted: bool) -> bool {
+        !fork_pr_trusted || self.trust_gated_velnor_job_skipped(RunnerMode::Velnor, unit)
+    }
+
     pub(crate) fn append_trusted_runner_availability_gate(
         &self,
         lane: RunnerMode,
@@ -4058,7 +4076,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 let id = unit_job_id(lane, &unit.id);
                 needs.push(id.clone());
-                job_checks.push((unit.id.clone(), id, lane == RunnerMode::Velnor && !trusted));
+                job_checks.push((
+                    unit.id.clone(),
+                    id,
+                    lane == RunnerMode::Velnor
+                        && self.velnor_aggregate_accepts_selected_skip(unit, trusted),
+                ));
             }
         }
         let gate = if self.control_plane_lane() == RunnerMode::Velnor {
