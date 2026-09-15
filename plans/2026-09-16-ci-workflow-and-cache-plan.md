@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **approved direction** — goal-ready execution checklist.  
-Date: 2026-09-16 (rev 2: every claim re-verified against HEAD `1eff089b`, `origin/main` `5ca61659`, and live GitHub state on 2026-09-16; Phase 0 added).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `c273707d` (Phases 0–6 code landed locally; live producer/budget/fleet gates open until merge).  
+Date: 2026-09-16 (rev 3: §9–§14, §16 checkboxes + §20 ledger updated from `c273707d` local evidence; rev 2 baseline `1eff089b` / `origin/main` `5ca61659`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -346,30 +346,30 @@ Pre-req: Phase 0 green.
 
 ### 9.1 Workflow structure (WP1–WP4)
 
-- [ ] Add `unit_job_display_name(unit, lane, runners)` in `lib.rs` (reuse `sidebar_group_name`'s `{kind} · {label}` form, `lib.rs:2131`)
-- [ ] Replace `kind_reusable_callers()` (**`primitives/ir.rs:1590`**, not `lib.rs`) with per-(unit,lane) callers; caller `if:` = `contains(needs.plan.outputs.units, unit)` so unselected units skip at the caller
-- [ ] Collapse each kind reusable to **one job** keyed on new `unit` + `lane` inputs; callee `name:` derived from `inputs.lane` (D1, D5); update `tests/velnor_first_ci.rs:675-676`
-- [ ] Regenerate `render_nodes_required()` (**`ir.rs:1701`**) for 35 caller ids (17×2 + control) plus `plan`, `velnor-lane-admission`, `policy`; keep the per-caller matrix validation semantics (`ci-pr.yml:271-413`) but generate it from one table
-- [ ] Rename `Control / Rust` → `Control / Prepare Cargo`; inner job `prepare-cargo` unchanged
-- [ ] Lift `velnor_rust_dependency_needs()` (`lib.rs:3144`) from inner jobs to aggregate `needs:`; dependents accept `skipped` (D6)
-- [ ] Keep `Control / Prepare Cargo` as a caller-level `needs:` of every Velnor Rust caller (today only `group-rust-velnor` needs it, `ci-pr.yml:236`)
-- [ ] Fix the ruleset contract (D16) and the fork-PR admission behavior (D17)
-- [ ] Remove the dead `merge_group` trigger and admission clauses (D8)
-- [ ] Rewrite `lane_compare` name parser (**`crates/velnor-tools/src/lane_compare.rs:687-724`**): parse the trailing `/ GitHub|Velnor` segment; today's fallback classifies any name containing both "velnor" and "github" as `Ambiguous`, and every Rust unit id contains "velnor"
-- [ ] Regen workflows; `velnor-workflow --check` green
+- [x] Add `unit_job_display_name(unit, lane, runners)` in `lib.rs` (reuse `sidebar_group_name`'s `{kind} · {label}` form, `lib.rs:2131`)
+- [x] Replace `kind_reusable_callers()` (**`primitives/ir.rs:1590`**, not `lib.rs`) with per-(unit,lane) callers; caller `if:` = `contains(needs.plan.outputs.units, unit)` so unselected units skip at the caller
+- [x] Collapse each kind reusable to **one job** keyed on new `unit` + `lane` inputs; callee `name:` derived from `inputs.lane` (D1, D5); update `tests/velnor_first_ci.rs:675-676`
+- [x] Regenerate `render_nodes_required()` (**`ir.rs:1701`**) for 35 caller ids (17×2 + control) plus `plan`, `velnor-lane-admission`, `policy`; keep the per-caller matrix validation semantics (`ci-pr.yml:271-413`) but generate it from one table
+- [x] Rename `Control / Rust` → `Control / Prepare Cargo`; inner job `prepare-cargo` unchanged
+- [x] Lift `velnor_rust_dependency_needs()` (`lib.rs:3144`) from inner jobs to aggregate `needs:`; dependents accept `skipped` (D6)
+- [x] Keep `Control / Prepare Cargo` as a caller-level `needs:` of every Velnor Rust caller (today only `group-rust-velnor` needs it, `ci-pr.yml:236`)
+- [x] Fix the ruleset contract (D16) and the fork-PR admission behavior (D17)
+- [x] Remove the dead `merge_group` trigger and admission clauses (D8)
+- [x] Rewrite `lane_compare` name parser (**`crates/velnor-tools/src/lane_compare.rs:687-724`**): parse the trailing `/ GitHub|Velnor` segment; today's fallback classifies any name containing both "velnor" and "github" as `Ambiguous`, and every Rust unit id contains "velnor"
+- [x] Regen workflows; `velnor-workflow --check` green
 
 ### 9.2 GitHub lane cache fixes (WP-C0–C3)
 
-- [ ] Add `trusted_cache_save_expression(default_branch)` in `ir.rs`; replace the **5** three-event literals (`ir.rs:919, 2283, 2866, 2992`, `lib.rs:3333`); keep the release push-only family behind a second named helper
-- [ ] Gate `jdx/mise-action` with `cache_save: ${{ <trusted expr> }}` (WP-C2); on Velnor lane set `cache: false` (the bind-mounted `MISE_DATA_DIR` is the cache)
-- [ ] Gate `setup-velnor-workflow` "Save runtime cache" on the trusted expression (RC-16)
-- [ ] Dependency-bundle saves (`cargo`, docker seed) → `if: always() && (trusted) && steps.cache.outputs.cache-hit != 'true'` (RC-17); toolchain saves unchanged
-- [ ] Add `cache-mode: read` to PR-triggered unit jobs (platform defense in depth)
-- [ ] Golden test: cache keys unchanged for fixed fixture (D9)
-- [ ] Test: restore always before checks on GitHub lane
-- [ ] Test: Velnor lane renders zero `actions/cache*` for host-persistent units
-- [ ] Test: no save `if:` contains `pull_request` or `merge_group`
-- [ ] Bump `VELNOR_WORKFLOW_SOURCE_REV` / `VELNOR_POLICY_WORKFLOW_REV` with the coherence guard (D19)
+- [x] Add `trusted_cache_save_expression(default_branch)` in `ir.rs`; replace the **5** three-event literals (`ir.rs:919, 2283, 2866, 2992`, `lib.rs:3333`); keep the release push-only family behind a second named helper
+- [x] Gate `jdx/mise-action` with `cache_save: ${{ <trusted expr> }}` (WP-C2); on Velnor lane set `cache: false` (the bind-mounted `MISE_DATA_DIR` is the cache)
+- [x] Gate `setup-velnor-workflow` "Save runtime cache" on the trusted expression (RC-16)
+- [x] Dependency-bundle saves (`cargo`, docker seed) → `if: always() && (trusted) && steps.cache.outputs.cache-hit != 'true'` (RC-17); toolchain saves unchanged
+- [x] Add `cache-mode: read` to PR-triggered unit jobs (platform defense in depth)
+- [x] Golden test: cache keys unchanged for fixed fixture (D9)
+- [x] Test: restore always before checks on GitHub lane
+- [x] Test: Velnor lane renders zero `actions/cache*` for host-persistent units
+- [x] Test: no save `if:` contains `pull_request` or `merge_group`
+- [x] Bump `VELNOR_WORKFLOW_SOURCE_REV` / `VELNOR_POLICY_WORKFLOW_REV` with the coherence guard (D19)
 
 ### 9.3 Velnor lane cache preservation (WP-V0) and extension (WP-V1)
 
@@ -379,61 +379,61 @@ Pre-req: Phase 0 green.
 - [x] Velnor Rust jobs use the offline probe (`ci-unit-rust.yml:937-952`; generator `ir.rs:773-779`)
 - [x] Docker Velnor lane has no seed restore/save (`ci-unit-docker.yml:262-432`) — but also no builder/GC contract (Phase 6)
 - [x] Velnor Rust YAML has zero `actions/cache/save` and zero `actions/cache/restore`
-- [ ] **WP-V1**: add `~/.bun/install/cache`, `~/.npm`, `~/.terraform.d/plugin-cache` to the runner mount set and to `velnor_host_persistent_cache_path` (`cache.rs:101-112`) + `velnor-runner::executor::velnor_persistent_cache_path`; then Velnor bun/docs/opentofu jobs render no `actions/cache*`
-- [ ] Test: Velnor lane YAML has zero `actions/cache*` for **every** unit
+- [x] **WP-V1**: add `~/.bun/install/cache`, `~/.npm`, `~/.terraform.d/plugin-cache` to the runner mount set and to `velnor_host_persistent_cache_path` (`cache.rs:101-112`) + `velnor-runner::executor::velnor_persistent_cache_path`; then Velnor bun/docs/opentofu jobs render no `actions/cache*`
+- [x] Test: Velnor lane YAML has zero `actions/cache*` for **every** unit
 
 ### 9.4 Phase 1 gate
 
-- [ ] `velnor-workflow --check` + `velnor-workflow policy` green (rev 2: there is **no** actionlint step and `scripts/pin_integrity.mjs` is unwired — add both to `ci-policy.yml` or drop the claim)
+- [ ] `velnor-workflow --check` + `velnor-workflow policy` green (rev 2: there is **no** actionlint step and `scripts/pin_integrity.mjs` is unwired — add both to `ci-policy.yml` or drop the claim) — **PARTIAL @ `c273707d`:** `force_generation_adopts_the_declared_surface_and_check_is_complete` + 453 `cargo test -p velnor-workflow` pass; pins at `e6fabca` (D19); `ci-policy.yml` still lacks actionlint / `pin_integrity.mjs`
 - [ ] §16 Phase 1 items pass
 
 ---
 
 ## 10. Execution checklist — Phase 2: Generated output audit
 
-- [ ] GitHub jobs: rustup → mise → mbx → mold → cargo restore → fetch-if-miss → checks → cargo save (gated, `always()`)
-- [ ] Velnor jobs: no GHA restore/save for any unit; mbx local; `Prepare Cargo` ordering at caller level
-- [ ] All save steps use the named helpers (no inline drift): assert by grep over generated YAML
-- [ ] `maintenance.yml`: schedule 03:31, `actions: write`, enforce 8 GiB, closed-PR sweep, skip-while-producer-running
-- [ ] `nightly.yml`: schedule 03:17, dispatches `ci-main.yml@main`, `cancel-in-progress: false`
-- [ ] `ci-pr.yml`: no `merge_group`; `cache-mode: read`
+- [x] GitHub jobs: rustup → mise → mbx → mold → cargo restore → fetch-if-miss → checks → cargo save (gated, `always()`) — **PARTIAL:** `rust-policy` GitHub lane omits `jdx/mise-action` (uses `cargo-bin` + `taiki-e/install-action` instead); other Rust units follow the stack
+- [x] Velnor jobs: no GHA restore/save for any unit; mbx local; `Prepare Cargo` ordering at caller level
+- [x] All save steps use the named helpers (no inline drift): assert by grep over generated YAML
+- [x] `maintenance.yml`: schedule 03:31, `actions: write`, enforce 8 GiB, closed-PR sweep, skip-while-producer-running
+- [x] `nightly.yml`: schedule 03:17, dispatches `ci-main.yml@main`, `cancel-in-progress: false`
+- [x] `ci-pr.yml`: no `merge_group`; `cache-mode: read`
 
 ---
 
 ## 11. Execution checklist — Phase 3: Key churn (PR3)
 
-- [ ] Narrow `rust-policy` mbx freshness — drop `./**/*.rs`; freshness = `deny.toml`, `Cargo.lock` (policy commands do not compile)
-- [ ] Add `deny.toml` to `rust-policy` `key_files`
-- [ ] **Cargo bundle key per lockfile, not per unit** (RC-11): `ci-{os}-{arch}-rust-{hashFiles('Cargo.lock','rust-toolchain.toml','rust-toolchain','.cargo/**')}`; `velnor-workflow-contract` keeps its own lockfile key; expect live `ci-*-rust-*` entries to drop from 9–13 to 2
-- [ ] Toolchain-seeds: add `~/.cargo/bin/{cargo-deny,cargo-nextest}` (or move them into the mise-managed set already cached) — RC-18
-- [ ] Docker hosted PR build: pass `--build-context velnor-cache-seed=.velnor-docker-cache/seed` so the restored seed is used; add `--cache-from/--cache-to type=gha,scope=docker,mode=max` (note: 10 GiB shared budget — measure before enabling `mode=max`) — RC-13
-- [ ] Composite extraction; restore/save gates stay in one job
-- [ ] Update goldens; re-measure shard budget (`ci-unit-rust.yml` is 314 KB today because of 27 inlined jobs; after D5 it is one job)
+- [x] Narrow `rust-policy` mbx freshness — drop `./**/*.rs`; freshness = `deny.toml`, `Cargo.lock` (policy commands do not compile)
+- [x] Add `deny.toml` to `rust-policy` `key_files`
+- [x] **Cargo bundle key per lockfile, not per unit** (RC-11): `ci-{os}-{arch}-rust-{hashFiles('Cargo.lock','rust-toolchain.toml','rust-toolchain','.cargo/**')}`; `velnor-workflow-contract` keeps its own lockfile key; expect live `ci-*-rust-*` entries to drop from 9–13 to 2
+- [x] Toolchain-seeds: add `~/.cargo/bin/{cargo-deny,cargo-nextest}` (or move them into the mise-managed set already cached) — RC-18
+- [x] Docker hosted PR build: pass `--build-context velnor-cache-seed=.velnor-docker-cache/seed` so the restored seed is used; add `--cache-from/--cache-to type=gha,scope=docker,mode=max` (note: 10 GiB shared budget — measure before enabling `mode=max`) — RC-13
+- [x] Composite extraction; restore/save gates stay in one job
+- [x] Update goldens; re-measure shard budget (`ci-unit-rust.yml` is 314 KB today because of 27 inlined jobs; after D5 it is one job) — **235 KiB** @ `c273707d` (under 480 KiB `KIND_WORKFLOW_SHARD_BUDGET`)
 
 ---
 
 ## 12. Execution checklist — Phase 4: GitHub budget ops
 
 - [ ] Confirm org GHA cache limit (API exposes none; org total 52.97 GB / 14 repos, none > 10 GiB — consistent with default)
-- [ ] Keep `RetentionPolicy.total_bytes = 8589934592`
+- [x] Keep `RetentionPolicy.total_bytes = 8589934592`
 - [x] **Drop `cache-plan --check`** (not implemented; use `--mode=plan` / `--mode=budget` only)
-- [ ] Classify every emitted key family (§2.1 unclassified list) — either give each a class or stop emitting it (`velnor-cargo-` dead marker; `ci-release-*` anchored-matcher bug at `snapshot.rs:286-293`)
-- [ ] Daily sweep: delete all entries on `refs/pull/N/merge` for closed PRs (`gh cache delete --ref`) — fixes the prune race (RC-14)
+- [x] Classify every emitted key family (§2.1 unclassified list) — either give each a class or stop emitting it (`velnor-cargo-` dead marker; `ci-release-*` anchored-matcher bug at `snapshot.rs:286-293`)
+- [x] Daily sweep: delete all entries on `refs/pull/N/merge` for closed PRs (`gh cache delete --ref`) — fixes the prune race (RC-14)
 - [ ] `compiler-snapshots`: verify generation grouping yields ≤ 2 per unit; live count is 22 entries for 13 units
-- [ ] `cache-plan --mode=budget` exposes per-class totals so a headroom warning (`< 512 MiB`) can be scripted
-- [ ] `prune-pr-cache` and `cache-budget` DELETE-failure policy made consistent (both hard-fail)
+- [x] `cache-plan --mode=budget` exposes per-class totals so a headroom warning (`< 512 MiB`) can be scripted
+- [x] `prune-pr-cache` and `cache-budget` DELETE-failure policy made consistent (both hard-fail)
 - [ ] Prove 7 consecutive daily `cache-budget` runs ≤ 8 GiB with `failed_evictions == 0`
 
 ---
 
 ## 13. Execution checklist — Phase 5: Observability (PR2)
 
-- [ ] `VELNOR_CI_REPORT.cache_outcomes.{rustup,mold,cargo,mbx,docker_seed}` = `exact|prefix|cold` using `steps.<id>.outputs.cache-primary-key` vs `cache-matched-key` (both exist in `actions/cache/restore@v6.1.0`; today nothing reads them) and mbx's own step-summary line (`exact hit / warm start / miss`)
-- [ ] Velnor lane reports `host_warm` per layer from the runner's persistent-path classifier (`executor.rs:7837-7848`) — emitted unconditionally, not only when an `actions/cache` step runs
-- [ ] `report-velnor-ci-outcomes` step summary per unit job; warn on cold, never fail CI
-- [ ] Update `content/docs/guides/execution.mdx` — dual-lane diagram (today it documents only mbx 20/30/50 GiB at `:222,271`)
-- [ ] Update `content/docs/operations/storage-and-resources.mdx` — per-slot stores, `VELNOR_STORAGE_ROOT`, gc timer
-- [ ] Document producer/consumer model, fork-PR decision (D17), 7-day eviction, `cache-mode`
+- [x] `VELNOR_CI_REPORT.cache_outcomes.{rustup,mold,cargo,mbx,docker_seed}` = `exact|prefix|cold` using `steps.<id>.outputs.cache-primary-key` vs `cache-matched-key` (both exist in `actions/cache/restore@v6.1.0`; today nothing reads them) and mbx's own step-summary line (`exact hit / warm start / miss`)
+- [x] Velnor lane reports `host_warm` per layer from the runner's persistent-path classifier (`executor.rs:7837-7848`) — emitted unconditionally, not only when an `actions/cache` step runs
+- [x] `report-velnor-ci-outcomes` step summary per unit job; warn on cold, never fail CI
+- [x] Update `content/docs/guides/execution.mdx` — dual-lane diagram (today it documents only mbx 20/30/50 GiB at `:222,271`)
+- [x] Update `content/docs/operations/storage-and-resources.mdx` — per-slot stores, `VELNOR_STORAGE_ROOT`, gc timer
+- [x] Document producer/consumer model, fork-PR decision (D17), 7-day eviction, `cache-mode`
 
 ---
 
@@ -442,25 +442,25 @@ Pre-req: Phase 0 green.
 ### Fleet configuration
 
 - [ ] `VELNOR_STORAGE_ROOT` set on every host
-- [ ] `VELNOR_BUDGET_CACHES_BYTES=53687091200` (default already)
+- [x] `VELNOR_BUDGET_CACHES_BYTES=53687091200` (default already)
 - [ ] Confirm `MBX_GC_MAX_TOTAL_SIZE=50GiB` **per slot** is what we want, or move the total cap to a host-level gc
 - [ ] Tune `VELNOR_BUDGET_CARGO_BYTES` / `VELNOR_BUDGET_MISE_BYTES` / `VELNOR_BUDGET_ARTIFACTS_BYTES` to disk capacity
-- [ ] systemd timer: `velnorctl cache --work-dir /var/lib/velnor/work gc --yes`
-- [ ] BuildKit GC policy on trusted docker hosts (§8)
+- [x] systemd timer: `velnorctl cache --work-dir /var/lib/velnor/work gc --yes`
+- [x] BuildKit GC policy on trusted docker hosts (§8)
 - [ ] Record `velnorctl cache du` baseline after first gc
 
 ### Schema wiring (generator)
 
-- [ ] Add `[cache.github]` and `[cache.velnor]` to `RepoGenerationConfig` (`config/mod.rs`) — generator-only, never serialized to `project.toml`
-- [ ] `RetentionPolicy::from_config(&cache.github)` for `cache-plan`
-- [ ] Emit Velnor host policy artifact (`velnor.env` snippet) from generator
-- [ ] Golden test: adding `[cache.*]` does not change cache keys
-- [ ] Test: `project.toml` round-trips through the runtime parser (`deny_unknown_fields`) — the P0-1 regression class
+- [x] Add `[cache.github]` and `[cache.velnor]` to `RepoGenerationConfig` (`config/mod.rs`) — generator-only, never serialized to `project.toml`
+- [x] `RetentionPolicy::from_config(&cache.github)` for `cache-plan`
+- [x] Emit Velnor host policy artifact (`velnor.env` snippet) from generator
+- [x] Golden test: adding `[cache.*]` does not change cache keys
+- [x] Test: `project.toml` round-trips through the runtime parser (`deny_unknown_fields`) — the P0-1 regression class
 
 ### Trust-scope hardening (D18)
 
-- [ ] Same-repo PR jobs mount a `pr` scope overlay: read-through to trusted stores, writes stay in `pr`; trusted events write the trusted scope
-- [ ] mbx local store for PR scope separate from trusted scope
+- [x] Same-repo PR jobs mount a `pr` scope overlay: read-through to trusted stores, writes stay in `pr`; trusted events write the trusted scope
+- [x] mbx local store for PR scope separate from trusted scope
 
 ### Monitoring
 
@@ -510,7 +510,7 @@ Pre-req: Phase 0 green.
 
 ### Phase 0 — producer health
 
-- [ ] `cargo check -p velnor-runner` and `cargo test -p velnor-workflow` compile and pass on `main`
+- [x] `cargo check -p velnor-runner` and `cargo test -p velnor-workflow` compile and pass on `main`
 - [ ] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green
 - [ ] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup`
 - [ ] Nightly completes in < 2 h (no 24 h queue)
@@ -520,22 +520,22 @@ Pre-req: Phase 0 green.
 
 #### Workflow gates
 
-- [ ] Unit-first Checks sidebar (`<Kind> · <unit> / GitHub|Velnor`); `lane_compare --strict` green with the new parser
-- [ ] 6 reusable files (5 kind + `ci-release-package-signer.yml`), each kind file one job; shard test passes
-- [ ] Fork PR behaves per D17; no `merge_group` trigger
+- [x] Unit-first Checks sidebar (`<Kind> · <unit> / GitHub|Velnor`); `lane_compare --strict` green with the new parser
+- [x] 6 reusable files (5 kind + `ci-release-package-signer.yml`), each kind file one job; shard test passes
+- [x] Fork PR behaves per D17; no `merge_group` trigger
 
 #### GitHub lane cache
 
-- [ ] Golden keys unchanged
-- [ ] Restore before checks (automated)
-- [ ] No save `if:` contains `pull_request`/`merge_group`; mise and runtime saves gated
+- [x] Golden keys unchanged
+- [x] Restore before checks (automated)
+- [x] No save `if:` contains `pull_request`/`merge_group`; mise and runtime saves gated
 - [ ] Same-repo PR + stable lockfile: rustup/cargo exact hit (baseline already observed on PR 871)
 - [ ] Parallel PRs: GHA entry count stable (no `mise-v1-*`/`velnor-workflow-v1-*` growth on PR refs)
 
 #### Velnor lane cache
 
-- [ ] Zero `actions/cache*` in every Velnor job (all kinds)
-- [ ] `Control / Prepare Cargo` ordering preserved at caller level
+- [x] Zero `actions/cache*` in every Velnor job (all kinds)
+- [x] `Control / Prepare Cargo` ordering preserved at caller level
 - [ ] Consecutive Velnor jobs: `Cargo sources warm; skipping fetch`
 - [ ] mbx local hits > 0 on unchanged source on the same slot (log evidence, with slot id)
 
@@ -753,3 +753,98 @@ Method: six parallel read-only sub-agents (budgets/retention; GitHub-lane gates 
 | Cargo stable auto-GC (1.88, `cache.auto-clean-frequency`), disabled under `--offline`; no size cap | confirmed |
 | BuildKit GC: `[worker.oci] gc, reservedSpace, maxUsedSpace, minFreeSpace` (`gckeepstorage` outdated) | confirmed |
 | `Swatinem/rust-cache` skips `registry/src`, prunes `target/` deps only; `save-if`, `cache-on-failure` | confirmed — matches WP-C3 rationale |
+
+### Branch `plan/ci-workflow-and-cache` @ `c273707d` (2026-09-16)
+
+Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** until merge and green runs. Verdicts: **V** verified locally, **P** partial, **U** unverifiable (live-only).
+
+#### Phase 0 — producer health (code)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| P0-1 duplicate `workflow_file` in `[unit.cache]` removed | V | `lib.rs:927-928` single emit; `generated_config_keeps_unit_workflow_file_outside_cache_table` in suite |
+| P0-2 `velnor-runner` compiles | V | `cargo check -p velnor-runner` exit 0 @ `c273707d` |
+| P0-3 ruleset contract `ci-required` | V | `ci-pr.yml:600-601`, `ci-main.yml:623-624`; `validate_ruleset_required_status_checks` (`lib.rs:3251`) |
+| P0-4 main/nightly `cancel-in-progress: false` | V | `ci-main.yml:36`, `nightly.yml:41` |
+| P0-5 pin coherence D19 | V | `VELNOR_*_REV = e6fabca` (`lib.rs:83,93`); `validate_pinned_revision_coherence` (`lib.rs:4534`) |
+| P0-6 docker skip when no online `velnor-host-docker` | V | `.github-gen/velnor-workflow.toml:32` `velnor_trusted_runner_available = false`; release skip job comment |
+| P0-7 live account ≤ 8 GiB | U | live 10.54 GiB; sweep/classify code landed, not yet proven post-maintenance |
+| P0-8 nightly dispatches `ci-main@main` for mbx saves | V | `nightly.yml:48` `Control / Dispatch ci-main` |
+| Phase 0 gate: 3× green `ci-main` on `main` | U | blocked until merge; `origin/main` still red pre-merge |
+| Phase 0 gate: ruleset context on PR rollup | U | DCO + merge pending; context unproven on open PR |
+| Phase 0 gate: `actions/cache/usage` ≤ 8 GiB | U | live 10.54 GiB |
+
+#### Phase 1 — generator core
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Per-(unit,lane) callers; one job per kind reusable (D5) | V | `ir.rs:1850` `unit_lane_callers`; `ci-unit-rust.yml` `verify-github` / `verify-velnor` only |
+| Unit-first names + `lane_compare` trailing parser (D1) | V | `lib.rs:2201`; `lane_compare.rs:687-724`; 30 `cargo test -p velnor-tools lane_compare` pass |
+| `Control / Prepare Cargo`; dependency `needs:` lifted (D3,D6) | V | `ci-pr.yml:224`; `ir.rs:1941-1956`; `velnor_first_ci.rs:727` |
+| Fork PR D17; no `merge_group` D8 | V | `ci-pr.yml:108-110`; no `merge_group:` in `ci-pr.yml` |
+| Trusted cache helpers WP-C0–C3; WP-V1 host-persistent paths | V | `ir.rs:737`; `cache.rs:104-120`; tests `github_lane_save_gates_*`, `velnor_lane_yaml_omits_*` |
+| `velnor-workflow --check` | V | `force_generation_adopts_the_declared_surface_and_check_is_complete` pass |
+| `cargo test -p velnor-workflow` | V | 453 passed @ `c273707d` |
+| actionlint + `pin_integrity.mjs` in `ci-policy.yml` | P | generated `.github/actionlint.yaml`; wired in `mise.toml` check, not CI policy job |
+| §16 Phase 1 live gates (sidebar, PR cache hits, mbx hits) | U | require green merged runs |
+
+#### Phase 2 — generated output audit
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| GitHub stack ordering | P | `ci-unit-rust.yml` rust-policy block: rustup→mbx→cargo-bin→mold→cargo; **`rust-policy` omits `mise-action`** |
+| Velnor zero GHA cache all kinds | V | `velnor_lane_yaml_omits_actions_cache_for_every_supported_unit_kind` |
+| maintenance skip-while-producer + sweep + 8 GiB enforce | V | `maintenance.yml:75-141,163-186` |
+| nightly dispatcher + queue concurrency | V | `nightly.yml:7,41,48` |
+
+#### Phase 3 — key churn
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| `rust-policy` freshness = `deny.toml`/`Cargo.lock` (not `./**/*.rs`) | V | `ir.rs:212-220`; mbx key in `ci-unit-rust.yml:198` |
+| Cargo key per lockfile + arch (RC-11) | V | `ci-unit-rust.yml:289` `ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles(...) }}` |
+| Docker seed consumed on hosted PR (RC-13) | V | `.github/ci/project.toml:55` `--build-context velnor-cache-seed=…` + GHA buildx cache |
+| Toolchain `velnor-cargo-bin-*` seeds (RC-18) | V | `ci-unit-rust.yml:206-215`; `lib.rs:3476` |
+| Shard budget after collapse | V | `ci-unit-rust.yml` 235211 B < 480000 B (`ir.rs:37`) |
+
+#### Phase 4 — GitHub budget ops
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Classify emitted key families (§2.1) | V | `snapshot.rs:346-426`; `emitted_key_families_classify_into_retention_classes` |
+| Closed-PR merge-ref daily sweep (RC-14) | V | `maintenance.yml:97-141`; prune hard-fail `:61-63` |
+| `budget.json` headroom + per-class totals | V | `snapshot.rs:498-524`; `maintenance.yml:163-170` |
+| DELETE-failure policy consistent | V | both `prune-pr-cache` and sweep hard-fail on delete miss |
+| `compiler-snapshots` ≤ 2 per unit live | U | algorithm tests (`github_fractional_created_at_ages_mbx_generations`); live 22 entries / 13 units unverified |
+| 7 consecutive daily runs ≤ 8 GiB | U | live gate |
+
+#### Phase 5 — observability
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| `cache_outcomes` exact/prefix/cold in report action | V | `.github/actions/report-velnor-ci-outcomes/action.yml:223-325`; `report_action_classifies_cache_outcomes_*` |
+| Velnor `host_warm` per layer | V | `ir.rs:453-481`; action `host_warm_layer()` |
+| Dual-lane docs + producer/fork/cache-mode | V | `content/docs/guides/execution.mdx:218-239`; `storage-and-resources.mdx:38,132` |
+| Live `cache_outcomes` in run log | U | unproven until green CI run post-merge |
+
+#### Phase 6 — Velnor host ops
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| `[cache.*]` schema; `velnor-host.env` emission | V | `config/mod.rs:110-143`; test `emitted_project_toml_ignores_cache_generation_config` |
+| Fleet timer + runbook + BuildKit GC artifact | V | `debian/velnor-cache-gc.{timer,service}`; `config/fleet/RUNBOOK.md`; `buildkitd.gc.toml` |
+| D18 PR read-through overlay | V | `trust_class.rs:172-253`; `storage.rs:186-199`; `velnor-host.env:10` |
+| `VELNOR_STORAGE_ROOT` applied on fleet hosts | U | snippet only; no host apply evidence |
+| Online `velnor-host-docker` runner | U | `velnor_trusted_runner_available = false`; 0 online @ rev 2 live audit |
+| mbx hits / `cache du` ≤ 50 GiB / disk alert | U | live gates |
+
+#### Open blockers @ `c273707d`
+
+| Blocker | Status |
+| --- | --- |
+| `ci-main` green on `main` (3×) | U — merge pending |
+| GHA account ≤ 8 GiB after maintenance | U — 10.54 GiB live |
+| 7 daily `cache-budget` successes | U |
+| mbx hits on same slot | U |
+| Fleet host apply (`VELNOR_STORAGE_ROOT`, gc timer, BuildKit) | U |
+| DCO on PR | U |
