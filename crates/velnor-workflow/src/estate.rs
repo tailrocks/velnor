@@ -6,6 +6,8 @@
 
 use crate::ProjectConfig;
 
+/// Optional org-group isolation. Omitting it is the labels-only contract:
+/// repository-scoped hosts can claim the same jobs as group members.
 pub(crate) const APPROVED_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
 pub(crate) const APPROVED_VELNOR_RUNNER_LABELS: &[&str] = &["self-hosted", "velnor-target-mvp"];
 
@@ -21,7 +23,13 @@ pub(crate) fn approved_velnor_runner_contract_matches(
     labels: &[&str],
     group: Option<&str>,
 ) -> bool {
-    group == Some(APPROVED_VELNOR_RUNNER_GROUP) && labels == APPROVED_VELNOR_RUNNER_LABELS
+    if labels != APPROVED_VELNOR_RUNNER_LABELS {
+        return false;
+    }
+    match group {
+        None => true,
+        Some(name) => name == APPROVED_VELNOR_RUNNER_GROUP,
+    }
 }
 
 /// The runner selector the generator's earliest generated surfaces embedded

@@ -322,7 +322,7 @@ jobs:
   velnor-rust-policy:
     name: "Velnor / rust-policy"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -817,7 +817,7 @@ jobs:
   velnor-rust-unit-collector:
     name: "Velnor / rust-unit-collector"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -1312,7 +1312,7 @@ jobs:
   velnor-rust-velnor-bench:
     name: "Velnor / rust-velnor-bench"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -1807,7 +1807,7 @@ jobs:
   velnor-rust-velnor-client:
     name: "Velnor / rust-velnor-client"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -2302,7 +2302,7 @@ jobs:
   velnor-rust-velnor-control:
     name: "Velnor / rust-velnor-control"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -2797,7 +2797,7 @@ jobs:
   velnor-rust-velnor-model:
     name: "Velnor / rust-velnor-model"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -3292,7 +3292,7 @@ jobs:
   velnor-rust-velnor-render:
     name: "Velnor / rust-velnor-render"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -3787,7 +3787,7 @@ jobs:
   velnor-rust-velnor-runner:
     name: "Velnor / rust-velnor-runner"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -4282,7 +4282,7 @@ jobs:
   velnor-rust-velnor-tools:
     name: "Velnor / rust-velnor-tools"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -4777,7 +4777,7 @@ jobs:
   velnor-rust-velnor-workflow:
     name: "Velnor / rust-velnor-workflow"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -5272,7 +5272,7 @@ jobs:
   velnor-rust-velnor-workflow-contract:
     name: "Velnor / rust-velnor-workflow-contract"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -5767,7 +5767,7 @@ jobs:
   velnor-rust-velnorctl:
     name: "Velnor / rust-velnorctl"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
@@ -6261,7 +6261,7 @@ jobs:
   velnor-rust-production-topology:
     name: "Velnor / rust-production-topology"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-production-topology,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
