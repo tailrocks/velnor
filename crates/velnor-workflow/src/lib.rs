@@ -229,7 +229,8 @@ impl ActionPin {
 }
 
 /// Default `workflow_dispatch` runner choice when the generation config omits
-/// `[workflow] default_dispatch_runner`.
+/// `[workflow] default_dispatch_runner` and the scan enables the GitHub lane.
+/// Velnor-only scans default to `velnor` instead; see `scan_target`.
 pub(crate) const DEFAULT_DISPATCH_RUNNER: &str = "github";
 
 /// Fallback automatic lane selection when a static workflow reads
@@ -965,6 +966,20 @@ fn scan_target(
     enable_mr_boxington_commands(&mut config);
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
+    }
+    if generation
+        .as_ref()
+        .and_then(|generation| generation.default_dispatch_runner())
+        .is_none()
+    {
+        // An omitted dispatch default follows the enabled lanes: Velnor-only
+        // dispatch offers `velnor` alone, so inheriting the GitHub default
+        // would fail closed below. An explicit mismatch still errors.
+        match config.runners {
+            RunnerMode::Velnor => "velnor",
+            RunnerMode::Github | RunnerMode::Both => DEFAULT_DISPATCH_RUNNER,
+        }
+        .clone_into(&mut config.default_dispatch_runner);
     }
     validate_dispatch_runner_for_runners(config.runners, &config.default_dispatch_runner)?;
     // A repo-owned config can add Rust units the scan did not produce. They
@@ -9886,8 +9901,8 @@ channel = "stable"
         assert!(velnor.contains(
             "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))"
         ));
-        assert!(velnor.contains("default: github"));
-        assert!(!velnor.contains("default: velnor"));
+        assert!(velnor.contains("default: velnor"));
+        assert!(!velnor.contains("default: github"));
 
         let velnor_pr = WorkflowIr::from_config(&scanned_fixture(RunnerMode::Velnor))
             .render(WorkflowKind::PullRequest);
@@ -9901,7 +9916,7 @@ channel = "stable"
         assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));
         assert!(!velnor_pr.contains("runs-on: ubuntu-24.04"));
-        assert!(velnor_pr.contains("default: github"));
+        assert!(velnor_pr.contains("default: velnor"));
         assert!(velnor_pr.contains("default: affected"));
         assert!(
             !velnor_pr.contains("github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main'"),
@@ -10288,7 +10303,7 @@ channel = "stable"
                     assert!(workflow.contains(&fixture_lane_selector()));
                     assert!(!workflow.contains("  github-"));
                     assert!(workflow.contains("  velnor-"));
-                    assert!(workflow.contains("default: github"));
+                    assert!(workflow.contains("default: velnor"));
                     assert!(
                         workflow.contains("github.event.inputs.runner == 'velnor'"),
                         "{workflow}"
