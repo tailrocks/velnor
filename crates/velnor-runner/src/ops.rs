@@ -22,8 +22,8 @@ use crate::trust_class::TrustClass;
 use rusqlite::Connection;
 use velnor_control::store::{
     EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
-    RetentionMaintenanceBudget, SlotIdentity, SlotTransitionRequest, SlotTransitionRequestKey,
-    Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
+    RetentionMaintenanceBudget, RunnerRegistrationRow, SlotIdentity, SlotTransitionRequest,
+    SlotTransitionRequestKey, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
 #[cfg(test)]
 use velnor_model::ExitClass;
@@ -1076,6 +1076,39 @@ impl OpsSink {
         })
     }
 
+    /// Persist one GitHub runner registration after successful JIT configure.
+    ///
+    /// Best-effort: a store miss must not tear down a live GitHub runner.
+    /// Labels are slug-projected; the registration name is already composed.
+    pub fn upsert_runner_registration(
+        &self,
+        runner_id: i64,
+        name: &str,
+        labels: &[String],
+        ephemeral: bool,
+        online: bool,
+    ) -> velnor_control::store::StoreResult<()> {
+        let now = Timestamp::now();
+        let mut labels_map = BTreeMap::new();
+        for label in labels {
+            let key = sanitize_slug(label);
+            if key != "unknown" {
+                labels_map.insert(key, "true".to_owned());
+            }
+        }
+        let labels_json = serde_json::to_string(&labels_map).unwrap_or_else(|_| "{}".to_owned());
+        self.store.upsert_runner_registration(&RunnerRegistrationRow {
+            instance_slug: self.instance_slug.clone(),
+            runner_id,
+            name: name.to_owned(),
+            ephemeral,
+            online,
+            labels_json,
+            registered_at: now,
+            updated_at: now,
+        })
+    }
+
     fn required_failure(&self, code: &str, detail: &str) -> bool {
         let detail = sanitize_forensic_detail(detail);
         eprintln!("REQUIRED operational-store write failed ({code}): {detail}");
@@ -1473,6 +1506,41 @@ mod tests {
             resource_policy: Some("standard".to_owned()),
             masks: secret.iter().map(|value| (*value).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn runner_registration_persists_non_secret_identity() {
+        let (dir, sink) = temp_sink("runner-reg");
+        let name = "velnor-sentry-primary-2";
+        sink.upsert_runner_registration(
+            42,
+            name,
+            &["self-hosted".into(), "linux".into()],
+            true,
+            true,
+        )
+        .unwrap();
+        let rows = sink
+            .store_for_tests()
+            .runner_registration_rows("test-instance")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].runner_id, 42);
+        assert_eq!(rows[0].name, name);
+        assert!(rows[0].ephemeral);
+        assert!(rows[0].online);
+        assert!(rows[0].labels_json.contains("self-hosted"));
+        assert!(!rows[0].name.contains("ghp_"));
+        assert!(!rows[0].labels_json.contains("ghp_"));
+        let mut admission = admission(202, None);
+        admission.runner_name = Some(name.to_owned());
+        assert!(sink.record_admission(&admission));
+        let stored = sink.store.fetch_summary("test-instance", 202, 1).unwrap();
+        assert_eq!(
+            stored.as_ref().and_then(|row| row.runner_name()),
+            Some(name)
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

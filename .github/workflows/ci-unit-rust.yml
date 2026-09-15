@@ -21,8 +21,8 @@ on:
 
 jobs:
   velnor-prepare-cargo-sources:
-    name: "Velnor / Prepare Cargo sources"
-    if: ${{ (contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') || contains(format(',{0},', inputs.selected_units), ',rust-production-topology,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Control / Rust / prepare-cargo"
+    if: ${{ (contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') || contains(format(',{0},', inputs.selected_units), ',rust-production-topology,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 20
     steps:
@@ -70,7 +70,7 @@ jobs:
           fi
           cd -- "$GITHUB_WORKSPACE"
   github-rust-policy:
-    name: "GitHub / rust-policy"
+    name: "GitHub / Rust / rust-policy"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -344,11 +344,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-policy"
+          job_label: "GitHub / Rust / rust-policy"
 
   velnor-rust-policy:
-    name: "Velnor / rust-policy"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-policy"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -371,6 +371,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -508,10 +523,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-policy"
+          job_label: "Velnor / Rust / rust-policy"
 
   github-rust-unit-collector:
-    name: "GitHub / rust-unit-collector"
+    name: "GitHub / Rust / rust-unit-collector"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -799,11 +814,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-unit-collector"
+          job_label: "GitHub / Rust / rust-unit-collector"
 
   velnor-rust-unit-collector:
-    name: "Velnor / rust-unit-collector"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-unit-collector"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -827,6 +842,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -953,10 +983,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-unit-collector"
+          job_label: "Velnor / Rust / rust-unit-collector"
 
   github-rust-velnor-bench:
-    name: "GitHub / rust-velnor-bench"
+    name: "GitHub / Rust / rust-velnor-bench"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -1244,11 +1274,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-bench"
+          job_label: "GitHub / Rust / rust-velnor-bench"
 
   velnor-rust-velnor-bench:
-    name: "Velnor / rust-velnor-bench"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-bench"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-model, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -1272,6 +1302,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -1398,10 +1443,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-bench"
+          job_label: "Velnor / Rust / rust-velnor-bench"
 
   github-rust-velnor-client:
-    name: "GitHub / rust-velnor-client"
+    name: "GitHub / Rust / rust-velnor-client"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -1689,11 +1734,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-client"
+          job_label: "GitHub / Rust / rust-velnor-client"
 
   velnor-rust-velnor-client:
-    name: "Velnor / rust-velnor-client"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-client"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -1717,6 +1762,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -1843,10 +1903,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-client"
+          job_label: "Velnor / Rust / rust-velnor-client"
 
   github-rust-velnor-control:
-    name: "GitHub / rust-velnor-control"
+    name: "GitHub / Rust / rust-velnor-control"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -2134,11 +2194,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-control"
+          job_label: "GitHub / Rust / rust-velnor-control"
 
   velnor-rust-velnor-control:
-    name: "Velnor / rust-velnor-control"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-control"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -2162,6 +2222,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -2288,10 +2363,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-control"
+          job_label: "Velnor / Rust / rust-velnor-control"
 
   github-rust-velnor-model:
-    name: "GitHub / rust-velnor-model"
+    name: "GitHub / Rust / rust-velnor-model"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -2579,11 +2654,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-model"
+          job_label: "GitHub / Rust / rust-velnor-model"
 
   velnor-rust-velnor-model:
-    name: "Velnor / rust-velnor-model"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-model"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -2607,6 +2682,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -2733,10 +2823,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-model"
+          job_label: "Velnor / Rust / rust-velnor-model"
 
   github-rust-velnor-render:
-    name: "GitHub / rust-velnor-render"
+    name: "GitHub / Rust / rust-velnor-render"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -3024,11 +3114,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-render"
+          job_label: "GitHub / Rust / rust-velnor-render"
 
   velnor-rust-velnor-render:
-    name: "Velnor / rust-velnor-render"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-render"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -3052,6 +3142,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -3178,10 +3283,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-render"
+          job_label: "Velnor / Rust / rust-velnor-render"
 
   github-rust-velnor-runner:
-    name: "GitHub / rust-velnor-runner"
+    name: "GitHub / Rust / rust-velnor-runner"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -3469,11 +3574,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-runner"
+          job_label: "GitHub / Rust / rust-velnor-runner"
 
   velnor-rust-velnor-runner:
-    name: "Velnor / rust-velnor-runner"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-runner"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-control, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -3497,6 +3602,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -3623,10 +3743,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-runner"
+          job_label: "Velnor / Rust / rust-velnor-runner"
 
   github-rust-velnor-tools:
-    name: "GitHub / rust-velnor-tools"
+    name: "GitHub / Rust / rust-velnor-tools"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -3914,11 +4034,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-tools"
+          job_label: "GitHub / Rust / rust-velnor-tools"
 
   velnor-rust-velnor-tools:
-    name: "Velnor / rust-velnor-tools"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-tools"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-client, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -3942,6 +4062,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -4068,10 +4203,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-tools"
+          job_label: "Velnor / Rust / rust-velnor-tools"
 
   github-rust-velnor-workflow:
-    name: "GitHub / rust-velnor-workflow"
+    name: "GitHub / Rust / rust-velnor-workflow"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -4359,11 +4494,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-workflow"
+          job_label: "GitHub / Rust / rust-velnor-workflow"
 
   velnor-rust-velnor-workflow:
-    name: "Velnor / rust-velnor-workflow"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-workflow"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -4387,6 +4522,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -4513,10 +4663,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-workflow"
+          job_label: "Velnor / Rust / rust-velnor-workflow"
 
   github-rust-velnor-workflow-contract:
-    name: "GitHub / rust-velnor-workflow-contract"
+    name: "GitHub / Rust / rust-velnor-workflow-contract"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -4804,11 +4954,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnor-workflow-contract"
+          job_label: "GitHub / Rust / rust-velnor-workflow-contract"
 
   velnor-rust-velnor-workflow-contract:
-    name: "Velnor / rust-velnor-workflow-contract"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnor-workflow-contract"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -4832,6 +4982,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -4958,10 +5123,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnor-workflow-contract"
+          job_label: "Velnor / Rust / rust-velnor-workflow-contract"
 
   github-rust-velnorctl:
-    name: "GitHub / rust-velnorctl"
+    name: "GitHub / Rust / rust-velnorctl"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -5249,11 +5414,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-velnorctl"
+          job_label: "GitHub / Rust / rust-velnorctl"
 
   velnor-rust-velnorctl:
-    name: "Velnor / rust-velnorctl"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-velnorctl"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources, velnor-rust-production-topology, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -5277,6 +5442,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -5403,10 +5583,10 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-velnorctl"
+          job_label: "Velnor / Rust / rust-velnorctl"
 
   github-rust-production-topology:
-    name: "GitHub / rust-production-topology"
+    name: "GitHub / Rust / rust-production-topology"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-production-topology,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -5693,11 +5873,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / rust-production-topology"
+          job_label: "GitHub / Rust / rust-production-topology"
 
   velnor-rust-production-topology:
-    name: "Velnor / rust-production-topology"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-production-topology,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Rust / rust-production-topology"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-production-topology,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     needs: [velnor-prepare-cargo-sources]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
@@ -5721,6 +5901,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -5843,5 +6038,5 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / rust-production-topology"
+          job_label: "Velnor / Rust / rust-production-topology"
 

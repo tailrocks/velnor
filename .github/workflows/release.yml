@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   admit-runner:
-    name: Admit release runner
+    name: Control / Admit release
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -42,7 +42,7 @@ jobs:
           exit 1
 
   verify:
-    name: Verify release
+    name: Control / Verify release
     outputs:
       version: ${{ steps.version.outputs.version }}
     runs-on: ubuntu-24.04
@@ -88,7 +88,7 @@ jobs:
 
 
   release-github-bun-velnor:
-    name: "GitHub / Release / Bun package (velnor)"
+    name: "GitHub / Bun / bun-velnor"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -125,7 +125,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit bun-velnor
 
   release-github-docker:
-    name: "GitHub / Release / Docker"
+    name: "GitHub / Docker / docker"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -157,7 +157,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docker
 
   release-github-docs:
-    name: "GitHub / Release / Documentation"
+    name: "GitHub / Documentation / docs"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -192,7 +192,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docs
 
   release-github-opentofu:
-    name: "GitHub / Release / OpenTofu"
+    name: "GitHub / OpenTofu / opentofu"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -232,7 +232,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit opentofu
 
   release-github-rust-policy:
-    name: "GitHub / Release / Rust dependency policy"
+    name: "GitHub / Rust / rust-policy"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -336,7 +336,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-policy
 
   release-github-rust-unit-collector:
-    name: "GitHub / Release / Rust crate (unit-collector)"
+    name: "GitHub / Rust / rust-unit-collector"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -454,7 +454,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector
 
   release-github-rust-velnor-bench:
-    name: "GitHub / Release / Rust crate (velnor-bench)"
+    name: "GitHub / Rust / rust-velnor-bench"
     needs: [verify, release-github-rust-velnor-model, release-github-rust-velnor-runner]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -572,7 +572,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench
 
   release-github-rust-velnor-client:
-    name: "GitHub / Release / Rust crate (velnor-client)"
+    name: "GitHub / Rust / rust-velnor-client"
     needs: [verify, release-github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -690,7 +690,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client
 
   release-github-rust-velnor-control:
-    name: "GitHub / Release / Rust crate (velnor-control)"
+    name: "GitHub / Rust / rust-velnor-control"
     needs: [verify, release-github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -808,7 +808,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control
 
   release-github-rust-velnor-model:
-    name: "GitHub / Release / Rust crate (velnor-model)"
+    name: "GitHub / Rust / rust-velnor-model"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -926,7 +926,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model
 
   release-github-rust-velnor-render:
-    name: "GitHub / Release / Rust crate (velnor-render)"
+    name: "GitHub / Rust / rust-velnor-render"
     needs: [verify, release-github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1044,7 +1044,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render
 
   release-github-rust-velnor-runner:
-    name: "GitHub / Release / Rust crate (velnor-runner)"
+    name: "GitHub / Rust / rust-velnor-runner"
     needs: [verify, release-github-rust-velnor-control, release-github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1162,7 +1162,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner
 
   release-github-rust-velnor-tools:
-    name: "GitHub / Release / Rust crate (velnor-tools)"
+    name: "GitHub / Rust / rust-velnor-tools"
     needs: [verify, release-github-rust-velnor-client, release-github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1280,7 +1280,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-tools
 
   release-github-rust-velnor-workflow:
-    name: "GitHub / Release / Rust crate (velnor-workflow)"
+    name: "GitHub / Rust / rust-velnor-workflow"
     needs: [verify, release-github-rust-velnor-runner]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1398,7 +1398,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow
 
   release-github-rust-velnor-workflow-contract:
-    name: "GitHub / Release / Rust crate (velnor-workflow-contract)"
+    name: "GitHub / Rust / rust-velnor-workflow-contract"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1516,7 +1516,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow-contract
 
   release-github-rust-velnorctl:
-    name: "GitHub / Release / Rust crate (velnorctl)"
+    name: "GitHub / Rust / rust-velnorctl"
     needs: [verify, release-github-rust-velnor-client, release-github-rust-velnor-control, release-github-rust-velnor-model, release-github-rust-velnor-render, release-github-rust-velnor-runner]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1634,7 +1634,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl
 
   release-github-rust-production-topology:
-    name: "GitHub / Release / Rust production topology"
+    name: "GitHub / Rust / rust-production-topology"
     needs: [verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1751,7 +1751,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-production-topology
 
   release-velnor-bun-velnor:
-    name: "Velnor / Release / Bun package (velnor)"
+    name: "Velnor / Bun / bun-velnor"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -1761,6 +1761,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Restore "Bun package (velnor)" cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1780,7 +1795,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit bun-velnor
 
   release-velnor-docker:
-    name: "Velnor / Release / Docker"
+    name: "Velnor / Docker / docker"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp, velnor-host-docker]
@@ -1790,6 +1805,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Run Docker checks
         env:
           CI_SCOPE: full
@@ -1802,7 +1832,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docker
 
   release-velnor-docs:
-    name: "Velnor / Release / Documentation"
+    name: "Velnor / Documentation / docs"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -1812,6 +1842,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Restore Documentation cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1831,7 +1876,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docs
 
   release-velnor-opentofu:
-    name: "Velnor / Release / OpenTofu"
+    name: "Velnor / OpenTofu / opentofu"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -1841,6 +1886,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Restore OpenTofu cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1860,7 +1920,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit opentofu
 
   release-velnor-rust-policy:
-    name: "Velnor / Release / Rust dependency policy"
+    name: "Velnor / Rust / rust-policy"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -1870,6 +1930,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -1890,7 +1965,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-policy
 
   release-velnor-rust-unit-collector:
-    name: "Velnor / Release / Rust crate (unit-collector)"
+    name: "Velnor / Rust / rust-unit-collector"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -1900,6 +1975,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -1937,7 +2027,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-unit-collector
 
   release-velnor-rust-velnor-bench:
-    name: "Velnor / Release / Rust crate (velnor-bench)"
+    name: "Velnor / Rust / rust-velnor-bench"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model, release-velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -1947,6 +2037,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -1984,7 +2089,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-bench
 
   release-velnor-rust-velnor-client:
-    name: "Velnor / Release / Rust crate (velnor-client)"
+    name: "Velnor / Rust / rust-velnor-client"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -1994,6 +2099,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2031,7 +2151,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client
 
   release-velnor-rust-velnor-control:
-    name: "Velnor / Release / Rust crate (velnor-control)"
+    name: "Velnor / Rust / rust-velnor-control"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2041,6 +2161,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2078,7 +2213,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-control
 
   release-velnor-rust-velnor-model:
-    name: "Velnor / Release / Rust crate (velnor-model)"
+    name: "Velnor / Rust / rust-velnor-model"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2088,6 +2223,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2125,7 +2275,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-model
 
   release-velnor-rust-velnor-render:
-    name: "Velnor / Release / Rust crate (velnor-render)"
+    name: "Velnor / Rust / rust-velnor-render"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2135,6 +2285,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2172,7 +2337,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-render
 
   release-velnor-rust-velnor-runner:
-    name: "Velnor / Release / Rust crate (velnor-runner)"
+    name: "Velnor / Rust / rust-velnor-runner"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2182,6 +2347,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2219,7 +2399,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-runner
 
   release-velnor-rust-velnor-tools:
-    name: "Velnor / Release / Rust crate (velnor-tools)"
+    name: "Velnor / Rust / rust-velnor-tools"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2229,6 +2409,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2266,7 +2461,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-tools
 
   release-velnor-rust-velnor-workflow:
-    name: "Velnor / Release / Rust crate (velnor-workflow)"
+    name: "Velnor / Rust / rust-velnor-workflow"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2276,6 +2471,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2313,7 +2523,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow
 
   release-velnor-rust-velnor-workflow-contract:
-    name: "Velnor / Release / Rust crate (velnor-workflow-contract)"
+    name: "Velnor / Rust / rust-velnor-workflow-contract"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2323,6 +2533,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2360,7 +2585,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-workflow-contract
 
   release-velnor-rust-velnorctl:
-    name: "Velnor / Release / Rust crate (velnorctl)"
+    name: "Velnor / Rust / rust-velnorctl"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model, release-velnor-rust-velnor-render, release-velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2370,6 +2595,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
@@ -2407,7 +2647,7 @@ jobs:
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnorctl
 
   release-velnor-rust-production-topology:
-    name: "Velnor / Release / Rust production topology"
+    name: "Velnor / Rust / rust-production-topology"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
@@ -2417,6 +2657,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -3508,7 +3763,7 @@ jobs:
 
 
   publish:
-    name: Publish GitHub release
+    name: Control / Publish
     needs: [admit-runner, verify, build, image, metadata, guest-payload, debian, sign-deb]
     runs-on: ubuntu-24.04
     timeout-minutes: 20

@@ -80,7 +80,12 @@
     "headBranch": "main",
     "queuedMs": 4200,
     "durationMs": 96500,
-    "conclusion": "success"
+    "conclusion": "success",
+    "host": "sentry",
+    "instance": "primary",
+    "slot": "slot-2",
+    "runner": "velnor-sentry-2",
+    "executionBackend": "docker"
   },
   {
     "resourceKind": "Run",

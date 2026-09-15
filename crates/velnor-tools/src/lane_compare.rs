@@ -1,12 +1,14 @@
 //! `lane-compare`: fetch the GitHub-hosted and Velnor lanes of one workflow
 //! run via the GitHub API and diff their Checks-UI surface per step.
 //!
-//! Implements a repeatable comparison using the GitHub API. The
-//! gate is **equal-or-better, never less informative**: any paired step where
-//! the GitHub lane shows information the Velnor lane lacks (a step missing
-//! entirely, an executed step that is not expandable, a divergent display
-//! name or conclusion, or lane log content without timestamps / groups /
-//! ANSI where GitHub has them) is a `WORSE` row and fails strict mode.
+//! Implements a repeatable comparison using the GitHub API. Strict mode
+//! first requires a 1:1 GitHub↔Velnor bijection of comparison units (no
+//! orphans, duplicates, skipped counterparts, or ambiguous names). The
+//! step gate is **equal-or-better, never less informative**: any paired
+//! step where the GitHub lane shows information the Velnor lane lacks (a
+//! step missing entirely, an executed step that is not expandable, a
+//! divergent display name or conclusion, or lane log content without
+//! timestamps / groups / ANSI where GitHub has them) is a `WORSE` row.
 //!
 //! Data sources (V2 jobs have no v1 log archive — `runs/{id}/logs` contains
 //! no Velnor per-step files and `jobs/{id}/logs` 404s, as recorded in the
@@ -21,7 +23,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{ArgAction, Args, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
@@ -162,6 +164,10 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     };
 
     let jobs = fetch_run_jobs(&args.repo, run_id)?;
+    let census = match (args.github_job, args.velnor_job) {
+        (Some(_), Some(_)) => None,
+        _ => Some(pair_lane_census(&jobs)),
+    };
     let pairs = match (args.github_job, args.velnor_job) {
         (Some(gh), Some(vl)) => {
             let github = jobs
@@ -174,27 +180,11 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
                 .with_context(|| format!("job {vl} not found in run {run_id}"))?;
             vec![(github.clone(), velnor.clone())]
         }
-        _ => pair_lane_jobs(&jobs),
+        _ => census
+            .as_ref()
+            .map(PairingCensus::matched_pairs)
+            .unwrap_or_default(),
     };
-    if pairs.is_empty() {
-        bail!(
-            "run {run_id} has no (github, velnor) lane job pairs; \
-             job names: {:?}",
-            jobs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>()
-        );
-    }
-    for (github, velnor) in &pairs {
-        for job in [github, velnor] {
-            if job.status != "completed" {
-                bail!(
-                    "job {} ({}) is {}, not completed — compare a finished run",
-                    job.name,
-                    job.id,
-                    job.status
-                );
-            }
-        }
-    }
 
     let out_dir = if args.output_dir.is_absolute() {
         args.output_dir.clone()
@@ -206,14 +196,6 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         .with_context(|| format!("create output directory {}", run_dir.display()))?;
     save_jobs_json(&run_dir, &jobs)?;
 
-    // Lane content: GitHub jobs expose a per-job log download; Velnor V2 jobs
-    // do not (no v1 archive), so read the Velnor lane's job-log artifact(s).
-    let velnor_content =
-        fetch_velnor_job_log_artifacts(&args.repo, run_id).unwrap_or_else(|error| {
-            eprintln!("warning: velnor job-log artifacts unavailable: {error:#}");
-            String::new()
-        });
-
     let mut report = String::new();
     let mut worse_total = 0usize;
     let mut budget_failures = 0usize;
@@ -222,8 +204,62 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     writeln!(
         report,
         "Gate: equal-or-better — zero rows where the GitHub lane shows \
-         information the Velnor lane lacks."
+         information the Velnor lane lacks. Strict mode also requires a 1:1 \
+         GitHub↔Velnor bijection of comparison units."
     )?;
+    writeln!(report)?;
+    if let Some(census) = &census {
+        report.push_str(&format_pairing_report(census)?);
+    } else {
+        writeln!(
+            report,
+            "Pairing: explicit `--github-job` / `--velnor-job` override; \
+             full-run bijection skipped."
+        )?;
+    }
+
+    let pairing_failures = census.as_ref().is_some_and(PairingCensus::has_parity_failures);
+    if args.strict && pairing_failures {
+        writeln!(report, "\n## Result")?;
+        writeln!(report)?;
+        writeln!(
+            report,
+            "**FAIL** — pairing bijection failed (orphans, duplicates, \
+             skipped counterpart, and/or ambiguous names)."
+        )?;
+        let report_path = run_dir.join("report.md");
+        fs::write(&report_path, &report)
+            .with_context(|| format!("write {}", report_path.display()))?;
+        println!("{report}");
+        println!("report: {}", report_path.display());
+        bail!(
+            "lane-compare gate failed: pairing bijection; see report above"
+        );
+    }
+
+    for (github, velnor) in &pairs {
+        for job in [github, velnor] {
+            if job_is_skipped(job) {
+                continue;
+            }
+            if job.status != "completed" {
+                bail!(
+                    "job {} ({}) is {}, not completed — compare a finished run",
+                    job.name,
+                    job.id,
+                    job.status
+                );
+            }
+        }
+    }
+
+    // Lane content: GitHub jobs expose a per-job log download; Velnor V2 jobs
+    // do not (no v1 archive), so read the Velnor lane's job-log artifact(s).
+    let velnor_content =
+        fetch_velnor_job_log_artifacts(&args.repo, run_id).unwrap_or_else(|error| {
+            eprintln!("warning: velnor job-log artifacts unavailable: {error:#}");
+            String::new()
+        });
     if let Some(class) = args.class {
         writeln!(report)?;
         writeln!(report, "## §2.11 Velnor budget ({class:?})")?;
@@ -293,6 +329,13 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
             report,
             "**PASS** — no paired step is less informative than the GitHub lane."
         )?;
+        if pairing_failures {
+            writeln!(
+                report,
+                "Pairing orphans/duplicates/skipped counterparts/ambiguous names \
+                 are reported above; `--strict false` does not fail on them."
+            )?;
+        }
     } else {
         writeln!(
             report,
@@ -312,7 +355,7 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     println!("{report}");
     println!("report: {}", report_path.display());
 
-    if args.strict && (worse_total > 0 || budget_failures > 0) {
+    if args.strict && (worse_total > 0 || budget_failures > 0 || pairing_failures) {
         bail!("lane-compare gate failed: {worse_total} worse row(s), {budget_failures} budget failure(s); see report above");
     }
     Ok(())
@@ -594,13 +637,9 @@ fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
 }
 
 fn lane_of_job_name(name: &str) -> Option<Lane> {
-    let lower = name.to_ascii_lowercase();
-    let has_velnor = contains_word(&lower, "velnor");
-    let has_github = contains_word(&lower, "github");
-    match (has_velnor, has_github) {
-        (true, false) => Some(Lane::Velnor),
-        (false, true) => Some(Lane::GitHub),
-        _ => None,
+    match classify_job_name(name) {
+        JobRole::Comparison { lane, .. } => Some(lane),
+        JobRole::Control | JobRole::Ambiguous => None,
     }
 }
 
@@ -624,9 +663,10 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// Pair key: the job name with the lane token and everything after it
-/// removed, so `compat (app-a, github, "ubuntu-latest")` and
-/// `compat (app-a, velnor, [...])` pair on `compat (app-a`.
+/// Fixture-matrix pair key: the job name with the lane token and everything
+/// after it removed, so `compat (app-a, github, "ubuntu-latest")` and
+/// `compat (app-a, velnor, [...])` pair on `compat (app-a`. Used only when
+/// the name does not match the generated lane-first pattern.
 fn pair_key(name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     let cut = ["velnor", "github"]
@@ -637,28 +677,306 @@ fn pair_key(name: &str) -> String {
     lower[..cut].trim_end_matches([' ', ',', '(']).to_string()
 }
 
-fn pair_lane_jobs(jobs: &[Job]) -> Vec<(Job, Job)> {
-    let mut github: BTreeMap<String, &Job> = BTreeMap::new();
-    let mut velnor: BTreeMap<String, &Job> = BTreeMap::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobRole<'a> {
+    Control,
+    Ambiguous,
+    Comparison { lane: Lane, key: &'a str },
+}
+
+/// Generated identity: `GitHub|Velnor / <kind> / <unit>`.
+/// The first segment is the lane; `velnor` inside a unit id is not a lane token.
+fn parse_lane_first(name: &str) -> Option<(Lane, &str)> {
+    let (lane, rest) = if let Some(rest) = name.strip_prefix("GitHub / ") {
+        (Lane::GitHub, rest)
+    } else if let Some(rest) = name.strip_prefix("Velnor / ") {
+        (Lane::Velnor, rest)
+    } else {
+        return None;
+    };
+    let (kind, unit) = rest.rsplit_once(" / ")?;
+    if kind.is_empty() || unit.is_empty() {
+        return None;
+    }
+    Some((lane, rest))
+}
+
+fn classify_job_name(name: &str) -> JobRole<'_> {
+    if name.starts_with("Control /") {
+        return JobRole::Control;
+    }
+    if let Some((lane, key)) = parse_lane_first(name) {
+        return JobRole::Comparison { lane, key };
+    }
+    let lower = name.to_ascii_lowercase();
+    let has_velnor = contains_word(&lower, "velnor");
+    let has_github = contains_word(&lower, "github");
+    match (has_velnor, has_github) {
+        (true, false) => JobRole::Comparison {
+            lane: Lane::Velnor,
+            key: "",
+        },
+        (false, true) => JobRole::Comparison {
+            lane: Lane::GitHub,
+            key: "",
+        },
+        (true, true) => JobRole::Ambiguous,
+        (false, false) => JobRole::Control,
+    }
+}
+
+/// Fixture names need a computed pair_key; generated names already carry theirs.
+fn comparison_key<'a>(name: &'a str, classified_key: &'a str) -> String {
+    if classified_key.is_empty() {
+        pair_key(name)
+    } else {
+        classified_key.to_string()
+    }
+}
+
+fn job_is_skipped(job: &Job) -> bool {
+    job.status.eq_ignore_ascii_case("skipped")
+        || job
+            .conclusion
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("skipped"))
+}
+
+fn is_skipped_counterpart(github: &Job, velnor: &Job) -> bool {
+    job_is_skipped(github) != job_is_skipped(velnor)
+}
+
+#[derive(Debug, Clone, Default)]
+struct PairingCensus {
+    matched: Vec<(Job, Job, String)>,
+    github_only: Vec<(String, Job)>,
+    velnor_only: Vec<(String, Job)>,
+    duplicate_github: Vec<(String, Vec<Job>)>,
+    duplicate_velnor: Vec<(String, Vec<Job>)>,
+    skipped_counterpart: Vec<(String, Job, Job)>,
+    ambiguous: Vec<Job>,
+    control: Vec<Job>,
+}
+
+impl PairingCensus {
+    fn has_parity_failures(&self) -> bool {
+        !self.github_only.is_empty()
+            || !self.velnor_only.is_empty()
+            || !self.duplicate_github.is_empty()
+            || !self.duplicate_velnor.is_empty()
+            || !self.skipped_counterpart.is_empty()
+            || !self.ambiguous.is_empty()
+    }
+
+    fn matched_pairs(&self) -> Vec<(Job, Job)> {
+        self.matched
+            .iter()
+            .map(|(github, velnor, _)| (github.clone(), velnor.clone()))
+            .collect()
+    }
+}
+
+fn pair_lane_census(jobs: &[Job]) -> PairingCensus {
+    let mut github: BTreeMap<String, Vec<Job>> = BTreeMap::new();
+    let mut velnor: BTreeMap<String, Vec<Job>> = BTreeMap::new();
+    let mut census = PairingCensus::default();
     for job in jobs {
-        match lane_of_job_name(&job.name) {
-            Some(Lane::GitHub) => {
-                github.insert(pair_key(&job.name), job);
+        match classify_job_name(&job.name) {
+            JobRole::Control => census.control.push(job.clone()),
+            JobRole::Ambiguous => census.ambiguous.push(job.clone()),
+            JobRole::Comparison { lane, key } => {
+                let key = comparison_key(&job.name, key);
+                match lane {
+                    Lane::GitHub => github.entry(key).or_default().push(job.clone()),
+                    Lane::Velnor => velnor.entry(key).or_default().push(job.clone()),
+                }
             }
-            Some(Lane::Velnor) => {
-                velnor.insert(pair_key(&job.name), job);
-            }
-            None => {}
         }
     }
-    github
-        .into_iter()
-        .filter_map(|(key, gh_job)| {
-            velnor
-                .get(&key)
-                .map(|vl_job| (gh_job.clone(), (*vl_job).clone()))
-        })
-        .collect()
+
+    let mut keys = BTreeSet::new();
+    keys.extend(github.keys().cloned());
+    keys.extend(velnor.keys().cloned());
+    for key in keys {
+        let gh = github.get(&key).cloned().unwrap_or_default();
+        let vl = velnor.get(&key).cloned().unwrap_or_default();
+        if gh.len() > 1 {
+            census.duplicate_github.push((key.clone(), gh.clone()));
+        }
+        if vl.len() > 1 {
+            census.duplicate_velnor.push((key.clone(), vl.clone()));
+        }
+        match (gh.len(), vl.len()) {
+            (1, 1) => {
+                let github_job = gh[0].clone();
+                let velnor_job = vl[0].clone();
+                if is_skipped_counterpart(&github_job, &velnor_job) {
+                    census.skipped_counterpart.push((
+                        key.clone(),
+                        github_job.clone(),
+                        velnor_job.clone(),
+                    ));
+                }
+                census.matched.push((github_job, velnor_job, key));
+            }
+            (n, 0) if n > 0 => {
+                for job in gh {
+                    census.github_only.push((key.clone(), job));
+                }
+            }
+            (0, n) if n > 0 => {
+                for job in vl {
+                    census.velnor_only.push((key.clone(), job));
+                }
+            }
+            _ => {}
+        }
+    }
+    census
+}
+
+fn pair_lane_jobs(jobs: &[Job]) -> Vec<(Job, Job)> {
+    pair_lane_census(jobs).matched_pairs()
+}
+
+fn format_job_ref(job: &Job) -> String {
+    format!("`{}` ({})", job.name, job.id)
+}
+
+fn format_pairing_report(census: &PairingCensus) -> Result<String> {
+    let mut out = String::new();
+    writeln!(out, "## Pairing")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "Set-equality of comparison units. Control/helper jobs are ignored \
+         and never fail parity."
+    )?;
+    writeln!(out)?;
+
+    writeln!(out, "### Matched pairs")?;
+    writeln!(out)?;
+    if census.matched.is_empty() {
+        writeln!(out, "- none")?;
+    } else {
+        for (github, velnor, key) in &census.matched {
+            writeln!(
+                out,
+                "- `{key}`: {} ⇄ {}",
+                format_job_ref(github),
+                format_job_ref(velnor)
+            )?;
+        }
+    }
+    writeln!(out)?;
+
+    writeln!(out, "### GitHub-only jobs")?;
+    writeln!(out)?;
+    write_keyed_jobs(&mut out, &census.github_only)?;
+    writeln!(out)?;
+
+    writeln!(out, "### Velnor-only jobs")?;
+    writeln!(out)?;
+    write_keyed_jobs(&mut out, &census.velnor_only)?;
+    writeln!(out)?;
+
+    writeln!(out, "### Duplicate GitHub executions")?;
+    writeln!(out)?;
+    write_duplicate_jobs(&mut out, &census.duplicate_github)?;
+    writeln!(out)?;
+
+    writeln!(out, "### Duplicate Velnor executions")?;
+    writeln!(out)?;
+    write_duplicate_jobs(&mut out, &census.duplicate_velnor)?;
+    writeln!(out)?;
+
+    writeln!(out, "### Skipped counterpart")?;
+    writeln!(out)?;
+    if census.skipped_counterpart.is_empty() {
+        writeln!(out, "- none")?;
+    } else {
+        for (key, github, velnor) in &census.skipped_counterpart {
+            writeln!(
+                out,
+                "- `{key}`: {} ⇄ {} (one side skipped, the other executed)",
+                format_job_ref(github),
+                format_job_ref(velnor)
+            )?;
+        }
+    }
+    writeln!(out)?;
+
+    writeln!(out, "### Missing counterpart")?;
+    writeln!(out)?;
+    if census.github_only.is_empty() && census.velnor_only.is_empty() {
+        writeln!(out, "- none")?;
+    } else {
+        for (key, job) in &census.github_only {
+            writeln!(
+                out,
+                "- `{key}`: {} has no Velnor counterpart",
+                format_job_ref(job)
+            )?;
+        }
+        for (key, job) in &census.velnor_only {
+            writeln!(
+                out,
+                "- `{key}`: {} has no GitHub counterpart",
+                format_job_ref(job)
+            )?;
+        }
+    }
+    writeln!(out)?;
+
+    writeln!(out, "### Ambiguous names")?;
+    writeln!(out)?;
+    if census.ambiguous.is_empty() {
+        writeln!(out, "- none")?;
+    } else {
+        for job in &census.ambiguous {
+            writeln!(out, "- {}", format_job_ref(job))?;
+        }
+    }
+    writeln!(out)?;
+
+    writeln!(out, "### Control jobs ignored")?;
+    writeln!(out)?;
+    if census.control.is_empty() {
+        writeln!(out, "- none")?;
+    } else {
+        for job in &census.control {
+            writeln!(out, "- {} (informational, not a failure)", format_job_ref(job))?;
+        }
+    }
+    writeln!(out)?;
+    Ok(out)
+}
+
+fn write_keyed_jobs(out: &mut String, jobs: &[(String, Job)]) -> Result<()> {
+    if jobs.is_empty() {
+        writeln!(out, "- none")?;
+    } else {
+        for (key, job) in jobs {
+            writeln!(out, "- `{key}`: {}", format_job_ref(job))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_duplicate_jobs(out: &mut String, groups: &[(String, Vec<Job>)]) -> Result<()> {
+    if groups.is_empty() {
+        writeln!(out, "- none")?;
+    } else {
+        for (key, jobs) in groups {
+            let refs = jobs
+                .iter()
+                .map(format_job_ref)
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(out, "- `{key}` ({count}): {refs}", count = jobs.len())?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -733,8 +1051,8 @@ pub fn is_regression(
 
 fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
     let jobs = fetch_run_jobs(repo, run_id)?;
-    let pairs = pair_lane_jobs(&jobs);
-    if pairs.is_empty() {
+    let census = pair_lane_census(&jobs);
+    if census.matched.is_empty() {
         bail!("run {run_id} has no both-lane job pairs");
     }
 
@@ -744,7 +1062,7 @@ fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
         parity_worse_rows: 0,
         jobs: BTreeMap::new(),
     };
-    for (github, velnor) in &pairs {
+    for (github, velnor, key) in &census.matched {
         let github_html = fetch_job_html_steps(github).unwrap_or_default();
         let velnor_html = fetch_job_html_steps(velnor).unwrap_or_default();
         let (_section, worse) = compare_pair(
@@ -762,7 +1080,7 @@ fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
             continue;
         };
         stats.jobs.insert(
-            pair_key(&github.name),
+            key.clone(),
             JobClassStats {
                 github_seconds: github_seconds as f64,
                 velnor_seconds: velnor_seconds as f64,
@@ -1253,6 +1571,28 @@ mod tests {
         }
     }
 
+    fn named_job(id: u64, name: &str) -> Job {
+        Job {
+            id,
+            name: name.to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+            html_url: None,
+            steps: Vec::new(),
+        }
+    }
+
+    fn named_job_status(id: u64, name: &str, status: &str, conclusion: Option<&str>) -> Job {
+        Job {
+            id,
+            name: name.to_string(),
+            status: status.to_string(),
+            conclusion: conclusion.map(str::to_string),
+            html_url: None,
+            steps: Vec::new(),
+        }
+    }
+
     #[test]
     fn lane_detection_and_pair_key_match_fixture_naming() {
         assert_eq!(
@@ -1279,26 +1619,166 @@ mod tests {
 
     #[test]
     fn pair_lane_jobs_pairs_by_key() {
-        let job = |id: u64, name: &str| Job {
-            id,
-            name: name.to_string(),
-            status: "completed".to_string(),
-            conclusion: Some("success".to_string()),
-            html_url: None,
-            steps: Vec::new(),
-        };
         let jobs = vec![
-            job(1, r#"compat (app-a, github, "ubuntu-latest")"#),
-            job(
+            named_job(1, r#"compat (app-a, github, "ubuntu-latest")"#),
+            named_job(
                 2,
                 r#"compat (app-a, velnor, ["self-hosted","velnor-target-mvp"])"#,
             ),
-            job(3, "lint"),
+            named_job(3, "lint"),
         ];
         let pairs = pair_lane_jobs(&jobs);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0.id, 1);
         assert_eq!(pairs[0].1.id, 2);
+    }
+
+    #[test]
+    fn generated_matched_pair_passes_strict_bijection() {
+        let jobs = vec![
+            named_job(1, "GitHub / Rust / rust-policy"),
+            named_job(2, "Velnor / Rust / rust-policy"),
+        ];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.matched.len(), 1);
+        assert_eq!(census.matched[0].2, "Rust / rust-policy");
+        assert!(!census.has_parity_failures());
+        let report = format_pairing_report(&census).unwrap();
+        assert!(report.contains("### Matched pairs"));
+        assert!(report.contains("GitHub / Rust / rust-policy"));
+        assert!(report.contains("Velnor / Rust / rust-policy"));
+    }
+
+    #[test]
+    fn github_only_unit_fails_strict() {
+        let jobs = vec![named_job(1, "GitHub / Rust / rust-policy")];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.github_only.len(), 1);
+        assert!(census.has_parity_failures());
+        let report = format_pairing_report(&census).unwrap();
+        assert!(report.contains("### GitHub-only jobs"));
+        assert!(report.contains("### Missing counterpart"));
+        assert!(report.contains("no Velnor counterpart"));
+    }
+
+    #[test]
+    fn velnor_only_unit_fails_strict() {
+        let jobs = vec![named_job(2, "Velnor / Rust / rust-policy")];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.velnor_only.len(), 1);
+        assert!(census.has_parity_failures());
+        let report = format_pairing_report(&census).unwrap();
+        assert!(report.contains("### Velnor-only jobs"));
+        assert!(report.contains("no GitHub counterpart"));
+    }
+
+    #[test]
+    fn duplicate_pair_fails_strict() {
+        let jobs = vec![
+            named_job(1, "GitHub / Rust / rust-policy"),
+            named_job(3, "GitHub / Rust / rust-policy"),
+            named_job(2, "Velnor / Rust / rust-policy"),
+        ];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.duplicate_github.len(), 1);
+        assert!(census.matched.is_empty());
+        assert!(census.has_parity_failures());
+        let report = format_pairing_report(&census).unwrap();
+        assert!(report.contains("### Duplicate GitHub executions"));
+        assert!(report.contains("### Duplicate Velnor executions"));
+    }
+
+    #[test]
+    fn skipped_counterpart_fails_strict() {
+        let jobs = vec![
+            named_job(1, "GitHub / Rust / rust-policy"),
+            named_job_status(2, "Velnor / Rust / rust-policy", "completed", Some("skipped")),
+        ];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.matched.len(), 1);
+        assert_eq!(census.skipped_counterpart.len(), 1);
+        assert!(census.has_parity_failures());
+
+        let status_skipped = vec![
+            named_job(1, "GitHub / Rust / rust-policy"),
+            named_job_status(2, "Velnor / Rust / rust-policy", "skipped", None),
+        ];
+        let census = pair_lane_census(&status_skipped);
+        assert_eq!(census.skipped_counterpart.len(), 1);
+        assert!(census.has_parity_failures());
+        let report = format_pairing_report(&census).unwrap();
+        assert!(report.contains("### Skipped counterpart"));
+        assert!(report.contains("one side skipped"));
+    }
+
+    #[test]
+    fn control_jobs_do_not_create_false_parity_failure() {
+        let jobs = vec![
+            named_job(1, "GitHub / Rust / rust-policy"),
+            named_job(2, "Velnor / Rust / rust-policy"),
+            named_job(3, "Control / Planning"),
+            named_job(4, "Control / Aggregate"),
+            named_job(5, "Control / Rust / prepare-cargo"),
+            named_job(6, "lint"),
+        ];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.matched.len(), 1);
+        assert_eq!(census.control.len(), 4);
+        assert!(!census.has_parity_failures());
+        let report = format_pairing_report(&census).unwrap();
+        assert!(report.contains("### Control jobs ignored"));
+        assert!(report.contains("Control / Planning"));
+        assert!(report.contains("lint"));
+        assert!(report.contains("informational, not a failure"));
+    }
+
+    #[test]
+    fn unit_id_containing_velnor_is_not_a_lane_token() {
+        let jobs = vec![
+            named_job(1, "GitHub / Rust / rust-velnor-tools"),
+            named_job(2, "Velnor / Rust / rust-velnor-tools"),
+            named_job(3, "GitHub / Rust / rust-policy"),
+            named_job(4, "Velnor / Rust / rust-policy"),
+        ];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.matched.len(), 2);
+        let keys: Vec<&str> = census.matched.iter().map(|(_, _, key)| key.as_str()).collect();
+        assert!(keys.contains(&"Rust / rust-velnor-tools"));
+        assert!(keys.contains(&"Rust / rust-policy"));
+        assert!(census.ambiguous.is_empty());
+        assert!(!census.has_parity_failures());
+    }
+
+    #[test]
+    fn unambiguous_mapping_failure_fails_strict() {
+        let jobs = vec![
+            named_job(1, "GitHub / Rust / rust-policy"),
+            named_job(2, "Velnor / Rust / rust-policy"),
+            named_job(3, "github-to-velnor sync"),
+        ];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.ambiguous.len(), 1);
+        assert_eq!(census.ambiguous[0].name, "github-to-velnor sync");
+        assert!(census.has_parity_failures());
+        let report = format_pairing_report(&census).unwrap();
+        assert!(report.contains("### Ambiguous names"));
+        assert!(report.contains("github-to-velnor sync"));
+    }
+
+    #[test]
+    fn fixture_matrix_naming_still_pairs() {
+        let jobs = vec![
+            named_job(1, r#"compat (app-a, github, "ubuntu-latest")"#),
+            named_job(
+                2,
+                r#"compat (app-a, velnor, ["self-hosted","velnor-target-mvp"])"#,
+            ),
+        ];
+        let census = pair_lane_census(&jobs);
+        assert_eq!(census.matched.len(), 1);
+        assert_eq!(census.matched[0].0.id, 1);
+        assert_eq!(census.matched[0].1.id, 2);
+        assert!(!census.has_parity_failures());
     }
 
     #[test]

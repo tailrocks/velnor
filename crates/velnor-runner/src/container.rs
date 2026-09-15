@@ -45,10 +45,13 @@ pub(crate) const JOB_DONE_SENTINEL: &str = "job.done";
 /// `append_step_env` and re-asserted after it on every exec/run path, so a
 /// workflow can neither shadow these names via `env:`/`GITHUB_ENV` nor win a
 /// `-e`-over-`--env-file` precedence race with a multiline spoof.
-const AUTHORITATIVE_RUNNER_ENV: [&str; 3] = [
+const AUTHORITATIVE_RUNNER_ENV: [&str; 6] = [
     "VELNOR_EXECUTION_BACKEND",
     "VELNOR_SOURCE_SHA",
     "VELNOR_MANIFEST_VERSION",
+    "VELNOR_HOST",
+    "VELNOR_INSTANCE",
+    "VELNOR_SLOT",
 ];
 
 fn is_reserved_mbx_env(name: &str) -> bool {

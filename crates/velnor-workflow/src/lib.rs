@@ -324,7 +324,7 @@ struct RawCli {
 
     /// Supported execution backends. Default `both` so every repository can
     /// run GitHub and Velnor. `[workflow] automatic` selects which lanes run
-    /// without a dispatch choice (inferred `github` when both are available).
+    /// without a dispatch choice (inferred `both` when both are available).
     #[arg(long, value_enum, default_value_t = RunnerMode::Both, value_name = "MODE")]
     runners: RunnerMode,
 
@@ -1464,16 +1464,17 @@ pub(crate) fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorErro
     }
 }
 
-fn inferred_automatic(runners: RunnerMode) -> RunnerMode {
+pub(crate) fn inferred_automatic(runners: RunnerMode) -> RunnerMode {
     match runners {
-        RunnerMode::Both => RunnerMode::Github,
+        RunnerMode::Both => RunnerMode::Both,
         other => other,
     }
 }
 
 fn automatic_fits_runners(runners: RunnerMode, automatic: RunnerMode) -> bool {
     match (runners, automatic) {
-        (RunnerMode::Both, _) => true,
+        (RunnerMode::Both, RunnerMode::Both) => true,
+        (RunnerMode::Both, _) => false,
         (mode, automatic) => mode == automatic,
     }
 }
@@ -2087,6 +2088,30 @@ pub(crate) fn unit_group(kind: UnitKind) -> &'static str {
         UnitKind::Swift => "Swift / Packages",
         UnitKind::Gradle => "Gradle / Projects",
     }
+}
+
+/// The first `unit_group` segment: `Bun / Packages` → `Bun`. Comparison job
+/// names use this so they never nest extra slashes.
+pub(crate) fn lane_kind_label(kind: UnitKind) -> &'static str {
+    unit_group(kind)
+        .split(" / ")
+        .next()
+        .unwrap_or_else(|| unit_group(kind))
+}
+
+/// `{Lane} / {Kind} / {unit_id}` — lane is always the first token.
+pub(crate) fn comparison_job_name(lane: RunnerMode, unit: &Unit) -> String {
+    format!(
+        "{} / {} / {}",
+        lane.display_name(),
+        lane_kind_label(unit.kind),
+        unit.id
+    )
+}
+
+/// Quoted `Control / {label}` display name for aggregate and side-effect jobs.
+pub(crate) fn control_job_name(label: &str) -> String {
+    yaml_scalar(&format!("Control / {label}"))
 }
 
 pub(crate) fn unit_display_label(unit: &Unit) -> &str {
@@ -2946,7 +2971,7 @@ pub(crate) fn inline_policy_job_for_lane(
 /// The workflow names the inline policy job renders under: the advisory lane in
 /// the trusted aggregate callers and the base-owned entrypoint job. The
 /// runtime validator admits exactly these two.
-pub(crate) const POLICY_JOB_NAMES: [&str; 2] = ["Advisory policy", "Policy"];
+pub(crate) const POLICY_JOB_NAMES: [&str; 2] = ["Control / Policy", "Policy"];
 
 fn control_plane_runner(config: &ProjectConfig) -> String {
     match config.runners {
@@ -2979,14 +3004,14 @@ fn render_policy_entrypoint(config: &ProjectConfig) -> String {
     let policy_job = if config.runners == RunnerMode::Velnor {
         let gate = control_plane_trusted_gate(&config.default_branch);
         inline_policy_job_for_lane(
-            "Policy",
+            "Control / Policy",
             VELNOR_POLICY_WORKFLOW_REV,
             &control_plane_runner(config),
             "local",
             Some(&gate),
         )
     } else {
-        inline_policy_job("Policy", VELNOR_POLICY_WORKFLOW_REV)
+        inline_policy_job("Control / Policy", VELNOR_POLICY_WORKFLOW_REV)
     };
     let concurrency = policy_concurrency_block(config);
     format!(
@@ -3044,18 +3069,69 @@ pub(crate) fn lane_supports_unit_kind(lane: RunnerMode, kind: UnitKind) -> bool 
     !(lane == RunnerMode::Velnor && kind == UnitKind::Swift)
 }
 
-/// Whether the admitted `lanes` can execute a unit of `kind`: at least one
-/// admitted lane must support it. A velnor-only selection drops whatever the
-/// Velnor lane cannot run; `github` and `both` keep every known kind because
-/// the GitHub lane runs them all.
+/// Whether the admitted `lanes` can execute a unit of `kind` as a comparison
+/// pair. `both` requires every admitted lane to support the kind so a unit is
+/// never selected for pairing when one lane would be silently omitted.
 pub(crate) fn lanes_support_unit_kind(lanes: RunnerMode, kind: UnitKind) -> bool {
     match lanes {
         RunnerMode::Both => {
             lane_supports_unit_kind(RunnerMode::Github, kind)
-                || lane_supports_unit_kind(RunnerMode::Velnor, kind)
+                && lane_supports_unit_kind(RunnerMode::Velnor, kind)
         }
         lane => lane_supports_unit_kind(lane, kind),
     }
+}
+
+fn validate_both_automatic_contract(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    if !automatic_fits_runners(config.runners, config.automatic) {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] automatic = `{}` is not available when runners = `{}`",
+            config.automatic.as_str(),
+            config.runners.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Fail generation when `runners=both` would emit an unpaired comparison unit.
+/// Per-unit `jobs = ["github"]` (or `["velnor"]`) is the documented opt-out.
+fn validate_both_lane_unit_coverage(
+    config: &ProjectConfig,
+    surface: Option<&primitives::Surface>,
+) -> Result<(), GeneratorError> {
+    if config.runners != RunnerMode::Both {
+        return Ok(());
+    }
+    for unit in &config.units {
+        let github_ok = lane_supports_unit_kind(RunnerMode::Github, unit.kind);
+        let velnor_ok = lane_supports_unit_kind(RunnerMode::Velnor, unit.kind);
+        if github_ok && velnor_ok {
+            continue;
+        }
+        let explicit_opt_out = surface
+            .and_then(|surface| surface.contracts.get(&unit.id))
+            .is_some_and(|contract| {
+                let has_github = contract
+                    .lanes
+                    .iter()
+                    .any(|job| job.lane == RunnerMode::Github);
+                let has_velnor = contract
+                    .lanes
+                    .iter()
+                    .any(|job| job.lane == RunnerMode::Velnor);
+                !(has_github && has_velnor)
+            });
+        if explicit_opt_out {
+            continue;
+        }
+        let missing = if velnor_ok { "github" } else { "velnor" };
+        return Err(GeneratorError::usage(format!(
+            "runners=both cannot generate unit `{}` ({}); the {missing} lane cannot run this kind. Declare `jobs = [\"github\"]` (or `[\"velnor\"]`) as an explicit opt-out, or remove the unit",
+            unit.id,
+            unit.kind.label(),
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn velnor_rust_dependency_needs(
@@ -3371,6 +3447,8 @@ fn generated_files_with_surface(
     // pin or a release matrix the pin does not declare.
     validate_rust_units_are_pinned(&config)?;
     validate_release_targets_are_pinned(&config)?;
+    validate_both_automatic_contract(&config)?;
+    validate_both_lane_unit_coverage(&config, surface)?;
     let mut files = BTreeMap::new();
     files.insert(
         PathBuf::from(".github/actionlint.yaml"),
@@ -3872,7 +3950,7 @@ fn report_unit_runners(config: &ProjectConfig, unit: &Unit) -> String {
         RunnerMode::Both => {
             if unit.kind == UnitKind::Swift {
                 format!(
-                    "github: {}; velnor: skipped (Apple unit requires macOS)",
+                    "github: {}; velnor: unsupported (declare jobs = [\"github\"] to opt out)",
                     config.macos_runner
                 )
             } else {
@@ -6106,7 +6184,7 @@ mod tests {
 
         assert!(workflow.contains("  github-"));
         assert!(workflow.contains("  velnor-"));
-        assert!(workflow.contains("default: github"));
+        assert!(workflow.contains("default: both"));
     }
 
     #[test]
@@ -9205,8 +9283,8 @@ channel = "stable"
         let config = scanned_fixture(RunnerMode::Both);
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
         assert!(workflow.contains("name: CI / Main\nrun-name: CI / main"));
-        assert!(workflow.contains("  ci-required:\n    name: ci-required"));
-        assert!(workflow.contains("  required:\n    name: Required"));
+        assert!(workflow.contains("  ci-required:\n    name: \"Control / Aggregate\""));
+        assert!(workflow.contains("  required:\n    name: \"Control / Required\""));
         assert!(workflow.contains("needs: [plan, policy]"));
         assert!(workflow.contains("github.ref == 'refs/heads/main'"));
         assert!(workflow.contains("github.event_name == 'workflow_dispatch'"));
@@ -9215,7 +9293,7 @@ channel = "stable"
         assert!(workflow.contains("persist-credentials: false"));
         assert!(workflow.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(!workflow.contains("\non:\n  pull_request_target:"));
-        assert!(workflow.contains("name: Advisory policy"));
+        assert!(workflow.contains("name: Control / Policy"));
         assert!(workflow.contains(&format!("--rev {VELNOR_POLICY_WORKFLOW_REV}")));
         assert!(workflow.contains(&format!(
             "{VELNOR_POLICY_REVISION_ENV}: {VELNOR_POLICY_WORKFLOW_REV}"
@@ -9482,11 +9560,11 @@ channel = "stable"
             "generated nightly workflow",
         );
         let policy_pin = format!("--rev {VELNOR_POLICY_WORKFLOW_REV}");
-        assert!(!pr_workflow.contains("name: Advisory policy"));
+        assert!(!pr_workflow.contains("name: Control / Policy"));
         assert!(!pr_workflow.contains("needs: [plan, policy]"));
         assert!(!pr_workflow.contains("uses: tailrocks/velnor/.github/workflows/"));
         assert!(policy_workflow.contains("pull_request_target:"));
-        assert!(policy_workflow.contains("name: Policy"));
+        assert!(policy_workflow.contains("name: Control / Policy"));
         assert!(policy_workflow.contains("steps:"));
         assert!(policy_workflow.contains(&policy_pin));
         assert!(pr_workflow.contains("pull_request:"));
@@ -9824,8 +9902,8 @@ channel = "stable"
             files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
             "root workflow",
         );
-        assert!(root.contains("name: Planning"));
-        assert!(!root.contains("name: Advisory policy"));
+        assert!(root.contains("name: \"Control / Planning\""));
+        assert!(!root.contains("name: Control / Policy"));
         let rust_unit = must_some(
             config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
             "Rust fixture unit",
@@ -9976,6 +10054,19 @@ channel = "stable"
     }
 
     #[test]
+    fn lane_kind_label_uses_the_first_unit_group_segment() {
+        assert_eq!(lane_kind_label(UnitKind::Rust), "Rust");
+        assert_eq!(lane_kind_label(UnitKind::Bun), "Bun");
+        assert_eq!(lane_kind_label(UnitKind::Node), "Node");
+        assert_eq!(lane_kind_label(UnitKind::Docker), "Docker");
+        assert_eq!(lane_kind_label(UnitKind::Docs), "Documentation");
+        assert_eq!(lane_kind_label(UnitKind::OpenTofu), "OpenTofu");
+        assert_eq!(lane_kind_label(UnitKind::Homebrew), "Homebrew");
+        assert_eq!(lane_kind_label(UnitKind::Swift), "Swift");
+        assert_eq!(lane_kind_label(UnitKind::Gradle), "Gradle");
+    }
+
+    #[test]
     fn admitted_lanes_support_every_kind_but_velnor_only_swift() {
         let kinds = [
             UnitKind::Rust,
@@ -9993,7 +10084,11 @@ channel = "stable"
                 lanes_support_unit_kind(RunnerMode::Github, kind),
                 "{kind:?}"
             );
-            assert!(lanes_support_unit_kind(RunnerMode::Both, kind), "{kind:?}");
+            assert_eq!(
+                lanes_support_unit_kind(RunnerMode::Both, kind),
+                kind != UnitKind::Swift,
+                "{kind:?}"
+            );
             assert_eq!(
                 lanes_support_unit_kind(RunnerMode::Velnor, kind),
                 kind != UnitKind::Swift,
@@ -10313,8 +10408,8 @@ channel = "stable"
         assert!(pr.contains("merge_group:"));
         assert!(pr.contains("permissions:\n  actions: read\n  contents: read"));
         assert!(pr.contains("cancel-in-progress: true"));
-        assert!(pr.contains("  ci-required:\n    name: ci-required"));
-        assert!(pr.contains("  required:\n    name: Required"));
+        assert!(pr.contains("  ci-required:\n    name: \"Control / Aggregate\""));
+        assert!(pr.contains("  required:\n    name: \"Control / Required\""));
         assert!(!pr.contains("branches: [main]"));
         assert!(main.contains("name: CI / Main\nrun-name: CI / main"));
         assert!(main.contains("branches: [main]"));
@@ -10333,8 +10428,8 @@ channel = "stable"
             generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator));
         assert!(nested_main.contains("cancel-in-progress: true"));
         assert!(nested_nightly.contains("cancel-in-progress: true"));
-        assert!(nested_nightly.contains("name: nightly-required"));
-        assert!(nested_nightly.contains("name: Nightly red-to-signal"));
+        assert!(nested_nightly.contains("name: \"Control / Nightly aggregate\""));
+        assert!(nested_nightly.contains("name: \"Control / Nightly red-to-signal\""));
         assert!(nested_nightly.contains("inputs.simulate_failure"));
         assert_eq!(
             must(
@@ -10613,71 +10708,25 @@ channel = "stable"
     }
 
     #[test]
-    fn both_with_automatic_velnor_plans_on_velnor_and_keeps_github_dispatch() {
+    fn both_with_automatic_velnor_is_rejected() {
         let mut config = scanned_fixture(RunnerMode::Both);
         config.automatic = RunnerMode::Velnor;
         config.pull_request_on_velnor = true;
-        let pr = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
-        assert!(pr.contains("default: velnor"), "{pr}");
-        assert!(!pr.contains("default: github"), "{pr}");
+        let error = generated_files(&config).expect_err("both + automatic=velnor");
         assert!(
-            pr.contains("  github-") || pr.contains("name: \"GitHub /"),
-            "{pr}"
-        );
-        let plan = pr
-            .split("\n  plan:\n")
-            .nth(1)
-            .and_then(|rest| rest.split("\n  group-").next())
-            .unwrap_or(&pr);
-        assert!(
-            plan.contains("runs-on: [self-hosted, example-runner-label]"),
-            "automatic=velnor Planning must run on Velnor: {plan}"
-        );
-        assert!(
-            !plan.contains("runs-on: ubuntu-24.04"),
-            "automatic=velnor Planning must not use GitHub-hosted: {plan}"
-        );
-        let unit = must(generated_files(&config), "generate units");
-        let rust = must_some(
-            unit.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
-            "rust unit",
-        );
-        let github_if = rust
-            .lines()
-            .find(|line| line.contains("github.event.inputs.runner == 'github'"))
-            .unwrap_or("");
-        assert!(
-            github_if.contains("workflow_dispatch"),
-            "GitHub lane stays dispatch-only when automatic=velnor: {github_if}"
-        );
-        assert!(
-            !github_if.contains("pull_request"),
-            "automatic=velnor must not auto-run GitHub on pull_request: {github_if}"
-        );
-        assert!(
-            rust.contains("setup-velnor-workflow"),
-            "GitHub units self-bootstrap when Planning is on Velnor: {rust}"
+            error.to_string().contains("automatic") && error.to_string().contains("both"),
+            "runners=both must reject automatic=velnor: {error}"
         );
     }
 
     #[test]
-    fn both_with_automatic_github_runs_github_on_pr_and_keeps_velnor_manual() {
+    fn both_with_automatic_github_is_rejected() {
         let mut config = scanned_fixture(RunnerMode::Both);
         config.automatic = RunnerMode::Github;
-        let pr = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
-        assert!(pr.contains("default: github"), "{pr}");
-        assert!(!pr.contains("default: velnor"), "{pr}");
-        assert!(pr.contains("  github-"), "{pr}");
-        assert!(pr.contains("  velnor-"), "{pr}");
+        let error = generated_files(&config).expect_err("both + automatic=github");
         assert!(
-            !pr.contains(
-                "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor'"
-            ),
-            "Velnor must not be automatic when automatic=github: {pr}"
-        );
-        assert!(
-            pr.contains("github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"),
-            "Velnor stays dispatch-only: {pr}"
+            error.to_string().contains("automatic") && error.to_string().contains("both"),
+            "runners=both must reject automatic=github: {error}"
         );
     }
 
@@ -11817,7 +11866,7 @@ channel = "stable"
             "Velnor recovery PR aggregate must use the derived -pr concurrency group: {pr}"
         );
         assert!(
-            pr.contains("group-bun:\n    name: \"Bun / Packages\"\n    if:"),
+            pr.contains("group-bun:\n    name: \"Control / Bun\"\n    if:"),
             "missing bun group caller: {pr}"
         );
         assert!(
@@ -13360,10 +13409,10 @@ channel = "stable"
         assert!(main.contains("workflow_dispatch:"));
         assert!(main.contains("refs/heads/main"));
         assert!(main.contains(&fixture_lane_selector()));
-        assert!(pr.contains("  ci-required:\n    name: ci-required"));
-        assert!(pr.contains("  required:\n    name: Required"));
-        assert!(main.contains("  ci-required:\n    name: ci-required"));
-        assert!(main.contains("  required:\n    name: Required"));
+        assert!(pr.contains("  ci-required:\n    name: \"Control / Aggregate\""));
+        assert!(pr.contains("  required:\n    name: \"Control / Required\""));
+        assert!(main.contains("  ci-required:\n    name: \"Control / Aggregate\""));
+        assert!(main.contains("  required:\n    name: \"Control / Required\""));
         assert!(!nightly.contains("name: ci-required"));
         assert!(nightly.contains("schedule:"));
         assert_eq!(

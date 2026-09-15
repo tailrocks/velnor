@@ -21,7 +21,7 @@ on:
 
 jobs:
   github-docker:
-    name: "GitHub / docker"
+    name: "GitHub / Docker / docker"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',docker,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
@@ -254,11 +254,11 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "GitHub / docker"
+          job_label: "GitHub / Docker / docker"
 
   velnor-docker:
-    name: "Velnor / docker"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',docker,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    name: "Velnor / Docker / docker"
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',docker,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp, velnor-host-docker]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -281,6 +281,21 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
+      - name: Velnor runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Velnor runner identity'
+            echo
+            echo "- Host: ${VELNOR_HOST:-unset}"
+            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
+            echo "- Slot: ${VELNOR_SLOT:-unset}"
+            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
+            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
+            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
+            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -410,5 +425,5 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: "Velnor / docker"
+          job_label: "Velnor / Docker / docker"
 
