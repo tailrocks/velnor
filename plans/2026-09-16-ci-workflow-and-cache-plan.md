@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `28b528d8` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8`; rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `81104ba8` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8`; rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -909,4 +909,12 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Clippy clean (`velnor-workflow --all-targets -D warnings`) | V | local `cargo clippy -p velnor-workflow --all-targets -- -D warnings` exit 0 |
 | Prefetch bash drops redundant `cd` (no duplicate workspace hop) | V | `lib.rs:4508-4511`; regen `ci-unit-rust-2.yml` single `cd -- "$GITHUB_WORKSPACE"` before install |
 | Pins @ `f3fc75a` / D19 @ `28b528d8` | V | `lib.rs:83,93`; `manifest.rs:712`; release golden digests; `cargo test -p velnor-workflow` 455 passed |
-| §16 `ci-required` / policy green / 3× main green | P | awaiting CI run on `28b528d8` |
+| §16 `ci-required` / policy green / 3× main green | P | awaiting CI run on `81104ba8` |
+
+#### Rev 10 delta @ `81104ba8` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| ci-required accepts trust-gated Velnor docker skip | V | `ir.rs:3658-3660,2212-2230`; run 35035084210 root cause `velnor-docker skipped`; `trust_gated_velnor_docker_skip_is_accepted_by_ci_required` |
+| lane_pairing clippy format_push_string | V | `92305dd2` `write!` fix in `lane_pairing.rs:468` |
+| Pins @ `643f3312` / D19 @ `81104ba8` | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 456 passed |
