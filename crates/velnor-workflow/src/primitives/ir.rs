@@ -2491,7 +2491,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             UnitKind::Docker => {
                 tools.insert(ToolRequirement::DockerBuildx);
             }
-            UnitKind::Swift | UnitKind::Docs => {}
+            UnitKind::Swift => {
+                if !unit.mise_tools.is_empty() || commands_invoke_mise(unit) {
+                    tools.insert(ToolRequirement::Mise);
+                }
+            }
+            UnitKind::Docs => {}
         }
         // Declared tools provision through mise whatever the kind: the scan
         // cannot see tools a test invokes at runtime, so the repository

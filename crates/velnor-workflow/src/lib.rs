@@ -7128,6 +7128,66 @@ channel = "stable"
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn swift_declared_mise_tools_render_mise_action() {
+        let root = temporary_repository("swift-mise-tools");
+        must(
+            fs::write(root.join("Package.swift"), "// swift-tools-version: 5.9\n"),
+            "write Package.swift",
+        );
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                r"[settings]
+lockfile = true
+",
+            ),
+            "write Mise configuration",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.rust]]\nversion = \"1.0.0\"\n\n[[tools.\"cargo:sccache\"]]\nversion = \"0.10.0\"\n\n[[tools.\"cargo:boltffi_cli\"]]\nversion = \"0.30.1\"\n",
+            ),
+            "write Mise lock",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan Swift repository",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        write_generation_config(
+            &root,
+            &swift.id,
+            "\"cargo-binstall\", \"rust\", \"cargo:sccache\", \"cargo:boltffi_cli\"",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "rescan with declared mise tools",
+        );
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift),
+            "Swift unit",
+        );
+        let workflow = WorkflowIr::from_config(&config).render_nested_unit(swift, WorkflowKind::PullRequest);
+        assert!(
+            workflow.contains(
+                "install_args: cargo-binstall rust cargo:sccache cargo:boltffi_cli"
+            ),
+            "Swift units with declared mise tools must provision them on GitHub: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// The scanned Rust unit id a `[[units]]` override row must name. The scan
     /// derives the id from the package, so tests learn it from a first scan
     /// instead of hardcoding the derivation.
