@@ -2512,12 +2512,12 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           fi
 "#;
 
-/// Maintenance keeps closed-PR pruning on the hosted image. The cache-budget
-/// lane follows the configured CI mode: Velnor for `runners = "velnor"`, and
-/// hosted otherwise. `uses:` stays on the `SOURCE_REV` pin (GitHub Actions
-/// rejects expressions in `uses:` versions). `rev:` uses a context-gated
-/// `${{ github.sha }}` with a static fallback when this repository owns the
-/// setup action.
+/// Maintenance follows the configured CI mode: both prune and cache-budget
+/// stay on Velnor when `runners = "velnor"`, so no GitHub-hosted `runs-on`
+/// leaks into a Velnor-only surface. Hosted otherwise. `uses:` stays on the
+/// `SOURCE_REV` pin (GitHub Actions rejects expressions in `uses:` versions).
+/// `rev:` uses a context-gated `${{ github.sha }}` with a static fallback
+/// when this repository owns the setup action.
 fn render_maintenance(config: &ProjectConfig) -> String {
     let cache_lane = if config.runners == RunnerMode::Velnor {
         RunnerMode::Velnor
@@ -2549,7 +2549,7 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
         .replace(
             "__MAINTENANCE_PRUNE_RUNNER__",
-            &configured_runner(config, RunnerMode::Github),
+            &configured_runner(config, cache_lane),
         )
         .replace(
             "__MAINTENANCE_CACHE_RUNNER__",
@@ -2787,8 +2787,18 @@ mod tests {
             .collect();
         assert_eq!(
             runs_on.as_slice(),
-            [hosted.as_str(), velnor.as_str()],
-            "only PR pruning is GitHub-hosted: {workflow}"
+            [velnor.as_str(), velnor.as_str()],
+            "velnor-only maintenance must not emit a hosted runs-on: {workflow}"
+        );
+        assert!(
+            !workflow.contains(&hosted),
+            "velnor-only maintenance must not mention the hosted runner: {workflow}"
+        );
+        assert!(
+            !workflow
+                .lines()
+                .any(|line| line.trim_start().starts_with("runs-on: ubuntu-")),
+            "velnor-only maintenance must not emit runs-on: ubuntu-: {workflow}"
         );
         assert!(!workflow.contains("setup-velnor-workflow"));
         let prune_if = format!(
@@ -3300,7 +3310,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_uses_configured_github_runner_when_runners_are_velnor() {
+    fn maintenance_keeps_github_runner_out_of_runs_on_when_runners_are_velnor() {
         let mut cfg = config(&["maintenance.yml"], None);
         cfg.runners = RunnerMode::Velnor;
         cfg.github_runner = "ubuntu-22.04".to_owned();
@@ -3310,12 +3320,12 @@ mod tests {
         assert_maintenance_runner_split(&workflow, &cfg);
         assert_cache_retention_has_actions_write(&workflow);
         assert!(
-            workflow.contains("runs-on: ubuntu-22.04"),
-            "maintenance must honor config.github_runner: {workflow}"
+            !workflow.contains("runs-on: ubuntu-22.04"),
+            "velnor-only maintenance must not leak config.github_runner into runs-on: {workflow}"
         );
         assert!(
             !workflow.contains("runs-on: ubuntu-24.04"),
-            "maintenance must not keep the template runner when github_runner differs: {workflow}"
+            "velnor-only maintenance must not emit a hosted runs-on: {workflow}"
         );
     }
 

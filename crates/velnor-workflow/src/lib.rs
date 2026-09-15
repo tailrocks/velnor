@@ -9470,8 +9470,18 @@ channel = "stable"
             .collect();
         assert_eq!(
             runs_on.as_slice(),
-            [hosted.as_str(), velnor.as_str()],
-            "only PR pruning is GitHub-hosted: {workflow}"
+            [velnor.as_str(), velnor.as_str()],
+            "velnor-only maintenance must not emit a hosted runs-on: {workflow}"
+        );
+        assert!(
+            !workflow.contains(&hosted),
+            "velnor-only maintenance must not mention the hosted runner: {workflow}"
+        );
+        assert!(
+            !workflow
+                .lines()
+                .any(|line| line.trim_start().starts_with("runs-on: ubuntu-")),
+            "velnor-only maintenance must not emit runs-on: ubuntu-: {workflow}"
         );
         assert!(!workflow.contains("setup-velnor-workflow"));
         assert!(
