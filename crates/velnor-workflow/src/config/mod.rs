@@ -686,6 +686,29 @@ impl RepoGenerationConfig {
         &self.policy.exclude_workflows
     }
 
+    /// Explicit policy excludes plus every owned static workflow file.
+    pub(crate) fn effective_policy_exclude_workflows(&self) -> BTreeSet<String> {
+        let mut excludes = self
+            .policy
+            .exclude_workflows
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for row in &self.static_files {
+            let Some(file) = row.file.as_deref() else {
+                continue;
+            };
+            if !file.starts_with(".github/workflows/") {
+                continue;
+            }
+            let Some(name) = Path::new(file).file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            excludes.insert(name.to_owned());
+        }
+        excludes
+    }
+
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
         match self.schema {
             Some(CONFIG_SCHEMA) => Ok(()),
