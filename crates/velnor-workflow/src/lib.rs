@@ -4475,11 +4475,10 @@ fn run_installed_policy(root: &Path, revision: &str) -> Result<(), GeneratorErro
                 VELNOR_WORKFLOW_INSTALL_GIT_URL,
                 "--rev",
                 revision,
-                "--package",
-                "velnor-workflow",
                 "--root",
             ])
             .arg(&install_root)
+            .args(["velnor-workflow", "--bin", "velnor-workflow"])
             .status()
             .map_err(|error| {
                 GeneratorError::usage(format!(
