@@ -84,7 +84,7 @@ jobs:
   group-docker:
     name: "Docker / Images"
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.docker_matrix != '[]' }}
-    needs: [plan, group-bun]
+    needs: [plan]
     uses: ./.github/workflows/ci-unit-docker.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
@@ -95,7 +95,7 @@ jobs:
   group-docs:
     name: Documentation
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.docs_matrix != '[]' }}
-    needs: [plan, group-docker]
+    needs: [plan]
     uses: ./.github/workflows/ci-unit-docs.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
@@ -106,7 +106,7 @@ jobs:
   group-opentofu:
     name: OpenTofu
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.opentofu_matrix != '[]' }}
-    needs: [plan, group-docs]
+    needs: [plan]
     uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
@@ -117,7 +117,7 @@ jobs:
   group-rust:
     name: Rust
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.rust_matrix != '[]' }}
-    needs: [plan, group-opentofu]
+    needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
