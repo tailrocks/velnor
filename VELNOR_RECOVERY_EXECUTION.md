@@ -26,7 +26,7 @@ Operator contract (2026-09-15): finish only after this sequence is independently
 | **PR #815** | `e5049452` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
 | **PR #816** | Planning **PASS** on `e53bc60b` run `34939230446`; latest HEAD CI blocked by concurrency |
 | **Focused branch** | `origin/velnor-macos-host` @ `4628e602` — `4628e602` (slot PID fix), `e53bc60b` (project.toml fix), `94b02ab4` (trust_scope on host line), `9344ef3c` (host lifecycle controls), `ec96f089` (MBX cache isolation) |
-| **Host** | Needs restart on latest binary (`4628e602`+). Force-cancel reaped all 12 job containers in ~2 min (cancellation lifecycle PASS). |
+| **Host** | RELAUNCHED 07:35Z on fixed binary (PID 89135, runner `0d3f3df0…`, src `3f790584` incl. mbx fix): 7 ready + 5 executing = 12/12 accountable; new jobs healthy (cargo 100% CPU). Tip adds drain (`d1d12413`) + startup-prune (`4628e602`) + OCC idempotency (`acfd60b9`) — pick up at next idle restart, not urgent. |
 | **Lifecycle** | Root cause documented: `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
 | **Sentry** | JIT wedge unchanged; tailrocks fleet down. Do not deploy until gate 4. |
 
@@ -127,7 +127,7 @@ repo-scoped runner that is not in `velnor-trusted`.
 
 ## Next
 
-1. Restart Mac host with latest binary (`4628e602`+); verify 12/12 slots ready.
+1. Mac host relaunched on fixed binary (07:35Z) — 12/12 accountable, jobs flowing; re-run failed jobs on #809/#816 and watch to green. Next idle restart picks up drain/prune/OCC.
 2. Operator rebase #809 onto main/host fixes (agents cannot commit to #809); watch run `34930642603` to green.
 3. Gate 2 **NOT YET** until `ci-required` green + recovery Velnor-lane proof. Do not merge #809.
 4. Do not deploy Sentry (JIT wedge unchanged; gate 5 blocked).
