@@ -2632,7 +2632,11 @@ mod tests {
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
-        assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
+        let expected_cpu = job
+            .slot_budget()
+            .docker_cpu_option()
+            .expect("the test host exposes a CPU budget");
+        assert!(args.windows(2).any(|pair| pair == expected_cpu.as_slice()));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
