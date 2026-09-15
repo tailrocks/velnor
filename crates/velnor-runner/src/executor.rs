@@ -666,6 +666,12 @@ fn register_process_group(
     program: &str,
 ) -> Option<crate::execution::cancel::TargetRegistration> {
     let token = crate::execution::cancel::active()?;
+    // After the job is cancelled, new host children are cleanup (`docker rm`,
+    // network delete), not workload. Registering them with the cancelled
+    // token makes the fan-out SIGKILL the teardown it is supposed to finish.
+    if token.is_cancelled() {
+        return None;
+    }
     Some(
         token.register(crate::execution::cancel::TerminationTarget::ProcessGroup {
             pgid: pid,
@@ -1206,6 +1212,48 @@ fn mark_job_container_done(container: &JobContainerSpec) -> bool {
     true
 }
 
+/// A retried teardown may find the sentinel from the first attempt. Accept
+/// only a regular, owner-only file we already wrote; a symlink or foreign
+/// inode stays a refusal.
+#[cfg(unix)]
+fn verify_existing_job_done_marker(
+    directory: &File,
+    marker_name: &std::ffi::CStr,
+) -> io::Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `directory` is an open directory fd; `marker_name` is a
+    // NUL-terminated sentinel name; `stat` is written only on success.
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            marker_name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstatat initialized `stat` on success.
+    let stat = unsafe { stat.assume_init() };
+    #[allow(clippy::unnecessary_cast)]
+    let file_type = (stat.st_mode as u32) & (libc::S_IFMT as u32);
+    #[allow(clippy::unnecessary_cast)]
+    if file_type != libc::S_IFREG as u32 {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "job.done sentinel exists but is not a regular file",
+        ));
+    }
+    if stat.st_uid != unsafe { libc::geteuid() } || stat.st_mode & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "job.done sentinel is not a private runner-owned file",
+        ));
+    }
+    Ok(())
+}
+
 fn write_job_done_marker(path: &Path) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "job.done path has no parent")
@@ -1248,7 +1296,11 @@ fn write_job_done_marker(path: &Path) -> io::Result<()> {
             )
         };
         if fd < 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                return verify_existing_job_done_marker(&directory, &marker_name);
+            }
+            return Err(error);
         }
         let mut marker = unsafe { File::from_raw_fd(fd) };
         marker.write_all(b"done\n")?;
@@ -15940,6 +15992,34 @@ mod tests {
         assert!(mark_job_container_done(&spec));
         let path = spec.job_done_host_path();
         assert_eq!(fs::read_to_string(&path).unwrap(), "done\n");
+    }
+
+    #[test]
+    fn mark_job_container_done_is_idempotent_for_a_real_sentinel() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        assert!(mark_job_container_done(&spec));
+        assert!(
+            mark_job_container_done(&spec),
+            "retried teardown must accept the sentinel it already wrote"
+        );
+        assert_eq!(
+            fs::read_to_string(spec.job_done_host_path()).unwrap(),
+            "done\n"
+        );
+    }
+
+    #[test]
+    fn cancelled_active_token_does_not_register_new_host_process_groups() {
+        let _serial = crate::docker::metrics::lock_serial_for_test();
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        let _guard = crate::execution::cancel::set_active(token.clone());
+        assert!(
+            super::register_process_group(4242, "docker").is_none(),
+            "cleanup docker children must not join a token that will SIGKILL them"
+        );
     }
 
     #[cfg(unix)]
