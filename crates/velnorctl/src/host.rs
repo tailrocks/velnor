@@ -1697,30 +1697,36 @@ mod tests {
         match phase {
             JobPhase2::Assigned => {}
             JobPhase2::Running => {
-                assert!(!journal
-                    .apply(Event::JobStarted {
-                        job_id: job,
-                        generation,
-                    })
-                    .expect("start")
-                    .rejected);
+                assert!(
+                    !journal
+                        .apply(Event::JobStarted {
+                            job_id: job,
+                            generation,
+                        })
+                        .expect("start")
+                        .rejected
+                );
             }
             JobPhase2::Completing => {
-                assert!(!journal
-                    .apply(Event::JobStarted {
-                        job_id: job.clone(),
-                        generation,
-                    })
-                    .expect("start")
-                    .rejected);
-                assert!(!journal
-                    .apply(Event::JobTerminalResult {
-                        job_id: job,
-                        generation,
-                        conclusion: "success".into(),
-                    })
-                    .expect("terminal")
-                    .rejected);
+                assert!(
+                    !journal
+                        .apply(Event::JobStarted {
+                            job_id: job.clone(),
+                            generation,
+                        })
+                        .expect("start")
+                        .rejected
+                );
+                assert!(
+                    !journal
+                        .apply(Event::JobTerminalResult {
+                            job_id: job,
+                            generation,
+                            conclusion: "success".into(),
+                        })
+                        .expect("terminal")
+                        .rejected
+                );
             }
         }
     }
@@ -1827,11 +1833,7 @@ mod tests {
         let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
             .expect_err("live worker");
         assert_eq!(error.reason, "host.active_jobs");
-        assert!(
-            error.message.contains("job-live"),
-            "{}",
-            error.message
-        );
+        assert!(error.message.contains("job-live"), "{}", error.message);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1863,11 +1865,7 @@ mod tests {
         let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
             .expect_err("live waiter");
         assert_eq!(error.reason, "host.active_jobs");
-        assert!(
-            error.message.contains("job-wait"),
-            "{}",
-            error.message
-        );
+        assert!(error.message.contains("job-wait"), "{}", error.message);
         std::fs::remove_dir_all(root).ok();
     }
 

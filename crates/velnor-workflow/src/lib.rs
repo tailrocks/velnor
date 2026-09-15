@@ -8728,10 +8728,12 @@ channel = "stable"
             "the guest producer must never enter the Velnor lane: {guest}"
         );
 
+        let generated = must(
+            crate::generated_files(&scanned.config),
+            "generate workflow files",
+        );
         let ci_units = must_some(
-            surface
-                .files
-                .get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            generated.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
             "Rust unit workflow",
         );
         for unit in [

@@ -293,6 +293,36 @@ fn cli_c005_directory_mode_writes_a_complete_deterministic_0644_page_set() {
 }
 
 #[test]
+fn cli_c005_directory_mode_overrides_restrictive_umask() {
+    let scratch = Scratch::new("umask");
+    let output = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "umask 077; exec \"$1\" man --directory \"$2\"",
+            "velnorctl-man-umask",
+            env!("CARGO_BIN_EXE_velnorctl"),
+            scratch.path().to_str().expect("scratch path is UTF-8"),
+        ])
+        .output()
+        .expect("run velnorctl under restrictive umask");
+    assert!(
+        output.status.success(),
+        "velnorctl man failed: status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(scratch.path().join("adapter-check.1"))
+        .expect("adapter-check page")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o644, "restrictive umask must not change final mode");
+}
+
+#[test]
 fn cli_c005_destination_symlink_is_refused_as_usage() {
     let real = Scratch::new("dest-real");
     let link = Scratch::new("dest-link");
