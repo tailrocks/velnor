@@ -26,6 +26,31 @@ impl Generated {
     fn workflow(&self, name: &str) -> String {
         fs::read_to_string(self.output.join(".github/workflows").join(name)).unwrap()
     }
+
+    fn rust_unit_workflows(&self) -> BTreeSet<(String, String)> {
+        fs::read_dir(self.output.join(".github/workflows"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+                    name.starts_with("ci-unit-rust") && name.ends_with(".yml")
+                })
+            })
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let content = fs::read_to_string(path).unwrap();
+                (name, content)
+            })
+            .collect()
+    }
+}
+
+fn count_kind_rust_callers(workflow: &str) -> usize {
+    workflow
+        .lines()
+        .filter(|line| line.contains("uses: ./.github/workflows/ci-unit-rust"))
+        .count()
 }
 
 fn unique_dir(name: &str) -> PathBuf {
@@ -719,9 +744,7 @@ fn kind_reusable_caller_is_one_call_per_kind() {
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
     assert!(
-        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
-            .count()
-            >= 16,
+        count_kind_rust_callers(&pr) >= 16,
         "each selected (unit, lane) gets its own caller: {pr}"
     );
     assert!(pr.contains("  prepare-cargo:\n    name: \"Control / Prepare Cargo\""));
@@ -763,27 +786,35 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     let root = unique_dir("linear-jobs");
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
-    let unit = generated.workflow("ci-unit-rust.yml");
+    let shards = generated.rust_unit_workflows();
     assert!(
-        unit.matches("  verify-github:").count() >= 1,
-        "GitHub lane verify shards must stay keyed on verify-github"
+        !shards.is_empty(),
+        "rust kind reusable must emit at least one shard file"
     );
-    assert!(
-        unit.matches("  verify-velnor:").count() >= 1,
-        "Velnor lane verify shards must stay keyed on verify-velnor"
-    );
+    for (_, unit) in &shards {
+        assert_eq!(unit.matches("  verify-github:").count(), 1);
+        assert_eq!(unit.matches("  verify-velnor:").count(), 1);
+    }
+    let combined = shards
+        .iter()
+        .map(|(_, content)| content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     for index in 0..8 {
         assert!(
-            unit.contains(&format!("inputs.unit == 'rust-crate{index:02}'")),
+            combined.contains(&format!("inputs.unit == 'rust-crate{index:02}'")),
             "each unit must gate its collapsed steps"
         );
     }
     let pr = generated.workflow("ci-pr.yml");
-    assert_eq!(
-        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
-            .count(),
-        17
-    );
+    let prepare_cargo_callers = pr
+        .lines()
+        .filter(|line| {
+            line.strip_prefix("  ")
+                .is_some_and(|job| job.starts_with("prepare-cargo"))
+        })
+        .count();
+    assert_eq!(count_kind_rust_callers(&pr), 8 * 2 + prepare_cargo_callers);
 }
 
 #[test]

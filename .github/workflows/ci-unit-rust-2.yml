@@ -28,7 +28,7 @@ on:
 jobs:
   velnor-prepare-cargo-sources:
     name: prepare-cargo
-    if: ${{ inputs.lane == 'control' && (contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    if: ${{ inputs.lane == 'control' && (contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 20
     steps:
@@ -68,9 +68,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+          cd -- 'crates/velnor-workflow-contract'
+          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
+          cd -- "$GITHUB_WORKSPACE"
   verify-github:
     name: GitHub
-    if: ${{ inputs.lane == 'github' && (contains(format(',{0},', inputs.selected_units), ',rust-policy,') || contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,')) && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
+    if: ${{ inputs.lane == 'github' && (contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,')) && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -157,274 +164,56 @@ jobs:
             fi
           fi
       - name: Restore Rust toolchain
-        if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-rustup-toolchain
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
+        id: rust-velnor-render-rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Provision Rust toolchain
-        if: ${{ inputs.unit == 'rust-policy' }}
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-rustup-toolchain.outputs.cache-hit != 'true') }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.rustup
-          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
-      - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: github
-          github-cache-mode: objects
-          version: 1.8.3
-          cache-key: velnor-mbx-v3-62feddca97eb-${{ runner.os }}-${{ runner.arch }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-${{ hashFiles('.cargo/audit.toml', '.cargo/deny.toml', 'Cargo.lock', 'audit.toml', 'deny.toml') }}
-          restore-keys: |
-            velnor-mbx-v3-62feddca97eb-${{ runner.os }}-${{ runner.arch }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-
-            velnor-mbx-v3-62feddca97eb-${{ runner.os }}-${{ runner.arch }}-rust-policy-
-          save-on-workflow-dispatch: true
-      - name: Restore cargo bin toolchain
-        if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-cargo-bin-toolchain
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin
-          key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
-      - name: Save cargo bin toolchain
-        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-cargo-bin-toolchain.outputs.cache-hit != 'true') }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin
-          key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
-      - name: Set up cargo-deny
-        if: ${{ inputs.unit == 'rust-policy' && (steps.rust-policy-cargo-bin-toolchain.outputs.cache-hit != 'true') }}
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
-        with:
-          tool: cargo-deny
-          fallback: none
-      - name: Restore mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-mold-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/velnor/mold/2.42.0
-          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
-      - name: Set up mold 2.42.0
-        if: ${{ inputs.unit == 'rust-policy' }}
-        shell: bash
-        env:
-          MOLD_VERSION: 2.42.0
-        run: |
-          set -euo pipefail
-          case "$(uname -m)" in
-            x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;
-            aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;
-            *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;
-          esac
-          cache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"
-          archive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
-          mkdir -p "$cache_dir"
-          if [[ ! -s "$archive" ]]; then
-            temporary="$archive.download"
-            trap 'rm -f "$temporary"' EXIT
-            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
-              --output "$temporary" \
-              "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
-            printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
-            mv "$temporary" "$archive"
-            trap - EXIT
-          fi
-          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
-          if [[ "$(id -u)" -eq 0 ]]; then
-            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
-            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
-          else
-            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
-            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
-          fi
-          mold --version | grep -F "$MOLD_VERSION"
-      - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-mold-cache.outputs.cache-hit != 'true') }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/velnor/mold/2.42.0
-          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
-      - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Restore "Rust dependency policy" cache
-        if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
-          restore-keys: |
-            ci-${{ runner.os }}-${{ runner.arch }}-rust-
-      - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CACHE_PREP_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Mark cargo fetch end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CARGO_FETCH_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Run "Rust dependency policy" checks
-        if: ${{ inputs.unit == 'rust-policy' }}
-        env:
-          CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -o pipefail
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CHECKS_STARTED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-          rc=0
-          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CHECKS_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-          exit $rc
-      - name: Save "Rust dependency policy" cache
-        if: ${{ inputs.unit == 'rust-policy' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-cache.outputs.cache-hit != 'true') }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
-      - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CLEANUP_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        env:
-          VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-policy-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-policy-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-policy-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-policy-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-policy-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-policy-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-policy-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-policy-cache.outputs.cache-matched-key }}
-        uses: ./.github/actions/report-velnor-ci-outcomes
-        with:
-          job_label: rust-policy
-      - name: Restore Rust toolchain
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-rustup-toolchain
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.rustup
-          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
-      - name: Provision Rust toolchain
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install
-          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
-      - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-unit-collector' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-unit-collector-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-render-rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Set up Mise tools
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
+        id: rust-velnor-render-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-58dac62b69b4-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('mise.lock', 'tools/unit-collector/**/*.rs', 'tools/unit-collector/benches/**', 'tools/unit-collector/examples/**', 'tools/unit-collector/src/**', 'tools/unit-collector/tests/**', 'tools/unit-collector/tests/fixtures/dependency-bump.jsonl', 'tools/unit-collector/tests/fixtures/fresh.jsonl', 'tools/unit-collector/tests/fixtures/touched-source.jsonl') }}
+          cache-key: velnor-mbx-v3-2e0a56e1acb7-${{ runner.os }}-${{ runner.arch }}-rust-velnor-render-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-render/**/*.rs', 'crates/velnor-render/benches/**', 'crates/velnor-render/examples/**', 'crates/velnor-render/src/**', 'crates/velnor-render/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-58dac62b69b4-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-58dac62b69b4-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-
+            velnor-mbx-v3-2e0a56e1acb7-${{ runner.os }}-${{ runner.arch }}-rust-velnor-render-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-2e0a56e1acb7-${{ runner.os }}-${{ runner.arch }}-rust-velnor-render-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-mold-cache
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
+        id: rust-velnor-render-mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Set up mold 2.42.0
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
         shell: bash
         env:
           MOLD_VERSION: 2.42.0
@@ -458,13 +247,13 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-unit-collector' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-unit-collector-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-render-mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -475,9 +264,9 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Restore "Rust crate (unit-collector)" cache
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-cache
+      - name: Restore "Rust crate (velnor-render)" cache
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
+        id: rust-velnor-render-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -487,7 +276,7 @@ jobs:
           restore-keys: |
             ci-${{ runner.os }}-${{ runner.arch }}-rust-
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -499,20 +288,20 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-unit-collector' && (steps.rust-unit-collector-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (steps.rust-velnor-render-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="tools/unit-collector"
+          root="crates/velnor-render"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
           cargo fetch --locked
       - name: Mark cargo fetch end
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -523,8 +312,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (unit-collector)" checks
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
+      - name: Run "Rust crate (velnor-render)" checks
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -559,8 +348,8 @@ jobs:
             fi
           fi
           exit $rc
-      - name: Save "Rust crate (unit-collector)" cache
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-unit-collector-cache.outputs.cache-hit != 'true') }}
+      - name: Save "Rust crate (velnor-render)" cache
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-render-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -568,7 +357,7 @@ jobs:
             ~/.cargo/git
           key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -580,71 +369,71 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-unit-collector-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-unit-collector-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-unit-collector-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-unit-collector-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-unit-collector-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-unit-collector-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-unit-collector-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-unit-collector-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-render-rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-render-rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-render-mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-render-mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-render-mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-render-mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-render-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-render-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-unit-collector
+          job_label: rust-velnor-render
       - name: Restore Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-rustup-toolchain
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
+        id: rust-velnor-runner-rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Provision Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-bench-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-runner-rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Set up Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
+        id: rust-velnor-runner-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-9d674a408396-${{ runner.os }}-${{ runner.arch }}-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-bench/**/*.rs', 'crates/velnor-bench/benches/**', 'crates/velnor-bench/examples/**', 'crates/velnor-bench/src/**', 'crates/velnor-bench/tests/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          cache-key: velnor-mbx-v3-63af1b2c2066-${{ runner.os }}-${{ runner.arch }}-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-9d674a408396-${{ runner.os }}-${{ runner.arch }}-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-9d674a408396-${{ runner.os }}-${{ runner.arch }}-rust-velnor-bench-
+            velnor-mbx-v3-63af1b2c2066-${{ runner.os }}-${{ runner.arch }}-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-63af1b2c2066-${{ runner.os }}-${{ runner.arch }}-rust-velnor-runner-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-mold-cache
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
+        id: rust-velnor-runner-mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Set up mold 2.42.0
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
         shell: bash
         env:
           MOLD_VERSION: 2.42.0
@@ -678,13 +467,13 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-bench-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-runner-mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -695,9 +484,9 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Restore "Rust crate (velnor-bench)" cache
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-cache
+      - name: Restore "Rust crate (velnor-runner)" cache
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
+        id: rust-velnor-runner-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -707,7 +496,7 @@ jobs:
           restore-keys: |
             ci-${{ runner.os }}-${{ runner.arch }}-rust-
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -719,20 +508,20 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (steps.rust-velnor-bench-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (steps.rust-velnor-runner-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-bench"
+          root="crates/velnor-runner"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
           cargo fetch --locked
       - name: Mark cargo fetch end
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -743,8 +532,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-bench)" checks
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
+      - name: Run "Rust crate (velnor-runner)" checks
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -779,8 +568,8 @@ jobs:
             fi
           fi
           exit $rc
-      - name: Save "Rust crate (velnor-bench)" cache
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-bench-cache.outputs.cache-hit != 'true') }}
+      - name: Save "Rust crate (velnor-runner)" cache
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-runner-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -788,7 +577,7 @@ jobs:
             ~/.cargo/git
           key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -800,71 +589,71 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-bench-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-bench-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-bench-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-bench-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-bench-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-bench-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-bench-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-bench-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-runner-rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-runner-rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-runner-mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-runner-mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-runner-mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-runner-mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-runner-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-runner-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-bench
+          job_label: rust-velnor-runner
       - name: Restore Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-rustup-toolchain
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
+        id: rust-velnor-tools-rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Provision Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-client' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-client-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-tools-rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Set up Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
+        id: rust-velnor-tools-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-f644c27620d3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          cache-key: velnor-mbx-v3-b6a2a5a1520f-${{ runner.os }}-${{ runner.arch }}-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/src/manifest.rs', 'crates/velnor-tools/**/*.rs', 'crates/velnor-tools/benches/**', 'crates/velnor-tools/examples/**', 'crates/velnor-tools/src/**', 'crates/velnor-tools/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-f644c27620d3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-f644c27620d3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-
+            velnor-mbx-v3-b6a2a5a1520f-${{ runner.os }}-${{ runner.arch }}-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-b6a2a5a1520f-${{ runner.os }}-${{ runner.arch }}-rust-velnor-tools-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-mold-cache
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
+        id: rust-velnor-tools-mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Set up mold 2.42.0
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
         shell: bash
         env:
           MOLD_VERSION: 2.42.0
@@ -898,13 +687,13 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-client' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-client-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-tools-mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -915,9 +704,9 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Restore "Rust crate (velnor-client)" cache
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-cache
+      - name: Restore "Rust crate (velnor-tools)" cache
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
+        id: rust-velnor-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -927,7 +716,7 @@ jobs:
           restore-keys: |
             ci-${{ runner.os }}-${{ runner.arch }}-rust-
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -939,20 +728,20 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-client' && (steps.rust-velnor-client-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (steps.rust-velnor-tools-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-client"
+          root="crates/velnor-tools"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
           cargo fetch --locked
       - name: Mark cargo fetch end
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -963,8 +752,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-client)" checks
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
+      - name: Run "Rust crate (velnor-tools)" checks
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -999,8 +788,8 @@ jobs:
             fi
           fi
           exit $rc
-      - name: Save "Rust crate (velnor-client)" cache
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-client-cache.outputs.cache-hit != 'true') }}
+      - name: Save "Rust crate (velnor-tools)" cache
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-tools-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1008,7 +797,7 @@ jobs:
             ~/.cargo/git
           key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1020,71 +809,71 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-client-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-client-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-client-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-client-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-client-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-client-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-client-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-client-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-tools-rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-tools-rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-tools-mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-tools-mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-tools-mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-tools-mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-tools-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-tools-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-client
+          job_label: rust-velnor-tools
       - name: Restore Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-rustup-toolchain
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
+        id: rust-velnor-workflow-rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Provision Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-control' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-control-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Set up Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
+        id: rust-velnor-workflow-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-83caea635d99-${{ runner.os }}-${{ runner.arch }}-rust-velnor-control-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          cache-key: velnor-mbx-v3-41cb49309db8-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('Dockerfile', 'config/fleet/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnor-workflow/**/*.rs', 'crates/velnor-workflow/README.md', 'crates/velnor-workflow/benches/**', 'crates/velnor-workflow/examples/**', 'crates/velnor-workflow/src/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnor-workflow/templates/**', 'crates/velnor-workflow/templates/release-package-signer.yml', 'crates/velnor-workflow/tests/**', 'docker/build-mise.*', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-v3-83caea635d99-${{ runner.os }}-${{ runner.arch }}-rust-velnor-control-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-83caea635d99-${{ runner.os }}-${{ runner.arch }}-rust-velnor-control-
+            velnor-mbx-v3-41cb49309db8-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-41cb49309db8-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-mold-cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
+        id: rust-velnor-workflow-mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Set up mold 2.42.0
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
         shell: bash
         env:
           MOLD_VERSION: 2.42.0
@@ -1118,13 +907,13 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-control' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-control-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1135,9 +924,9 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Restore "Rust crate (velnor-control)" cache
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-cache
+      - name: Restore "Rust crate (velnor-workflow)" cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
+        id: rust-velnor-workflow-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1147,7 +936,7 @@ jobs:
           restore-keys: |
             ci-${{ runner.os }}-${{ runner.arch }}-rust-
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1159,20 +948,20 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-control' && (steps.rust-velnor-control-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (steps.rust-velnor-workflow-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-control"
+          root="crates/velnor-workflow"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
           cargo fetch --locked
       - name: Mark cargo fetch end
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1183,8 +972,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-control)" checks
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
+      - name: Run "Rust crate (velnor-workflow)" checks
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -1219,8 +1008,8 @@ jobs:
             fi
           fi
           exit $rc
-      - name: Save "Rust crate (velnor-control)" cache
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-control-cache.outputs.cache-hit != 'true') }}
+      - name: Save "Rust crate (velnor-workflow)" cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1228,7 +1017,7 @@ jobs:
             ~/.cargo/git
           key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1240,71 +1029,71 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-control-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-control-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-control-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-control-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-control-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-control-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-control-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-control-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-workflow-rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-workflow-rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-workflow-mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-workflow-mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-workflow-mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-workflow-mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-workflow-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-workflow-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-control
+          job_label: rust-velnor-workflow
       - name: Restore Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-rustup-toolchain
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
+        id: rust-velnor-workflow-contract-rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Provision Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-model' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-model-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-contract-rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Set up Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
+        id: rust-velnor-workflow-contract-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-56d78416eb8f-${{ runner.os }}-${{ runner.arch }}-rust-velnor-model-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          cache-key: velnor-mbx-v3-a155698a30b7-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-contract-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-workflow-contract/**/*.rs', 'crates/velnor-workflow-contract/Cargo.lock', 'crates/velnor-workflow-contract/benches/**', 'crates/velnor-workflow-contract/examples/**', 'crates/velnor-workflow-contract/src/**', 'crates/velnor-workflow-contract/tests/**', 'mise.lock') }}
           restore-keys: |
-            velnor-mbx-v3-56d78416eb8f-${{ runner.os }}-${{ runner.arch }}-rust-velnor-model-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-56d78416eb8f-${{ runner.os }}-${{ runner.arch }}-rust-velnor-model-
+            velnor-mbx-v3-a155698a30b7-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-contract-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-a155698a30b7-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-contract-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-mold-cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
+        id: rust-velnor-workflow-contract-mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Set up mold 2.42.0
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
         shell: bash
         env:
           MOLD_VERSION: 2.42.0
@@ -1338,13 +1127,13 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-model' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-model-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-contract-mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1355,19 +1144,19 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Restore "Rust crate (velnor-model)" cache
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-cache
+      - name: Restore "Rust crate (velnor-workflow-contract)" cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
+        id: rust-velnor-workflow-contract-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
           restore-keys: |
             ci-${{ runner.os }}-${{ runner.arch }}-rust-
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1379,20 +1168,20 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-model' && (steps.rust-velnor-model-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (steps.rust-velnor-workflow-contract-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-model"
+          root="crates/velnor-workflow-contract"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
           cargo fetch --locked
       - name: Mark cargo fetch end
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1403,8 +1192,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-model)" checks
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
+      - name: Run "Rust crate (velnor-workflow-contract)" checks
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -1439,16 +1228,16 @@ jobs:
             fi
           fi
           exit $rc
-      - name: Save "Rust crate (velnor-model)" cache
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-model-cache.outputs.cache-hit != 'true') }}
+      - name: Save "Rust crate (velnor-workflow-contract)" cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-contract-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'crates/velnor-workflow-contract/Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1460,23 +1249,243 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-model-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-model-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-model-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-model-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-model-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-model-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-model-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-model-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-workflow-contract-rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-workflow-contract-rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-workflow-contract-mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-workflow-contract-mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-workflow-contract-mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-workflow-contract-mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-workflow-contract-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-workflow-contract-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-model
+          job_label: rust-velnor-workflow-contract
+      - name: Restore Rust toolchain
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        id: rust-velnorctl-rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: ${{ inputs.unit == 'rust-velnorctl' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnorctl-rustup-toolchain.outputs.cache-hit != 'true') }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Set up Mise tools
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: aqua:nextest-rs/nextest/cargo-nextest
+          cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Set up Mr. Boxington
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        id: rust-velnorctl-mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          github-cache-mode: objects
+          version: 1.8.3
+          cache-key: velnor-mbx-v3-8c434f39428b-${{ runner.os }}-${{ runner.arch }}-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('config/fleet/**', 'crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-render/**/*.rs', 'crates/velnor-render/benches/**', 'crates/velnor-render/examples/**', 'crates/velnor-render/src/**', 'crates/velnor-render/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/canary.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnorctl/**/*.rs', 'crates/velnorctl/benches/**', 'crates/velnorctl/examples/**', 'crates/velnorctl/src/**', 'crates/velnorctl/tests/**', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
+          restore-keys: |
+            velnor-mbx-v3-8c434f39428b-${{ runner.os }}-${{ runner.arch }}-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-8c434f39428b-${{ runner.os }}-${{ runner.arch }}-rust-velnorctl-
+          save-on-workflow-dispatch: true
+      - name: Restore mold 2.42.0 cache
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        id: rust-velnorctl-mold-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Set up mold 2.42.0
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        shell: bash
+        env:
+          MOLD_VERSION: 2.42.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;
+            aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;
+            *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          cache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"
+          archive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+          mkdir -p "$cache_dir"
+          if [[ ! -s "$archive" ]]; then
+            temporary="$archive.download"
+            trap 'rm -f "$temporary"' EXIT
+            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+              --output "$temporary" \
+              "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+            printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
+            mv "$temporary" "$archive"
+            trap - EXIT
+          fi
+          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
+          if [[ "$(id -u)" -eq 0 ]]; then
+            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
+          else
+            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
+          fi
+          mold --version | grep -F "$MOLD_VERSION"
+      - name: Save mold 2.42.0 cache
+        if: ${{ inputs.unit == 'rust-velnorctl' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnorctl-mold-cache.outputs.cache-hit != 'true') }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Mark tool bootstrap end
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Restore "Rust crate (velnorctl)" cache
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        id: rust-velnorctl-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          restore-keys: |
+            ci-${{ runner.os }}-${{ runner.arch }}-rust-
+      - name: Mark cache prep end
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Prepare Cargo sources
+        if: ${{ inputs.unit == 'rust-velnorctl' && (steps.rust-velnorctl-cache.outputs.cache-hit != 'true') }}
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          root="crates/velnorctl"
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
+      - name: Mark cargo fetch end
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CARGO_FETCH_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run "Rust crate (velnorctl)" checks
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Save "Rust crate (velnorctl)" cache
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnorctl-cache.outputs.cache-hit != 'true') }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('.cargo/**', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Mark cleanup end
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        env:
+          VELNOR_CI_LANE: github
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnorctl-rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnorctl-rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnorctl-mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnorctl-mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnorctl-mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnorctl-mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnorctl-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnorctl-cache.outputs.cache-matched-key }}
+        uses: ./.github/actions/report-velnor-ci-outcomes
+        with:
+          job_label: rust-velnorctl
   verify-velnor:
     name: Velnor
-    if: ${{ inputs.lane == 'velnor' && (contains(format(',{0},', inputs.selected_units), ',rust-policy,') || contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
+    if: ${{ inputs.lane == 'velnor' && (contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 45
     steps:
@@ -1556,120 +1565,18 @@ jobs:
             fi
           fi
       - name: Install declared Mise tools
-        if: ${{ inputs.unit == 'rust-policy' }}
-        run: |
-          set -euo pipefail
-          mise --yes install aqua:EmbarkStudios/cargo-deny
-      - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: local
-      - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CACHE_PREP_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Mark cargo fetch end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CARGO_FETCH_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Run "Rust dependency policy" checks
-        if: ${{ inputs.unit == 'rust-policy' }}
-        env:
-          CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          MISE_AUTO_INSTALL: "false"
-          MISE_EXEC_AUTO_INSTALL: "false"
-          MISE_NOT_FOUND_AUTO_INSTALL: "false"
-        run: |
-          set -o pipefail
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CHECKS_STARTED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-          rc=0
-          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CHECKS_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-          exit $rc
-      - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        run: |
-          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
-          umask 077
-          mkdir -p "$timing_dir"
-          marker="$timing_dir/CLEANUP_ENDED"
-          if [[ ! -e "$marker" ]]; then
-            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
-              chmod 0444 "$marker" 2>/dev/null || true
-            fi
-          fi
-      - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-policy' && (always()) }}
-        env:
-          VELNOR_CI_LANE: velnor
-          VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
-        uses: ./.github/actions/report-velnor-ci-outcomes
-        with:
-          job_label: rust-policy
-      - name: Install declared Mise tools
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
         run: |
           set -euo pipefail
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
+        id: rust-velnor-render-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1681,7 +1588,7 @@ jobs:
             fi
           fi
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1692,8 +1599,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (unit-collector)" checks
-        if: ${{ inputs.unit == 'rust-unit-collector' }}
+      - name: Run "Rust crate (velnor-render)" checks
+        if: ${{ inputs.unit == 'rust-velnor-render' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -1729,7 +1636,7 @@ jobs:
           fi
           exit $rc
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1741,26 +1648,26 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         env:
           VELNOR_CI_LANE: velnor
           VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-unit-collector
+          job_label: rust-velnor-render
       - name: Install declared Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
         run: |
           set -euo pipefail
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
+        id: rust-velnor-runner-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1772,7 +1679,7 @@ jobs:
             fi
           fi
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1783,8 +1690,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-bench)" checks
-        if: ${{ inputs.unit == 'rust-velnor-bench' }}
+      - name: Run "Rust crate (velnor-runner)" checks
+        if: ${{ inputs.unit == 'rust-velnor-runner' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -1820,7 +1727,7 @@ jobs:
           fi
           exit $rc
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1832,26 +1739,26 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         env:
           VELNOR_CI_LANE: velnor
           VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-bench
+          job_label: rust-velnor-runner
       - name: Install declared Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
         run: |
           set -euo pipefail
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
+        id: rust-velnor-tools-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1863,7 +1770,7 @@ jobs:
             fi
           fi
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1874,8 +1781,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-client)" checks
-        if: ${{ inputs.unit == 'rust-velnor-client' }}
+      - name: Run "Rust crate (velnor-tools)" checks
+        if: ${{ inputs.unit == 'rust-velnor-tools' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -1911,7 +1818,7 @@ jobs:
           fi
           exit $rc
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1923,26 +1830,26 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         env:
           VELNOR_CI_LANE: velnor
           VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-client
+          job_label: rust-velnor-tools
       - name: Install declared Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
         run: |
           set -euo pipefail
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
+        id: rust-velnor-workflow-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1954,7 +1861,7 @@ jobs:
             fi
           fi
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -1965,8 +1872,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-control)" checks
-        if: ${{ inputs.unit == 'rust-velnor-control' }}
+      - name: Run "Rust crate (velnor-workflow)" checks
+        if: ${{ inputs.unit == 'rust-velnor-workflow' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -2002,7 +1909,7 @@ jobs:
           fi
           exit $rc
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -2014,26 +1921,26 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         env:
           VELNOR_CI_LANE: velnor
           VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-control
+          job_label: rust-velnor-workflow
       - name: Install declared Mise tools
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
         run: |
           set -euo pipefail
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-mbx-cache
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
+        id: rust-velnor-workflow-contract-mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
       - name: Mark tool bootstrap end
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -2045,7 +1952,7 @@ jobs:
             fi
           fi
       - name: Mark cache prep end
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -2056,8 +1963,8 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
-      - name: Run "Rust crate (velnor-model)" checks
-        if: ${{ inputs.unit == 'rust-velnor-model' }}
+      - name: Run "Rust crate (velnor-workflow-contract)" checks
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -2093,7 +2000,7 @@ jobs:
           fi
           exit $rc
       - name: Mark cleanup end
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         run: |
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
           umask 077
@@ -2105,10 +2012,101 @@ jobs:
             fi
           fi
       - name: Report phase timings and cache outcomes
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         env:
           VELNOR_CI_LANE: velnor
           VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_label: rust-velnor-model
+          job_label: rust-velnor-workflow-contract
+      - name: Install declared Mise tools
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        run: |
+          set -euo pipefail
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
+      - name: Set up Mr. Boxington
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        id: rust-velnorctl-mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+      - name: Mark tool bootstrap end
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cache prep end
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run "Rust crate (velnorctl)" checks
+        if: ${{ inputs.unit == 'rust-velnorctl' }}
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Mark cleanup end
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
+        env:
+          VELNOR_CI_LANE: velnor
+          VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
+        uses: ./.github/actions/report-velnor-ci-outcomes
+        with:
+          job_label: rust-velnorctl
