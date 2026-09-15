@@ -27,8 +27,13 @@ velnor_trusted_label = "velnor-host-docker"
 # Restore velnor-trusted after Sentry org fleet is healthy.
 pull_request_on_velnor = true
 velnor_rust_needs = "dependency-closure"
-# Serialize competing PR/workflow runs on the repository's shared host.
-velnor_concurrency_group = "velnor-${{ github.repository }}"
+# Supersede stale heads within one PR/branch; separate PRs run in parallel.
+# A repo-wide group with cancel-in-progress would cancel every in-progress run
+# on each push anywhere, making green CI unobtainable. Host capacity stays
+# bounded by runner slots: queued jobs wait for a free slot, they never
+# overload the host. Non-PR triggers (push/schedule/dispatch) fall back to
+# github.ref, so main/nightly runs still supersede per branch.
+velnor_concurrency_group = "velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 # Release contract: typed native publisher + rolling preview. Guest-seed

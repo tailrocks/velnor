@@ -37,7 +37,7 @@ on:
 
 
 concurrency:
-  group: velnor-${{ github.repository }}-nightly
+  group: velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}-nightly
   cancel-in-progress: true
 
 permissions:
@@ -157,7 +157,8 @@ jobs:
             "$CARGO_TARGET_DIR" \
             "$VELNOR_WORKFLOW_INSTALL_DIR"
           cd "$VELNOR_WORKFLOW_INSTALL_DIR"
-          cargo install \
+          env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+            cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
             --rev 92f933fdb7f84ef8d6e6eb3c1b5809d8231fbaea \
