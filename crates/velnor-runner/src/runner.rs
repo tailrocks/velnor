@@ -2684,8 +2684,10 @@ pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
     {
         return *hint;
     }
-    let hint =
-        velnor_control::journal::read_drain_state(journal_path).is_some_and(|state| state.active);
+    let hint = match velnor_control::journal::read_drain_state(journal_path) {
+        Ok(state) => state.is_some_and(|state| state.active),
+        Err(_) => false,
+    };
     if let Ok(mut cache) = DRAIN_HINT_CACHE.try_lock() {
         *cache = Some((journal_path.to_path_buf(), hint, now));
     }
