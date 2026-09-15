@@ -1991,7 +1991,7 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
             || !policy.approved_runner_configured())
     {
         return Err(GeneratorError::usage(
-            "workflow policy rejected pull_request_on_velnor: config must declare the exact approved Velnor runner group and labels and include the Velnor lane",
+            "workflow policy rejected pull_request_on_velnor: config must declare the approved Velnor runner labels, optionally with the approved runner group, and include the Velnor lane",
         ));
     }
     Ok(policy)
@@ -2347,12 +2347,18 @@ fn inspect_runner(
     if require_approved_runner && analysis.self_hosted && !is_approved_velnor_runner(value) {
         failures.record(
             path,
-            "opt-in Velnor self-hosted jobs must use the exact approved runner group and labels",
+            "opt-in Velnor self-hosted jobs must use the approved Velnor runner labels, optionally with the approved runner group",
         );
     }
 }
 
 fn is_approved_velnor_runner(value: &Value) -> bool {
+    if let Some(labels) = value.as_sequence() {
+        let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        return super::estate::approved_velnor_runner_contract_matches(&labels, None);
+    }
     let Some(runner) = value.as_mapping() else {
         return false;
     };
@@ -4821,6 +4827,59 @@ jobs:
     }
 
     #[test]
+    fn policy_accepts_labels_only_approved_velnor_runner() -> Result<(), Box<dyn Error>> {
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config_text = format!(
+            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\n"
+        );
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))";
+        let root = policy_fixture(
+            "velnor-pr-labels-only",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            "schema = 1\n\n[workflow]\npull_request_on_velnor = true\n",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            format!(
+                r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{{{ {gate} }}}}
+    runs-on: [{yaml_labels}]
+    steps:
+      - run: true
+  ci-required:
+    if: ${{{{ always() && ({gate}) }}}}
+    runs-on: [{yaml_labels}]
+    steps:
+      - run: true
+"
+            ),
+        )?;
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION);
+        assert!(
+            result.is_ok(),
+            "labels-only approved runner rejected: {result:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn policy_ignores_runner_group_lingering_in_the_runtime_contract() -> Result<(), Box<dyn Error>>
     {
         let group = crate::estate::approved_velnor_runner_group();
@@ -4831,7 +4890,7 @@ jobs:
             .collect::<Vec<_>>()
             .join(", ");
         // A hand-merged group lingers in the runtime contract while the
-        // generation input carries no group. The runner group is
+        // generation input names a different group. The runner group is
         // generation-only, so policy must not see the stale field.
         let config_text = format!(
             "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\n"
@@ -4847,7 +4906,7 @@ jobs:
         std::fs::create_dir_all(root.join(".github-gen"))?;
         std::fs::write(
             root.join(".github-gen/velnor-workflow.toml"),
-            "schema = 1\n\n[workflow]\npull_request_on_velnor = true\n",
+            "schema = 1\n\n[workflow]\nvelnor_runner_group = \"other-trusted\"\npull_request_on_velnor = true\n",
         )?;
         std::fs::write(
             root.join(".github/workflows/ci-pr.yml"),
@@ -4872,8 +4931,8 @@ jobs:
         )?;
         let failures = policy_failures(&root);
         assert!(
-            failures.contains("approved Velnor runner group"),
-            "a stale runtime group must not satisfy the approved-group policy: {failures}"
+            failures.contains("approved Velnor runner labels"),
+            "a stale runtime group must not satisfy the approved-runner policy: {failures}"
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
