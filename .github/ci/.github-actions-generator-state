@@ -2,7 +2,7 @@
 schema = 2
 [inputs]
 config	f02255a0a780701a
-scan	8d290b71864f655f
+scan	a675c6ae1a8ec857
 generator	43
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
@@ -10,17 +10,17 @@ generator	43
 .github/actions/setup-velnor-workflow/action.yml	9aa9c8647f90b8a4
 .github/ci/project.toml	b65a2731fd50877f
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	c1325d77e0d8f793
-.github/workflows/ci-policy.yml	0cb64653d9917100
-.github/workflows/ci-pr.yml	285cf9a8098b933b
+.github/workflows/ci-main.yml	1bbae0e4b4064c5f
+.github/workflows/ci-policy.yml	dd9fbcb5ca66fdd0
+.github/workflows/ci-pr.yml	5f623f9261893deb
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-.github/workflows/ci-unit-bun.yml	2aeb706ba29a25ee
-.github/workflows/ci-unit-docker.yml	5e98d87698a89cc1
-.github/workflows/ci-unit-docs.yml	4d9ae510581c2600
-.github/workflows/ci-unit-opentofu.yml	b5168efe0d325c6e
-.github/workflows/ci-unit-rust.yml	cd89f73a45d7076f
-.github/workflows/maintenance.yml	15492efda53d5071
+.github/workflows/ci-unit-bun.yml	2fb17f166e0872e2
+.github/workflows/ci-unit-docker.yml	28ac738ae969695d
+.github/workflows/ci-unit-docs.yml	57a67468ea274d04
+.github/workflows/ci-unit-opentofu.yml	1ad345bc1f133d7e
+.github/workflows/ci-unit-rust.yml	2d64f4a134c012ab
+.github/workflows/maintenance.yml	597c01031f8f4d0d
 .github/workflows/nightly.yml	2057397bf0480d73
-.github/workflows/preview.yml	2928b4b3ba3ea4c7
-.github/workflows/release.yml	ccc8d28d601906a1
+.github/workflows/preview.yml	21148e2cd65cb32b
+.github/workflows/release.yml	48b0555141c0e675
 config/fleet/velnor-host.env	d14b419216449423

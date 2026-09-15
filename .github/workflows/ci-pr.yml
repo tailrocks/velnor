@@ -61,11 +61,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@e56289e61a11f8e4372bd0fbce3b1b82574b8bf9
         with:
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '69f94748c331920b9411bbc227694988afebc78c' }}
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || 'e56289e61a11f8e4372bd0fbce3b1b82574b8bf9' }}
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=e56289e61a11f8e4372bd0fbce3b1b82574b8bf9" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -82,7 +82,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
+          EXPECTED_REVISION: e56289e61a11f8e4372bd0fbce3b1b82574b8bf9
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -95,7 +95,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-69f94748c331920b9411bbc227694988afebc78c-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-e56289e61a11f8e4372bd0fbce3b1b82574b8bf9-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
