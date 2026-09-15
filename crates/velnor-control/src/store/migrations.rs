@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 19;
+pub const LATEST_SCHEMA_VERSION: u32 = 20;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -518,6 +518,13 @@ const SCHEMA_V19: &str = "
 ALTER TABLE lifecycle_operations ADD COLUMN expected_version INTEGER;
 ";
 
+/// Persist the operator-selected execution backend advertised to the job as
+/// `VELNOR_EXECUTION_BACKEND`. Historical rows predate admission-time
+/// capture and keep NULL.
+const SCHEMA_V20: &str = "
+ALTER TABLE jobs ADD COLUMN execution_backend TEXT;
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -644,6 +651,11 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "lifecycle-idempotency-expected-version",
         sql: SCHEMA_V19,
     },
+    Migration {
+        version: 20,
+        name: "job-execution-backend-on-admission-row",
+        sql: SCHEMA_V20,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -694,13 +706,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
             "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
         )));
     }
-    if version >= LATEST_SCHEMA_VERSION && !v19_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v20_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 19 is recorded but its lifecycle idempotency precondition column or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 20 is recorded but its job execution-backend column or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -898,6 +910,8 @@ pub(crate) fn apply_pending(
             migration.version == 18 && has_column(&transaction, "jobs", "trust_class")?;
         let lifecycle_expected_version_exists = migration.version == 19
             && has_column(&transaction, "lifecycle_operations", "expected_version")?;
+        let execution_backend_column_exists =
+            migration.version == 20 && has_column(&transaction, "jobs", "execution_backend")?;
         if migration.version == 16
             && slot_lifecycle_columns.iter().any(|exists| *exists)
             && !slot_lifecycle_columns.iter().all(|exists| *exists)
@@ -930,7 +944,8 @@ pub(crate) fn apply_pending(
                 && !retention_generation_exists
                 && !slot_lifecycle_columns.iter().all(|exists| *exists)
                 && !trust_class_column_exists
-                && !lifecycle_expected_version_exists)
+                && !lifecycle_expected_version_exists
+                && !execution_backend_column_exists)
         {
             let sql = if lifecycle_columns_exist {
                 SCHEMA_V6_REPLAY
@@ -1017,6 +1032,15 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v19 lifecycle idempotency expected-version column did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 20 && !v20_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v20 job execution-backend column did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1296,6 +1320,13 @@ fn v19_schema_complete(conn: &Connection) -> StoreResult<bool> {
         false,
         None,
     )
+}
+
+fn v20_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v19_schema_complete(conn)? {
+        return Ok(false);
+    }
+    column_definition_matches(conn, "jobs", "execution_backend", "TEXT", false, None)
 }
 
 fn v16_schema_complete(conn: &Connection) -> StoreResult<bool> {
@@ -2035,8 +2066,8 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_v17_to_v19_adding_nullable_columns() {
-        let temp = TempDb::new("v17-v19-columns");
+    fn upgrades_v17_to_v20_adding_nullable_columns() {
+        let temp = TempDb::new("v17-v20-columns");
         let mut conn = Connection::open(&temp.path).expect("open legacy database");
         conn.busy_timeout(Duration::from_secs(5)).unwrap();
         ensure_meta_tables(&conn).unwrap();
@@ -2060,15 +2091,16 @@ mod tests {
         )
         .unwrap();
 
-        acquire_lock(&conn, "v17-v19-test", Duration::from_secs(1)).unwrap();
+        acquire_lock(&conn, "v17-v20-test", Duration::from_secs(1)).unwrap();
         assert_eq!(
-            apply_pending(&mut conn, "v17-v19-test", None).unwrap(),
+            apply_pending(&mut conn, "v17-v20-test", None).unwrap(),
             LATEST_SCHEMA_VERSION
         );
-        release_lock(&conn, "v17-v19-test").unwrap();
+        release_lock(&conn, "v17-v20-test").unwrap();
 
         assert!(v18_schema_complete(&conn).unwrap());
         assert!(v19_schema_complete(&conn).unwrap());
+        assert!(v20_schema_complete(&conn).unwrap());
         assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
         let class: Option<String> = conn
             .query_row(
@@ -2078,6 +2110,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(class, None);
+        let backend: Option<String> = conn
+            .query_row(
+                "SELECT execution_backend FROM jobs WHERE job_uid = 'legacy-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(backend, None);
         let expected_version: Option<i64> = conn
             .query_row(
                 "SELECT expected_version FROM lifecycle_operations LIMIT 1",
@@ -2101,6 +2141,19 @@ mod tests {
         let connection = store.lock_conn().expect("store lock");
         connection
             .execute("ALTER TABLE jobs DROP COLUMN trust_class", [])
+            .unwrap();
+
+        let error = current_version(&connection).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+    }
+
+    #[test]
+    fn recorded_v20_without_execution_backend_column_fails_closed() {
+        let temp = TempDb::new("incomplete-v20-column");
+        let store = Store::open(&temp.path).expect("initial migration");
+        let connection = store.lock_conn().expect("store lock");
+        connection
+            .execute("ALTER TABLE jobs DROP COLUMN execution_backend", [])
             .unwrap();
 
         let error = current_version(&connection).unwrap_err();

@@ -146,6 +146,9 @@ pub const WIDE_SUFFIX: [&str; 3] = ["SOURCE", "REASON", "LAST-TRANSITION"];
 trait Projection {
     const KIND: &'static str;
     fn narrow_columns() -> &'static [&'static str];
+    fn extra_wide_columns() -> &'static [&'static str] {
+        &[]
+    }
     fn project(&self, wide: bool) -> Vec<String>;
     fn object_name(&self) -> &str;
 }
@@ -156,6 +159,7 @@ macro_rules! impl_tabular {
             fn columns(&self, wide: bool) -> Vec<&'static str> {
                 let mut columns = <$ty as Projection>::narrow_columns().to_vec();
                 if wide {
+                    columns.extend(<$ty as Projection>::extra_wide_columns());
                     columns.extend(WIDE_SUFFIX);
                 }
                 columns
@@ -304,22 +308,42 @@ impl Projection for Job {
             "NAME",
             "REPO",
             "RUN",
+            "HOST",
+            "INSTANCE",
+            "SLOT",
+            "RUNNER",
             "WORKFLOW",
             "QUEUED",
             "DURATION",
             "CONCLUSION",
         ]
     }
-    fn project(&self, _wide: bool) -> Vec<String> {
-        vec![
+    fn extra_wide_columns() -> &'static [&'static str] {
+        &["BACKEND"]
+    }
+    fn project(&self, wide: bool) -> Vec<String> {
+        let mut cells = vec![
             self.meta.name.clone(),
             repo_cell(&self.repository),
             opt_cell(&self.run),
+            opt_cell(&self.host),
+            opt_cell(&self.instance),
+            opt_cell(&self.slot),
+            opt_cell(&self.runner),
             self.workflow.clone(),
             ms_cell(&self.queued_ms),
             ms_cell(&self.duration_ms),
             opt_cell(&self.conclusion),
-        ]
+        ];
+        if wide {
+            cells.push(opt_cell(
+                &self
+                    .execution_backend
+                    .map(velnor_model::ExecutionBackendKind::as_str)
+                    .map(str::to_owned),
+            ));
+        }
+        cells
     }
     fn object_name(&self) -> &str {
         &self.meta.name
