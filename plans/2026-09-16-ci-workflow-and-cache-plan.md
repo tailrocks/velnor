@@ -1,6 +1,6 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `6c51eceb` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `c3917fb5` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
 Date: 2026-09-16 (rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
@@ -100,7 +100,7 @@ Velnor exists because **GitHub Actions cache is small, shared, and easy to evict
 | compiler-snapshots | 3.5 GiB | Rolling | **2** | `-mbx-v3-` |
 | **Total** | **8 GiB** | | | |
 
-(rev 2) **Unclassified key families** fall to `"unclassified"`, tier Rolling, budget 0, bound 0 (`snapshot.rs:504`) — swept only by the global pass: `mise-v1-*` (12 entries / 0.57 GiB live), `velnor-workflow-v1-*` (59 entries, saved by `setup-velnor-workflow` on every event incl. PRs, `.github/actions/setup-velnor-workflow/action.yml:231-236`), `ci-release-<os>-rust-*` (fails the anchored `CiRustCargoSources` matcher because the second segment is `release`, not the OS — `snapshot.rs:286-293`), `guest-seed-*`, `velnor-policy-mbx-1.8.3-*` (no `-mbx-v3-`), `ci-Linux-{bun,docs,opentofu}-*`. `velnor-cargo-` matches zero emitted keys (dead marker). Phase 4 classifies all of these.
+(rev 2) **Unclassified key families** fall to `"unclassified"`, tier Rolling, budget 0, bound 0 (`snapshot.rs:504`) — swept only by the global pass: `mise-v1-*` (12 entries / 0.57 GiB live), `velnor-workflow-v1-*` (59 entries, saved by `setup-velnor-workflow` on every event incl. PRs, `.github/actions/setup-velnor-workflow/action.yml:231-236`), `ci-release-<os>-rust-*` (fails the anchored `CiRustCargoSources` matcher because the second segment is `release`, not the OS — `snapshot.rs:286-293`), `guest-seed-*`, `velnor-policy-mbx-1.11.1-*` (no `-mbx-v3-`), `ci-Linux-{bun,docs,opentofu}-*`. `velnor-cargo-` matches zero emitted keys (dead marker). Phase 4 classifies all of these.
 
 - Producer window: 2 hours (`snapshot.rs:344`)
 - Eviction: generation bound → class budget → global; protected never global-swept (`snapshot.rs:631-653`)
@@ -856,7 +856,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | D19 `run_installed_policy` uses valid `cargo install` syntax | V | `lib.rs:4470-4482` `velnor-workflow --bin velnor-workflow`; was invalid `--package` |
 | `velnor-workflow --check` when HEAD ≠ pin | V | `cargo run -p velnor-workflow -- . --plain --check` exit 0 @ `ad76f4a` (HEAD `f54d2f76` ≠ pin `abc81a94`) |
 | Policy on PR pre-merge | P | `pull_request_target` runs `ci-policy.yml` from `main` (pin `4790f7cc`); expected red until merge |
-| PR #872 DCO | V | pass after rebase sign-off @ `f54d2f76` |
+| PR #872 DCO | V | pass after `git rebase origin/main --signoff` + force push @ `c3917fb5` |
 
 #### Rev 5 delta @ `9c1211d7` (2026-09-16)
 
