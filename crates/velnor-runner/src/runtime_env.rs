@@ -868,11 +868,8 @@ mod tests {
             .expect("admitted stamp must populate queue time")
             .to_owned();
         assert!(
-            time::OffsetDateTime::parse(
-                &stamped,
-                &time::format_description::well_known::Rfc3339
-            )
-            .is_ok(),
+            time::OffsetDateTime::parse(&stamped, &time::format_description::well_known::Rfc3339)
+                .is_ok(),
             "stamp must be RFC3339: {stamped}"
         );
 
@@ -894,10 +891,7 @@ mod tests {
         .unwrap();
 
         stamp_admitted_job_queue_time(&mut job);
-        assert_eq!(
-            protocol_job_queue_time(&job),
-            Some("2026-09-15T01:02:03Z")
-        );
+        assert_eq!(protocol_job_queue_time(&job), Some("2026-09-15T01:02:03Z"));
     }
 
     #[test]
