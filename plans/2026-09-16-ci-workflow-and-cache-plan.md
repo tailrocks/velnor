@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `284f1091` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `28b528d8` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8`; rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -899,4 +899,14 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Fork aggregate gate D17 cleanup | V | `ir.rs:2208-2219`; github callers require success; velnor callers accept skipped on fork PR |
 | Pins @ `284f1091` (D19) | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 455 passed |
 | Run 35031834569 Planning green + docker skip visible | V | `Control / Planning` pass; `Docker · Docker / Velnor · skipped (no online velnor-host-docker runner)` |
-| rustfmt + manifest pin drift (run 35031834569) | P | `snapshot.rs` fmt + `manifest.rs` `284f1091` pin pending commit |
+| rustfmt + manifest pin drift (run 35031834569) | V | `6130a77e` rustfmt; `manifest.rs` @ `f3fc75a`/`28b528d8` |
+
+#### Rev 9 delta @ `28b528d8` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Velnor prepare-cargo policy prefetch for `--plain --check` | V | `ir.rs:2700-2708` `append_lane_cargo_prep_jobs`; `ci-unit-rust-2.yml:77-81` |
+| Clippy clean (`velnor-workflow --all-targets -D warnings`) | V | local `cargo clippy -p velnor-workflow --all-targets -- -D warnings` exit 0 |
+| Prefetch bash drops redundant `cd` (no duplicate workspace hop) | V | `lib.rs:4508-4511`; regen `ci-unit-rust-2.yml` single `cd -- "$GITHUB_WORKSPACE"` before install |
+| Pins @ `f3fc75a` / D19 @ `28b528d8` | V | `lib.rs:83,93`; `manifest.rs:712`; release golden digests; `cargo test -p velnor-workflow` 455 passed |
+| §16 `ci-required` / policy green / 3× main green | P | awaiting CI run on `28b528d8` |
