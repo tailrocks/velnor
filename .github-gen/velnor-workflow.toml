@@ -27,10 +27,8 @@ velnor_trusted_label = "velnor-host-docker"
 # Restore velnor-trusted after Sentry org fleet is healthy.
 pull_request_on_velnor = true
 velnor_rust_needs = "dependency-closure"
-# Single-slot macOS recovery host: one admitted run across PRs/workflows.
+# Serialize competing PR/workflow runs on the repository's shared host.
 velnor_concurrency_group = "velnor-${{ github.repository }}"
-# Avoid five stack groups fanning out immediately after plan on one slot.
-velnor_serial_stack_groups = true
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 # Release contract: typed native publisher + rolling preview. Guest-seed
