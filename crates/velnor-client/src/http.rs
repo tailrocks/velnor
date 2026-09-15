@@ -407,10 +407,10 @@ async fn exchange(
             message: "control request could not be sent".to_owned(),
             detail: error.to_string(),
         })?;
-    stream.shutdown().await.map_err(|error| ClientError::Io {
-        message: "control request could not be finalized".to_owned(),
-        detail: error.to_string(),
-    })?;
+    // Content-Length frames the request body. Do not half-close the write
+    // side: hyper/axum treats EOF before completing its HTTP/1 request task
+    // as an aborted request and may close the Unix socket without a response.
+    // Keep the connection writable until the server has answered.
     read_response(&mut stream).await
 }
 
@@ -845,7 +845,16 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let mut request = Vec::new();
-            stream.read_to_end(&mut request).await.expect("read");
+            let marker = b"\r\n\r\n";
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).await.expect("read");
+                assert!(read > 0, "client closed before request headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(marker.len()).any(|window| window == marker) {
+                    break;
+                }
+            }
             assert!(request.starts_with(b"GET /v1/info HTTP/1.1"));
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
