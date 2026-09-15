@@ -284,13 +284,19 @@ fn write_member_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(),
 /// check-then-rename gap is the accepted single-writer stance; the rename
 /// itself never follows a symbolic link at the destination path.
 fn write_and_rename(temp: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o644)
+        // Keep the in-progress file private even under a permissive umask;
+        // the final public mode is enforced on the open descriptor below.
+        .mode(0o600)
         .open(temp)?;
     file.write_all(bytes)?;
+    // `OpenOptionsExt::mode` is masked by the process umask. Set the exact
+    // documented mode on our descriptor before the atomic rename, avoiding a
+    // pathname race and ensuring every installed page is exactly 0644.
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(temp, final_path)
