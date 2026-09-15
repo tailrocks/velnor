@@ -5619,6 +5619,19 @@ where
                     container.temp_host.display()
                 )
             })?;
+            // The store root is shared across slots, but MBX_CACHE_DIR points
+            // at a per-slot subdir so mbx's registrar/lease flocks never cross
+            // containers. Pre-create it daemon-side like the root: mbx runs as
+            // root in the container and would otherwise create it root-owned
+            // on first use, locking the daemon user out of host-side repair.
+            if let Some(slot_cache) = container.mbx_cache_store_host() {
+                fs::create_dir_all(&slot_cache).with_context(|| {
+                    format!(
+                        "create per-slot Mr Boxington cache for {}",
+                        container.temp_host.display()
+                    )
+                })?;
+            }
         }
         if let Some(cache_host) = &container.sccache_store_host {
             fs::create_dir_all(cache_host).with_context(|| {
