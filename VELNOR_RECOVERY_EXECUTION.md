@@ -24,11 +24,11 @@ Operator contract (2026-09-15): finish only after this sequence is independently
 | **PR #812** | **CLOSED** — superseded by #819. Last known `4db23c0f`. |
 | **PR #814** | **CLOSED** — superseded by #819. Last known `a67e4c28`. |
 | **PR #815** | **CLOSED** — superseded by #819. Last known `e5049452`. |
-| **PR #816** | CLOSED unmerged. Not the integration PR. |
+| **PR #816** | CLOSED unmerged. Not the integration PR. Branch DCO rewrite closed it; superseded by #819. |
 | **PR #819** | **MERGED** `24f05af9`. Integration landed on `main`. |
 | **Focused branch** | `velnor-macos-host` — fix Advisory policy (stale `d3e441fb` revision), PR to `main`. |
-| **Host** | slot-6 zombie cleaned; **10/12 ready**. |
-| **Lifecycle** | Verified local tests cover exclusive in-flight leases, persisted waiter ownership, teardown-before-release, fail-closed marker scans, orphan cleanup, output spill/reconnect, and repeated slot reuse. |
+| **Host** | Relaunched 07:35Z PID 89135 on fixed binary (per-slot mbx), 12/12 accountable, healthy execution; latest: slot-6 zombie cleaned, **10/12 ready**. |
+| **Lifecycle** | Verified local tests cover exclusive in-flight leases, persisted waiter ownership, teardown-before-release, fail-closed marker scans, orphan cleanup, output spill/reconnect, and repeated slot reuse. Plus per-slot `MBX_CACHE_DIR` isolation, admission-test env guard, per-PR concurrency (see Verified fixes). |
 | **Sentry** | JIT wedge unchanged; tailrocks fleet down. Do not deploy Sentry. |
 
 ## Related PR stack
@@ -63,15 +63,39 @@ Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redund
 | #809 run `34930642603` attempt 2 | hung `in_progress` | 7 this-Mac Velnor jobs idle mbx/no rustc ~36min (not compiling). Superseded by rerun. |
 | #809 run `34930642603` rerun | in progress | 8/17 Velnor on recovery slots; production-topology Velnor fail ~58s (setup, not compile). Prior attempt force-cancelled after mbx wedge. |
 | #809 run `34930642603` prior attempt | force-cancelled (`completed/cancelled`) | 12 Mac containers wedged in mbx ABBA flock deadlock (see wedge row). |
-| mbx cross-container flock wedge | ROOT CAUSE PROVEN + FIXED+VERIFIED | All containers shared `/var/cache/mbx`; mbx takes registrar flock(EX)→lease flock(EX), no timeouts; lease names `{pid}-0.lease` collide (every container runs mbx as pid 63). Observed 1 holder + 11 waiters, 0% CPU, 30+ min (runs `34930408749` att.3, `34930642603` att.2). Fix `ec96f089`: per-slot `MBX_CACHE_DIR` (`/var/cache/mbx/slots/slot-N`), verified vs upstream `jdx/mr-boxington` (relocates registrar+leases). Host locks dir rotated; wedge evidence preserved at `.locks.wedged-20260915T0608Z`. |
-| Sentry hung test `local_composite_unknown_nested_action_fails_admission_read_only` | TEST-ONLY, FIXED+VERIFIED | `admit_job` errored pre-connect (unset `VELNOR_GITHUB_HTTP_TRANSPORT`); fake server parked in `accept()`, test in `join()` forever (job `104265844196`, 2176/2177 then hang). Fix `bf77c4fd`: env guard + 30s accept deadline + read timeout + test-support gate. Verifier: passes env-unset/set, CI `--all-features` keeps it running. |
+| mbx cross-container flock wedge | ROOT CAUSE PROVEN + FIXED+VERIFIED | All containers shared `/var/cache/mbx`; mbx takes registrar flock(EX)→lease flock(EX), no timeouts; lease names `{pid}-0.lease` collide (every container runs mbx as pid 63). Observed 1 holder + 11 waiters, 0% CPU, 30+ min (runs `34930408749` att.3, `34930642603` att.2). Fix `ec96f089`: per-slot `MBX_CACHE_DIR` (`/var/cache/mbx/slots/slot-N`), verified vs upstream `jdx/mr-boxington` (relocates registrar+leases). Host locks dir rotated; wedge evidence preserved at `.locks.wedged-20260915T0608Z`. Post-rewrite SHA `14dda640` (same fix). Force-cancelled wedged attempts: run `34930408749` att.3 and run `34930642603` att.2/prior (completed/cancelled). |
+| Sentry hung test `local_composite_unknown_nested_action_fails_admission_read_only` | TEST-ONLY, FIXED+VERIFIED | `admit_job` errored pre-connect (unset `VELNOR_GITHUB_HTTP_TRANSPORT`); fake server parked in `accept()`, test in `join()` forever (job `104265844196`, 2176/2177 then hang). Fix `bf77c4fd`: env guard + 30s accept deadline + read timeout + test-support gate. Verifier: passes env-unset/set, CI `--all-features` keeps it running. Post-rewrite SHA `2d6bc863` (same fix). |
 | #812 `4db23c0f` / #814 `a67e4c28` / #815 `e5049452` | DCO pass; `ci-required` fail | latest completed runs |
 | #816 run `34939230446` @ `e53bc60b` | historical (PR CLOSED unmerged) | Planning **PASS** then; not current integration |
 | #816 run `34930408749` | historical (PR CLOSED unmerged) | bootstrap/setup pattern (superseded) |
 | #819 MERGED `24f05af9`; leftover run `34960823479` | topology still compiling on this-Mac slot-3 at last watch | integration landed on `main`; do not cancel leftover. |
-| Host lifecycle | root cause documented | `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
+| Host lifecycle | root cause documented | `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. Orphan-leak fix pointer: `8ea96b4c` (recover dead persisted jobs on reconnect, local head). |
 | `velnor-macos-host` | `origin/` remote ref reported gone after merge | local still `velnor-macos-host` with dirty WIP — do not discard. |
 | Sentry tailrocks | fleet down | JIT wedge, 0/8 registered after 15:11 restart |
+| cpus-budget test `builds_start_container_args_with_mounts` | FIXED+VERIFIED | Expected `--cpus` hardcoded; fix `3ec86c23` (post-rewrite `756c3576`): derive expected value from slot budget. |
+| `velnor-workflow` fmt check | FIXED+VERIFIED | rustfmt drift; fix `30c63ea1` (post-rewrite `ed52f625`): apply rustfmt. |
+| repo-wide Velnor concurrency group | ROOT CAUSE PROVEN + FIXED | Single group cancelled overlapping runs with 0 jobs started, making green structurally unobtainable. Fix `a5b2ff5a`: scope concurrency group per PR. |
+| branch DCO rewrite | DONE | Unsigned `991d86bd` forced operator-owned rewrite (pre/post SHA pairs in Verified fixes); #816 closed unmerged, superseded by #819 (merged `24f05af9`). |
+| host relaunch 07:35Z | HEALTHY | PID 89135 on fixed binary (per-slot mbx); 12/12 slots accountable, healthy execution. |
+
+## Verified fixes (each independently verified; post-rewrite SHAs current)
+
+| Fix | Pre-rewrite | Post-rewrite | Verifier |
+|---|---|---|---|
+| admission-test hang (env-unset transport + accept/join deadlock) | `bf77c4fd` | `2d6bc863` | passes env-unset/set; CI `--all-features` keeps it running |
+| per-slot mbx (`MBX_CACHE_DIR` → `/var/cache/mbx/slots/slot-N`) | `ec96f089` | `14dda640` | matches upstream `jdx/mr-boxington` relocation; host healthy post-relaunch |
+| cpus-budget test expectation | `3ec86c23` | `756c3576` | test derives `--cpus` from slot budget |
+| `velnor-workflow` fmt | `30c63ea1` | `ed52f625` | rustfmt clean |
+| per-PR concurrency groups | — (post-rewrite only) | `a5b2ff5a` | no more 0-job cross-PR cancels |
+
+## Recon results (2026-09-15)
+
+- **#809 gate:** only blocker is cpus (budget/expectation mismatch); all other gates passable.
+- **Stack red heads:** #812/#814/#815 latest completed runs DCO pass but `ci-required` fail (see Failure graph); #816 closed unmerged.
+- **Release map + Homebrew gap:** today Linux debs only; no Homebrew channel (gate 4).
+- **Sentry:** apt-only recipe; `.145` live; rest of fleet down (JIT wedge). Do not deploy until gate 4.
+- **Orphan-leak:** `child_owns_slot` ignored persisted waiter PIDs after controller restart → fix `8ea96b4c`.
+- **Lone-cancel:** isolated cancels; OAuth `release_in_flight_after_registration_gone` on branch; marker release when `runner.json` gone still missing.
 
 ## Decisions
 
@@ -80,6 +104,7 @@ Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redund
 - `velnorctl host start` is the operator entry point on #814.
 - Do not force-push unsigned history except the operator-owned DCO rewrite of `991d86bd`. Independent verify: that commit is a legitimate scan-input record, not a hash overwrite. Keep the bytes; sign them.
 - Merging via this Mac requires Velnor-lane jobs that a **repository-scoped** runner can claim. `velnor-macos-host` now omits `velnor_runner_group` and emits `runs-on: [self-hosted, velnor-target-mvp]`. #809/#812/#814/#815 still emit `group: velnor-trusted` until they rebase/regen. Recovery hosts must not join that org pool.
+- Velnor concurrency groups are scoped per PR (`a5b2ff5a`). A repo-wide group cancelled overlapping runs before any job started (0-job cancels), making green structurally unobtainable.
 
 ## macOS host progress (`velnor-macos-host`)
 
@@ -132,3 +157,5 @@ repo-scoped runner that is not in `velnor-trusted`.
 1. Fix Advisory policy on `velnor-macos-host` (stale `d3e441fb` revision vs new workflows); PR to `main`.
 2. Gate 3: `main` green after policy fix.
 3. Gates 4–6: release (Debian apt + Homebrew), then Sentry deploy — do not deploy Sentry until gate 4.
+4. #819 green proof (post-merge verification of the integration).
+5. #809 operator rebase, then stack merges (#812/#814/#815).
