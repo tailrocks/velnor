@@ -41,6 +41,7 @@ struct State {
 pub struct LifecycleService {
     state: Arc<Mutex<State>>,
     store: Option<Arc<Store>>,
+    store_instance: Option<String>,
     instance: Option<String>,
 }
 
@@ -51,6 +52,7 @@ impl LifecycleService {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             store: None,
+            store_instance: None,
             instance: None,
         }
     }
@@ -71,6 +73,7 @@ impl LifecycleService {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             store: Some(store),
+            store_instance: None,
             instance: None,
         }
     }
@@ -85,11 +88,24 @@ impl LifecycleService {
         instance: impl Into<String>,
     ) -> crate::store::StoreResult<Self> {
         let instance = instance.into();
-        validate_configured_instance(&instance)?;
+        Self::with_store_and_api_instance(store, &instance, &instance)
+    }
+
+    /// Create a durable lifecycle service with distinct durable and API
+    /// identities. The runner store uses the host slug while the local API
+    /// may expose an operator-selected instance name.
+    pub fn with_store_and_api_instance(
+        store: Arc<Store>,
+        store_instance: &str,
+        api_instance: &str,
+    ) -> crate::store::StoreResult<Self> {
+        validate_configured_instance(store_instance)?;
+        validate_configured_instance(api_instance)?;
         Ok(Self {
             state: Arc::new(Mutex::new(State::default())),
             store: Some(store),
-            instance: Some(instance),
+            store_instance: Some(store_instance.to_owned()),
+            instance: Some(api_instance.to_owned()),
         })
     }
 
@@ -122,11 +138,12 @@ impl LifecycleService {
         let Some(store) = &self.store else {
             return self.get(instance);
         };
+        let store_instance = self.store_instance.as_deref().unwrap_or(instance);
         let fresh = store
-            .lifecycle_instance(instance)
+            .lifecycle_instance(store_instance)
             .map_err(store_error)?
             .map(|row| LifecycleState {
-                instance: row.instance_slug,
+                instance: instance.to_owned(),
                 desired: row.desired_state,
                 observed: row.observed_state,
                 version: row.resource_version,
@@ -153,11 +170,12 @@ impl LifecycleService {
                 resource: format!("instance {instance}"),
             });
         };
+        let store_instance = self.store_instance.as_deref().unwrap_or(instance);
         store
-            .lifecycle_instance(instance)
+            .lifecycle_instance(store_instance)
             .map_err(store_error)?
             .map(|row| LifecycleState {
-                instance: row.instance_slug,
+                instance: instance.to_owned(),
                 desired: row.desired_state,
                 observed: row.observed_state,
                 version: row.resource_version,
@@ -176,10 +194,14 @@ impl MutationPort for LifecycleService {
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         let desired = desired_state(&request.kind).to_owned();
         if let Some(store) = &self.store {
+            let store_instance = self
+                .store_instance
+                .as_deref()
+                .unwrap_or(request.target.as_str());
             let operation_id = format!("op-{}", uuid::Uuid::new_v4());
             let created_at = velnor_model::Timestamp::now();
             let operation_request = crate::store::LifecycleOperationRequest {
-                instance_slug: request.target.clone(),
+                instance_slug: store_instance.to_owned(),
                 kind: kind_name(&request.kind).to_owned(),
                 target: request.target.clone(),
                 reason: request.reason.clone(),

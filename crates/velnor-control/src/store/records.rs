@@ -309,6 +309,48 @@ impl Store {
         Ok(())
     }
 
+    /// Read the durable current-state projection for one instance.
+    pub fn instance_row(&self, instance_slug: &str) -> StoreResult<Option<InstanceRow>> {
+        let conn = self.lock_conn()?;
+        let stored = conn
+            .query_row(
+                "SELECT instance_slug, host, daemon_version, slots_configured, slots_busy, updated_at
+                 FROM instances WHERE instance_slug = ?1",
+                [instance_slug],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((instance_slug, host, daemon_version, slots_configured, slots_busy, updated_at)) =
+            stored
+        else {
+            return Ok(None);
+        };
+        let slots_configured = u32::try_from(slots_configured)
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.instance.slots.range"))?;
+        let slots_busy = u32::try_from(slots_busy)
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.instance.busy.range"))?;
+        let updated_at = Timestamp::parse(&updated_at).map_err(|_| {
+            StoreError::new(ExitClass::Operation, "store.instance.timestamp.invalid")
+        })?;
+        Ok(Some(InstanceRow {
+            instance_slug,
+            host,
+            daemon_version,
+            slots_configured,
+            slots_busy,
+            updated_at,
+        }))
+    }
+
     /// Read the durable lifecycle projection for one instance.
     pub fn lifecycle_instance(
         &self,
@@ -705,6 +747,24 @@ impl Store {
         query_slot_state(&conn, instance_slug, slot_id)
     }
 
+    /// Read all durable slot projections for one instance in stable name order.
+    pub fn slot_rows(&self, instance_slug: &str) -> StoreResult<Vec<SlotRow>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn
+            .prepare_cached("SELECT name FROM slots WHERE instance_slug = ?1 ORDER BY name ASC")?;
+        let names = statement
+            .query_map([instance_slug], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        names
+            .into_iter()
+            .map(|name| {
+                let slot_id = SlotId(name);
+                query_slot_state(&conn, instance_slug, &slot_id)?
+                    .ok_or_else(|| StoreError::new(ExitClass::Operation, "store.slot.disappeared"))
+            })
+            .collect()
+    }
+
     /// Recover the newest caller intent for one slot generation.
     ///
     /// The request ledger survives a worker-process restart and is used by
@@ -783,6 +843,83 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Read all durable GitHub runner registrations for one instance.
+    pub fn runner_registration_rows(
+        &self,
+        instance_slug: &str,
+    ) -> StoreResult<Vec<RunnerRegistrationRow>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT instance_slug, runner_id, name, ephemeral, online, labels_json,
+                    registered_at, updated_at
+             FROM runner_registrations WHERE instance_slug = ?1 ORDER BY runner_id ASC",
+        )?;
+        let rows = statement.query_map([instance_slug], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    instance_slug,
+                    runner_id,
+                    name,
+                    ephemeral,
+                    online,
+                    labels_json,
+                    registered_at,
+                    updated_at,
+                )| {
+                    let ephemeral = match ephemeral {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(StoreError::new(
+                                ExitClass::Operation,
+                                "store.runner.ephemeral.invalid",
+                            ));
+                        }
+                    };
+                    let online = match online {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(StoreError::new(
+                                ExitClass::Operation,
+                                "store.runner.online.invalid",
+                            ));
+                        }
+                    };
+                    let registered_at = Timestamp::parse(&registered_at).map_err(|_| {
+                        StoreError::new(ExitClass::Operation, "store.runner.registered_at.invalid")
+                    })?;
+                    let updated_at = Timestamp::parse(&updated_at).map_err(|_| {
+                        StoreError::new(ExitClass::Operation, "store.runner.updated_at.invalid")
+                    })?;
+                    Ok(RunnerRegistrationRow {
+                        instance_slug,
+                        runner_id,
+                        name,
+                        ephemeral,
+                        online,
+                        labels_json,
+                        registered_at,
+                        updated_at,
+                    })
+                },
+            )
+            .collect()
     }
 
     /// Insert or refresh a sanitized job summary keyed by
