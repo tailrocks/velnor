@@ -2,6 +2,9 @@ use crate::job_message::AgentJobRequestMessage;
 use anyhow::Result;
 use serde_json::{Map, Value};
 
+pub(crate) const RUN_STARTED_AT_ENV: &str = "VELNOR_RUN_STARTED_AT";
+pub(crate) const JOB_QUEUED_AT_ENV: &str = "VELNOR_JOB_QUEUED_AT";
+
 pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     let mut env = vec![
         ("CI".to_string(), "true".to_string()),
@@ -29,6 +32,17 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         (
             "VELNOR_MANIFEST_VERSION".to_string(),
             crate::manifest::MANIFEST_VERSION.to_string(),
+        ),
+        // Emit runner-owned timing names even when the broker omitted a
+        // value, so repository-controlled environment cannot fill a missing
+        // value with a spoof.
+        (
+            RUN_STARTED_AT_ENV.to_string(),
+            authoritative_timing_value(job, RUN_STARTED_AT_ENV),
+        ),
+        (
+            JOB_QUEUED_AT_ENV.to_string(),
+            authoritative_timing_value(job, JOB_QUEUED_AT_ENV),
         ),
         ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
     ];
@@ -354,8 +368,35 @@ fn is_protected_default_env(name: &str) -> bool {
         )
         // Exact matches only: jobs legitimately carry VELNOR_APP_ID and
         // VELNOR_APP_PRIVATE_KEY, so no VELNOR_ prefix rule here.
-        || matches!(name, "VELNOR_SOURCE_SHA" | "VELNOR_MANIFEST_VERSION")
+        || matches!(
+            name,
+            "VELNOR_SOURCE_SHA"
+                | "VELNOR_MANIFEST_VERSION"
+                | RUN_STARTED_AT_ENV
+                | JOB_QUEUED_AT_ENV
+        )
         || (upper.starts_with("MBX_") && upper != "MBX_DISABLE")
+}
+
+fn authoritative_timing_value(job: &AgentJobRequestMessage, name: &str) -> String {
+    let value = match name {
+        RUN_STARTED_AT_ENV => job.variable("github.run_started_at"),
+        JOB_QUEUED_AT_ENV => job
+            .queue_time
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                job.variables
+                    .get("system.queueTime")
+                    .and_then(|value| value.value.as_deref())
+                    .filter(|value| !value.trim().is_empty())
+            }),
+        _ => None,
+    };
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn configured_cache_url(url: Option<&str>, has_job_token: bool) -> Option<String> {
@@ -745,6 +786,50 @@ mod tests {
         // No VELNOR_ prefix rule: legitimate job-carried vars pass through.
         assert!(env.contains(&("VELNOR_APP_ID".into(), "12345".into())));
         assert!(env.contains(&("VELNOR_APP_PRIVATE_KEY".into(), "secret".into())));
+    }
+
+    #[test]
+    fn timing_env_is_runner_owned_and_uses_protocol_queue_time() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "queueTime": "2026-09-15T01:02:03Z",
+            "variables": {
+                "github.run_started_at": { "value": "2026-09-15T01:01:00Z" }
+            },
+            "environmentVariables": [{
+                "VELNOR_RUN_STARTED_AT": "spoofed",
+                "VELNOR_JOB_QUEUED_AT": "spoofed"
+            }]
+        }))
+        .unwrap();
+
+        let env = job_runtime_env(&job);
+
+        assert!(env.contains(&(RUN_STARTED_AT_ENV.into(), "2026-09-15T01:01:00Z".into())));
+        assert!(env.contains(&(JOB_QUEUED_AT_ENV.into(), "2026-09-15T01:02:03Z".into())));
+        assert!(!env.contains(&(RUN_STARTED_AT_ENV.into(), "spoofed".into())));
+        assert!(!env.contains(&(JOB_QUEUED_AT_ENV.into(), "spoofed".into())));
+
+        let fallback_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "fallback",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "queueTime": " ",
+            "variables": {
+                "system.queueTime": { "value": "2026-09-15T01:02:03Z" }
+            }
+        }))
+        .unwrap();
+        let fallback_env = job_runtime_env(&fallback_job);
+        assert!(fallback_env.contains(&(JOB_QUEUED_AT_ENV.into(), "2026-09-15T01:02:03Z".into())));
     }
 
     #[test]

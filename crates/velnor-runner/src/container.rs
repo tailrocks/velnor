@@ -24,6 +24,17 @@ const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 const JOB_WORKFLOW_CLI: &str = "/usr/local/bin/velnor-workflow";
 const JOB_WORKFLOW_CLI_SHA256: &str = "/usr/local/share/velnor/velnor-workflow.sha256";
 
+/// PID 1: tail the live console so `docker logs` mirrors GitHub, then exit
+/// when Velnor writes the job-owned done sentinel. `exec tail -F` alone made
+/// finished/cancelled jobs immortal — the tailer outlived every job process.
+/// A virtiofs hiccup can kill `tail`; respawn it until `job.done` rather
+/// than exiting PID 1 and tearing down in-flight `docker exec`s.
+pub(crate) const JOB_CONTAINER_PID1: &str = "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; while [ ! -f /__t/_velnor/job.done ]; do if ! kill -0 \"$tail_pid\" 2>/dev/null; then echo '[velnor] console tail exited; restarting logger' >&2; tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; fi; sleep 1; done; kill \"$tail_pid\" 2>/dev/null; wait \"$tail_pid\" 2>/dev/null; exit 0";
+
+/// Host-relative sentinel that ends PID 1. Written on every terminal path
+/// before `docker rm` so a stalled remove cannot leave `tail -F` running.
+pub(crate) const JOB_DONE_SENTINEL: &str = "job.done";
+
 /// Daemon-owned runner identity. Dropped from step env by exact match in
 /// `append_step_env` and re-asserted after it on every exec/run path, so a
 /// workflow can neither shadow these names via `env:`/`GITHUB_ENV` nor win a
@@ -33,6 +44,11 @@ const AUTHORITATIVE_RUNNER_ENV: [&str; 3] = [
     "VELNOR_SOURCE_SHA",
     "VELNOR_MANIFEST_VERSION",
 ];
+
+fn is_reserved_mbx_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("MBX_") && upper != "MBX_DISABLE"
+}
 
 fn is_docker_control_env(name: &str) -> bool {
     name.eq_ignore_ascii_case("DOCKER_HOST")
@@ -434,9 +450,10 @@ impl JobContainerSpec {
         if let Some(host) = &self.mbx_store_host {
             command.pair("-v", self.mount_arg(host, "/var/cache/mbx"));
             let cache_dir = self.mbx_cache_container_dir();
+            let target_root = self.mbx_target_container_dir();
             command.envs([
                 ("MBX_CACHE_DIR", cache_dir.as_str()),
-                ("MBX_TARGET_ROOT", "/var/cache/mbx/targets"),
+                ("MBX_TARGET_ROOT", target_root.as_str()),
                 ("MBX_GC_AUTO", "true"),
                 ("MBX_GC_MAX_SIZE", "20GiB"),
                 ("MBX_TARGET_MAX_SIZE", "30GiB"),
@@ -650,17 +667,12 @@ impl JobContainerSpec {
         // this job's share of a host it cannot see.
         self.append_resource_budget(args, &budget);
 
-        // PID 1 tails a live console file instead of /dev/null, so
-        // `docker logs <job-container>` mirrors the GitHub UI step output.
-        // Velnor appends each masked step's lines to this file (mounted at
-        // /__t). `tail -F` waits for the file if it does not exist yet.
+        // PID 1 supervises the live console tail. `tail -F` alone would
+        // keep the container alive after the job is terminal; the supervisor
+        // exits when Velnor writes `/__t/_velnor/job.done`.
         command
             .image(&image)
-            .operands([
-                "sh",
-                "-c",
-                "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log",
-            ])
+            .operands(["sh", "-c", JOB_CONTAINER_PID1])
             .finish()
     }
 
@@ -809,6 +821,9 @@ impl JobContainerSpec {
             if AUTHORITATIVE_RUNNER_ENV.contains(&name.as_str()) {
                 continue;
             }
+            if is_reserved_mbx_env(name) {
+                continue;
+            }
             command.env(name.clone(), value.clone());
         }
     }
@@ -825,6 +840,18 @@ impl JobContainerSpec {
                 command.env(name, value.clone());
             }
         }
+        self.append_authoritative_mbx_env(command);
+    }
+
+    /// Authoritative mbx paths. `GITHUB_ENV` / step `env:` cannot replace the
+    /// daemon-owned cache or managed-target roots. Re-asserted after step env,
+    /// same last-wins rule as `VELNOR_*`.
+    fn append_authoritative_mbx_env(&self, command: &mut DockerCommand) {
+        if self.mbx_store_host.is_none() {
+            return;
+        }
+        command.env("MBX_CACHE_DIR", self.mbx_cache_container_dir());
+        command.env("MBX_TARGET_ROOT", self.mbx_target_container_dir());
     }
 
     /// Truthful base env for every exec'd process: the job home is the
@@ -1418,6 +1445,29 @@ impl JobContainerSpec {
         self.mbx_store_host
             .as_ref()
             .map(|store| store.join("slots").join(self.mbx_slot_key()))
+    }
+
+    /// Container-side managed-target root: a per-slot subdir of the shared
+    /// mount. Cargo's `.cargo-lock` lives under `MBX_TARGET_ROOT`; a shared
+    /// root globally serializes concurrent Rust jobs. Sequential jobs on the
+    /// same slot keep one warm tree. Missing slot identity isolates per job
+    /// name, never the global `/var/cache/mbx/targets` root.
+    pub(crate) fn mbx_target_container_dir(&self) -> String {
+        format!("/var/cache/mbx/targets/slots/{}", self.mbx_slot_key())
+    }
+
+    pub(crate) fn mbx_target_store_host(&self) -> Option<PathBuf> {
+        self.mbx_store_host.as_ref().map(|store| {
+            store
+                .join("targets")
+                .join("slots")
+                .join(self.mbx_slot_key())
+        })
+    }
+
+    /// Host path of the sentinel that ends the container's PID 1 supervisor.
+    pub(crate) fn job_done_host_path(&self) -> PathBuf {
+        self.temp_host.join("_velnor").join(JOB_DONE_SENTINEL)
     }
 
     fn mbx_slot_key(&self) -> String {
@@ -2163,6 +2213,7 @@ mod tests {
         let args = rendered(&prepared);
         assert!(args.contains(&format!("{}:/var/cache/mbx", mbx_store.display())));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
+        assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
         assert!(!args.contains(&"MBX_DISABLE=1".into()));
@@ -2677,10 +2728,23 @@ mod tests {
                 "macOS guest Docker must mount the resolved host socket, got {args:?}"
             );
         }
-        // PID 1 tails the live console file (so `docker logs` mirrors the UI).
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log")
+        // PID 1 supervises the console tail and exits on the job.done sentinel.
+        assert_eq!(args.last().map(String::as_str), Some(JOB_CONTAINER_PID1));
+        assert!(
+            JOB_CONTAINER_PID1.contains("/__t/_velnor/job.done"),
+            "PID 1 must terminate when the job-owned done sentinel appears"
+        );
+        assert!(
+            !JOB_CONTAINER_PID1.contains("exec tail"),
+            "exec tail -F as PID 1 keeps finished containers alive"
+        );
+        assert!(
+            JOB_CONTAINER_PID1.contains("restarting logger"),
+            "a dead console tail must respawn until job.done, not exit PID 1"
+        );
+        assert!(
+            !JOB_CONTAINER_PID1.contains("exit 2"),
+            "tail death must not kill in-flight docker exec"
         );
     }
 
@@ -2789,9 +2853,114 @@ mod tests {
         let args = rendered(&job.start_args().unwrap());
         assert!(args.contains(&format!("{}:/var/cache/mbx", store.display())));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
-        // Managed targets stay on the shared root: they serialize on
-        // cargo-lock files, not on mbx's registrar/lease flock pair.
-        assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets".into()));
+        assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
+    }
+
+    #[test]
+    fn concurrent_slots_do_not_share_mbx_target_roots() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut other = spec();
+        other.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/slot-3"
+        );
+        assert_eq!(
+            other.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/slot-4"
+        );
+        assert_ne!(
+            first.mbx_target_container_dir(),
+            other.mbx_target_container_dir()
+        );
+        assert_eq!(
+            first.mbx_target_store_host().unwrap(),
+            first
+                .mbx_store_host
+                .as_ref()
+                .unwrap()
+                .join("targets/slots/slot-3")
+        );
+        assert_eq!(
+            other.mbx_target_store_host().unwrap(),
+            other
+                .mbx_store_host
+                .as_ref()
+                .unwrap()
+                .join("targets/slots/slot-4")
+        );
+    }
+
+    #[test]
+    fn sequential_same_slot_jobs_reuse_mbx_target_root() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut second = spec();
+        second.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            second.mbx_target_container_dir()
+        );
+        assert_eq!(
+            first.mbx_target_store_host().unwrap().file_name(),
+            second.mbx_target_store_host().unwrap().file_name()
+        );
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/slot-3"
+        );
+    }
+
+    #[test]
+    fn missing_slot_identity_never_falls_back_to_shared_mbx_target_root() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/job-a/temp".into();
+        let mut second = spec();
+        second.name = "velnor-job-2".into();
+        second.temp_host = "/var/lib/velnor/work/job-b/temp".into();
+
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/velnor-job-1"
+        );
+        assert_eq!(
+            second.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/velnor-job-2"
+        );
+        assert_ne!(first.mbx_target_container_dir(), "/var/cache/mbx/targets");
+    }
+
+    #[test]
+    fn step_env_cannot_override_authoritative_mbx_roots() {
+        let job = slotted_spec("mbx-target-spoof");
+        let env = vec![
+            ("MBX_TARGET_ROOT".into(), "/var/cache/mbx/targets".into()),
+            ("MBX_CACHE_DIR".into(), "/var/cache/mbx".into()),
+            ("MBX_DISABLE".into(), "1".into()),
+        ];
+        let recorded = job.script_exec_env(&env);
+        assert!(recorded.iter().any(|(name, value)| {
+            name == "MBX_TARGET_ROOT" && value == "/var/cache/mbx/targets/slots/slot-1"
+        }));
+        assert!(recorded.iter().any(|(name, value)| {
+            name == "MBX_CACHE_DIR" && value == "/var/cache/mbx/slots/slot-1"
+        }));
+        assert!(
+            recorded
+                .iter()
+                .any(|(name, value)| name == "MBX_DISABLE" && value == "1"),
+            "MBX_DISABLE is the one mbx name a job may set"
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|(name, _)| name == "MBX_TARGET_ROOT")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2824,8 +2993,10 @@ mod tests {
         job.mbx_store_host = None;
         job.sccache_store_host = Some(PathBuf::from("/var/cache/sccache"));
         assert_eq!(job.mbx_cache_store_host(), None);
+        assert_eq!(job.mbx_target_store_host(), None);
         let args = rendered(&job.start_args().unwrap());
         assert!(!args.iter().any(|arg| arg.starts_with("MBX_CACHE_DIR=")));
+        assert!(!args.iter().any(|arg| arg.starts_with("MBX_TARGET_ROOT=")));
         assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
     }
 
@@ -2951,6 +3122,8 @@ mod tests {
             "VELNOR_DOCKER_HOST_WORKSPACE={}",
             spec.workspace_host.display()
         );
+        let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
+        let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
 
         assert_eq!(
             rendered(&prepared),
@@ -2966,6 +3139,8 @@ mod tests {
                 temp_env.as_str(),
                 workspace_env.as_str(),
                 "GITHUB_OUTPUT=/__t/out",
+                mbx_cache_env.as_str(),
+                mbx_target_env.as_str(),
                 "--",
                 "velnor-job-1",
                 "bash",
@@ -2995,6 +3170,8 @@ mod tests {
             "VELNOR_DOCKER_HOST_WORKSPACE={}",
             spec.workspace_host.display()
         );
+        let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
+        let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
 
         assert_eq!(
             rendered(&prepared),
@@ -3010,6 +3187,8 @@ mod tests {
                 temp_env.as_str(),
                 workspace_env.as_str(),
                 "INPUT_NAME=value",
+                mbx_cache_env.as_str(),
+                mbx_target_env.as_str(),
                 "--",
                 "velnor-job-1",
                 "node",
@@ -4299,7 +4478,13 @@ mod tests {
             .unwrap();
         assert!(base_path < step_path);
         assert!(!engine.iter().any(|entry| entry.ends_with("=spoof")));
-        assert_eq!(engine.last().unwrap(), "VELNOR_EXECUTION_BACKEND=velnor");
+        assert!(engine
+            .iter()
+            .any(|entry| entry == "VELNOR_EXECUTION_BACKEND=velnor"));
+        assert_eq!(
+            engine.last().unwrap(),
+            &format!("MBX_TARGET_ROOT={}", job.mbx_target_container_dir())
+        );
         assert!(engine.contains(&"MULTILINE=a\nb".to_string()));
         // The CLI leg can only carry that value via the client process env;
         // the engine leg carries it directly — same daemon value.

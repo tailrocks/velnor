@@ -36,10 +36,10 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -49,7 +49,10 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{
+    mpsc::{error::TrySendError, Sender},
+    Notify,
+};
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -1070,31 +1073,130 @@ impl CommandRunner for ProcessCommandRunner {
     }
 }
 
+/// Pending bytes without a newline become visible within this bound so
+/// `printf` / progress spinners are not invisible until the process exits.
+/// Workflow-command prefixes are held until newline or stream end.
+const PARTIAL_LINE_FLUSH: Duration = Duration::from_millis(250);
+
 fn stream_reader<R: std::io::Read + Send + 'static>(
-    reader: R,
+    mut reader: R,
     stream: CommandStream,
     sender: mpsc::Sender<(CommandStream, String)>,
 ) {
-    let mut reader = BufReader::new(reader);
-    let mut buf = Vec::new();
+    let (chunk_tx, chunk_rx) = mpsc::sync_channel::<Vec<u8>>(16);
+    thread::spawn(move || {
+        let mut buf = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if chunk_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let mut pending = Vec::new();
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,
-            Ok(_) => {
-                if buf.last() == Some(&b'\n') {
-                    buf.pop();
-                }
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-                let line = String::from_utf8_lossy(&buf).into_owned();
-                if sender.send((stream, line)).is_err() {
+        match chunk_rx.recv_timeout(PARTIAL_LINE_FLUSH) {
+            Ok(chunk) => {
+                pending.extend_from_slice(&chunk);
+                if !emit_complete_stream_lines(&mut pending, stream, &sender) {
                     break;
                 }
             }
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !flush_partial_stream_line(&mut pending, stream, &sender) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = emit_complete_stream_lines(&mut pending, stream, &sender);
+                if !pending.is_empty() {
+                    let _ = emit_stream_line(&mut pending, stream, &sender);
+                }
+                break;
+            }
         }
+    }
+}
+
+fn emit_complete_stream_lines(
+    pending: &mut Vec<u8>,
+    stream: CommandStream,
+    sender: &mpsc::Sender<(CommandStream, String)>,
+) -> bool {
+    let mut start = 0;
+    while let Some(relative) = pending[start..].iter().position(|byte| *byte == b'\n') {
+        let end = start + relative;
+        let mut line = pending[start..end].to_vec();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let text = String::from_utf8_lossy(&line).into_owned();
+        if sender.send((stream, text)).is_err() {
+            pending.clear();
+            return false;
+        }
+        start = end + 1;
+    }
+    pending.drain(..start);
+    true
+}
+
+fn flush_partial_stream_line(
+    pending: &mut Vec<u8>,
+    stream: CommandStream,
+    sender: &mpsc::Sender<(CommandStream, String)>,
+) -> bool {
+    if pending.is_empty() || pending_looks_like_workflow_command(pending) {
+        return true;
+    }
+    emit_stream_line(pending, stream, sender)
+}
+
+fn emit_stream_line(
+    pending: &mut Vec<u8>,
+    stream: CommandStream,
+    sender: &mpsc::Sender<(CommandStream, String)>,
+) -> bool {
+    let mut line = std::mem::take(pending);
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    let text = String::from_utf8_lossy(&line).into_owned();
+    sender.send((stream, text)).is_ok()
+}
+
+fn pending_looks_like_workflow_command(pending: &[u8]) -> bool {
+    let start = pending
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(pending.len());
+    let rest = &pending[start..];
+    rest.starts_with(b"::") || rest.starts_with(b"##[")
+}
+
+/// Tell the container PID 1 supervisor the job is terminal so `tail -F`
+/// cannot keep an otherwise finished container alive.
+fn mark_job_container_done(container: &JobContainerSpec) {
+    let path = container.job_done_host_path();
+    if let Some(parent) = path.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "forensics.lifecycle: failed to create job.done parent {}: {error}",
+            parent.display()
+        );
+        return;
+    }
+    if let Err(error) = fs::write(&path, b"done\n") {
+        eprintln!(
+            "forensics.lifecycle: failed to write job.done sentinel {}: {error}",
+            path.display()
+        );
     }
 }
 
@@ -1257,19 +1359,78 @@ pub struct StepStartEvent {
 /// never as executor backpressure or unbounded queue memory.
 pub const STEP_PUBLISH_CHANNEL_CAPACITY: usize = 1024;
 
-/// Best-effort step-publish sender over a bounded channel.
+/// Ordered overflow after the live channel fills. GitHub upload slowness
+/// must not erase step output: events spill here, still in send order, and
+/// drop only when this buffer is also full. The publisher drains the channel
+/// first, then this queue.
+pub const STEP_PUBLISH_OVERFLOW_CAPACITY: usize = 8192;
+
+/// Mutex-ordered overflow paired with a `Notify` so the publisher wakes
+/// when the live channel is empty but spilled events remain.
+#[derive(Debug)]
+pub struct StepPublishSpill<T> {
+    overflow: Mutex<VecDeque<T>>,
+    notify: Notify,
+}
+
+impl<T> StepPublishSpill<T> {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            overflow: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+        })
+    }
+
+    /// Store `value` at the tail. Returns false only when the overflow is
+    /// already at `STEP_PUBLISH_OVERFLOW_CAPACITY`.
+    pub fn push(&self, value: T) -> bool {
+        let mut overflow = self
+            .overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if overflow.len() >= STEP_PUBLISH_OVERFLOW_CAPACITY {
+            return false;
+        }
+        overflow.push_back(value);
+        self.notify.notify_one();
+        true
+    }
+
+    pub fn take_front(&self) -> Option<T> {
+        self.overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
+
+    pub fn take_all(&self) -> Vec<T> {
+        self.overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect()
+    }
+
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+/// Best-effort step-publish sender over a bounded channel plus optional
+/// ordered overflow.
 ///
 /// Publishing is advisory — the authoritative step records travel in
-/// `ScriptJobResult` — so a full channel (stalled publisher) drops the event
-/// and bumps the counter instead of blocking the execution thread. The runner
-/// reads the counter at drain time for the forensics line. Exception: on the
-/// cancel path the executor never returns `ScriptJobResult`, so the streamed
-/// mirror (fed through this channel) is the persisted log's only source —
-/// drops there surface in the cancel-path truncation marker.
+/// `ScriptJobResult` — so a full channel+overflow (stalled publisher) drops
+/// the event and bumps the counter instead of blocking the execution thread.
+/// The runner reads the counter at drain time for the forensics line.
+/// Exception: on the cancel path the executor never returns `ScriptJobResult`,
+/// so the streamed mirror (fed through this channel) is the persisted log's
+/// only source — drops there surface in the cancel-path truncation marker.
 #[derive(Debug, Clone)]
 pub struct BoundedStepSender<T> {
     sender: Sender<T>,
     drops: Arc<AtomicU64>,
+    spill: Option<Arc<StepPublishSpill<T>>>,
 }
 
 impl<T> BoundedStepSender<T> {
@@ -1277,6 +1438,15 @@ impl<T> BoundedStepSender<T> {
         Self {
             sender,
             drops: Arc::new(AtomicU64::new(0)),
+            spill: None,
+        }
+    }
+
+    pub fn with_spill(sender: Sender<T>, spill: Arc<StepPublishSpill<T>>) -> Self {
+        Self {
+            sender,
+            drops: Arc::new(AtomicU64::new(0)),
+            spill: Some(spill),
         }
     }
 
@@ -1290,13 +1460,25 @@ impl<T> BoundedStepSender<T> {
         self.drops.load(Ordering::Relaxed)
     }
 
-    /// Non-blocking best-effort send. A full channel (stalled publisher) or
-    /// a gone publisher drops the event and counts it; both are fine because
-    /// the authoritative records travel in `ScriptJobResult` — except on the
-    /// cancel path, where the count feeds the truncation marker instead.
+    /// Non-blocking best-effort send. A full channel spills into the ordered
+    /// overflow when one is attached. Drop (and count) only when the overflow
+    /// is also full, or when the publisher is gone. Authoritative records
+    /// travel in `ScriptJobResult` — except on the cancel path, where the
+    /// count feeds the truncation marker instead.
     pub fn send_best_effort(&self, value: T) {
-        if self.sender.try_send(value).is_err() {
-            self.drops.fetch_add(1, Ordering::Relaxed);
+        match self.sender.try_send(value) {
+            Ok(()) => {}
+            Err(TrySendError::Full(value)) => {
+                if let Some(spill) = &self.spill
+                    && spill.push(value)
+                {
+                    return;
+                }
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Closed(_)) => {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -5341,6 +5523,7 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard("cleanup")?;
+        mark_job_container_done(container);
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
         // and `docker network rm` fails while an endpoint is still attached.
@@ -5381,6 +5564,7 @@ where
     }
 
     fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
+        mark_job_container_done(container);
         // Services first: their endpoints block the network removal inside
         // reclaim (see `cleanup`).
         let service_result = self.cleanup_services_unlocked(container);
@@ -5421,6 +5605,7 @@ where
     }
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
+        mark_job_container_done(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
@@ -5448,6 +5633,7 @@ where
         &mut self,
         container: &JobContainerSpec,
     ) -> Result<()> {
+        mark_job_container_done(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
@@ -5628,6 +5814,14 @@ where
                 fs::create_dir_all(&slot_cache).with_context(|| {
                     format!(
                         "create per-slot Mr Boxington cache for {}",
+                        container.temp_host.display()
+                    )
+                })?;
+            }
+            if let Some(slot_target) = container.mbx_target_store_host() {
+                fs::create_dir_all(&slot_target).with_context(|| {
+                    format!(
+                        "create per-slot Mr Boxington target root for {}",
                         container.temp_host.display()
                     )
                 })?;
@@ -15613,6 +15807,79 @@ mod tests {
         assert_eq!(lines[2].1, "after");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn stream_reader_flushes_partial_lines_without_duplicating() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        writer.write_all(b"part-one").unwrap();
+        writer.flush().unwrap();
+        let first = receiver
+            .recv_timeout(Duration::from_millis(800))
+            .expect("partial line must become visible within the flush bound");
+        assert_eq!(first, (CommandStream::Stdout, "part-one".into()));
+        writer.write_all(b" part-two\n").unwrap();
+        writer.flush().unwrap();
+        let second = receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect("remainder after a partial flush must not stall");
+        assert_eq!(second, (CommandStream::Stdout, " part-two".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_reader_holds_partial_workflow_commands_until_newline() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        writer.write_all(b"::group::hidden").unwrap();
+        writer.flush().unwrap();
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(400)).is_err(),
+            "partial workflow commands must not flush as live lines"
+        );
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+        let line = receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect("complete workflow command must stream");
+        assert_eq!(line, (CommandStream::Stdout, "::group::hidden".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_reader_holds_indented_workflow_commands_until_newline() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        writer.write_all(b" ::group::hidden").unwrap();
+        writer.flush().unwrap();
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(400)).is_err(),
+            "leading whitespace must not split a workflow command mid-token"
+        );
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+        let line = receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect("complete indented workflow command must stream");
+        assert_eq!(line, (CommandStream::Stdout, " ::group::hidden".into()));
+    }
+
+    #[test]
+    fn mark_job_container_done_writes_sentinel() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        mark_job_container_done(&spec);
+        let path = spec.job_done_host_path();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "done\n");
+    }
+
     fn assert_uuid(value: &str) {
         uuid::Uuid::parse_str(value).unwrap_or_else(|_| panic!("expected UUID, got {value}"));
     }
@@ -22897,6 +23164,49 @@ fi"#
         assert_eq!(received.len(), 2);
         assert_eq!(received[0].step_id, "step-0");
         assert_eq!(received[1].step_id, "step-1");
+    }
+
+    #[test]
+    fn bounded_step_sender_overflow_preserves_order_when_channel_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let spill = StepPublishSpill::new();
+        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
+        for order in 0..5 {
+            sender.send_best_effort(StepStartEvent {
+                step_id: format!("step-{order}"),
+                display_name: String::new(),
+                order,
+            });
+        }
+        assert_eq!(sender.drops(), 0);
+        let mut received = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            received.push(event.order);
+        }
+        assert_eq!(received, vec![0, 1]);
+        let spilled: Vec<i32> = spill
+            .take_all()
+            .into_iter()
+            .map(|event| event.order)
+            .collect();
+        assert_eq!(spilled, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn bounded_step_sender_drops_only_after_overflow_is_full() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let spill = StepPublishSpill::new();
+        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
+        let total = 1 + STEP_PUBLISH_OVERFLOW_CAPACITY + 3;
+        for order in 0..total {
+            sender.send_best_effort(StepStartEvent {
+                step_id: format!("step-{order}"),
+                display_name: String::new(),
+                order: order as i32,
+            });
+        }
+        assert_eq!(sender.drops(), 3);
+        assert_eq!(spill.take_all().len(), STEP_PUBLISH_OVERFLOW_CAPACITY);
     }
 
     #[test]

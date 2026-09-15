@@ -1800,9 +1800,9 @@ fn spawn_ready_waiters(
     journal: &Journal,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
-    if load_exec_config(&args.state_dir).is_err() {
+    let Ok(exec) = load_exec_config(&args.state_dir) else {
         return Ok(());
-    }
+    };
     let state = journal.materialized_state()?;
     if state.admission_blocked || state.drain_active {
         stop_idle_waiters(jobs, &state)?;
@@ -1818,6 +1818,26 @@ fn spawn_ready_waiters(
             .any(|job| job.slot_id == slot.slot_id && job.phase.occupies_slot())
         {
             continue;
+        }
+        // Journal Ready is not physical idleness. A live waiter, a persisted
+        // waiter pid after controller restart, or an in-flight lease whose
+        // containers are still tearing down must keep this slot unspawnable.
+        if child_owns_slot(
+            &args.state_dir,
+            &state,
+            jobs,
+            &slot.slot_id,
+            slot.generation,
+        ) {
+            continue;
+        }
+        match recovery_slot_config_dir(&args.state_dir, &exec, &state, &slot.slot_id) {
+            Ok(slot_dir) => {
+                if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
+                    continue;
+                }
+            }
+            Err(_) => continue,
         }
         let waiter_id = format!("wait-{}", slot.slot_id.0);
         if jobs.contains_key(&waiter_id) {
@@ -4311,6 +4331,54 @@ mod tests {
         )
         .unwrap();
         (dir, journal, slot_dir)
+    }
+
+    #[test]
+    fn ready_waiters_are_not_spawned_while_an_in_flight_lease_exists() {
+        let (dir, journal, _slot_dir) = marker_only_recovery_fixture("ready-waiter-in-flight");
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut jobs = HashMap::new();
+        spawn_ready_waiters(&args, &journal, &mut jobs).unwrap();
+        assert!(
+            jobs.is_empty(),
+            "an in-flight lease is physical occupancy; Ready is not enough to spawn"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_waiters_are_not_spawned_while_a_persisted_waiter_pid_lives() {
+        let dir = metrics_test_dir("ready-waiter-live-pid");
+        let journal = ready_slot_journal(&dir);
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 1).unwrap();
+        let mut waiter = Command::new("sleep").arg("30").spawn().unwrap();
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, waiter.id())
+            .unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut jobs = HashMap::new();
+        spawn_ready_waiters(&args, &journal, &mut jobs).unwrap();
+        assert!(
+            jobs.is_empty(),
+            "a live waiter pid after controller restart must keep the slot unspawnable"
+        );
+        let _ = waiter.kill();
+        let _ = waiter.wait();
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn stale_pid() -> u32 {

@@ -860,6 +860,11 @@ where
 /// socket wait within this bound instead of riding the API budget.
 const CANCEL_POLL: Duration = Duration::from_millis(10);
 
+/// How long an unterminated exec line may sit before it is flushed live
+/// while the process is still running. Workflow-command prefixes wait for
+/// newline or finish instead, so `::group::` / `::error::` stay intact.
+const PARTIAL_FLUSH: Duration = Duration::from_millis(250);
+
 /// Drive `future` unless the active job cancels first: `None` is the
 /// cancelled leg winning, and the facade answers it with the CLI fallback —
 /// the same spawn-and-ladder-kill the CLI path has always run under cancel,
@@ -1381,7 +1386,8 @@ impl EngineClient {
     /// the live shape; anything else is an API error. No budget here: the
     /// caller wraps [`Self::exec_run`] in the step deadline, and the
     /// buffers are caller-owned so an abandoned stream keeps its partial
-    /// lines for the 124 synthesis.
+    /// lines for the 124 synthesis. A 250 ms tick flushes non-command
+    /// pending tails so `printf` progress is visible before newline.
     async fn exec_stream(
         &self,
         id: &str,
@@ -1419,14 +1425,24 @@ impl EngineClient {
         let mut demux = Demux::default();
         drain_frames(&mut demux, &first_bytes, op, output, on_line)?;
         let mut chunk = [0_u8; 8192];
+        let mut ticker =
+            tokio::time::interval_at(tokio::time::Instant::now() + PARTIAL_FLUSH, PARTIAL_FLUSH);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let read = stream.read(&mut chunk).await.map_err(|error| {
-                EngineError::fault(op, (EngineFaultKind::Read, error.to_string()))
-            })?;
-            if read == 0 {
-                break;
+            tokio::select! {
+                read = stream.read(&mut chunk) => {
+                    let read = read.map_err(|error| {
+                        EngineError::fault(op, (EngineFaultKind::Read, error.to_string()))
+                    })?;
+                    if read == 0 {
+                        break;
+                    }
+                    drain_frames(&mut demux, &chunk[..read], op, output, on_line)?;
+                }
+                _ = ticker.tick() => {
+                    output.flush_partial(on_line);
+                }
             }
-            drain_frames(&mut demux, &chunk[..read], op, output, on_line)?;
         }
         if !demux.is_drained() {
             return Err(EngineError::fault(
@@ -1628,9 +1644,13 @@ fn drain_frames(
 /// is stripped per line, lines decode lossy UTF-8, every emitted line is
 /// appended with a `\n` terminator whether the process printed one or
 /// not, and a nonempty tail without a trailing newline still emits. Live
-/// lines reach `on_line` per stream as they complete; only the
-/// cross-stream interleave differs from the CLI leg (daemon frame order
-/// instead of two racing pipe readers), which was already racy there.
+/// lines reach `on_line` per stream as they complete; an unterminated
+/// tail that is not a workflow command is also flushed within
+/// [`PARTIAL_FLUSH`] so progress is visible before newline or process
+/// end. Command-like tails (`::`, `##[`) wait for newline or
+/// [`ExecOutput::finish`]. Only the cross-stream interleave differs from
+/// the CLI leg (daemon frame order instead of two racing pipe readers),
+/// which was already racy there.
 #[derive(Debug, Default)]
 pub(crate) struct ExecOutput {
     pub stdout: String,
@@ -1676,6 +1696,36 @@ impl ExecOutput {
         pending.drain(..start);
     }
 
+    /// Emit each stream's unterminated tail now, unless it looks like a
+    /// workflow command. Taking the pending bytes is what prevents a later
+    /// newline or [`Self::finish`] from re-emitting the same prefix.
+    fn flush_partial(
+        &mut self,
+        on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send),
+    ) {
+        for (pending, sink, which) in [
+            (
+                &mut self.pending_stdout,
+                &mut self.stdout,
+                crate::executor::CommandStream::Stdout,
+            ),
+            (
+                &mut self.pending_stderr,
+                &mut self.stderr,
+                crate::executor::CommandStream::Stderr,
+            ),
+        ] {
+            if pending.is_empty() || holds_workflow_command(pending) {
+                continue;
+            }
+            let mut line: Vec<u8> = std::mem::take(pending);
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            emit_exec_line(&mut *sink, &mut *on_line, which, &line);
+        }
+    }
+
     /// Flush each stream's unterminated tail, if any: a final line without
     /// its newline, exactly as the CLI leg's reader emits it.
     fn finish(&mut self, on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send)) {
@@ -1715,6 +1765,19 @@ fn emit_exec_line(
     sink.push_str(&line);
     sink.push('\n');
     on_line(which, &line);
+}
+
+/// True when `pending` is a workflow-command prefix that must not be
+/// split mid-token: `::group::` / `::error::` / `##[group]` wait for
+/// newline or finish. Leading ASCII whitespace is skipped because the
+/// command parser trims it before the prefix test.
+fn holds_workflow_command(pending: &[u8]) -> bool {
+    let start = pending
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(pending.len());
+    let rest = &pending[start..];
+    rest.starts_with(b"::") || rest.starts_with(b"##[")
 }
 
 type EngineResult<T> = Result<T, EngineError>;
@@ -2290,6 +2353,24 @@ pub(crate) mod mock {
             handler: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static,
             max_connections: usize,
         ) -> Self {
+            Self::serve_inner(handler, max_connections, Duration::ZERO)
+        }
+
+        /// Like [`Self::serve`], but keep each connection open for `hold`
+        /// after writing so the client read loop can tick.
+        pub(crate) fn serve_held(
+            handler: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+            hold: Duration,
+            max_connections: usize,
+        ) -> Self {
+            Self::serve_inner(handler, max_connections, hold)
+        }
+
+        fn serve_inner(
+            handler: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+            max_connections: usize,
+            hold: Duration,
+        ) -> Self {
             let seq = MOCK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!("ve-{}-{seq}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -2323,7 +2404,7 @@ pub(crate) mod mock {
                     }
                     let mut stream = accepted;
                     served += 1;
-                    if Self::handle_one(&mut stream, &handler).is_err() {
+                    if Self::handle_one(&mut stream, &handler, hold).is_err() {
                         break;
                     }
                 }
@@ -2336,7 +2417,11 @@ pub(crate) mod mock {
             }
         }
 
-        fn handle_one(stream: &mut UnixStream, handler: &MockHandler) -> std::io::Result<()> {
+        fn handle_one(
+            stream: &mut UnixStream,
+            handler: &MockHandler,
+            hold: Duration,
+        ) -> std::io::Result<()> {
             stream.set_read_timeout(Some(Duration::from_secs(10)))?;
             let mut buffer = Vec::new();
             let mut chunk = [0_u8; 4096];
@@ -2374,6 +2459,11 @@ pub(crate) mod mock {
             let head = String::from_utf8_lossy(&buffer).into_owned();
             let response = handler(&head);
             stream.write_all(&response)?;
+            // Hold only the hijacked start stream: create/inspect stay
+            // prompt so a ticker test pays the delay once, not per call.
+            if !hold.is_zero() && head.contains("/start HTTP") {
+                std::thread::sleep(hold);
+            }
             stream.shutdown(std::net::Shutdown::Both).ok();
             Ok(())
         }
@@ -3390,6 +3480,220 @@ mod tests {
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn exec_output_flush_partial_emits_pending_without_newline() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"part-one", &mut on_line);
+        }
+        assert!(lines.is_empty(), "unterminated tail waits for the tick");
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.flush_partial(&mut on_line);
+        }
+        assert_eq!(lines, vec![(CommandStream::Stdout, "part-one".to_string())]);
+        assert_eq!(output.stdout, "part-one\n");
+    }
+
+    #[test]
+    fn exec_output_flush_partial_does_not_duplicate_later_bytes() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"part-one", &mut on_line);
+            output.flush_partial(&mut on_line);
+            output.push_frame(1, b" part-two\n", &mut on_line);
+            output.finish(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stdout, "part-one".to_string()),
+                (CommandStream::Stdout, " part-two".to_string()),
+            ]
+        );
+        assert_eq!(output.stdout, "part-one\n part-two\n");
+    }
+
+    #[test]
+    fn exec_output_flush_partial_holds_workflow_command_prefixes() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"::group::foo", &mut on_line);
+            output.push_frame(2, b"##[error]x", &mut on_line);
+            output.flush_partial(&mut on_line);
+        }
+        assert!(lines.is_empty());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"\n", &mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stdout, "::group::foo".to_string())]
+        );
+    }
+
+    #[test]
+    fn exec_output_finish_emits_held_workflow_command_tails() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"::group::foo", &mut on_line);
+            output.flush_partial(&mut on_line);
+        }
+        assert!(lines.is_empty());
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.finish(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stdout, "::group::foo".to_string())]
+        );
+        assert_eq!(output.stdout, "::group::foo\n");
+    }
+
+    #[test]
+    fn exec_output_flush_partial_stdout_and_stderr_are_independent() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"part-one", &mut on_line);
+            output.push_frame(2, b"err\n", &mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stderr, "err".to_string())],
+            "a finished stderr line must not stall pending stdout"
+        );
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.flush_partial(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stderr, "err".to_string()),
+                (CommandStream::Stdout, "part-one".to_string()),
+            ]
+        );
+
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"out-part", &mut on_line);
+            output.push_frame(2, b"::group::held", &mut on_line);
+            output.flush_partial(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stdout, "out-part".to_string())],
+            "command-like stderr stays pending while stdout flushes"
+        );
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(2, b"\n", &mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stdout, "out-part".to_string()),
+                (CommandStream::Stderr, "::group::held".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_stream_ticker_flushes_pending_without_newline() {
+        use crate::executor::CommandStream;
+        let payload = exec_frame(1, b"part-one");
+        let mock = MockEngine::serve_held(
+            move |request| {
+                if request.contains("POST /containers/") {
+                    error_response("201 Created", r#"{"Id":"abc"}"#)
+                } else if request.contains("POST /exec/") && request.contains("/start") {
+                    start_response(&payload)
+                } else {
+                    json_response(r#"{"Running":false,"ExitCode":0}"#)
+                }
+            },
+            Duration::from_millis(800),
+            3,
+        );
+        let first_at = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let first_at_cb = Arc::clone(&first_at);
+        let mut lines = Vec::new();
+        let mut output = ExecOutput::default();
+        let started = std::time::Instant::now();
+        let code = EngineClient::new(mock.socket.clone())
+            .exec_run(
+                "velnor-job-1",
+                &test_exec_config(),
+                Duration::from_secs(30),
+                &mut output,
+                &mut |stream: CommandStream, line: &str| {
+                    let mut first = first_at_cb.lock().unwrap();
+                    if first.is_none() {
+                        *first = Some(std::time::Instant::now());
+                    }
+                    drop(first);
+                    lines.push((stream, line.to_string()));
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let elapsed = first_at
+            .lock()
+            .unwrap()
+            .expect("ticker must emit before the held stream closes")
+            .duration_since(started);
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "partial flush must land on the 250ms tick, not finish(): {elapsed:?}"
+        );
+        assert_eq!(lines, vec![(CommandStream::Stdout, "part-one".to_string())]);
+        assert_eq!(output.stdout, "part-one\n");
     }
 
     #[tokio::test]

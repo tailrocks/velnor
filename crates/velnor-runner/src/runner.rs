@@ -44,7 +44,8 @@ use crate::{
     execution::condition_is_statically_false,
     executor::{
         BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
-        ProcessCommandRunner, StepLog, StepStartEvent, STEP_PUBLISH_CHANNEL_CAPACITY,
+        ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
+        STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -877,33 +878,38 @@ fn persist_in_flight_job(
         billing_owner_id: run_service_job.billing_owner_id.clone(),
     };
     let path = in_flight_job_path(config_dir);
-    let temporary = path.with_file_name(format!(
-        "in-flight-job.json.tmp-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
     let bytes = serde_json::to_vec_pretty(&record).context("serialize in-flight job")?;
-    let result = (|| -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        file.write_all(&bytes)
-            .with_context(|| format!("write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", temporary.display()))?;
-        fs::rename(&temporary, &path)
-            .with_context(|| format!("publish in-flight job lease {}", path.display()))?;
-        sync_directory(path.parent())?;
-        Ok(())
-    })();
-    if result.is_err() {
-        fs::remove_file(&temporary).ok();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    match options.open(&path) {
+        Ok(mut file) => {
+            file.write_all(&bytes)
+                .with_context(|| format!("write {}", path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync {}", path.display()))?;
+            sync_directory(path.parent())?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = load_in_flight_job(config_dir)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "in-flight job lease {} existed then became unreadable",
+                    path.display()
+                )
+            })?;
+            if existing.job_id == job.job_id {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "slot already owns in-flight job {}; refusing to admit {}",
+                existing.job_id,
+                job.job_id
+            );
+        }
+        Err(error) => Err(error).with_context(|| format!("create exclusive {}", path.display())),
     }
-    result
 }
 
 fn sync_directory(path: Option<&Path>) -> Result<()> {
@@ -1045,6 +1051,7 @@ fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
 fn job_queue_time(job: &AgentJobRequestMessage) -> Option<&str> {
     job.queue_time
         .as_deref()
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             job.variables
                 .get("system.queueTime")
@@ -2671,10 +2678,11 @@ static ADMISSION_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> 
     std::sync::Mutex::new(None);
 
 /// Non-blocking journal-drain hint for slot and daemon poll boundaries.
-/// False on any read failure or when no marker is latched; never blocks on a
-/// writer's lock — or on the cache mutex: a contended cache degrades to a
-/// fresh zero-timeout read (and a skipped store), which is always safe because
-/// the cache is a pure TTL overlay.
+/// True when a drain marker is latched; false when the journal is absent or
+/// has no marker. An existing but unreadable journal fails closed (true),
+/// matching admission. Never blocks on a writer's lock — or on the cache
+/// mutex: a contended cache degrades to a fresh zero-timeout read (and a
+/// skipped store), which is always safe because the cache is a pure TTL overlay.
 pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
     let now = Instant::now();
     if let Ok(cache) = DRAIN_HINT_CACHE.try_lock()
@@ -2686,7 +2694,7 @@ pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
     }
     let hint = match velnor_control::journal::read_drain_state(journal_path) {
         Ok(state) => state.is_some_and(|state| state.active),
-        Err(_) => false,
+        Err(_) => journal_path.exists(),
     };
     if let Ok(mut cache) = DRAIN_HINT_CACHE.try_lock() {
         *cache = Some((journal_path.to_path_buf(), hint, now));
@@ -4998,7 +5006,16 @@ fn maybe_startup_host_docker_reclaim_with(
 /// job fails with the address-pool error above. Foreign daemons are not in
 /// `containers`.
 fn prune_stale_velnor_docker_resources(daemon_id: &str, config_base: &Path) {
-    let live_job_containers = startup_live_job_container_names(config_base);
+    let live_job_containers = match startup_live_job_container_names(config_base) {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!(
+                "Skipped startup Velnor Docker cleanup: in-flight marker scan failed: {}",
+                sanitized_retry_error(&error)
+            );
+            return;
+        }
+    };
     let docker = |args: &[&str]| {
         let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
         let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
@@ -5111,23 +5128,37 @@ fn stale_job_container_remove_args(ids: &[String]) -> Vec<String> {
 /// Container names (`velnor.job-id`) for jobs a slot runner may still be
 /// executing after daemon restart. The in-flight marker is written before any
 /// Docker environment is created and cleared only after terminal cleanup.
-fn startup_live_job_container_names(config_base: &Path) -> BTreeSet<String> {
+fn startup_live_job_container_names(config_base: &Path) -> Result<BTreeSet<String>> {
     let mut protected = BTreeSet::new();
-    let mut scan_slot = |dir: &Path| {
-        if let Ok(Some(record)) = load_in_flight_job(dir) {
+    let mut scan_slot = |dir: &Path| -> Result<()> {
+        if let Some(record) = load_in_flight_job(dir)? {
             protected.insert(job_container_name_for_id(&record.job_id));
         }
+        Ok(())
     };
-    scan_slot(config_base);
+    scan_slot(config_base)?;
     let slots = config_base.join("slots");
-    if let Ok(entries) = std::fs::read_dir(slots) {
-        for entry in entries.flatten() {
-            if entry.file_type().ok().is_some_and(|kind| kind.is_dir()) {
-                scan_slot(&entry.path());
+    match std::fs::read_dir(&slots) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry
+                    .with_context(|| format!("read startup slot entry in {}", slots.display()))?;
+                if entry
+                    .file_type()
+                    .with_context(|| format!("inspect startup slot {}", entry.path().display()))?
+                    .is_dir()
+                {
+                    scan_slot(&entry.path())?;
+                }
             }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("scan startup slots in {}", slots.display()));
+        }
     }
-    protected
+    Ok(protected)
 }
 
 fn job_container_name_for_id(job_id: &str) -> String {
@@ -5269,6 +5300,179 @@ fn maybe_prune_empty_velnor_networks(
         return;
     }
     prune_empty_velnor_networks(daemon_id);
+}
+
+/// Reclaim this daemon's job containers that no slot still records as
+/// in-flight. Startup prune is not enough: a daemon that stays up for hours
+/// otherwise accumulates leftover job containers after cancel/crash.
+fn maybe_reclaim_orphan_job_containers(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    daemon_id: &str,
+    config_dir: Option<&Path>,
+) {
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("periodic orphan job-container reclaim skipped: {reason}");
+        return;
+    }
+    let Some(config_dir) = config_dir else {
+        eprintln!(
+            "periodic orphan job-container reclaim skipped: missing config dir; refusing to guess live jobs"
+        );
+        return;
+    };
+    let scan_root = in_flight_marker_scan_root(config_dir);
+    let live = match startup_live_job_container_names(scan_root) {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!(
+                "periodic orphan job-container reclaim skipped: in-flight marker scan failed: {}",
+                sanitized_retry_error(&error)
+            );
+            return;
+        }
+    };
+    let removed = reclaim_orphan_job_containers_refreshing(
+        daemon_id,
+        &live,
+        || startup_live_job_container_names(scan_root),
+        |args| {
+            let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
+            let deadline =
+                crate::docker::deadline_for(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT)
+                    .1
+                    .min(EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT);
+            crate::docker::client::host_call_bounded(&owned, deadline)
+                .ok()
+                .map(|stdout| std::process::Output {
+                    status: success_exit_status(),
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                })
+        },
+    );
+    if removed > 0 {
+        eprintln!("Reclaimed {removed} orphan Velnor job container(s).");
+    }
+}
+
+#[cfg(test)]
+fn reclaim_orphan_job_containers_with(
+    daemon_id: &str,
+    live_job_containers: &BTreeSet<String>,
+    docker: impl Fn(&[&str]) -> Option<std::process::Output>,
+) -> usize {
+    reclaim_orphan_job_containers_refreshing(
+        daemon_id,
+        live_job_containers,
+        || Ok(live_job_containers.clone()),
+        docker,
+    )
+}
+
+fn reclaim_orphan_job_containers_refreshing(
+    daemon_id: &str,
+    live_job_containers: &BTreeSet<String>,
+    refresh_live: impl Fn() -> Result<BTreeSet<String>>,
+    docker: impl Fn(&[&str]) -> Option<std::process::Output>,
+) -> usize {
+    let ids_from = |args: &[&str]| -> Vec<String> {
+        docker(args)
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut container_ids = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"]);
+    container_ids.extend(ids_from(&[
+        "ps",
+        "-aq",
+        "--filter",
+        "name=velnor-mise-seed",
+    ]));
+    container_ids.sort();
+    container_ids.dedup();
+    const INSPECT_FORMAT: &str = r#"{{ index .Config.Labels "velnor.daemon-id" }}{{ "\t" }}{{ index .Config.Labels "velnor.job-id" }}"#;
+    let owned: Vec<(String, String)> = container_ids
+        .into_iter()
+        .filter_map(|id| {
+            docker(&["inspect", "--format", INSPECT_FORMAT, &id])
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let mut parts = text.trim().split('\t');
+                    let owner = parts.next().unwrap_or("");
+                    let job_container = parts.next().unwrap_or("").to_string();
+                    if !job_container.is_empty() && live_job_containers.contains(&job_container) {
+                        return None;
+                    }
+                    daemon_owns_resource(owner, daemon_id).then_some((id, job_container))
+                })
+        })
+        .collect();
+    // A sibling slot can persist a marker and create a container after the
+    // first live-set snapshot. Re-read immediately before `rm --force`.
+    let live = match refresh_live() {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!(
+                "periodic orphan job-container reclaim skipped: live-set refresh failed: {}",
+                sanitized_retry_error(&error)
+            );
+            return 0;
+        }
+    };
+    let stale: Vec<String> = owned
+        .into_iter()
+        .filter(|(_, job_container)| job_container.is_empty() || !live.contains(job_container))
+        .map(|(id, _)| id)
+        .collect();
+    if stale.is_empty() {
+        return 0;
+    }
+    let args = stale_job_container_remove_args(&stale);
+    let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let _ = docker(&argv);
+    stale.len()
+}
+
+/// In-flight markers live under the daemon config root (`config_base` and
+/// `config_base/slots/slot-N`), never under the job work tree.
+fn in_flight_marker_scan_root(config_dir: &Path) -> &Path {
+    if !is_numeric_slot_dir(config_dir) {
+        return config_dir;
+    }
+    let Some(parent) = config_dir.parent() else {
+        return config_dir;
+    };
+    if parent.file_name().and_then(|name| name.to_str()) == Some("slots") {
+        return parent.parent().unwrap_or(parent);
+    }
+    parent
+}
+
+/// Slot work dirs are `work/slot-N`. Ownership labels and startup reclaim
+/// use the shared work root so one slot can collect a sibling's leftovers.
+fn daemon_ownership_root(path: &Path) -> &Path {
+    if is_numeric_slot_dir(path) {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    }
+}
+
+fn is_numeric_slot_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.strip_prefix("slot-")
+                .is_some_and(|slot| !slot.is_empty() && slot.chars().all(|c| c.is_ascii_digit()))
+        })
 }
 
 fn daemon_slot_configure_args(
@@ -5553,7 +5757,7 @@ async fn run_v2(
     let slot_daemon_id = args
         .work_dir
         .as_deref()
-        .map(|path| path.display().to_string())
+        .map(|path| daemon_ownership_root(path).display().to_string())
         .unwrap_or_else(|| "default".to_string());
     let slot_backend = crate::execution::load_execution_file(&config_dir, None)
         .ok()
@@ -5677,8 +5881,14 @@ async fn run_v2(
                     // drain.
                     let sweep_backend = slot_backend;
                     let sweep_daemon_id = slot_daemon_id.clone();
+                    let sweep_config_dir = config_dir.clone();
                     tokio::task::spawn_blocking(move || {
                         maybe_prune_empty_velnor_networks(sweep_backend, &sweep_daemon_id);
+                        maybe_reclaim_orphan_job_containers(
+                            sweep_backend,
+                            &sweep_daemon_id,
+                            Some(sweep_config_dir.as_path()),
+                        );
                     });
                 }
 
@@ -7267,16 +7477,21 @@ async fn handle_job_request(
             config_dir,
             &job.job_id,
         );
+        let step_start_spill = StepPublishSpill::new();
         let (step_start_tx, step_start_receiver) =
             tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_start_sender = BoundedStepSender::new(step_start_tx);
+        let step_start_sender =
+            BoundedStepSender::with_spill(step_start_tx, Arc::clone(&step_start_spill));
         // Counter handles only: cloning the senders here would hold the
         // channels open past execution and the publishers would never drain.
         let step_start_drops = step_start_sender.drops_handle();
-        let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
+        let step_timeline =
+            start_step_timeline_publisher(job.clone(), step_start_receiver, step_start_spill);
+        let step_log_spill = StepPublishSpill::new();
         let (step_log_tx, step_log_receiver) =
             tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_log_sender = BoundedStepSender::new(step_log_tx);
+        let step_log_sender =
+            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill));
         let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
@@ -7294,6 +7509,7 @@ async fn handle_job_request(
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
+            step_log_spill,
             console_log_path,
             Arc::clone(&streamed_step_logs),
         );
@@ -7371,7 +7587,9 @@ async fn handle_job_request(
                 )
                 .await;
                 renewal.abort();
-                let teardown_result = if let Some(teardown) = take_teardown_owner(&teardown_slot) {
+                let teardown = take_teardown_owner(&teardown_slot);
+                let had_teardown = teardown.is_some();
+                let teardown_result = if let Some(teardown) = teardown {
                     start_failed_execution_teardown(
                         teardown_config_dir.clone(),
                         teardown,
@@ -7395,8 +7613,10 @@ async fn handle_job_request(
                     };
                 }
                 completion?;
-                clear_in_flight_job(&teardown_config_dir)
-                    .context("failed to clear acknowledged in-flight job")?;
+                if !had_teardown {
+                    clear_in_flight_job(&teardown_config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
+                }
                 return Err(join_error).context("join Docker job execution thread");
             }
         };
@@ -7451,18 +7671,19 @@ async fn handle_job_request(
                     )
                     .await;
                     renewal.abort();
-                    let teardown_result =
-                        if let Some(teardown) = take_teardown_owner(&teardown_slot) {
-                            start_failed_execution_teardown(
-                                teardown_config_dir.clone(),
-                                teardown,
-                                forensics.clone(),
-                                job_claim,
-                            )
-                            .await
-                        } else {
-                            Ok(())
-                        };
+                    let teardown = take_teardown_owner(&teardown_slot);
+                    let had_teardown = teardown.is_some();
+                    let teardown_result = if let Some(teardown) = teardown {
+                        start_failed_execution_teardown(
+                            teardown_config_dir.clone(),
+                            teardown,
+                            forensics.clone(),
+                            job_claim,
+                        )
+                        .await
+                    } else {
+                        Ok(())
+                    };
                     if let Err(teardown_error) = teardown_result {
                         let detail = format!(
                             "job execution failed and teardown handoff failed: {teardown_error:#}"
@@ -7476,8 +7697,10 @@ async fn handle_job_request(
                         };
                     }
                     completion?;
-                    clear_in_flight_job(&teardown_config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
+                    if !had_teardown {
+                        clear_in_flight_job(&teardown_config_dir)
+                            .context("failed to clear acknowledged in-flight job")?;
+                    }
                     return Err(error);
                 }
             }
@@ -7553,8 +7776,6 @@ async fn handle_job_request(
         let finalize_ms = duration_ms(finalize_started.elapsed());
         renewal.abort();
         completion?;
-        clear_in_flight_job(&teardown_config_dir)
-            .context("failed to clear acknowledged in-flight job")?;
         println!(
             "forensics.lifecycle event=completion-posted timestamp={}",
             unix_now_iso8601()
@@ -7591,6 +7812,8 @@ async fn handle_job_request(
             )
             .await?;
         } else {
+            clear_in_flight_job(&teardown_config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             record_job_timing(&teardown_config_dir, forensics, &timing_record);
         }
         println!(
@@ -8417,6 +8640,7 @@ fn step_log_mirror_bytes(log: &StepLog) -> u64 {
 fn start_step_timeline_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepStartEvent>,
+    spill: Arc<StepPublishSpill<StepStartEvent>>,
 ) -> JoinHandle<()> {
     // Build Twirp client for Results Service step status updates if available.
     let twirp_client = job
@@ -8437,7 +8661,7 @@ fn start_step_timeline_publisher(
 
     tokio::spawn(async move {
         let mut change_order: i64 = 1;
-        while let Some(event) = receiver.recv().await {
+        while let Some(event) = recv_published(&mut receiver, &spill).await {
             // Send step "in-progress" update via Twirp Results Service
             if let Some(client) = &twirp_client {
                 let step = crate::protocol::TwirpStep {
@@ -8487,6 +8711,7 @@ fn start_step_timeline_publisher(
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepLog>,
+    spill: Arc<StepPublishSpill<StepLog>>,
     console_log_path: Option<PathBuf>,
     streamed_step_logs: Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
 ) -> JoinHandle<()> {
@@ -8543,7 +8768,11 @@ fn start_step_log_publisher(
                 .truncate(true)
                 .open(path)
                 .ok()
-                .map(BufWriter::new)
+                .map(|file| {
+                    let mut writer = BufWriter::new(file);
+                    write_job_console_identity(&mut writer, &job, path);
+                    writer
+                })
         });
         let job_masks = MaskPatterns::new(job_secret_mask_values(&job));
 
@@ -8576,29 +8805,50 @@ fn start_step_log_publisher(
         // live console doesn't stutter on the next send.
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            let first_log = tokio::select! {
-                maybe = receiver.recv() => match maybe {
-                    Some(log) => log,
-                    None => break,
-                },
-                _ = ping_interval.tick() => {
-                    if let Some(ws) = ws_conn.as_mut()
-                        && let Err(e) = publish_with_timeout(
-                            crate::protocol::FeedStreamClient::send_ping(ws),
-                        )
-                        .await
-                    {
-                            eprintln!(
-                                "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
-                                sanitized_retry_error(&e)
-                            );
-                            ws_conn = None;
+        'publish: loop {
+            let first_log = loop {
+                match receiver.try_recv() {
+                    Ok(log) => break log,
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        if let Some(log) = spill.take_front() {
+                            break log;
                         }
-                    continue;
+                        break 'publish;
+                    }
+                }
+                if let Some(log) = spill.take_front() {
+                    break log;
+                }
+                tokio::select! {
+                    maybe = receiver.recv() => match maybe {
+                        Some(log) => break log,
+                        None => {
+                            if let Some(log) = spill.take_front() {
+                                break log;
+                            }
+                            break 'publish;
+                        }
+                    },
+                    _ = spill.notified() => continue,
+                    _ = ping_interval.tick() => {
+                        if let Some(ws) = ws_conn.as_mut()
+                            && let Err(e) = publish_with_timeout(
+                                crate::protocol::FeedStreamClient::send_ping(ws),
+                            )
+                            .await
+                        {
+                                eprintln!(
+                                    "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
+                                    sanitized_retry_error(&e)
+                                );
+                                ws_conn = None;
+                            }
+                        continue;
+                    }
                 }
             };
-            let logs = step_log_batch(first_log, &mut receiver);
+            let logs = step_log_batch(first_log, &mut receiver, &spill);
             let mut processed = Vec::with_capacity(logs.len());
             let mut live_batches = Vec::new();
             for log in logs {
@@ -8609,7 +8859,8 @@ fn start_step_log_publisher(
                 let size = step_log_mirror_bytes(&log);
                 streamed_step_logs.lock().await.push(Arc::clone(&log), size);
                 let masker = job_masks.with_extra(&log.masks);
-                let lines = mask_log_lines_with(&log.lines, &masker);
+                let lines =
+                    annotate_lock_wait_lines(&mask_log_lines_with(&log.lines, &masker), &job);
                 let line_count = lines.len() as i64;
                 let live_chunk = log.completed_at.is_empty() && !log.skipped;
                 if live_chunk {
@@ -8780,7 +9031,33 @@ struct LiveFeedBatch {
     start_line: i64,
 }
 
-fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepLog> {
+async fn recv_published<T>(receiver: &mut Receiver<T>, spill: &StepPublishSpill<T>) -> Option<T> {
+    loop {
+        match receiver.try_recv() {
+            Ok(value) => return Some(value),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => return spill.take_front(),
+        }
+        if let Some(value) = spill.take_front() {
+            return Some(value);
+        }
+        tokio::select! {
+            maybe = receiver.recv() => {
+                return match maybe {
+                    Some(value) => Some(value),
+                    None => spill.take_front(),
+                };
+            }
+            _ = spill.notified() => {}
+        }
+    }
+}
+
+fn step_log_batch(
+    first: StepLog,
+    receiver: &mut Receiver<StepLog>,
+    spill: &StepPublishSpill<StepLog>,
+) -> Vec<StepLog> {
     let mut logs = vec![first];
     loop {
         match receiver.try_recv() {
@@ -8788,6 +9065,9 @@ fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepL
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => break,
         }
+    }
+    while let Some(log) = spill.take_front() {
+        logs.push(log);
     }
     logs
 }
@@ -10734,6 +11014,17 @@ async fn start_teardown_task(
                         "forensics.lifecycle event=teardown-done timestamp={}",
                         unix_now_iso8601()
                     );
+                    // The lease is occupancy, not a GitHub-completion flag.
+                    // Clearing it here — after Docker and workspace cleanup —
+                    // is what makes persist_in_flight_job refuse a second job
+                    // while this slot's containers can still exist.
+                    if let Err(error) = clear_in_flight_job(&timing_config_dir) {
+                        let detail = format!("post-completion in-flight release failed: {error:#}");
+                        forensics.lifecycle(&detail);
+                        eprintln!("Warning: {detail}; retrying until the slot lease is released");
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
                     return Ok(());
                 }
                 Err(error) => {
@@ -10776,6 +11067,10 @@ fn register_slot_teardown_task(
 }
 
 async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
+    wait_for_prior_slot_teardown_within(config_dir, PRIOR_TEARDOWN_JOIN_DEADLINE).await
+}
+
+async fn wait_for_prior_slot_teardown_within(config_dir: &Path, deadline: Duration) -> Result<()> {
     let task = slot_teardown_tasks()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -10783,51 +11078,39 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
     let Some(task) = task else {
         return Ok(());
     };
-    // Bounded. The teardown thread retries on its own schedule, so an await
-    // with no deadline let a teardown that never succeeds pin the slot of a job
-    // GitHub had already been told was finished — the one place a *completed*
-    // job could hold a slot indefinitely.
-    //
-    // On expiry the thread is left running: it owns the containers and will
-    // keep trying, and abandoning its handle is strictly better than refusing
-    // to start the next job. What the operator must not get is silence, so the
-    // wait says which slot and how long it waited.
-    let joined = tokio::time::timeout(
-        PRIOR_TEARDOWN_JOIN_DEADLINE,
-        tokio::task::spawn_blocking(move || task.join()),
-    )
-    .await;
-    match joined {
-        Ok(joined) => {
-            joined
-                .context("join prior slot teardown task")?
-                .map_err(|panic| {
-                    anyhow::anyhow!("prior slot teardown task panicked: {panic:?}")
-                })??;
-        }
-        Err(_) => {
+    // Bounded so a wedged teardown is visible, but fail-closed: the next job
+    // must not start while this thread still owns the slot's containers.
+    // Put the handle back on timeout so a later cycle can join it instead of
+    // losing the thread and admitting overlapping work.
+    let started = Instant::now();
+    while !task.is_finished() {
+        if started.elapsed() >= deadline {
             let message = format!(
-                "prior slot teardown for {} did not finish within {}s; continuing without it, \
-                 its containers may still be present",
+                "prior slot teardown for {} did not finish within {}s; refusing the next job \
+                 until containers are gone",
                 config_dir.display(),
-                PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs()
+                deadline.as_secs()
             );
             eprintln!("{message}");
             tracing::warn!(
                 target: "velnor.teardown",
                 slot_dir = %config_dir.display(),
-                waited_s = PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs(),
+                waited_s = deadline.as_secs(),
                 "prior slot teardown exceeded its join deadline"
             );
+            register_slot_teardown_task(config_dir, task)?;
+            bail!("{message}");
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Ok(())
+    task.join()
+        .map_err(|panic| anyhow::anyhow!("prior slot teardown task panicked: {panic:?}"))?
 }
 
 /// How long a slot waits for the previous job's teardown before starting work.
 ///
-/// Generous, because a legitimate teardown of a large workspace takes time, and
-/// bounded, because a completed job must never hold a slot forever.
+/// Generous, because a legitimate teardown of a large workspace takes time.
+/// Expiry refuses the next job rather than overlapping containers on one slot.
 const PRIOR_TEARDOWN_JOIN_DEADLINE: Duration = Duration::from_secs(300);
 
 struct PrecreatedJobEnvironment {
@@ -11029,6 +11312,7 @@ fn hydrate_github_variables_from_context(
         "github.run_attempt",
         "github.run_id",
         "github.run_number",
+        "github.run_started_at",
         "github.server_url",
         "github.sha",
         "github.triggering_actor",
@@ -12108,6 +12392,47 @@ fn job_console_log_path(
         .join("temp")
         .join("_velnor")
         .join("console.log")
+}
+
+fn write_job_console_identity(
+    writer: &mut BufWriter<fs::File>,
+    job: &AgentJobRequestMessage,
+    console_path: &Path,
+) {
+    let slot = console_path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .rev()
+        .find(|name| name.starts_with("slot-"))
+        .unwrap_or("unknown");
+    let repo = crate::github_adapter::job_variable(job, "github.repository").unwrap_or("unknown");
+    let workflow = crate::github_adapter::job_variable(job, "github.workflow").unwrap_or("unknown");
+    let run_id = crate::github_adapter::job_variable(job, "github.run_id").unwrap_or("unknown");
+    let github_job = crate::github_adapter::job_variable(job, "github.job").unwrap_or("unknown");
+    let banner = format!(
+        "[velnor] job-container identity slot={slot} job={} name={} repo={repo} workflow={workflow} run={run_id} github_job={github_job}\n[velnor] docker logs is a live view of this job; the container exits when /__t/_velnor/job.done is written\n",
+        job.job_id,
+        job.job_display_name
+    );
+    let _ = writer.write_all(banner.as_bytes());
+    let _ = writer.flush();
+}
+
+fn annotate_lock_wait_lines(lines: &[String], job: &AgentJobRequestMessage) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        out.push(line.clone());
+        if line.contains("Blocking waiting for file lock on build directory")
+            && !line.contains("[velnor] waiting")
+        {
+            out.push(format!(
+                "[velnor] waiting for Cargo build lock; job={} repo={}",
+                job.job_id,
+                crate::github_adapter::job_variable(job, "github.repository").unwrap_or("unknown")
+            ));
+        }
+    }
+    out
 }
 
 /// Append one step's masked output to the live console file tailed by the job
@@ -14975,6 +15300,7 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
+    use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
 
@@ -15170,6 +15496,35 @@ mod tests {
         assert_eq!(
             load_in_flight_job(&dir).unwrap().unwrap().job_id,
             job.job_id
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persist_in_flight_job_refuses_a_second_distinct_job() {
+        let dir = unique_temp_dir("in-flight-exclusive-slot");
+        fs::create_dir_all(&dir).unwrap();
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        let mut first = minimal_job_with_variables(serde_json::json!({}));
+        first.job_id = "job-first".into();
+        let mut second = minimal_job_with_variables(serde_json::json!({}));
+        second.job_id = "job-second".into();
+        persist_in_flight_job(&dir, &context, &first).unwrap();
+        persist_in_flight_job(&dir, &context, &first).unwrap();
+        let error = persist_in_flight_job(&dir, &context, &second).unwrap_err();
+        assert!(
+            error.to_string().contains("job-first"),
+            "exclusive lease must name the occupant: {error}"
+        );
+        assert_eq!(
+            load_in_flight_job(&dir).unwrap().unwrap().job_id,
+            "job-first"
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -15648,6 +16003,10 @@ mod tests {
         assert!(journal_drain_hint(&drained));
         assert!(!journal_drain_hint(&idle));
         assert!(!journal_drain_hint(&dir.join("missing.db")));
+
+        let corrupt = dir.join("corrupt.db");
+        std::fs::write(&corrupt, b"not a sqlite database").unwrap();
+        assert!(journal_drain_hint(&corrupt));
 
         // Within the TTL the cached verdict survives the file's removal:
         // the second read is served without touching SQLite.
@@ -17164,7 +17523,8 @@ jobs:
                     { "k": "workflow", "v": "compat" },
                     { "k": "workflow_ref", "v": "tailrocks/fixture/.github/workflows/compat.yml@refs/heads/main" },
                     { "k": "run_attempt", "v": "3" },
-                    { "k": "run_number", "v": "42" }
+                    { "k": "run_number", "v": "42" },
+                    { "k": "run_started_at", "v": "2026-09-15T01:01:00Z" }
                 ], "t": 2 }
             }
         }))
@@ -17184,6 +17544,10 @@ jobs:
         let env = crate::runtime_env::job_runtime_env(&job);
         assert!(env.contains(&("GITHUB_RUN_ATTEMPT".into(), "3".into())));
         assert!(env.contains(&("GITHUB_RUN_NUMBER".into(), "42".into())));
+        assert!(env.contains(&(
+            crate::runtime_env::RUN_STARTED_AT_ENV.into(),
+            "2026-09-15T01:01:00Z".into()
+        )));
     }
 
     #[test]
@@ -17305,10 +17669,21 @@ jobs:
             &job_b,
         )
         .unwrap();
-        let names = startup_live_job_container_names(&base);
+        let names = startup_live_job_container_names(&base).unwrap();
         assert!(names.contains("velnor-job-job-a"));
         assert!(names.contains("velnor-job-job_b"));
         assert_eq!(names.len(), 2);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn startup_live_job_container_names_fails_closed_on_unreadable_marker() {
+        let base = unique_temp_dir("startup-live-containers-corrupt");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(in_flight_job_path(&base), b"corrupt").unwrap();
+        let error = startup_live_job_container_names(&base)
+            .expect_err("corrupt marker must block startup pruning");
+        assert!(error.to_string().contains("parse in-flight job"));
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -17359,6 +17734,147 @@ jobs:
                 "velnor-job-bbbb".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn reclaim_orphan_job_containers_keeps_in_flight_and_removes_stale() {
+        let live = BTreeSet::from(["velnor-job-live".to_owned()]);
+        let removed = reclaim_orphan_job_containers_with("/daemon/work", &live, |args| {
+            if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: b"id-live\nid-dead\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args == ["ps", "-aq", "--filter", "name=velnor-mise-seed"] {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args.first() == Some(&"inspect") && args.last() == Some(&"id-live") {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: b"/daemon/work/slot-1\tvelnor-job-live\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args.first() == Some(&"inspect") && args.last() == Some(&"id-dead") {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: b"/daemon/work/slot-2\tvelnor-job-dead\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args.first() == Some(&"rm") {
+                let expected = stale_job_container_remove_args(&["id-dead".to_owned()]);
+                assert_eq!(
+                    args,
+                    expected.iter().map(String::as_str).collect::<Vec<_>>()
+                );
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            None
+        });
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn reclaim_rechecks_in_flight_markers_immediately_before_rm() {
+        let live = BTreeSet::new();
+        let removed = reclaim_orphan_job_containers_refreshing(
+            "/daemon/work",
+            &live,
+            || Ok(BTreeSet::from(["velnor-job-new".to_owned()])),
+            |args| {
+                if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"id-new\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args == ["ps", "-aq", "--filter", "name=velnor-mise-seed"] {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"inspect") && args.last() == Some(&"id-new") {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"/daemon/work/slot-2\tvelnor-job-new\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"rm") {
+                    panic!(
+                        "a container admitted after the first snapshot must not be force-removed"
+                    );
+                }
+                None
+            },
+        );
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn in_flight_marker_scan_root_walks_up_from_slot_config() {
+        assert_eq!(
+            in_flight_marker_scan_root(Path::new("/config/slots/slot-9")),
+            Path::new("/config")
+        );
+        assert_eq!(
+            in_flight_marker_scan_root(Path::new("/config")),
+            Path::new("/config")
+        );
+        assert_eq!(
+            in_flight_marker_scan_root(Path::new("/daemon/work/slot-2")),
+            Path::new("/daemon/work")
+        );
+    }
+
+    #[test]
+    fn daemon_ownership_root_is_the_shared_work_tree() {
+        assert_eq!(
+            daemon_ownership_root(Path::new("/daemon/work/slot-2")),
+            Path::new("/daemon/work")
+        );
+        assert_eq!(
+            daemon_ownership_root(Path::new("/daemon/work")),
+            Path::new("/daemon/work")
+        );
+        assert!(daemon_owns_resource("/daemon/work/slot-9", "/daemon/work"));
+    }
+
+    #[test]
+    fn annotate_lock_wait_lines_adds_actionable_owner_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "job-lock",
+            "JobDisplayName": "Check",
+            "RequestId": 1,
+            "Variables": {
+                "github.repository": { "Value": "tailrocks/velnor" }
+            }
+        }))
+        .unwrap();
+        let lines = annotate_lock_wait_lines(
+            &["    Blocking waiting for file lock on build directory".into()],
+            &job,
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("job=job-lock"));
+        assert!(lines[1].contains("tailrocks/velnor"));
     }
 
     #[test]
@@ -18536,6 +19052,24 @@ jobs:
         }))
         .unwrap();
         assert!(job_queue_time_present(&fallback));
+
+        let empty_explicit: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "empty-explicit",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "QueueTime": " ",
+            "Variables": {
+                "system.queueTime": { "Value": "2026-08-30T00:00:00Z" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            job_queue_time(&empty_explicit),
+            Some("2026-08-30T00:00:00Z")
+        );
 
         for (raw, present) in [
             ("", false),
@@ -23334,6 +23868,60 @@ runs:
     }
 
     #[tokio::test]
+    async fn prior_teardown_timeout_fails_closed_and_keeps_the_task() -> Result<()> {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        let (release_sender, release_receiver) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+        register_slot_teardown_task(
+            &key,
+            std::thread::spawn(move || -> Result<()> {
+                release_receiver.recv()??;
+                Ok(())
+            }),
+        )?;
+
+        let error = wait_for_prior_slot_teardown_within(&key, Duration::from_millis(80))
+            .await
+            .expect_err("overlapping admission must not beat unfinished teardown");
+        assert!(
+            error.to_string().contains("refusing the next job"),
+            "timeout must fail closed: {error}"
+        );
+
+        release_sender.send(Ok(()))?;
+        tokio::time::timeout(Duration::from_secs(1), wait_for_prior_slot_teardown(&key))
+            .await
+            .map_err(anyhow::Error::from)??;
+        Ok(())
+    }
+
+    #[test]
+    fn in_flight_lease_survives_github_completion_until_explicit_release() {
+        let dir = unique_temp_dir("in-flight-outlives-completion");
+        fs::create_dir_all(&dir).unwrap();
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        let mut first = minimal_job_with_variables(serde_json::json!({}));
+        first.job_id = "job-first".into();
+        let mut second = minimal_job_with_variables(serde_json::json!({}));
+        second.job_id = "job-second".into();
+        persist_in_flight_job(&dir, &context, &first).unwrap();
+        assert!(recorded_in_flight_job_exists(&dir).unwrap());
+        persist_in_flight_job(&dir, &context, &second).unwrap_err();
+        clear_in_flight_job(&dir).unwrap();
+        persist_in_flight_job(&dir, &context, &second).unwrap();
+        assert_eq!(
+            load_in_flight_job(&dir).unwrap().unwrap().job_id,
+            "job-second"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn stalled_step_publisher_is_aborted_after_deadline() {
         struct DropMarker(Arc<AtomicBool>);
 
@@ -24350,7 +24938,13 @@ runs:
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let held = mirror.lock().await;
-        let mut publisher = start_step_log_publisher(job, receiver, None, Arc::clone(&mirror));
+        let mut publisher = start_step_log_publisher(
+            job,
+            receiver,
+            StepPublishSpill::new(),
+            None,
+            Arc::clone(&mirror),
+        );
         sender
             .send(partial_step_log("contended", &["line"], ""))
             .await
@@ -24475,7 +25069,8 @@ runs:
         // the burst as counted drops and the mirror must hold the ceiling —
         // neither may grow with the number of emitted events.
         let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let sender = BoundedStepSender::new(tx);
+        let spill = StepPublishSpill::new();
+        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let started = Instant::now();
         let events: u64 = 100_000;
@@ -24497,10 +25092,8 @@ runs:
             mirror_guard.len(),
             mirror_guard.bytes(),
         );
-        assert_eq!(
-            sender.drops(),
-            events - STEP_PUBLISH_CHANNEL_CAPACITY as u64
-        );
+        let retained = STEP_PUBLISH_CHANNEL_CAPACITY as u64 + STEP_PUBLISH_OVERFLOW_CAPACITY as u64;
+        assert_eq!(sender.drops(), events - retained);
         assert!(mirror_guard.len() <= STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
         assert!(mirror_guard.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
         // The soak's overflow is fully accounted: every record past the
@@ -24515,13 +25108,15 @@ runs:
             elapsed < Duration::from_secs(60),
             "soak sender blocked: {elapsed:?}"
         );
-        // The stalled publisher still drains exactly one capacity once it
-        // makes progress — nothing was lost except the counted drops.
+        // The stalled publisher still drains the live channel plus the
+        // ordered overflow once it makes progress — nothing was lost except
+        // the counted drops past both buffers.
         let mut drained = 0u64;
         while rx.try_recv().is_ok() {
             drained += 1;
         }
-        assert_eq!(drained, STEP_PUBLISH_CHANNEL_CAPACITY as u64);
+        drained += spill.take_all().len() as u64;
+        assert_eq!(drained, retained);
     }
 
     #[test]
