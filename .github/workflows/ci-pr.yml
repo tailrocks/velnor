@@ -622,17 +622,10 @@ jobs:
           selected=",$SELECTED_UNITS,"
           if [[ "$selected" == *",bun-velnor,"* ]]; then
             result="$(result_for_job github-bun-velnor)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-bun-velnor did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-bun-velnor did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-bun-velnor did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-bun-velnor)"
             case "$result" in
@@ -642,7 +635,7 @@ jobs:
           fi
           if [[ "$selected" == *",bun-velnor,"* ]]; then
             result="$(result_for_job velnor-bun-velnor)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;
@@ -662,17 +655,10 @@ jobs:
           fi
           if [[ "$selected" == *",docker,"* ]]; then
             result="$(result_for_job github-docker)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-docker did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-docker did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-docker did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-docker)"
             case "$result" in
@@ -682,7 +668,7 @@ jobs:
           fi
           if [[ "$selected" == *",docker,"* ]]; then
             result="$(result_for_job velnor-docker)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
@@ -702,17 +688,10 @@ jobs:
           fi
           if [[ "$selected" == *",docs,"* ]]; then
             result="$(result_for_job github-docs)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-docs did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-docs did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-docs did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-docs)"
             case "$result" in
@@ -722,7 +701,7 @@ jobs:
           fi
           if [[ "$selected" == *",docs,"* ]]; then
             result="$(result_for_job velnor-docs)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;
@@ -742,17 +721,10 @@ jobs:
           fi
           if [[ "$selected" == *",opentofu,"* ]]; then
             result="$(result_for_job github-opentofu)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-opentofu did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-opentofu did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-opentofu did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-opentofu)"
             case "$result" in
@@ -762,7 +734,7 @@ jobs:
           fi
           if [[ "$selected" == *",opentofu,"* ]]; then
             result="$(result_for_job velnor-opentofu)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;
@@ -795,17 +767,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-policy,"* ]]; then
             result="$(result_for_job github-rust-policy)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-policy did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-policy did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-policy did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-policy)"
             case "$result" in
@@ -815,7 +780,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-policy,"* ]]; then
             result="$(result_for_job velnor-rust-policy)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;
@@ -835,17 +800,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-unit-collector,"* ]]; then
             result="$(result_for_job github-rust-unit-collector)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-unit-collector)"
             case "$result" in
@@ -855,7 +813,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-unit-collector,"* ]]; then
             result="$(result_for_job velnor-rust-unit-collector)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
@@ -875,17 +833,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-bench,"* ]]; then
             result="$(result_for_job github-rust-velnor-bench)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-bench)"
             case "$result" in
@@ -895,7 +846,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-bench,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-bench)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
@@ -915,17 +866,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-client,"* ]]; then
             result="$(result_for_job github-rust-velnor-client)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-client)"
             case "$result" in
@@ -935,7 +879,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-client,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-client)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
@@ -955,17 +899,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-control,"* ]]; then
             result="$(result_for_job github-rust-velnor-control)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-control)"
             case "$result" in
@@ -975,7 +912,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-control,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-control)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
@@ -995,17 +932,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-model,"* ]]; then
             result="$(result_for_job github-rust-velnor-model)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-model)"
             case "$result" in
@@ -1015,7 +945,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-model,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-model)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
@@ -1048,17 +978,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-render,"* ]]; then
             result="$(result_for_job github-rust-velnor-render)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-render)"
             case "$result" in
@@ -1068,7 +991,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-render,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-render)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
@@ -1088,17 +1011,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-runner,"* ]]; then
             result="$(result_for_job github-rust-velnor-runner)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-runner)"
             case "$result" in
@@ -1108,7 +1024,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-runner,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-runner)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
@@ -1128,17 +1044,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-tools,"* ]]; then
             result="$(result_for_job github-rust-velnor-tools)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-tools)"
             case "$result" in
@@ -1148,7 +1057,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-tools,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-tools)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
@@ -1168,17 +1077,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow,"* ]]; then
             result="$(result_for_job github-rust-velnor-workflow)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-workflow)"
             case "$result" in
@@ -1188,7 +1090,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-workflow)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
@@ -1208,17 +1110,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
             result="$(result_for_job github-rust-velnor-workflow-contract)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnor-workflow-contract)"
             case "$result" in
@@ -1228,7 +1123,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-workflow-contract)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
@@ -1261,17 +1156,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then
             result="$(result_for_job github-rust-velnorctl)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-velnorctl)"
             case "$result" in
@@ -1281,7 +1169,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then
             result="$(result_for_job velnor-rust-velnorctl)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
@@ -1301,17 +1189,10 @@ jobs:
           fi
           if [[ "$selected" == *",rust-production-topology,"* ]]; then
             result="$(result_for_job github-rust-production-topology)"
-            if [[ "$FORK_PR" == true && false ]]; then
-              case "$result" in
-                success|skipped) ;;
-                *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;
-              esac
-            else
-              case "$result" in
-                success) ;;
-                *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;
-              esac
-            fi
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;
+            esac
           else
             result="$(result_for_job github-rust-production-topology)"
             case "$result" in
@@ -1321,7 +1202,7 @@ jobs:
           fi
           if [[ "$selected" == *",rust-production-topology,"* ]]; then
             result="$(result_for_job velnor-rust-production-topology)"
-            if [[ "$FORK_PR" == true && true ]]; then
+            if [[ "$FORK_PR" == true ]]; then
               case "$result" in
                 success|skipped) ;;
                 *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;
