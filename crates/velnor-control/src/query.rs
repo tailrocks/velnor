@@ -726,9 +726,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "velnor-query-durable-{}-{}",
             std::process::id(),
-            Timestamp::now()
-                .as_offset_datetime()
-                .unix_timestamp_nanos()
+            Timestamp::now().as_offset_datetime().unix_timestamp_nanos()
         ));
         std::fs::create_dir_all(&directory).expect("query test directory");
         let path = directory.join("state.db");
