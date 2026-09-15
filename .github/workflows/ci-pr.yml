@@ -112,7 +112,6 @@ jobs:
     name: "Bun · Bun package (velnor)"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-bun.yml
     with:
       unit: bun-velnor
@@ -126,7 +125,6 @@ jobs:
     name: "Bun · Bun package (velnor)"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-bun.yml
     with:
       unit: bun-velnor
@@ -140,7 +138,6 @@ jobs:
     name: "Docker · Docker"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-docker.yml
     with:
       unit: docker
@@ -154,7 +151,6 @@ jobs:
     name: "Docker · Docker"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-docker.yml
     with:
       unit: docker
@@ -168,7 +164,6 @@ jobs:
     name: "Documentation · Documentation"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-docs.yml
     with:
       unit: docs
@@ -182,7 +177,6 @@ jobs:
     name: "Documentation · Documentation"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-docs.yml
     with:
       unit: docs
@@ -196,7 +190,6 @@ jobs:
     name: "OpenTofu · OpenTofu"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
       unit: opentofu
@@ -210,7 +203,6 @@ jobs:
     name: "OpenTofu · OpenTofu"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
       unit: opentofu
@@ -237,7 +229,6 @@ jobs:
     name: "Rust · Rust dependency policy"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-policy
@@ -251,7 +242,6 @@ jobs:
     name: "Rust · Rust dependency policy"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-policy
@@ -265,7 +255,6 @@ jobs:
     name: "Rust · unit-collector"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-unit-collector
@@ -279,7 +268,6 @@ jobs:
     name: "Rust · unit-collector"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-unit-collector
@@ -293,7 +281,6 @@ jobs:
     name: "Rust · velnor-bench"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-bench
@@ -307,7 +294,6 @@ jobs:
     name: "Rust · velnor-bench"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model, velnor-rust-velnor-runner]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-bench
@@ -321,7 +307,6 @@ jobs:
     name: "Rust · velnor-client"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-client
@@ -335,7 +320,6 @@ jobs:
     name: "Rust · velnor-client"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-client
@@ -349,7 +333,6 @@ jobs:
     name: "Rust · velnor-control"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-control
@@ -363,7 +346,6 @@ jobs:
     name: "Rust · velnor-control"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-control
@@ -377,7 +359,6 @@ jobs:
     name: "Rust · velnor-model"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-model
@@ -391,7 +372,6 @@ jobs:
     name: "Rust · velnor-model"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-model
@@ -405,7 +385,6 @@ jobs:
     name: "Rust · velnor-render"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-render
@@ -419,7 +398,6 @@ jobs:
     name: "Rust · velnor-render"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-render
@@ -433,7 +411,6 @@ jobs:
     name: "Rust · velnor-runner"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-runner
@@ -447,7 +424,6 @@ jobs:
     name: "Rust · velnor-runner"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-control, velnor-rust-velnor-model]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-runner
@@ -461,7 +437,6 @@ jobs:
     name: "Rust · velnor-tools"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-tools
@@ -475,7 +450,6 @@ jobs:
     name: "Rust · velnor-tools"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-model]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-tools
@@ -489,7 +463,6 @@ jobs:
     name: "Rust · velnor-workflow"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow
@@ -503,7 +476,6 @@ jobs:
     name: "Rust · velnor-workflow"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-runner]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow
@@ -517,7 +489,6 @@ jobs:
     name: "Rust · velnor-workflow-contract"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow-contract
@@ -531,7 +502,6 @@ jobs:
     name: "Rust · velnor-workflow-contract"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow-contract
@@ -545,7 +515,6 @@ jobs:
     name: "Rust · velnorctl"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnorctl
@@ -559,7 +528,6 @@ jobs:
     name: "Rust · velnorctl"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnorctl
@@ -573,7 +541,6 @@ jobs:
     name: "Rust · Rust production topology"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') }}
     needs: [plan]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-production-topology
@@ -587,7 +554,6 @@ jobs:
     name: "Rust · Rust production topology"
     if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs: [plan, prepare-cargo]
-    cache-mode: read
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-production-topology

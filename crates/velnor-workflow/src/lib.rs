@@ -11858,12 +11858,13 @@ channel = "stable"
     }
 
     #[test]
-    fn ci_pr_unit_callers_declare_read_only_cache_mode() {
+    fn ci_pr_aggregate_omits_explicit_cache_mode_on_reusable_callers() {
         let ir = WorkflowIr::from_config(&scanned_fixture(RunnerMode::Both));
         let pr = generated_ci_pr(&ir);
         assert!(
-            pr.contains("cache-mode: read"),
-            "PR aggregate callers must declare read-only cache mode"
+            !pr.contains("cache-mode: read"),
+            "PR aggregate must not declare cache-mode on reusable-workflow callers; \
+             pull_request already defaults to read-only cache access"
         );
         let main = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir));
         assert!(

@@ -12,7 +12,7 @@ generator	43
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-main.yml	1bbae0e4b4064c5f
 .github/workflows/ci-policy.yml	dd9fbcb5ca66fdd0
-.github/workflows/ci-pr.yml	5f623f9261893deb
+.github/workflows/ci-pr.yml	7b20df44756c9f97
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-unit-bun.yml	2fb17f166e0872e2
 .github/workflows/ci-unit-docker.yml	28ac738ae969695d
