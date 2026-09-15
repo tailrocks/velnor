@@ -1,0 +1,4810 @@
+use crate::{
+    executor::{CommandRunner, StepLogicFailure},
+    job_message::{
+        ActionReferenceType, ActionStep, AgentJobRequestMessage, RepositoryResource,
+        ServiceEndpoint,
+    },
+};
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rustix::fs::{flock, FlockOperation};
+use serde_json::{Map, Value};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
+use url::Url;
+
+// Tracing caches callsite interest globally. Parallel tests that exercise the
+// same checkout spans without installing a subscriber can therefore initialize
+// those callsites as disabled before the span-capture test installs its local
+// subscriber. Give the test binary one enabled global subscriber first; local
+// capture subscribers still receive the events, while this sink subscriber
+// emits nothing itself.
+#[cfg(test)]
+static INITIALIZE_TRACE_CALLSITES: std::sync::Once = std::sync::Once::new();
+
+#[cfg(test)]
+pub(crate) fn initialize_trace_callsites_for_tests() {
+    INITIALIZE_TRACE_CALLSITES.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutPlan {
+    pub step_id: String,
+    pub display_name: String,
+    pub clone_url: String,
+    pub version: Option<String>,
+    pub destination: PathBuf,
+    pub token: Option<String>,
+    pub fetch_depth: Option<u32>,
+    pub fetch_tags: bool,
+    pub persist_credentials: bool,
+    pub clean: bool,
+    /// Keep the top-level `target/` directory when `clean` runs.
+    ///
+    /// Set by the runner — never parsed from workflow input — when the
+    /// destination lives in a stable per-slot workspace (the non-mbx Rust
+    /// paths). The workspace persists across jobs so Cargo fingerprints
+    /// survive warm same-SHA rebuilds; without this exclusion `git clean
+    /// -ffdx` would delete `target/` on every checkout and the stable path
+    /// would buy nothing. Only the anchored top-level `target/` is
+    /// excluded; every other untracked file is still removed, and mtimes
+    /// stay wall-clock, so this is ordinary incremental compilation, not
+    /// the deleted mtime pin or persistent-target restore.
+    pub preserve_target: bool,
+    /// `lfs: true` input — download Git LFS objects during checkout. Default false
+    /// (matches actions/checkout: leave LFS pointers, do not fetch blobs).
+    pub lfs: bool,
+    pub condition: Option<String>,
+    pub continue_on_error: bool,
+    pub timeout_minutes: Option<u64>,
+}
+
+impl CheckoutPlan {
+    pub fn requires_runtime_context(&self) -> bool {
+        // GitHub's job message sets `Condition: "success()"` on every step, so
+        // a trivial default condition must not force the checkout onto the
+        // runtime-deferred path — local composite actions are resolved from the
+        // workspace right after the eager checkouts, and a job whose only
+        // checkout is deferred can never resolve them (observed live on the
+        // fixture: "action metadata not found in …/.github/actions/…").
+        if self
+            .condition
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|condition| {
+                !condition.is_empty()
+                    && !condition.eq_ignore_ascii_case("success()")
+                    && !condition.eq_ignore_ascii_case("always()")
+            })
+        {
+            return true;
+        }
+        self.version
+            .as_deref()
+            .is_some_and(contains_step_context_expression)
+            || self
+                .token
+                .as_deref()
+                .is_some_and(contains_step_context_expression)
+    }
+}
+
+pub fn checkout_plans(
+    job: &AgentJobRequestMessage,
+    workspace_host: &Path,
+) -> Result<Vec<CheckoutPlan>> {
+    let mut plans = Vec::new();
+    for (index, step) in job.steps.iter().enumerate() {
+        if !step.enabled || !is_checkout_step(step) {
+            continue;
+        }
+        plans.push(checkout_plan(job, workspace_host, step, index)?);
+    }
+    Ok(plans)
+}
+
+pub(crate) fn checkout_plan(
+    job: &AgentJobRequestMessage,
+    workspace_host: &Path,
+    step: &ActionStep,
+    index: usize,
+) -> Result<CheckoutPlan> {
+    let self_repository = self_repository(job)?;
+    let checkout_repository = checkout_repository(step);
+    let server_url = checkout_server_url(job, &self_repository);
+    let clone_url = checkout_clone_url(
+        checkout_repository.as_deref(),
+        &self_repository,
+        &server_url,
+    )?;
+    let destination = workspace_host.join(checkout_path(step)?);
+    let reference_name = step
+        .reference
+        .as_ref()
+        .and_then(|r| r.name.as_deref())
+        .unwrap_or("");
+    let reference_ref = step
+        .reference
+        .as_ref()
+        .and_then(|r| r.git_ref.as_deref())
+        .unwrap_or("");
+    let display_name = step.display_name_template().unwrap_or_else(|| {
+        if reference_name.is_empty() {
+            String::new()
+        } else if reference_ref.is_empty() {
+            format!("Run {reference_name}")
+        } else {
+            format!("Run {reference_name}@{reference_ref}")
+        }
+    });
+    let token = checkout_token(step, job)?.or_else(|| {
+        // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
+        // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
+        job.variables
+            .get("system.github.token")
+            .and_then(|v| v.value.clone())
+            .filter(|v| !v.is_empty())
+            .or_else(|| system_access_token(job.system_connection()))
+    });
+    Ok(CheckoutPlan {
+        step_id: checkout_step_id(step, index),
+        display_name,
+        clone_url,
+        version: checkout_version(job, step, checkout_repository.as_deref(), &self_repository),
+        destination,
+        token,
+        fetch_depth: checkout_fetch_depth(step)?,
+        fetch_tags: checkout_fetch_tags(step),
+        persist_credentials: checkout_persist_credentials(step),
+        clean: checkout_clean(step),
+        // Ephemeral by default: only the runner flips this for destinations
+        // inside a stable per-slot workspace.
+        preserve_target: false,
+        lfs: checkout_lfs(step),
+        condition: step.condition.clone(),
+        continue_on_error: crate::script_step::step_continue_on_error(step),
+        timeout_minutes: crate::script_step::step_timeout_minutes(step),
+    })
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
+    steps.iter().any(|step| {
+        step.enabled
+            && step.reference_type() != Some(ActionReferenceType::Script)
+            && !is_checkout_step(step)
+    })
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+pub fn execute_checkout<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+    workspace_host: &Path,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    execute_checkout_with_mirror(runner, plan, log, None, workspace_host)
+}
+
+pub fn execute_checkout_with_mirror<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+    mirror_store: Option<&Path>,
+    workspace_host: &Path,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    #[cfg(test)]
+    initialize_trace_callsites_for_tests();
+
+    // Fail closed before any side effect: a destination that escapes the
+    // workspace must not even reap, let alone be created or credentialed.
+    ensure_checkout_destination_contained(workspace_host, &plan.destination)?;
+    // Any credential an aborted job left on this host is unowned once its
+    // process is gone; take it out before adding another one.
+    reap_stale_checkout_credentials().context("reap stale checkout credentials")?;
+    let mirror = match mirror_store {
+        // A mirror failure used to warn and fall back to a direct checkout,
+        // which turned one broken mirror into a permanent, silent slowdown for
+        // every later job. `ensure_mirror` repairs what it can; what is left is
+        // a real failure and fails the checkout.
+        Some(store) => match crate::git_mirror::ensure_mirror(
+            runner,
+            store,
+            &plan.clone_url,
+            plan.token.as_deref(),
+            &mirror_want(plan),
+        ) {
+            Ok(mirror) => Some(mirror),
+            Err(error) => {
+                // The mirror is part of this step, so its git output belongs in
+                // the step log and its exit code in the step result.
+                for line in format!("{error:#}").lines() {
+                    log.push(line.to_string());
+                }
+                return Err(error.context(format!("prepare git mirror for {}", plan.clone_url)));
+            }
+        },
+        None => None,
+    };
+    fetch_git_ref(
+        runner,
+        &plan.clone_url,
+        plan.version.as_deref().unwrap_or("HEAD"),
+        &plan.destination,
+        workspace_host,
+        plan.token.as_deref(),
+        plan.fetch_depth,
+        plan.fetch_tags,
+        plan.persist_credentials,
+        plan.clean,
+        plan.preserve_target,
+        plan.lfs,
+        mirror,
+        log,
+    )?;
+    // Wall-clock checkout, like GitHub-hosted runners: checked-out files keep
+    // the mtime git gave them (now). Pinning mtimes to the commit timestamp
+    // made stale build artifacts read as fresh whenever dep-info outlived
+    // the sources it was built from — a staleness class no SHA gate can
+    // close for key-driven caches, and directory pinning additionally
+    // defeated rerun-if-changed=<dir> add/remove detection. Stable
+    // workspaces (the non-mbx Rust paths) additionally keep Cargo
+    // fingerprints warm across jobs by preserving `target/`; that reuse is
+    // ordinary wall-clock incremental compilation, while cross-checkout
+    // reuse without a stable path still comes only from content-addressed
+    // caches (mbx/sccache), which do not read mtimes at all.
+    Ok(())
+}
+
+/// Refuse a checkout destination that escapes `workspace_host` through a
+/// symlink, before anything is created or credentialed there.
+///
+/// `checkout_path` rejects absolute paths and `..` lexically, but the
+/// destination is created and written host-side (`create_dir_all`, git, the
+/// `.git/config` credential write), which all follow symlinks. A second
+/// checkout whose `path:` traverses a link an earlier checkout's repo content
+/// planted (`first/link/escape`) is lexically clean yet lands outside the
+/// workspace. This runs at execution time — plan time cannot see links that
+/// do not exist yet — and mirrors the pages/artifact containment in
+/// `executor.rs`: canonicalize both sides, require prefix containment.
+/// Missing trailing components cannot hide a symlink, so only the nearest
+/// existing ancestor is resolved.
+///
+/// Callers run this up front as a fail-fast before any side effect, and
+/// `fetch_git_ref` re-asserts it before every path-resolving write phase
+/// (creation, fetch/hydration, checkout, clean/reset, credential persist).
+/// Each re-assert bounds its window to the gap between that check and its
+/// phase instead of the minutes `ensure_mirror` spends on network fetch —
+/// but the windows are narrowed, not closed: a swap landing exactly between
+/// a check and the phase it guards still redirects that phase, because git
+/// resolves paths itself and no fd survives into its writes. What the
+/// re-asserts guarantee is that a swap completed *before* a check is refused
+/// before the next write, and that no window ever again spans a network
+/// fetch.
+fn ensure_checkout_destination_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_host, destination);
+        bail!("checkout containment requires Unix no-follow filesystem support");
+    }
+
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(workspace_host)
+            .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
+        let workspace = fs::canonicalize(workspace_host)
+            .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
+        let mut existing: &Path = destination;
+        while !existing.exists() {
+            existing = existing.parent().with_context(|| {
+                format!(
+                    "checkout destination '{}' has no existing ancestor",
+                    destination.display()
+                )
+            })?;
+        }
+        let canonical = fs::canonicalize(existing)
+            .with_context(|| format!("resolve checkout destination '{}'", destination.display()))?;
+        if !canonical.starts_with(&workspace) {
+            bail!(
+                "refusing checkout destination '{}': resolves outside the workspace",
+                destination.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Create the checkout destination without letting a swapped path component
+/// redirect creation outside the workspace.
+///
+/// `fs::create_dir_all` follows symlinks, so create-then-check left an empty
+/// directory outside the workspace on a swapped tree before the check ran.
+/// Check first (nearest existing ancestor — nothing created yet), then create
+/// with ancestor-pinned, no-follow semantics, then re-assert with the
+/// destination itself existing.
+fn create_contained_dir_all(workspace_host: &Path, destination: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_host, destination);
+        bail!("checkout directory creation requires Unix no-follow filesystem support");
+    }
+
+    #[cfg(unix)]
+    {
+        ensure_checkout_destination_contained(workspace_host, destination)?;
+        create_pinned_dir_all(workspace_host, destination)?;
+        ensure_checkout_destination_contained(workspace_host, destination)?;
+        Ok(())
+    }
+}
+
+/// Create `destination` component by component below the canonical workspace
+/// root, never traversing a symlink. Each ancestor is descriptor-bound before
+/// its child is opened or created, so a swap racing creation meets a
+/// `NOFOLLOW` open and fails instead of redirecting the new directory.
+#[cfg(unix)]
+fn create_pinned_dir_all(workspace_host: &Path, destination: &Path) -> Result<()> {
+    let relative = destination.strip_prefix(workspace_host).with_context(|| {
+        format!(
+            "checkout destination '{}' is not below the workspace '{}'",
+            destination.display(),
+            workspace_host.display()
+        )
+    })?;
+    // The pre-check above created the workspace, so it canonicalizes now; the
+    // root handed to the pinned walk is absolute and link-free.
+    let workspace = fs::canonicalize(workspace_host)
+        .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
+    let _pinned = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+        &workspace, relative,
+    )
+    .with_context(|| {
+        format!(
+            "create checkout destination '{}' without following links",
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn mirror_want(plan: &CheckoutPlan) -> crate::git_mirror::MirrorWant {
+    crate::git_mirror::MirrorWant {
+        git_ref: plan.version.clone().unwrap_or_else(|| "HEAD".to_string()),
+        full_history: plan.fetch_depth.is_none(),
+        tags: plan.fetch_tags,
+    }
+}
+
+/// Run the post-checkout credential cleanup for each plan, returning the
+/// GitHub-style git-command trace for each (aligned with `plans` by index) so
+/// the "Post Run actions/checkout" step log shows the cleanup instead of being
+/// empty. A plan that has nothing to clean yields an empty trace.
+pub fn cleanup_checkout_credentials<R>(
+    runner: &mut R,
+    plans: &[CheckoutPlan],
+    workspace_host: &Path,
+) -> Result<Vec<Vec<String>>>
+where
+    R: CommandRunner,
+{
+    let mut traces = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let mut log = Vec::new();
+        cleanup_checkout_credential(runner, plan, &mut log, workspace_host)?;
+        traces.push(log);
+    }
+    Ok(traces)
+}
+
+fn cleanup_checkout_credential<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+    workspace_host: &Path,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    let git_dir = plan.destination.join(".git");
+    if !git_dir.exists() {
+        return Ok(());
+    }
+    // The `git config --unset-all` below writes through whatever the
+    // destination resolves to *now*. A path component swapped for a symlink
+    // after checkout would turn cleanup into a write outside the workspace,
+    // so gate before touching git — after the existence check so a
+    // never-created destination stays a silent no-op, and before the release
+    // below so a gate-failure bail never leaves a live untracked credential.
+    ensure_cleanup_contained(workspace_host, &plan.destination)?;
+    // Retire the crash journal entries for this workspace: from here on this
+    // function owns removing the credential, and a stale entry would let a
+    // later reaper scrub a workspace that has already been handed back.
+    let registered = release_registered_credentials(&plan.destination);
+    let config_path = git_dir.join("config");
+    // Cleanup is unconditional. Keying it off `persist_credentials` assumed the
+    // only writer of the credential was the persist path, which left every
+    // other write (an interrupted run, an lfs checkout, a reused workspace)
+    // permanently on disk.
+    let args = [
+        "-C".to_string(),
+        path_arg(&plan.destination),
+        "config".to_string(),
+        "--local".to_string(),
+        "--unset-all".to_string(),
+        git_extraheader_key(&plan.clone_url),
+    ];
+    log.push(format!("[command]git {}", format_git_args(&args)));
+    let result = runner.run("git", &args)?;
+    for line in result.stdout.lines().chain(result.stderr.lines()) {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            log.push(trimmed.to_string());
+        }
+    }
+    // Exit 5 is "the key was not set", the expected state for a checkout that
+    // never persisted anything. Anything else is a real failure and must fail
+    // the job: a warning on stderr let a credentialed workspace survive.
+    if result.code != 0 && result.code != GIT_CONFIG_KEY_NOT_FOUND {
+        // Scrub before failing: stable workspaces persist across jobs, so a
+        // token left behind by a failed `git config` would be readable by
+        // the next job. The failure itself still fails loud below.
+        let _ = scrub_config_credentials(&config_path);
+        bail!(
+            "cleanup of checkout credentials in {} failed with code {}: {}",
+            plan.destination.display(),
+            result.code,
+            result.stderr.trim()
+        );
+    }
+    // Verify rather than trust. `git config --unset-all` removes one key; the
+    // invariant this function has to hold is that no credential of any scope
+    // survives in the workspace at all. Gate again: the scrub below writes
+    // through the same `.git` dir the git invocation above did, and a swap
+    // between them must not redirect it.
+    ensure_cleanup_contained(workspace_host, &plan.destination)?;
+    if scrub_config_credentials(&config_path)? {
+        log.push(format!(
+            "Removed a residual credential from {}",
+            config_path.display()
+        ));
+    }
+    if config_has_credential(&config_path) {
+        bail!(
+            "checkout credential still present in {} after cleanup",
+            config_path.display()
+        );
+    }
+    if registered > 0 {
+        log.push(format!(
+            "Released {registered} tracked checkout credential(s)"
+        ));
+    }
+    Ok(())
+}
+
+/// Containment for cleanup: both the `git config --unset-all` and the scrub
+/// write through `destination/.git`, so gate the git dir itself — not just
+/// the destination — against a `.git`-component swap. Gating the destination
+/// alone lets a `destination/.git` symlink bypass the gate into scrub writes
+/// outside the workspace. Missing trailing components cannot hide a symlink,
+/// so the git dir resolves to its nearest existing ancestor.
+fn ensure_cleanup_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
+    ensure_checkout_destination_contained(workspace_host, destination)?;
+    ensure_checkout_destination_contained(workspace_host, &destination.join(".git"))?;
+    Ok(())
+}
+
+/// `git config --unset-all` exit code for "the key does not exist".
+const GIT_CONFIG_KEY_NOT_FOUND: i32 = 5;
+
+/// One persisted credential, tracked for as long as it exists on disk.
+///
+/// The journal file is held under an exclusive `flock` for the whole lifetime
+/// of the credential. The kernel drops that lock when the owning process dies,
+/// however it dies, so a later reaper can tell a live credential from one an
+/// aborted runner left behind without pid liveness guesswork.
+struct CredentialRegistration {
+    destination: PathBuf,
+    journal_path: PathBuf,
+    _journal: File,
+}
+
+fn active_credentials() -> &'static Mutex<Vec<CredentialRegistration>> {
+    static ACTIVE: OnceLock<Mutex<Vec<CredentialRegistration>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-test journal directory, so tests never share the host's.
+    static TEST_JOURNAL_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn credential_journal_dir() -> PathBuf {
+    #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
+    if let Some(dir) = TEST_JOURNAL_DIR.with(|dir| dir.borrow().clone()) {
+        return dir;
+    }
+    crate::storage::StorageLayout::resolve()
+        .or_else(|| crate::storage::StorageLayout::user_cli().ok())
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| std::env::temp_dir().join("velnor"))
+        .join("checkout-credentials")
+}
+
+/// Record that `destination` is about to hold a credential, before it does.
+fn register_credential(destination: &Path) -> Result<()> {
+    register_credential_in(&credential_journal_dir(), destination)
+}
+
+fn register_credential_in(dir: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("create checkout credential journal {}", dir.display()))?;
+    // Keep a new record invisible to the reaper until its lock and contents
+    // are ready. Publishing the `.json` path first lets a concurrent reaper
+    // claim and remove the empty file between `open` and `flock`, leaving the
+    // credential write untracked.
+    let id = uuid::Uuid::new_v4().to_string();
+    let journal_path = dir.join(format!("{id}.json"));
+    let pending_path = dir.join(format!(".{id}.pending"));
+    let mut journal = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&pending_path)
+        .with_context(|| format!("open checkout credential journal {pending_path:?}"))?;
+    if let Err(error) = flock(&journal, FlockOperation::NonBlockingLockExclusive)
+        .with_context(|| format!("lock checkout credential journal {pending_path:?}"))
+    {
+        fs::remove_file(&pending_path).ok();
+        return Err(error);
+    }
+    let record = serde_json::json!({
+        "config": destination.join(".git/config").display().to_string(),
+        "workspace": destination.display().to_string(),
+        "pid": std::process::id(),
+    });
+    let publish = (|| -> Result<()> {
+        journal
+            .write_all(record.to_string().as_bytes())
+            .and_then(|()| journal.sync_all())
+            .with_context(|| format!("write checkout credential journal {pending_path:?}"))?;
+        fs::rename(&pending_path, &journal_path)
+            .with_context(|| format!("publish checkout credential journal {journal_path:?}"))?;
+        Ok(())
+    })();
+    if let Err(error) = publish {
+        fs::remove_file(&pending_path).ok();
+        return Err(error);
+    }
+    let mut active = match active_credentials()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("checkout credential registry poisoned"))
+    {
+        Ok(active) => active,
+        Err(error) => {
+            fs::remove_file(&journal_path).ok();
+            return Err(error);
+        }
+    };
+    active.push(CredentialRegistration {
+        destination: destination.to_path_buf(),
+        journal_path,
+        _journal: journal,
+    });
+    Ok(())
+}
+
+/// Drop the journal entries for a workspace whose credential has been removed.
+fn release_registered_credentials(destination: &Path) -> usize {
+    let Ok(mut active) = active_credentials().lock() else {
+        return 0;
+    };
+    let mut released = 0;
+    active.retain(|registration| {
+        if registration.destination != destination {
+            return true;
+        }
+        fs::remove_file(&registration.journal_path).ok();
+        released += 1;
+        false
+    });
+    released
+}
+
+/// Scrub every credential an aborted runner left behind.
+///
+/// A journal entry whose exclusive lock can be taken has no live owner, so the
+/// credential it names is unowned and is removed. Entries of running jobs — in
+/// this process or any other on the host — stay locked and are left alone.
+///
+/// # Errors
+/// The journal directory exists but cannot be read.
+pub fn reap_stale_checkout_credentials() -> Result<usize> {
+    reap_stale_credentials_in(&credential_journal_dir())
+}
+
+fn reap_stale_credentials_in(dir: &Path) -> Result<usize> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read checkout credential journal {}", dir.display()))
+        }
+    };
+    let mut reaped = 0;
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "read checkout credential journal entry in {}",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("open checkout credential journal {}", path.display())
+                })
+            }
+        };
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {}
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                // A live job owns this credential.
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("lock checkout credential journal {}", path.display())
+                })
+            }
+        }
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .with_context(|| format!("read checkout credential journal {}", path.display()))?;
+        let record = serde_json::from_str::<Value>(&content)
+            .with_context(|| format!("parse checkout credential journal {}", path.display()))?;
+        let config = record
+            .get("config")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "checkout credential journal {} has no config path",
+                    path.display()
+                )
+            })?;
+        // The journal names an absolute `<workspace>/.git/config` — that is
+        // the only shape `register_credential` ever writes. A relative path
+        // would resolve against the reaper's own working directory, and any
+        // other absolute path is not a checkout credential; scrubbing either
+        // touches a file this journal must never name. Skip the entry without
+        // removing it (it stays for inspection) and keep reaping the rest: a
+        // single planted entry must not block every legitimate cleanup.
+        if !is_journal_config_path(&config) {
+            eprintln!(
+                "Skipping checkout credential journal {}: unexpected config path {}",
+                path.display(),
+                config.display()
+            );
+            continue;
+        }
+        if scrub_config_credentials(&config)? {
+            eprintln!(
+                "Removed a checkout credential left behind by an aborted job: {}",
+                config.display()
+            );
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("remove checkout credential journal {}", path.display())
+                })
+            }
+        }
+        reaped += 1;
+    }
+    Ok(reaped)
+}
+
+/// The only config path shape the reaper scrubs: an absolute
+/// `<workspace>/.git/config`, matching what `register_credential` writes.
+fn is_journal_config_path(config: &Path) -> bool {
+    config.is_absolute()
+        && config.file_name().is_some_and(|name| name == "config")
+        && config
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == ".git")
+}
+
+/// Remove every `extraheader` entry from a git config file, returning whether
+/// anything was removed. Velnor is the only writer of `http.*.extraheader` in a
+/// checkout, and every value it writes is a bearer credential.
+pub(crate) fn scrub_config_credentials(config_path: &Path) -> Result<bool> {
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read git config {}", config_path.display()))
+        }
+    };
+    let (scrubbed, changed) = strip_extraheaders(&content);
+    if !changed {
+        return Ok(false);
+    }
+    let temporary = config_path.with_extension(format!("velnor-scrub-{}", std::process::id()));
+    fs::write(&temporary, scrubbed)
+        .with_context(|| format!("write scrubbed git config {}", temporary.display()))?;
+    fs::rename(&temporary, config_path)
+        .with_context(|| format!("replace git config {}", config_path.display()))?;
+    Ok(true)
+}
+
+fn config_has_credential(config_path: &Path) -> bool {
+    fs::read_to_string(config_path).is_ok_and(|content| {
+        content.lines().any(|line| {
+            line.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("extraheader")
+        })
+    })
+}
+
+/// Drop `extraheader` keys, and any `[http …]` section left empty by that.
+fn strip_extraheaders(content: &str) -> (String, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut pending_http_section: Option<&str> = None;
+    let mut in_http_section = false;
+    let mut changed = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if let Some(header) = pending_http_section.take() {
+                lines.push(header.to_string());
+            }
+            in_http_section = trimmed.to_ascii_lowercase().starts_with("[http");
+            if in_http_section {
+                pending_http_section = Some(line);
+            } else {
+                lines.push(line.to_string());
+            }
+            continue;
+        }
+        if in_http_section && trimmed.to_ascii_lowercase().starts_with("extraheader") {
+            changed = true;
+            continue;
+        }
+        if !trimmed.is_empty()
+            && let Some(header) = pending_http_section.take()
+        {
+            lines.push(header.to_string());
+        }
+        lines.push(line.to_string());
+    }
+    let mut scrubbed = lines.join("\n");
+    if !scrubbed.is_empty() {
+        scrubbed.push('\n');
+    }
+    (scrubbed, changed)
+}
+
+pub fn configure_safe_directory(
+    home_host: &Path,
+    workspace_host: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let Some(safe_directory) = checkout_container_path(workspace_host, destination) else {
+        return Ok(());
+    };
+    fs::create_dir_all(home_host).with_context(|| format!("create {}", home_host.display()))?;
+    let config_path = home_host.join(".gitconfig");
+    let mut config = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("open {}", config_path.display()))?;
+    writeln!(config, "[safe]\n\tdirectory = {safe_directory}")
+        .with_context(|| format!("write {}", config_path.display()))?;
+    Ok(())
+}
+
+fn checkout_container_path(workspace_host: &Path, destination: &Path) -> Option<String> {
+    let relative = destination.strip_prefix(workspace_host).ok()?;
+    if relative.as_os_str().is_empty() {
+        return Some("/__w".to_string());
+    }
+    let relative = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(format!("/__w/{relative}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn fetch_git_ref<R>(
+    runner: &mut R,
+    clone_url: &str,
+    git_ref: &str,
+    destination: &Path,
+    workspace_host: &Path,
+    token: Option<&str>,
+    fetch_depth: Option<u32>,
+    fetch_tags: bool,
+    persist_credentials: bool,
+    clean: bool,
+    preserve_target: bool,
+    lfs: bool,
+    mirror: Option<crate::git_mirror::MirrorCheckout>,
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    // Check-first, ancestor-pinned creation: the pre-check in
+    // `execute_checkout_with_mirror` ran before `ensure_mirror`'s network
+    // fetch, and a concurrent workspace writer could have swapped a path
+    // component for a symlink during those minutes. Refuse before creating
+    // anything — a plain `create_dir_all` would follow the swap and leave an
+    // empty directory outside the workspace.
+    create_contained_dir_all(workspace_host, destination)?;
+
+    run_git(runner, &["init".to_string(), path_arg(destination)], log)?;
+    // Remove a stale origin only when one exists: on a fresh workspace
+    // `git remote remove origin` exits non-zero and prints
+    // "error: No such remote: 'origin'" into the job log (noise the
+    // GitHub-hosted lane never emits). Probe quietly first; stay tolerant
+    // of a removal failure (`|| true`, matching the guest checkout idiom).
+    let origin_exists = runner
+        .run(
+            "git",
+            &[
+                "-C".to_string(),
+                path_arg(destination),
+                "remote".to_string(),
+                "get-url".to_string(),
+                "origin".to_string(),
+            ],
+        )
+        .map(|result| result.code == 0)
+        .unwrap_or(false);
+    if origin_exists {
+        run_git(
+            runner,
+            &[
+                "-C".to_string(),
+                path_arg(destination),
+                "remote".to_string(),
+                "remove".to_string(),
+                "origin".to_string(),
+            ],
+            log,
+        )
+        .ok();
+    }
+    run_git(
+        runner,
+        &[
+            "-C".to_string(),
+            path_arg(destination),
+            "remote".to_string(),
+            "add".to_string(),
+            "origin".to_string(),
+            clone_url.to_string(),
+        ],
+        log,
+    )?;
+
+    let fetch_env = git_auth_env(clone_url, token);
+    // Later path-resolving writes re-assert too: the minutes-long fetch below
+    // would otherwise carry a swap from the `git init` above into every phase
+    // after it.
+    ensure_checkout_destination_contained(workspace_host, destination)?;
+    {
+        let _span =
+            tracing::info_span!("checkout.workspace.fetch", phase = "workspace-fetch",).entered();
+        if let Some(mirror) = mirror {
+            hydrate_from_mirror(
+                runner,
+                &mirror,
+                destination,
+                clone_url,
+                git_ref,
+                fetch_depth.is_none(),
+                fetch_tags,
+                log,
+            )?;
+            if fetch_depth.is_none() && destination.join(".git/shallow").is_file() {
+                // A reused workspace can be shallow from a prior job; a full
+                // hydration without an unshallow keeps it shallow. Fetch the
+                // missing history from the local mirror (no network), then
+                // restore FETCH_HEAD to the requested ref.
+                let unshallow = vec![
+                    "-C".to_string(),
+                    path_arg(destination),
+                    "fetch".to_string(),
+                    "--unshallow".to_string(),
+                    mirror.path.display().to_string(),
+                    git_ref.to_string(),
+                    "+refs/heads/*:refs/remotes/origin/*".to_string(),
+                    "+refs/tags/*:refs/tags/*".to_string(),
+                ];
+                run_git(runner, &unshallow, log)?;
+                write_fetch_head(&destination.join(".git"), &mirror.sha, git_ref, clone_url)?;
+                log.push("Unshallowed the workspace from the local mirror".to_string());
+            }
+            // Hydration has linked or copied every object and wrote the refs and
+            // FETCH_HEAD the workspace needs. Later checkout/cleanup work touches
+            // only the workspace, so do not hold the mirror reader lease for it.
+            drop(mirror);
+        } else {
+            run_network_fetch(
+                runner,
+                destination,
+                git_ref,
+                fetch_depth,
+                fetch_tags,
+                &fetch_env,
+                log,
+            )?;
+        }
+    }
+
+    // A swap during the fetch above must not reach the checkout writes.
+    ensure_checkout_destination_contained(workspace_host, destination)?;
+    {
+        let _span =
+            tracing::info_span!("checkout.workspace.checkout", phase = "workspace-checkout",)
+                .entered();
+        // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
+        // LFS blobs. It authenticates through the same header the fetch used, which
+        // is passed per command rather than written into the workspace config, so
+        // no credential outlives the checkout unless the job asked for one.
+        let mut checkout = vec!["-C".to_string(), path_arg(destination)];
+        if !lfs {
+            checkout.extend(lfs_skip_smudge_args());
+        }
+        checkout.extend([
+            "checkout".to_string(),
+            "--force".to_string(),
+            "FETCH_HEAD".to_string(),
+        ]);
+        if lfs {
+            run_git_with_env_and_display(runner, &checkout, &checkout, &fetch_env, log)?;
+        } else {
+            run_git(runner, &checkout, log)?;
+        }
+
+        if clean {
+            // `reset --hard` and `clean -ffdx` delete; re-assert before them.
+            ensure_checkout_destination_contained(workspace_host, destination)?;
+            let mut reset = vec!["-C".to_string(), path_arg(destination)];
+            if !lfs {
+                reset.extend(lfs_skip_smudge_args());
+            }
+            reset.extend([
+                "reset".to_string(),
+                "--hard".to_string(),
+                "HEAD".to_string(),
+            ]);
+            if lfs {
+                run_git_with_env_and_display(runner, &reset, &reset, &fetch_env, log)?;
+            } else {
+                run_git(runner, &reset, log)?;
+            }
+            run_git(
+                runner,
+                &checkout_clean_args(destination, preserve_target),
+                log,
+            )?;
+        }
+    }
+
+    if persist_credentials && let Some(token) = token {
+        // The credential write is the last path-resolving write; a swap
+        // during checkout must not plant the token outside the workspace.
+        ensure_checkout_destination_contained(workspace_host, destination)?;
+        persist_git_credentials(runner, destination, clone_url, token, log)?;
+    }
+
+    Ok(())
+}
+
+fn run_network_fetch<R>(
+    runner: &mut R,
+    destination: &Path,
+    git_ref: &str,
+    fetch_depth: Option<u32>,
+    fetch_tags: bool,
+    fetch_env: &[(String, String)],
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    let mut fetch = vec![
+        "-C".to_string(),
+        path_arg(destination),
+        "-c".to_string(),
+        "protocol.version=2".to_string(),
+    ];
+    fetch.extend(["fetch".to_string(), "--prune".to_string()]);
+    if fetch_depth.is_none() && destination.join(".git/shallow").is_file() {
+        // A reused workspace can be shallow from a prior job; a full fetch
+        // without `--unshallow` keeps the new history shallow.
+        fetch.push("--unshallow".to_string());
+    }
+    match fetch_depth {
+        Some(depth) => {
+            if fetch_tags {
+                fetch.push("--tags".to_string());
+            } else {
+                fetch.push("--no-tags".to_string());
+            }
+            fetch.push(format!("--depth={depth}"));
+            fetch.extend(["origin".to_string(), git_ref.to_string()]);
+        }
+        None => {
+            fetch.extend([
+                "--tags".to_string(),
+                "origin".to_string(),
+                // FETCH_HEAD is ordered by requested refspec. Keep the exact
+                // workflow ref first: checkout uses FETCH_HEAD below, while
+                // the remaining refspecs only populate full history/tags.
+                // Putting the wildcard first made FETCH_HEAD resolve to the
+                // lexicographically first branch (observed on v0.1.122).
+                git_ref.to_string(),
+                "+refs/heads/*:refs/remotes/origin/*".to_string(),
+                "+refs/tags/*:refs/tags/*".to_string(),
+            ]);
+        }
+    }
+    run_git_with_env_and_display(runner, &fetch, &fetch, fetch_env, log)
+}
+
+/// Make the mirror's objects available to the workspace without copying them.
+///
+/// Object files are hard-linked out of the mirror. Git object files are
+/// immutable and are only ever added to a repository, so a link is a complete,
+/// self-contained copy of the byte content for zero bytes written:
+///
+/// * A concurrent mirror fetch only adds new object files; it never rewrites
+///   the ones already linked here, and files still being written carry a
+///   `tmp_` name and are skipped.
+/// * `git gc` in the mirror cannot take the bytes away — a hard link keeps the
+///   inode alive after the mirror unlinks its own name — and cannot even reach
+///   the wanted objects, which the mirror pins under `refs/velnor/*` and never
+///   deletes. Auto gc is disabled there regardless.
+/// * Deleting the workspace unlinks names only; the mirror is untouched.
+/// * The workspace ends up self-contained, unlike `objects/info/alternates`,
+///   which would break the moment the container (which does not mount the
+///   mirror store) or a rebuild of a corrupt mirror removed the pointee.
+#[allow(clippy::too_many_arguments)]
+fn hydrate_from_mirror<R>(
+    runner: &mut R,
+    mirror: &crate::git_mirror::MirrorCheckout,
+    destination: &Path,
+    clone_url: &str,
+    git_ref: &str,
+    full_history: bool,
+    tags: bool,
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    let git_dir = destination.join(".git");
+    fs::create_dir_all(&git_dir)
+        .with_context(|| format!("create git directory {}", git_dir.display()))?;
+    let (linked, bytes) =
+        link_object_store(&mirror.path.join("objects"), &git_dir.join("objects"))?;
+
+    let mut refs = 0usize;
+    if full_history || tags {
+        for (refname, object) in crate::git_mirror::mirror_refs(runner, &mirror.path)? {
+            let Some(local) = workspace_ref_name(&refname, full_history, tags) else {
+                continue;
+            };
+            write_loose_ref(&git_dir, &local, &object)?;
+            refs += 1;
+        }
+    }
+
+    // `checkout FETCH_HEAD` stays the checkout command on both paths, so the
+    // step log and the resulting worktree do not depend on which path ran.
+    write_fetch_head(&git_dir, &mirror.sha, git_ref, clone_url)?;
+
+    log.push(format!(
+        "Linked {linked} object file(s) ({bytes} bytes) and {refs} ref(s) from the shared mirror; no objects were copied and no network fetch was needed"
+    ));
+    Ok(())
+}
+
+fn link_object_store(source: &Path, destination: &Path) -> Result<(usize, u64)> {
+    let mut linked = 0usize;
+    let mut bytes = 0u64;
+    let mut pending = vec![PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        let directory = source.join(&relative);
+        let entries = fs::read_dir(&directory)
+            .with_context(|| format!("read Git object directory {}", directory.display()))?;
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("read Git object entry in {}", directory.display()))?;
+            let name = entry.file_name();
+            let file_type = entry.file_type().with_context(|| {
+                format!("read Git object entry type for {}", entry.path().display())
+            })?;
+            let child = relative.join(&name);
+            if file_type.is_dir() {
+                // `info/` holds regenerable caches, and an `alternates` file
+                // there would point outside this store.
+                if name == "info" {
+                    continue;
+                }
+                pending.push(child);
+                continue;
+            }
+            if !file_type.is_file() || name.to_string_lossy().starts_with("tmp_") {
+                continue;
+            }
+            let target = destination.join(&child);
+            if target.exists() {
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create object directory {}", parent.display()))?;
+            }
+            let origin = source.join(&child);
+            match fs::hard_link(&origin, &target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                // A different filesystem (or a filesystem without links) is the
+                // only case that still pays for the bytes.
+                Err(_) => {
+                    fs::copy(&origin, &target).with_context(|| {
+                        format!(
+                            "copy git object {} to {}",
+                            origin.display(),
+                            target.display()
+                        )
+                    })?;
+                }
+            }
+            linked += 1;
+            bytes = bytes.saturating_add(
+                entry
+                    .metadata()
+                    .with_context(|| format!("read Git object metadata for {}", origin.display()))?
+                    .len(),
+            );
+        }
+    }
+    Ok((linked, bytes))
+}
+
+fn workspace_ref_name(refname: &str, full_history: bool, tags: bool) -> Option<String> {
+    if let Some(branch) = refname.strip_prefix("refs/heads/") {
+        return full_history.then(|| format!("refs/remotes/origin/{branch}"));
+    }
+    if refname.starts_with("refs/tags/") {
+        return (full_history || tags).then(|| refname.to_string());
+    }
+    None
+}
+
+fn write_loose_ref(git_dir: &Path, refname: &str, object: &str) -> Result<()> {
+    if !is_safe_ref_name(refname) || !object.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("refusing to write unsafe ref '{refname}'")
+    }
+    let path = git_dir.join(refname);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create ref directory {}", parent.display()))?;
+    }
+    fs::write(&path, format!("{object}\n")).with_context(|| format!("write ref {}", path.display()))
+}
+
+/// Ref names are mirror data, and they become path components here.
+fn is_safe_ref_name(refname: &str) -> bool {
+    refname.starts_with("refs/")
+        && !refname.ends_with('/')
+        && refname.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && component.chars().all(|character| {
+                    !character.is_control()
+                        && !matches!(character, '\\' | ':' | '?' | '*' | '[' | '~' | '^' | ' ')
+                })
+        })
+}
+
+fn write_fetch_head(git_dir: &Path, sha: &str, git_ref: &str, clone_url: &str) -> Result<()> {
+    let kind = if git_ref.len() == 40 && git_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        "commit"
+    } else {
+        "branch"
+    };
+    let path = git_dir.join("FETCH_HEAD");
+    fs::write(
+        &path,
+        format!("{sha}\t\t{kind} '{git_ref}' of {clone_url}\n"),
+    )
+    .with_context(|| format!("write {}", path.display()))
+}
+
+fn checkout_clean_args(destination: &Path, preserve_target: bool) -> Vec<String> {
+    // Full actions/checkout clean semantics on ephemeral workspaces: no
+    // `target/` survives between jobs. (A persistent Cargo target layer used
+    // to be excluded here; it was deleted with the mtime pin because
+    // wall-clock sources made its mtime-based reuse always-dirty, and pinned
+    // mtimes made it stale-prone.)
+    //
+    // Stable per-slot workspaces (the non-mbx Rust paths) exclude the
+    // anchored top-level `target/` so Cargo fingerprints survive warm
+    // same-SHA rebuilds. The exclusion is anchored (`/target`): nested
+    // `target/` directories and every other untracked file are still
+    // removed. Mtimes stay wall-clock, so the reuse is ordinary
+    // incremental compilation, not the deleted pin.
+    let mut args = vec![
+        "-C".to_string(),
+        path_arg(destination),
+        "clean".to_string(),
+        "-ffdx".to_string(),
+    ];
+    if preserve_target {
+        args.push("-e".to_string());
+        args.push("/target".to_string());
+    }
+    args
+}
+
+/// `git -c` args that make the git-lfs smudge/process filters skip downloading
+/// LFS objects, leaving the pointer files in place. This matches the default
+/// behavior of `actions/checkout` (`lfs: false`): a repo that uses Git LFS is
+/// checked out without fetching LFS blobs, so no LFS credentials are needed.
+///
+/// Without this, the job image's globally-installed git-lfs runs its smudge
+/// filter during `git checkout` and makes its own authenticated request to the
+/// LFS endpoint, which fails ("could not read Username for https://github.com")
+/// because the credential helper is not configured for the lfs subprocess.
+///
+/// (LFS download — the `lfs: true` opt-in — is a separate feature; ChainArgos and
+/// the fixture both use the default, so skipping is the correct match today.)
+fn lfs_skip_smudge_args() -> [String; 6] {
+    [
+        "-c".to_string(),
+        "filter.lfs.smudge=git-lfs smudge --skip -- %f".to_string(),
+        "-c".to_string(),
+        "filter.lfs.process=git-lfs filter-process --skip".to_string(),
+        "-c".to_string(),
+        "filter.lfs.required=false".to_string(),
+    ]
+}
+
+fn persist_git_credentials<R>(
+    runner: &mut R,
+    destination: &Path,
+    clone_url: &str,
+    token: &str,
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    let key = git_extraheader_key(clone_url);
+    let _ = runner.run(
+        "git",
+        &[
+            "-C".to_string(),
+            path_arg(destination),
+            "config".to_string(),
+            "--local".to_string(),
+            "--unset-all".to_string(),
+            key.clone(),
+        ],
+    );
+    log.push(format!(
+        "[command]git -C {} config --local {} AUTHORIZATION: ***",
+        path_arg(destination),
+        key
+    ));
+    let config_path = destination.join(".git/config");
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create checkout config dir {}", parent.display()))?;
+    }
+    // Register before the write, never after: an entry that names a credential
+    // which was never written scrubs nothing, while a credential written before
+    // its entry exists is untracked if the process dies in between.
+    register_credential(destination)?;
+    let mut config = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("open checkout config {}", config_path.display()))?;
+    writeln!(
+        config,
+        "\n[http \"{}\"]\n\textraheader = {}",
+        git_extraheader_scope(clone_url),
+        git_basic_auth_value(token)
+    )
+    .with_context(|| format!("write checkout credential {}", config_path.display()))
+}
+
+fn run_git<R>(runner: &mut R, args: &[String], log: &mut Vec<String>) -> Result<()>
+where
+    R: CommandRunner,
+{
+    // Echo the command (token masked) the way actions/checkout does — a
+    // `[command]git …` line followed by the command's own output — so the
+    // checkout step log reads like the GitHub-hosted runner's git trace.
+    log.push(format!("[command]git {}", format_git_args(args)));
+    let result = runner.run("git", args)?;
+    for line in result.stdout.lines().chain(result.stderr.lines()) {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            log.push(trimmed.to_string());
+        }
+    }
+    if result.code != 0 {
+        return Err(StepLogicFailure::new(
+            result.code,
+            "",
+            format!(
+                "git {} failed with code {}: {}",
+                format_git_args(args),
+                result.code,
+                result.stderr
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn run_git_with_env_and_display<R>(
+    runner: &mut R,
+    args: &[String],
+    display_args: &[String],
+    env: &[(String, String)],
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    log.push(format!("[command]git {}", format_git_args(display_args)));
+    let result = runner.run_with_env("git", args, env)?;
+    for line in result.stdout.lines().chain(result.stderr.lines()) {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            log.push(trimmed.to_string());
+        }
+    }
+    if result.code != 0 {
+        return Err(StepLogicFailure::new(
+            result.code,
+            "",
+            format!(
+                "git {} failed with code {}: {}",
+                format_git_args(display_args),
+                result.code,
+                result.stderr
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+pub(crate) fn is_checkout_step(step: &ActionStep) -> bool {
+    step.reference_type() == Some(ActionReferenceType::Repository)
+        && step
+            .reference
+            .as_ref()
+            .and_then(|reference| reference.name.as_deref())
+            .is_some_and(|name| name.eq_ignore_ascii_case("actions/checkout"))
+}
+
+pub(crate) fn checkout_step_id(step: &ActionStep, index: usize) -> String {
+    // Prefer context_name (YAML id:) over internal UUID for expression lookup.
+    step.context_name
+        .as_deref()
+        .filter(|n| !n.is_empty() && !n.starts_with("__"))
+        .or(step.id.as_deref())
+        .or(step.name.as_deref())
+        .map(sanitize_segment)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("checkout{}", index + 1))
+}
+
+fn sanitize_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn contains_step_context_expression(value: &str) -> bool {
+    value.contains("${{") && value.contains("steps.")
+}
+
+fn self_repository(job: &AgentJobRequestMessage) -> Result<RepositoryResource> {
+    if let Some(repository) = job
+        .resources
+        .repositories
+        .iter()
+        .find(|repository| repository.alias.as_deref() == Some("self"))
+        .or_else(|| job.resources.repositories.first())
+    {
+        return Ok(repository.clone());
+    }
+
+    let name = job_string(job, "github.repository")
+        .filter(|name| is_repository_name(name))
+        .ok_or_else(|| {
+            anyhow::anyhow!("job has no repository resources and no github.repository context")
+        })?;
+    let server_url = job_string(job, "github.server_url").unwrap_or("https://github.com");
+    let clone_url = format!(
+        "{}/{}.git",
+        server_url.trim_end_matches('/'),
+        name.trim_start_matches('/')
+    );
+    let mut properties = BTreeMap::new();
+    properties.insert("cloneUrl".to_string(), clone_url);
+    Ok(RepositoryResource {
+        alias: Some("self".to_string()),
+        name: Some(name.to_string()),
+        git_ref: job_string(job, "github.ref").map(ToOwned::to_owned),
+        version: job_string(job, "github.sha").map(ToOwned::to_owned),
+        url: None,
+        properties,
+    })
+}
+
+fn checkout_path(step: &ActionStep) -> Result<PathBuf> {
+    let path = step
+        .inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["path", "Path"]))
+        .unwrap_or(".");
+    if path.starts_with('/') || path.contains("..") {
+        bail!("unsupported checkout path '{path}'")
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn checkout_ref(step: &ActionStep) -> Option<String> {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["ref", "Ref"]))
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn checkout_version(
+    job: &AgentJobRequestMessage,
+    step: &ActionStep,
+    checkout_repository: Option<&str>,
+    self_repository: &RepositoryResource,
+) -> Option<String> {
+    if let Some(reference) = checkout_ref(step) {
+        return Some(reference);
+    }
+
+    let is_self_checkout = checkout_repository.is_none_or(|repository| {
+        self_repository
+            .name
+            .as_deref()
+            .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
+    });
+    if !is_self_checkout {
+        return None;
+    }
+
+    // RepositoryResource.version is the server-selected immutable revision.
+    // PR merge/head refs are mutable pointers and remain only as a fallback
+    // for incomplete job messages that lack the immutable version.
+    self_repository.version.clone().or_else(|| {
+        self_repository
+            .git_ref
+            .as_deref()
+            .or_else(|| job_string(job, "github.ref"))
+            .filter(|reference| is_pull_request_ref(reference))
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn is_pull_request_ref(reference: &str) -> bool {
+    let mut parts = reference.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some("refs"), Some("pull"), Some(number), Some(kind), None)
+            if !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && matches!(kind, "merge" | "head")
+    )
+}
+
+fn checkout_repository(step: &ActionStep) -> Option<String> {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["repository", "Repository"]))
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn checkout_clone_url(
+    requested_repository: Option<&str>,
+    self_repository: &RepositoryResource,
+    server_url: &str,
+) -> Result<String> {
+    match requested_repository {
+        Some(repository) if !is_repository_name(repository) => {
+            bail!("unsupported checkout repository '{repository}'")
+        }
+        Some(repository)
+            if self_repository
+                .name
+                .as_deref()
+                .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name)) =>
+        {
+            self_clone_url(self_repository)
+        }
+        // The server was hardcoded to github.com, so an external-repository
+        // checkout on a GHES instance silently fetched a different repository
+        // from the public site. The host comes from the job's own repository.
+        Some(repository) => Ok(format!(
+            "{}/{repository}.git",
+            server_url.trim_end_matches('/')
+        )),
+        None => self_clone_url(self_repository),
+    }
+}
+
+/// The git server this job belongs to: the origin of the self repository's
+/// clone URL, falling back to the `github.server_url` context.
+fn checkout_server_url(
+    job: &AgentJobRequestMessage,
+    self_repository: &RepositoryResource,
+) -> String {
+    self_clone_url(self_repository)
+        .ok()
+        .and_then(|url| {
+            let parsed = Url::parse(&url).ok()?;
+            let host = parsed.host_str()?;
+            Some(match parsed.port() {
+                Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+                None => format!("{}://{host}", parsed.scheme()),
+            })
+        })
+        .or_else(|| job_string(job, "github.server_url").map(ToOwned::to_owned))
+        .unwrap_or_else(|| "https://github.com".to_string())
+}
+
+fn self_clone_url(repository: &RepositoryResource) -> Result<String> {
+    repository
+        .properties
+        .get("cloneUrl")
+        .or(repository.url.as_ref())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("self repository missing clone URL"))
+}
+
+fn is_repository_name(repository: &str) -> bool {
+    let mut parts = repository.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(name) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && [owner, name].iter().all(|part| {
+            !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+        })
+}
+
+fn checkout_fetch_depth(step: &ActionStep) -> Result<Option<u32>> {
+    let Some(value) = step
+        .inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["fetch-depth", "fetchDepth", "FetchDepth"]))
+    else {
+        return Ok(Some(1));
+    };
+    let Some(value) = Some(value).filter(|value| !value.is_empty()) else {
+        return Ok(Some(1));
+    };
+    let depth = value
+        .parse::<u32>()
+        .with_context(|| format!("parse checkout fetch-depth '{value}'"))?;
+    if depth == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(depth))
+    }
+}
+
+fn checkout_fetch_tags(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["fetch-tags", "fetchTags", "FetchTags"]))
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// `lfs` input (actions/checkout). Default false: leave LFS pointers, do not
+/// fetch blobs. `true`: download LFS objects during checkout (needs auth).
+fn checkout_lfs(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["lfs", "Lfs", "LFS"]))
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+fn checkout_persist_credentials(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| {
+            input_string(
+                inputs,
+                &[
+                    "persist-credentials",
+                    "persistCredentials",
+                    "PersistCredentials",
+                ],
+            )
+        })
+        .map(|value| !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn checkout_clean(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["clean", "Clean"]))
+        .map(|value| !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Result<Option<String>> {
+    let Some(token) = step
+        .inputs
+        .as_ref()
+        .and_then(|inputs| input_string_or_expression(inputs, &["token", "Token"]))
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if contains_step_context_expression(&token) {
+        return Ok(Some(token));
+    }
+    let Some(resolved) = resolve_token_expression(&token, job).filter(|value| !value.is_empty())
+    else {
+        bail!("explicit checkout token expression did not resolve");
+    };
+    Ok(Some(resolved))
+}
+
+fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option<String> {
+    let expression = token
+        .trim()
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map(str::trim);
+    let Some(expression) = expression else {
+        return Some(token.to_string());
+    };
+    if expression.eq_ignore_ascii_case("github.token")
+        || expression.eq_ignore_ascii_case("secrets.GITHUB_TOKEN")
+    {
+        // system.github.token is the GITHUB_TOKEN for workflow git/API auth.
+        // The SystemVssConnection AccessToken is for the Actions service API — not git auth.
+        return job
+            .variables
+            .get("system.github.token")
+            .and_then(|v| v.value.clone())
+            .filter(|v| !v.is_empty())
+            .or_else(|| system_access_token(job.system_connection()));
+    }
+    for prefix in ["secrets.", "secret."] {
+        if let Some(name) = expression.strip_prefix(prefix) {
+            return job
+                .variables
+                .get(&format!("secrets.{name}"))
+                .or_else(|| job.variables.get(&format!("secret.{name}")))
+                .or_else(|| job.variables.get(name))
+                .and_then(|value| value.value.clone());
+        }
+    }
+    Some(token.to_string())
+}
+
+fn system_access_token(endpoint: Option<&ServiceEndpoint>) -> Option<String> {
+    endpoint
+        .and_then(|endpoint| endpoint.authorization.as_ref())
+        .and_then(|authorization| {
+            authorization
+                .parameters
+                .get("AccessToken")
+                .or_else(|| authorization.parameters.get("accessToken"))
+        })
+        .cloned()
+}
+
+fn input_string<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    let object = value.as_object()?;
+    direct_input_string(object, names).or_else(|| nested_map_input_string(object, names))
+}
+
+fn direct_input_string<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(input_value_as_str))
+}
+
+fn nested_map_input_string<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    if let Some(map) = map.as_object() {
+        return direct_input_string(map, names);
+    }
+    map.as_array().and_then(|items| {
+        items.iter().find_map(|item| {
+            let item = item.as_object()?;
+            let name = input_name_field(item)?;
+            if !names
+                .iter()
+                .any(|expected| name.eq_ignore_ascii_case(expected))
+            {
+                return None;
+            }
+            item.get("value")
+                .or_else(|| item.get("Value"))
+                .and_then(input_value_as_str)
+        })
+    })
+}
+
+fn input_name_field(object: &Map<String, Value>) -> Option<&str> {
+    ["name", "Name", "key", "Key"]
+        .iter()
+        .find_map(|name| object.get(*name).and_then(input_value_as_str))
+}
+
+fn input_value_as_str(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_object()
+            .and_then(|object| direct_input_string(object, &["value", "Value", "lit", "Lit"]))
+    })
+}
+
+fn input_string_or_expression(value: &Value, names: &[&str]) -> Option<String> {
+    input_string(value, names)
+        .map(ToOwned::to_owned)
+        .or_else(|| input_expression(value, names).map(|expr| format!("${{{{ {expr} }}}}")))
+}
+
+fn input_expression<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    let object = value.as_object()?;
+    if let Some(expression) = names
+        .iter()
+        .filter_map(|name| object.get(*name))
+        .find_map(expression_value_as_str)
+    {
+        return Some(expression);
+    }
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    map.as_array()?.iter().find_map(|item| {
+        let item = item.as_object()?;
+        let name = input_name_field(item)?;
+        if !names
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+        {
+            return None;
+        }
+        item.get("value")
+            .or_else(|| item.get("Value"))
+            .and_then(expression_value_as_str)
+    })
+}
+
+fn expression_value_as_str(value: &Value) -> Option<&str> {
+    value
+        .as_object()?
+        .get("expr")
+        .or_else(|| value.as_object()?.get("Expr"))
+        .and_then(Value::as_str)
+}
+
+fn job_string<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
+    job.variables
+        .get(name)
+        .and_then(|value| value.value.as_deref())
+        .or_else(|| context_string(&job.context_data, name))
+}
+
+fn context_string<'a>(context_data: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a str> {
+    let mut parts = path.split('.');
+    let root = parts.next()?;
+    let mut value = context_data.get(root)?;
+    for part in parts {
+        value = context_object_get(value, part)?;
+    }
+    value.as_str()
+}
+
+/// Navigate a context value by key, handling both plain objects and
+/// the GitHub V2 broker format `{"d": [{"k": key, "v": value}, ...]}`.
+fn context_object_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    if let Some(obj) = value.as_object() {
+        // Plain object lookup
+        if let Some(v) = obj.get(key) {
+            return Some(v);
+        }
+        // GitHub broker compact format: {"d": [{"k": "...", "v": ...}, ...]}
+        if let Some(items) = obj.get("d").and_then(Value::as_array) {
+            for item in items {
+                if let Some(item_obj) = item.as_object() {
+                    let k = item_obj
+                        .get("k")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if k.eq_ignore_ascii_case(key) {
+                        return item_obj.get("v");
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn path_arg(path: &Path) -> String {
+    path.display().to_string()
+}
+
+/// Build the git http.extraheader value for basic auth (matches actions/runner format).
+/// GitHub's git service expects: AUTHORIZATION: basic base64("x-access-token:<token>")
+fn git_basic_auth_value(token: &str) -> String {
+    let encoded = STANDARD.encode(format!("x-access-token:{token}"));
+    format!("AUTHORIZATION: basic {encoded}")
+}
+
+pub(crate) fn git_auth_env(clone_url: &str, token: Option<&str>) -> Vec<(String, String)> {
+    token.map_or_else(Vec::new, |token| {
+        vec![
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), git_extraheader_key(clone_url)),
+            ("GIT_CONFIG_VALUE_0".into(), git_basic_auth_value(token)),
+        ]
+    })
+}
+
+pub(crate) fn git_extraheader_key(clone_url: &str) -> String {
+    Url::parse(clone_url)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(format!("http.{}://{host}/.extraheader", url.scheme()))
+        })
+        .unwrap_or_else(|| "http.https://github.com/.extraheader".to_string())
+}
+
+fn git_extraheader_scope(clone_url: &str) -> String {
+    Url::parse(clone_url)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(format!("{}://{host}/", url.scheme()))
+        })
+        .unwrap_or_else(|| "https://github.com/".to_string())
+}
+
+fn format_git_args(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if arg.starts_with("http.extraheader=AUTHORIZATION:")
+                || arg.starts_with("AUTHORIZATION: bearer ")
+                || arg.starts_with("AUTHORIZATION: basic ")
+            {
+                "http.extraheader=AUTHORIZATION: ***".to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+mod tests {
+    use super::*;
+    use crate::executor::{CommandResult, ProcessCommandRunner};
+
+    #[derive(Default)]
+    struct RecordingRunner {
+        calls: Vec<(String, Vec<String>)>,
+        env_calls: Vec<Vec<(String, String)>>,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            self.env_calls.push(env.to_vec());
+            self.run(program, args)
+        }
+    }
+
+    #[test]
+    fn detects_supported_and_unsupported_actions() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            { "reference": { "type": "Repository", "name": "actions/checkout" } },
+            { "reference": { "type": "Script" }, "inputs": { "script": "echo ok" } }
+        ]))
+        .unwrap();
+
+        assert!(!has_unsupported_enabled_action(&steps));
+
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            { "reference": { "type": "Repository", "name": "actions/cache" } }
+        ]))
+        .unwrap();
+
+        assert!(has_unsupported_enabled_action(&steps));
+    }
+
+    #[test]
+    fn executes_checkout_with_fetch_head() {
+        let temp =
+            std::env::temp_dir().join(format!("velnor-checkout-test-{}", std::process::id()));
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: String::new(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: temp.clone(),
+            token: Some("token".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            preserve_target: false,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let mut runner = RecordingRunner::default();
+
+        execute_checkout(&mut runner, &plan, &mut Vec::new(), &temp).unwrap();
+
+        assert_eq!(runner.calls[0].0, "git");
+        assert_eq!(runner.calls[0].1[0], "init");
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.contains(&"fetch".to_string())
+                && args.contains(&"abc123".to_string())
+                && args.contains(&"--depth=1".to_string())));
+        assert!(runner.env_calls.iter().any(|env| env
+            .iter()
+            .any(|(name, value)| name == "GIT_CONFIG_VALUE_0"
+                && value.starts_with("AUTHORIZATION: basic "))));
+        assert!(!runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.iter().any(|arg| arg.contains("AUTHORIZATION: basic "))));
+        assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
+            "checkout".into(),
+            "--force".into(),
+            "FETCH_HEAD".into()
+        ])));
+        assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
+            "reset".into(),
+            "--hard".into(),
+            "HEAD".into()
+        ])));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.ends_with(&["clean".into(), "-ffdx".into()])));
+        let config = std::fs::read_to_string(temp.join(".git/config")).unwrap();
+        assert!(config.contains("extraheader = AUTHORIZATION: basic "));
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn an_external_repository_is_cloned_from_the_job_own_server() {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "cloneUrl".to_string(),
+            "https://ghe.acme.test/acme/repo.git".to_string(),
+        );
+        let self_repository = RepositoryResource {
+            alias: Some("self".to_string()),
+            name: Some("acme/repo".to_string()),
+            git_ref: None,
+            version: None,
+            url: None,
+            properties,
+        };
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Build",
+            "requestId": 1,
+            "variables": {},
+            "resources": { "repositories": [] },
+            "steps": []
+        }))
+        .unwrap();
+        let server = checkout_server_url(&job, &self_repository);
+        assert_eq!(server, "https://ghe.acme.test");
+        // Hardcoding github.com here made a GHES job fetch a public repository
+        // of the same name instead of its own server's.
+        assert_eq!(
+            checkout_clone_url(Some("other/tool"), &self_repository, &server).unwrap(),
+            "https://ghe.acme.test/other/tool.git"
+        );
+    }
+
+    fn write_credentialed_config(destination: &Path) -> PathBuf {
+        let git_dir = destination.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let config = git_dir.join("config");
+        std::fs::write(
+            &config,
+            "[core]\n\trepositoryformatversion = 0\n[http \"https://github.com/\"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n",
+        )
+        .unwrap();
+        config
+    }
+
+    #[test]
+    fn an_aborted_job_leaves_no_credential_behind() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let live = root.join("live");
+        let abandoned = root.join("abandoned");
+        let live_config = write_credentialed_config(&live);
+        let abandoned_config = write_credentialed_config(&abandoned);
+
+        // A credential whose owner is still running is never touched: its
+        // journal entry stays locked for as long as the process lives.
+        register_credential_in(&journal, &live).unwrap();
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 0);
+        assert!(config_has_credential(&live_config));
+
+        // A runner that died between its last step and cleanup leaves an
+        // unlocked entry behind — the kernel released the lock with the
+        // process. Nothing used to remove that credential, ever.
+        std::fs::write(
+            journal.join(format!("{}.json", uuid::Uuid::new_v4())),
+            serde_json::json!({
+                "config": abandoned_config.display().to_string(),
+                "workspace": abandoned.display().to_string(),
+                "pid": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 1);
+        assert!(!config_has_credential(&abandoned_config));
+        let scrubbed = std::fs::read_to_string(&abandoned_config).unwrap();
+        assert!(!scrubbed.contains("basic"), "{scrubbed}");
+        assert!(scrubbed.contains("repositoryformatversion"), "{scrubbed}");
+        // The live job kept its own credential throughout.
+        assert!(config_has_credential(&live_config));
+
+        release_registered_credentials(&live);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_unpublished_credential_journal_is_invisible_to_the_reaper() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        std::fs::create_dir_all(&journal).unwrap();
+        std::fs::write(
+            journal.join(".new-credential.pending"),
+            serde_json::json!({
+                "config": config.display().to_string(),
+                "workspace": workspace.display().to_string(),
+                "pid": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 0);
+        assert!(config_has_credential(&config));
+        assert!(journal.join(".new-credential.pending").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_malformed_credential_journal_is_not_removed() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        std::fs::create_dir_all(&journal).unwrap();
+        let record = journal.join("malformed.json");
+        std::fs::write(&record, "not json").unwrap();
+
+        let error = reap_stale_credentials_in(&journal)
+            .expect_err("malformed journal records must fail closed");
+        assert!(
+            format!("{error:#}").contains("parse checkout credential journal"),
+            "unexpected error: {error:#}"
+        );
+        assert!(record.exists(), "malformed record was removed");
+        assert!(config_has_credential(&config));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reaper_skips_journal_entries_with_unexpected_config_paths() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let abandoned = root.join("abandoned");
+        let abandoned_config = write_credentialed_config(&abandoned);
+        // An absolute path that is not a `<workspace>/.git/config`: the only
+        // shape `register_credential` ever writes.
+        let decoy = root.join("decoy.conf");
+        std::fs::write(
+            &decoy,
+            "[http \"https://github.com/\"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&journal).unwrap();
+        for (name, config) in [
+            ("legit.json", abandoned_config.display().to_string()),
+            ("relative.json", "some/relative/config".to_string()),
+            ("elsewhere.json", decoy.display().to_string()),
+        ] {
+            std::fs::write(
+                journal.join(name),
+                serde_json::json!({
+                    "config": config,
+                    "workspace": abandoned.display().to_string(),
+                    "pid": 1,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        // The legitimate entry reaps; the two planted entries are skipped —
+        // kept for inspection, never scrubbed, never blocking the rest.
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 1);
+        assert!(!config_has_credential(&abandoned_config));
+        assert!(!journal.join("legit.json").exists());
+        assert!(config_has_credential(&decoy));
+        assert!(journal.join("relative.json").exists());
+        assert!(journal.join("elsewhere.json").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn checkout_fails_closed_when_the_credential_journal_cannot_be_read() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&journal, "not a directory").unwrap();
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(journal));
+
+        let mut runner = RecordingRunner::default();
+        let error = execute_checkout(
+            &mut runner,
+            &test_checkout_plan(root.join("workspace")),
+            &mut Vec::new(),
+            &root,
+        )
+        .expect_err("checkout must stop when stale credentials cannot be inspected");
+
+        assert!(
+            format!("{error:#}").contains("reap stale checkout credentials"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "checkout ran Git after credential reaper failure"
+        );
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cleanup_fails_the_job_when_the_credential_cannot_be_removed() {
+        struct RefusingRunner;
+        impl CommandRunner for RefusingRunner {
+            fn run(&mut self, _program: &str, _args: &[String]) -> Result<CommandResult> {
+                Ok(CommandResult {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "error: could not lock config file".into(),
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        let mut plan = test_checkout_plan(workspace.clone());
+        plan.token = Some("token".into());
+        plan.persist_credentials = true;
+
+        // This used to print a warning to stderr and report success, leaving a
+        // credentialed workspace on the host.
+        let error = cleanup_checkout_credentials(&mut RefusingRunner, &[plan], &root).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cleanup of checkout credentials"),
+            "{error:#}"
+        );
+        assert!(
+            !config_has_credential(&config),
+            "a failed git cleanup must still scrub the token (stable workspaces persist)"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cleanup_removes_a_credential_even_when_persistence_was_disabled() {
+        struct MissingKeyRunner;
+        impl CommandRunner for MissingKeyRunner {
+            fn run(&mut self, _program: &str, _args: &[String]) -> Result<CommandResult> {
+                // `git config --unset-all` on an absent key.
+                Ok(CommandResult {
+                    code: GIT_CONFIG_KEY_NOT_FOUND,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        let mut plan = test_checkout_plan(workspace);
+        plan.persist_credentials = false;
+
+        // Cleanup used to return early whenever the plan said it had not
+        // persisted anything, so a credential written by any other path stayed.
+        cleanup_checkout_credentials(&mut MissingKeyRunner, &[plan], &root).unwrap();
+        assert!(!config_has_credential(&config));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_persisted_credential_is_registered_before_it_reaches_disk() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(root.join("journal")));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        let mut runner = RecordingRunner::default();
+
+        persist_git_credentials(
+            &mut runner,
+            &workspace,
+            "https://github.com/acme/repo.git",
+            "token",
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let tracked = active_credentials()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.destination == workspace);
+        assert!(tracked, "the persisted credential is untracked");
+        assert!(config_has_credential(&workspace.join(".git/config")));
+
+        cleanup_checkout_credentials(
+            &mut runner,
+            &[{
+                let mut plan = test_checkout_plan(workspace.clone());
+                plan.token = Some("token".into());
+                plan.persist_credentials = true;
+                plan
+            }],
+            &root,
+        )
+        .unwrap();
+        assert!(!config_has_credential(&workspace.join(".git/config")));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_lfs_checkout_does_not_write_the_token_into_the_workspace() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let mut runner = RecordingRunner::default();
+
+        // lfs used to persist the credential unconditionally, before the
+        // checkout, so `persist-credentials: false` still left one on disk.
+        fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &workspace,
+            &root,
+            Some("token"),
+            Some(1),
+            false,
+            false,
+            false,
+            false,
+            true,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert!(!config_has_credential(&workspace.join(".git/config")));
+        assert!(runner
+            .env_calls
+            .iter()
+            .any(|env| env.iter().any(|(name, _)| name == "GIT_CONFIG_KEY_0")));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A real repository served over `file://`, so the mirror and the workspace
+    /// hydration run the actual git commands rather than a mock.
+    /// Zero-dependency Cargo fixture: a binary over a build-script crate
+    /// and a proc-macro crate, the slow-crate shapes in miniature. No
+    /// registry access, so the rebuild tests run fully offline.
+    const CARGO_FIXTURE_FILES: [(&str, &str); 7] = [
+        (
+            "Cargo.toml",
+            "[package]\n\
+             name = \"stable-probe\"\n\
+             version = \"0.1.0\"\n\
+             edition = \"2021\"\n\
+             \n\
+             [dependencies]\n\
+             probe-macro = { path = \"crates/probe-macro\" }\n\
+             probe-build = { path = \"crates/probe-build\" }\n\
+             \n\
+             [workspace]\n",
+        ),
+        (
+            "src/main.rs",
+            "fn main() {\n    println!(\"value={} answer={}\", probe_build::VALUE, probe_macro::answer!());\n}\n",
+        ),
+        (
+            "crates/probe-macro/Cargo.toml",
+            "[package]\n\
+             name = \"probe-macro\"\n\
+             version = \"0.1.0\"\n\
+             edition = \"2021\"\n\
+             \n\
+             [lib]\n\
+             proc-macro = true\n",
+        ),
+        (
+            "crates/probe-macro/src/lib.rs",
+            "extern crate proc_macro;\nuse proc_macro::TokenStream;\n\n#[proc_macro]\npub fn answer(_input: TokenStream) -> TokenStream {\n    \"42\".parse().unwrap()\n}\n",
+        ),
+        (
+            "crates/probe-build/Cargo.toml",
+            "[package]\n\
+             name = \"probe-build\"\n\
+             version = \"0.1.0\"\n\
+             edition = \"2021\"\n\
+             build = \"build.rs\"\n",
+        ),
+        ("crates/probe-build/build.rs", "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n}\n"),
+        ("crates/probe-build/src/lib.rs", "pub const VALUE: u32 = 7;\n"),
+    ];
+
+    struct RepoFixture {
+        root: PathBuf,
+        origin: PathBuf,
+        sha: String,
+    }
+
+    impl RepoFixture {
+        fn new() -> Self {
+            Self::new_inner(None)
+        }
+
+        /// Same repo, but the seed commit carries a 2001 committer stamp: the
+        /// trap for mtime pinning — a pin would set every mtime to 2001 while
+        /// wall-clock checkout leaves them at now.
+        fn new_backdated() -> Self {
+            Self::new_inner(Some("2001-02-03T04:05:06+00:00"))
+        }
+
+        /// Same repo plus a zero-dependency Cargo workspace shaped like the
+        /// slow-crate classes the bench measures on real estates: a
+        /// build-script crate (native-code shape) and a proc-macro crate
+        /// (host-compiled, downstream-invalidating), consumed by one binary.
+        fn new_cargo() -> Self {
+            let mut fixture = Self::new_inner(None);
+            let work = fixture.root.join("seed");
+            for (name, contents) in CARGO_FIXTURE_FILES {
+                let path = work.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, contents).unwrap();
+            }
+            let mut runner = ProcessCommandRunner;
+            let mut git = |args: Vec<String>| {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+                result.stdout.trim().to_string()
+            };
+            git(vec!["-C".into(), path_arg(&work), "add".into(), ".".into()]);
+            git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "commit".into(),
+                "-m".into(),
+                "cargo fixture".into(),
+            ]);
+            git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "push".into(),
+                path_arg(&fixture.origin),
+                "HEAD:master".into(),
+            ]);
+            fixture.sha = git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "rev-parse".into(),
+                "HEAD".into(),
+            ]);
+            fixture
+        }
+
+        fn new_inner(commit_date: Option<&str>) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("velnor-checkout-{}", uuid::Uuid::new_v4()));
+            let origin = root.join("origin/repo.git");
+            let work = root.join("seed");
+            std::fs::create_dir_all(origin.parent().unwrap()).unwrap();
+            let mut runner = ProcessCommandRunner;
+            let mut git = |args: Vec<String>| {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+                result.stdout.trim().to_string()
+            };
+            git(vec!["init".into(), "--bare".into(), path_arg(&origin)]);
+            git(vec![
+                "-C".into(),
+                path_arg(&origin),
+                "config".into(),
+                "uploadpack.allowAnySHA1InWant".into(),
+                "true".into(),
+            ]);
+            git(vec!["init".into(), path_arg(&work)]);
+            for (key, value) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+                git(vec![
+                    "-C".into(),
+                    path_arg(&work),
+                    "config".into(),
+                    key.into(),
+                    value.into(),
+                ]);
+            }
+            std::fs::write(work.join("value"), "one").unwrap();
+            git(vec!["-C".into(), path_arg(&work), "add".into(), ".".into()]);
+            let commit_args: Vec<String> = ["-C", path_arg(&work).as_str(), "commit", "-m", "one"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            match commit_date {
+                Some(date) => {
+                    let result = runner
+                        .run_with_env(
+                            "git",
+                            &commit_args,
+                            &[
+                                ("GIT_AUTHOR_DATE".to_string(), date.to_string()),
+                                ("GIT_COMMITTER_DATE".to_string(), date.to_string()),
+                            ],
+                        )
+                        .unwrap();
+                    assert_eq!(result.code, 0, "git {commit_args:?}: {}", result.stderr);
+                }
+                None => {
+                    let result = runner.run("git", &commit_args).unwrap();
+                    assert_eq!(result.code, 0, "git {commit_args:?}: {}", result.stderr);
+                }
+            }
+            // The pre-commit closure's borrow ended at its last use above; a
+            // fresh closure serves the post-commit calls.
+            let mut git = |args: Vec<String>| {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+                result.stdout.trim().to_string()
+            };
+            git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "push".into(),
+                path_arg(&origin),
+                "HEAD:master".into(),
+            ]);
+            let sha = git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "rev-parse".into(),
+                "HEAD".into(),
+            ]);
+            Self { root, origin, sha }
+        }
+
+        fn plan(&self, destination: PathBuf) -> CheckoutPlan {
+            CheckoutPlan {
+                step_id: "checkout".into(),
+                display_name: "Checkout".into(),
+                clone_url: format!("file://{}", self.origin.display()),
+                version: Some(self.sha.clone()),
+                destination,
+                token: None,
+                fetch_depth: Some(1),
+                fetch_tags: false,
+                persist_credentials: false,
+                clean: false,
+                preserve_target: false,
+                lfs: false,
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }
+        }
+
+        fn store(&self) -> PathBuf {
+            self.root.join("mirrors")
+        }
+    }
+
+    impl Drop for RepoFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    #[test]
+    fn checkout_hydrates_the_workspace_without_copying_object_bytes() {
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace.clone());
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .unwrap();
+
+        let head = runner
+            .run(
+                "git",
+                &[
+                    "-C".into(),
+                    path_arg(&workspace),
+                    "rev-parse".into(),
+                    "HEAD".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(head.stdout.trim(), fixture.sha);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("value")).unwrap(),
+            "one"
+        );
+
+        // Every object in the workspace is a hard link to the mirror's copy:
+        // more than one link, and the same inode.
+        use std::os::unix::fs::MetadataExt;
+        let mirror = fixture
+            .store()
+            .join(format!("{}__origin__repo.git", "localhost"));
+        let mirror = if mirror.exists() {
+            mirror
+        } else {
+            std::fs::read_dir(fixture.store())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "git"))
+                .expect("mirror directory")
+        };
+        let mut checked = 0;
+        let mut pending = vec![workspace.join(".git/objects")];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let workspace_object = std::fs::metadata(&path).unwrap();
+                let relative = path.strip_prefix(workspace.join(".git/objects")).unwrap();
+                let mirrored = std::fs::metadata(mirror.join("objects").join(relative)).unwrap();
+                assert_eq!(
+                    workspace_object.ino(),
+                    mirrored.ino(),
+                    "{} was copied out of the mirror instead of linked",
+                    relative.display()
+                );
+                assert!(workspace_object.nlink() >= 2);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "workspace has no objects from the mirror");
+    }
+
+    #[test]
+    fn checkout_hydration_fails_closed_when_object_directory_is_missing() {
+        let fixture = RepoFixture::new();
+        let error = link_object_store(
+            &fixture.root.join("missing-objects"),
+            &fixture.root.join("workspace-objects"),
+        )
+        .expect_err("missing mirror objects must fail closed");
+        assert!(
+            format!("{error:#}").contains("read Git object directory"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn checkout_releases_mirror_reader_lease_after_hydration() {
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace.clone());
+        let mut setup = ProcessCommandRunner;
+        let mirror = crate::git_mirror::ensure_mirror(
+            &mut setup,
+            &fixture.store(),
+            &plan.clone_url,
+            None,
+            &mirror_want(&plan),
+        )
+        .unwrap();
+        let lock_path = std::fs::read_dir(fixture.store())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "lock")
+            })
+            .expect("mirror lock");
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            flock(&contender, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        ));
+        drop(mirror);
+        drop(contender);
+        let mut runner = LeaseProbeRunner {
+            inner: ProcessCommandRunner,
+            lock_path,
+            checkout_lock_available: None,
+            initial_lock_available: None,
+        };
+
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut Vec::new(),
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .unwrap();
+
+        assert_eq!(
+            runner.checkout_lock_available,
+            Some(true),
+            "workspace checkout must not keep the mirror reader lease"
+        );
+        assert_eq!(runner.initial_lock_available, Some(false));
+    }
+
+    struct LeaseProbeRunner {
+        inner: ProcessCommandRunner,
+        lock_path: PathBuf,
+        checkout_lock_available: Option<bool>,
+        initial_lock_available: Option<bool>,
+    }
+
+    impl CommandRunner for LeaseProbeRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if program == "git" && args.iter().any(|arg| arg == "checkout") {
+                // Dropping the lease releases flock before control returns.
+                // Under heavy parallel-test scheduling, probe briefly so the
+                // assertion tests release-versus-hold, not lock-service
+                // propagation timing.
+                let mut available = false;
+                for _ in 0..16 {
+                    let contender = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&self.lock_path)?;
+                    available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                    if available {
+                        break;
+                    }
+                    drop(contender);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                self.checkout_lock_available = Some(available);
+            }
+            if program == "git"
+                && self.initial_lock_available.is_none()
+                && args.iter().any(|arg| arg == "init")
+            {
+                let contender = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.lock_path)?;
+                let available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                self.initial_lock_available = Some(available);
+            }
+            self.inner.run(program, args)
+        }
+    }
+
+    #[test]
+    fn checkout_fails_when_the_mirror_cannot_be_prepared() {
+        let fixture = RepoFixture::new();
+        let mut plan = fixture.plan(fixture.root.join("workspace"));
+        plan.clone_url = format!("file://{}", fixture.root.join("gone.git").display());
+        let mut runner = ProcessCommandRunner;
+
+        // A mirror that cannot serve the job used to warn and fall through to a
+        // direct fetch, hiding the failure and every later degradation with it.
+        let error = execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut Vec::new(),
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("git mirror"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn concurrent_checkouts_of_one_commit_fetch_the_mirror_once() {
+        #[derive(Default)]
+        struct CountingRunner {
+            network_fetches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl CommandRunner for CountingRunner {
+            fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+                ProcessCommandRunner.run(program, args)
+            }
+            fn run_with_env(
+                &mut self,
+                program: &str,
+                args: &[String],
+                env: &[(String, String)],
+            ) -> Result<CommandResult> {
+                if args.iter().any(|arg| arg.starts_with("file://")) {
+                    self.network_fetches
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                ProcessCommandRunner.run_with_env(program, args, env)
+            }
+        }
+
+        let fixture = RepoFixture::new();
+        let store = fixture.store();
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // The first leg of a matrix warms the mirror.
+        execute_checkout_with_mirror(
+            &mut CountingRunner {
+                network_fetches: std::sync::Arc::clone(&fetches),
+            },
+            &fixture.plan(fixture.root.join("warm")),
+            &mut Vec::new(),
+            Some(&store),
+            &fixture.root,
+        )
+        .unwrap();
+        assert_eq!(fetches.swap(0, std::sync::atomic::Ordering::SeqCst), 1);
+        std::thread::scope(|scope| {
+            for index in 0..6 {
+                let plan = fixture.plan(fixture.root.join(format!("matrix-{index}")));
+                let store = store.clone();
+                let workspace = fixture.root.clone();
+                let fetches = std::sync::Arc::clone(&fetches);
+                scope.spawn(move || {
+                    let mut runner = CountingRunner {
+                        network_fetches: fetches,
+                    };
+                    execute_checkout_with_mirror(
+                        &mut runner,
+                        &plan,
+                        &mut Vec::new(),
+                        Some(&store),
+                        &workspace,
+                    )
+                    .unwrap();
+                });
+            }
+        });
+
+        // Every remaining leg wants the same commit, and the mirror already has
+        // it: no lock upgrade, no fetch, no origin traffic. This used to be six
+        // full `+refs/*:refs/*` fetches serialized behind one exclusive lock.
+        let observed = fetches.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            observed, 0,
+            "a mirrored commit still cost {observed} fetch(es)"
+        );
+        for index in 0..6 {
+            let workspace = fixture.root.join(format!("matrix-{index}"));
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("value")).unwrap(),
+                "one"
+            );
+        }
+    }
+
+    /// A second checkout whose `path:` traverses a symlink an earlier
+    /// checkout's repo content planted is lexically clean (`first/link/…`
+    /// has no `..`) yet resolves outside the workspace. Execution must
+    /// refuse it before anything is created or credentialed there.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_destination_traversing_a_planted_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-symlink-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(workspace.join("first")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("first/link")).unwrap();
+
+        let mut plan = test_checkout_plan(workspace.join("first/link/escape"));
+        plan.persist_credentials = true;
+        plan.token = Some("token".into());
+        let mut runner = RecordingRunner::default();
+        let error = execute_checkout(&mut runner, &plan, &mut Vec::new(), &workspace)
+            .expect_err("a symlink escape must fail the checkout");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        assert!(
+            !outside.join("escape").exists(),
+            "nothing may be created outside the workspace"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The pre-check passes on a clean tree, but `ensure_mirror` then spends
+    /// minutes on network fetch before the first write; a concurrent
+    /// workspace writer swapping a path component for a symlink in that
+    /// window must still be refused — after `create_dir_all`, before the
+    /// first git command.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_destination_swapped_out_after_the_precheck() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-toctou-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let parent = workspace.join("first");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let destination = parent.join("escape");
+
+        // The fail-fast pre-check sees a clean tree and passes.
+        ensure_checkout_destination_contained(&workspace, &destination).unwrap();
+        // A concurrent writer swaps the parent for a link during the mirror
+        // fetch window. (`fetch_git_ref` itself re-checks after creating the
+        // destination, which is what this test pins.)
+        std::fs::remove_dir(&parent).unwrap();
+        std::os::unix::fs::symlink(&outside, &parent).unwrap();
+
+        let mut runner = RecordingRunner::default();
+        let error = fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &destination,
+            &workspace,
+            Some("token"),
+            Some(1),
+            false,
+            true,
+            true,
+            false,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a swapped-out destination must fail the checkout");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        assert!(
+            !outside.join("escape").exists(),
+            "nothing may be created outside the workspace"
+        );
+        assert!(
+            outside.read_dir().unwrap().next().is_none(),
+            "the swap target must stay empty"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Containment is re-asserted before *every* write phase, not just the
+    /// first: a swap landing after `git init` must still be refused before
+    /// the fetch, checkout, clean, and credential writes that follow it.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_reasserts_containment_before_later_write_phases() {
+        /// Swaps the destination's parent for a symlink the first time git
+        /// runs, mimicking a concurrent workspace writer racing the checkout.
+        struct SwappingRunner {
+            parent: PathBuf,
+            outside: PathBuf,
+            calls: Vec<Vec<String>>,
+            swapped: bool,
+        }
+        impl CommandRunner for SwappingRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                self.calls.push(args.to_vec());
+                if !self.swapped {
+                    std::fs::remove_dir_all(&self.parent).unwrap();
+                    std::os::unix::fs::symlink(&self.outside, &self.parent).unwrap();
+                    self.swapped = true;
+                }
+                Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-reswap-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let parent = workspace.join("first");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(root.join("journal")));
+
+        let mut runner = SwappingRunner {
+            parent: parent.clone(),
+            outside: outside.clone(),
+            calls: Vec::new(),
+            swapped: false,
+        };
+        let error = fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &parent.join("escape"),
+            &workspace,
+            Some("token"),
+            Some(1),
+            false,
+            true,
+            true,
+            false,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a mid-run swap must fail the checkout");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(runner.swapped, "the test never performed its swap");
+        for phase in ["fetch", "checkout", "reset", "clean"] {
+            assert!(
+                !runner
+                    .calls
+                    .iter()
+                    .any(|args| args.iter().any(|arg| arg == phase)),
+                "no `{phase}` may run after the swap: {:?}",
+                runner.calls
+            );
+        }
+        assert!(
+            !outside.join("escape").exists(),
+            "no credential may be planted outside the workspace"
+        );
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A destination that resolves outside the workspace by cleanup time —
+    /// a path component swapped for a symlink after checkout — must refuse
+    /// the `git config --unset-all` rather than write through the link.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_refuses_credential_unset_outside_the_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-swap-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(outside.join("repo/.git")).unwrap();
+        std::os::unix::fs::symlink(outside.join("repo"), workspace.join("link")).unwrap();
+
+        let plan = test_checkout_plan(workspace.join("link"));
+        let mut runner = RecordingRunner::default();
+        let error = cleanup_checkout_credentials(&mut runner, &[plan], &workspace)
+            .expect_err("cleanup outside the workspace must fail closed");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Gating the destination alone lets a `destination/.git` swap bypass the
+    /// gate: cleanup must gate the canonicalized git dir too, before both
+    /// the git invocation and the scrub.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_refuses_git_dir_swapped_outside_the_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-gitdir-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let repo = workspace.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let outside_config = write_credentialed_config(&outside);
+        std::os::unix::fs::symlink(outside.join(".git"), repo.join(".git")).unwrap();
+
+        let plan = test_checkout_plan(repo);
+        let mut runner = RecordingRunner::default();
+        let error = cleanup_checkout_credentials(&mut runner, &[plan], &workspace)
+            .expect_err("cleanup through a swapped .git must fail closed");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped git dir: {:?}",
+            runner.calls
+        );
+        assert!(
+            config_has_credential(&outside_config),
+            "the outside credential must be untouched"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A gate-failure bail must not leave a live untracked credential: the
+    /// gate runs before the journal release, so a refused cleanup keeps its
+    /// registration for a later reaper instead of deleting it.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_gate_failure_keeps_credential_tracked() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-tracked-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(outside.join("repo/.git")).unwrap();
+        std::os::unix::fs::symlink(outside.join("repo"), workspace.join("link")).unwrap();
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(root.join("journal")));
+
+        let destination = workspace.join("link");
+        register_credential(&destination).unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.join("journal")).unwrap().count(),
+            1,
+            "the credential must start tracked"
+        );
+
+        let plan = test_checkout_plan(destination.clone());
+        let mut runner = RecordingRunner::default();
+        let error = cleanup_checkout_credentials(&mut runner, &[plan], &workspace)
+            .expect_err("cleanup outside the workspace must fail closed");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.join("journal")).unwrap().count(),
+            1,
+            "a refused cleanup must not release the journal entry"
+        );
+        assert!(
+            active_credentials()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|registration| registration.destination == destination),
+            "a refused cleanup must keep the credential registered"
+        );
+
+        release_registered_credentials(&destination);
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn test_checkout_plan(destination: PathBuf) -> CheckoutPlan {
+        CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: "Checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination,
+            token: None,
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: true,
+            preserve_target: false,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
+    }
+
+    #[test]
+    fn cleanup_unsets_persisted_checkout_credentials() {
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(temp.join(".git")).unwrap();
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: String::new(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: temp.clone(),
+            token: Some("token".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            preserve_target: false,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let mut runner = RecordingRunner::default();
+
+        cleanup_checkout_credentials(&mut runner, &[plan], &temp).unwrap();
+
+        assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
+            "config".into(),
+            "--local".into(),
+            "--unset-all".into(),
+            "http.https://github.com/.extraheader".into()
+        ])));
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn cleanup_skips_disabled_persistence() {
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: String::new(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: PathBuf::from("/tmp/nonexistent-velnor-cleanup-test"),
+            token: Some("token".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: true,
+            preserve_target: false,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let mut runner = RecordingRunner::default();
+
+        // The destination was never created, so cleanup returns before the
+        // containment gate; the workspace value is never consulted.
+        cleanup_checkout_credentials(&mut runner, &[plan], std::path::Path::new("/tmp")).unwrap();
+
+        assert!(runner.calls.is_empty());
+    }
+
+    #[test]
+    fn full_fetch_checkout_omits_depth_arg() {
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-checkout-full-fetch-test-{}",
+            std::process::id()
+        ));
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: String::new(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("main".into()),
+            destination: temp.clone(),
+            token: None,
+            fetch_depth: None,
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            preserve_target: false,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let mut runner = RecordingRunner::default();
+
+        execute_checkout(&mut runner, &plan, &mut Vec::new(), &temp).unwrap();
+
+        let fetch = runner
+            .calls
+            .iter()
+            .find(|(_, args)| args.contains(&"fetch".to_string()))
+            .unwrap();
+        assert!(!fetch.1.iter().any(|arg| arg.starts_with("--depth=")));
+        assert!(fetch
+            .1
+            .contains(&"+refs/heads/*:refs/remotes/origin/*".to_string()));
+        assert!(fetch.1.contains(&"+refs/tags/*:refs/tags/*".to_string()));
+        assert!(fetch.1.contains(&"--tags".to_string()));
+        let origin = fetch.1.iter().position(|arg| arg == "origin").unwrap();
+        let requested = fetch.1.iter().position(|arg| arg == "main").unwrap();
+        let wildcard = fetch
+            .1
+            .iter()
+            .position(|arg| arg == "+refs/heads/*:refs/remotes/origin/*")
+            .unwrap();
+        assert_eq!(requested, origin + 1);
+        assert!(requested < wildcard, "requested ref must own FETCH_HEAD");
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    /// Fresh-workspace probe: `git remote get-url origin` fails with
+    /// "error: No such remote: 'origin'".
+    #[derive(Default)]
+    struct FreshWorkspaceRunner {
+        calls: Vec<Vec<String>>,
+    }
+
+    impl CommandRunner for FreshWorkspaceRunner {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            let get_url = args.iter().any(|arg| arg == "get-url");
+            Ok(CommandResult {
+                code: if get_url { 2 } else { 0 },
+                stdout: String::new(),
+                stderr: if get_url {
+                    "error: No such remote: 'origin'".to_string()
+                } else {
+                    String::new()
+                },
+            })
+        }
+
+        fn run_with_env(
+            &mut self,
+            _program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn checkout_skips_origin_removal_on_fresh_workspace() {
+        // A fresh workspace has no origin remote: removing it prints
+        // "error: No such remote: 'origin'" into the job log. The removal
+        // must be probed quietly and skipped instead.
+        let temp =
+            std::env::temp_dir().join(format!("velnor-checkout-fresh-{}", uuid::Uuid::new_v4()));
+        let mut runner = FreshWorkspaceRunner::default();
+        let mut log = Vec::new();
+
+        fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &temp,
+            &temp,
+            None,
+            Some(1),
+            false,
+            false,
+            true,
+            false,
+            false,
+            None,
+            &mut log,
+        )
+        .unwrap();
+
+        assert!(
+            !runner.calls.iter().any(|args| args
+                .windows(2)
+                .any(|pair| pair[0] == "remote" && pair[1] == "remove")),
+            "fresh workspace must not run git remote remove: {:?}",
+            runner.calls
+        );
+        assert!(
+            !log.iter().any(|line| line.contains("No such remote")),
+            "fresh workspace log must not contain the git error: {log:?}"
+        );
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn checkout_removes_stale_origin_remote() {
+        // With an existing origin (probe succeeds), the removal still runs
+        // so re-checkout of a reused workspace stays idempotent.
+        let temp =
+            std::env::temp_dir().join(format!("velnor-checkout-stale-{}", uuid::Uuid::new_v4()));
+        let mut runner = RecordingRunner::default();
+        let mut log = Vec::new();
+
+        fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &temp,
+            &temp,
+            None,
+            Some(1),
+            false,
+            false,
+            true,
+            false,
+            false,
+            None,
+            &mut log,
+        )
+        .unwrap();
+
+        assert!(runner.calls.iter().any(|(_, args)| args
+            .windows(2)
+            .any(|pair| pair[0] == "remote" && pair[1] == "remove")));
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn full_fetch_checkout_keeps_exact_requested_commit_in_fetch_head() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-fetch-head-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main", source.to_str().unwrap()]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "config",
+            "user.name",
+            "Velnor Test",
+        ]);
+        std::fs::write(source.join("state"), "requested\n").unwrap();
+        git(&["-C", source.to_str().unwrap(), "add", "state"]);
+        git(&["-C", source.to_str().unwrap(), "commit", "-m", "requested"]);
+        let requested = git(&["-C", source.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "checkout",
+            "-b",
+            "aaa-unrelated",
+        ]);
+        std::fs::write(source.join("state"), "unrelated\n").unwrap();
+        git(&["-C", source.to_str().unwrap(), "commit", "-am", "unrelated"]);
+
+        fetch_git_ref(
+            &mut ProcessCommandRunner,
+            source.to_str().unwrap(),
+            &requested,
+            &destination,
+            &root,
+            None,
+            None,
+            true,
+            false,
+            true,
+            false,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            git(&["-C", destination.to_str().unwrap(), "rev-parse", "HEAD"]),
+            requested
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn plans_external_checkout_with_path_ref_token_and_full_fetch() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Release",
+            "requestId": 1,
+            "variables": {
+                "secrets.HOMEBREW_TAP_TOKEN": {
+                    "value": "tap-token",
+                    "isSecret": true
+                }
+            },
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "jackin-project/jackin",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/jackin-project/jackin.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "repository": "jackin-project/homebrew-tap",
+                    "ref": "main",
+                    "path": "homebrew-tap",
+                    "token": "${{ secrets.HOMEBREW_TAP_TOKEN }}",
+                    "fetch-depth": "0"
+                }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].clone_url,
+            "https://github.com/jackin-project/homebrew-tap.git"
+        );
+        assert_eq!(plans[0].version.as_deref(), Some("main"));
+        assert_eq!(plans[0].destination, Path::new("/tmp/work/homebrew-tap"));
+        assert_eq!(plans[0].token.as_deref(), Some("tap-token"));
+        assert_eq!(plans[0].fetch_depth, None);
+        assert!(!plans[0].fetch_tags);
+        assert!(plans[0].persist_credentials);
+        assert!(plans[0].clean);
+    }
+
+    #[test]
+    fn plans_self_checkout_defaults() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "ghs-token" }
+                    }
+                }],
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].clone_url, "https://github.com/acme/repo.git");
+        assert_eq!(plans[0].version.as_deref(), Some("abc123"));
+        assert_eq!(plans[0].destination, Path::new("/tmp/work"));
+        assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
+        assert_eq!(plans[0].fetch_depth, Some(1));
+        assert!(!plans[0].fetch_tags);
+        assert!(plans[0].persist_credentials);
+        assert!(plans[0].clean);
+    }
+
+    #[test]
+    fn plans_self_pull_request_checkout_from_immutable_repository_version() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "PR",
+            "requestId": 1,
+            "variables": {
+                "github.ref": { "value": "refs/pull/408/merge" }
+            },
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/pull/408/merge",
+                    "version": "immutable-merge-sha",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("immutable-merge-sha"));
+    }
+
+    #[test]
+    fn plans_self_pull_request_checkout_from_remote_ref_without_version() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "PR",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/pull/408/merge",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("refs/pull/408/merge"));
+    }
+
+    #[test]
+    fn plans_self_push_checkout_from_exact_sha() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Push",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/heads/main",
+                    "version": "push-commit-sha",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("push-commit-sha"));
+    }
+
+    #[test]
+    fn explicit_checkout_ref_overrides_pull_request_remote_ref() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "PR",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/pull/408/merge",
+                    "version": "ephemeral-merge-sha",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": { "ref": "refs/tags/v1.2.3" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("refs/tags/v1.2.3"));
+    }
+
+    #[test]
+    fn plans_self_checkout_from_github_context_without_repository_resources() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" },
+                "github.ref": { "value": "refs/heads/main" },
+                "github.server_url": { "value": "https://github.com" }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "ghs-token" }
+                    }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].clone_url, "https://github.com/acme/repo.git");
+        assert_eq!(plans[0].version.as_deref(), Some("abc123"));
+        assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
+    }
+
+    #[test]
+    fn plans_checkout_from_run_service_typed_inputs() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" },
+                "secrets.HOMEBREW_TAP_TOKEN": { "value": "tap-token", "isSecret": true }
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "repository", "type": 0 }, "Value": { "lit": "acme/homebrew-tap", "type": 0 } },
+                        { "Key": { "lit": "ref", "type": 0 }, "Value": { "lit": "main", "type": 0 } },
+                        { "Key": { "lit": "path", "type": 0 }, "Value": { "lit": "homebrew-tap", "type": 0 } },
+                        { "Key": { "lit": "token", "type": 0 }, "Value": { "expr": "secrets.HOMEBREW_TAP_TOKEN", "type": 3 } },
+                        { "Key": { "lit": "fetch-depth", "type": 0 }, "Value": { "lit": "0", "type": 0 } },
+                        { "Key": { "lit": "persist-credentials", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
+                        { "Key": { "lit": "clean", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
+                        { "Key": { "lit": "fetch-tags", "type": 0 }, "Value": { "lit": "true", "type": 0 } }
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(
+            plans[0].clone_url,
+            "https://github.com/acme/homebrew-tap.git"
+        );
+        assert_eq!(plans[0].version.as_deref(), Some("main"));
+        assert_eq!(plans[0].destination, Path::new("/tmp/work/homebrew-tap"));
+        assert_eq!(plans[0].token.as_deref(), Some("tap-token"));
+        assert_eq!(plans[0].fetch_depth, None);
+        assert!(plans[0].fetch_tags);
+        assert!(!plans[0].persist_credentials);
+        assert!(!plans[0].clean);
+    }
+
+    #[test]
+    fn explicit_unresolved_checkout_secret_does_not_fall_back_to_github_token() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" },
+                "system.github.token": { "value": "repo-token", "isSecret": true }
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "repository", "type": 0 }, "Value": { "lit": "acme/homebrew-tap", "type": 0 } },
+                        { "Key": { "lit": "token", "type": 0 }, "Value": { "expr": "secrets.MISSING_TOKEN", "type": 3 } }
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let error = checkout_plans(&job, Path::new("/tmp/work")).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "explicit checkout token expression did not resolve"
+        );
+        assert!(!error.to_string().contains("MISSING_TOKEN"));
+        assert!(!error.to_string().contains("repo-token"));
+    }
+
+    #[test]
+    fn checkout_can_disable_credential_persistence_and_clean() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "ghs-token" }
+                    }
+                }],
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "persist-credentials": "false",
+                    "clean": "false",
+                    "fetch-tags": "true"
+                }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert!(plans[0].fetch_tags);
+        assert!(!plans[0].persist_credentials);
+        assert!(!plans[0].clean);
+    }
+
+    #[test]
+    fn writes_safe_directory_for_workspace_checkout() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-checkout-safe-dir-test-{}-{nonce}",
+            std::process::id(),
+        ));
+        let home = temp.join("home");
+        let workspace = temp.join("work");
+
+        configure_safe_directory(&home, &workspace, &workspace).unwrap();
+        configure_safe_directory(&home, &workspace, &workspace.join("homebrew-tap")).unwrap();
+
+        let config = std::fs::read_to_string(home.join(".gitconfig")).unwrap();
+        assert!(config.contains("directory = /__w\n"));
+        assert!(config.contains("directory = /__w/homebrew-tap\n"));
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn checkout_ref_from_previous_step_requires_runtime_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Preview",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "jackin-project/jackin",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/jackin-project/jackin.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "id": "source",
+                    "reference": { "type": "Script" },
+                    "inputs": { "script": "echo sha=def456 >> \"$GITHUB_OUTPUT\"" }
+                },
+                {
+                    "reference": { "type": "Repository", "name": "actions/checkout" },
+                    "inputs": {
+                        "ref": "${{ steps.source.outputs.sha }}",
+                        "fetch-depth": "0"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].step_id, "checkout2");
+        assert_eq!(
+            plans[0].version.as_deref(),
+            Some("${{ steps.source.outputs.sha }}")
+        );
+        assert!(plans[0].requires_runtime_context());
+        assert_eq!(plans[0].fetch_depth, None);
+    }
+
+    #[test]
+    fn checkout_with_condition_requires_runtime_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Preview",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "ChainArgos/java-monorepo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/ChainArgos/java-monorepo.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "id": "plan",
+                    "reference": { "type": "Script" },
+                    "inputs": { "script": "echo run-tests=false >> \"$GITHUB_OUTPUT\"" }
+                },
+                {
+                    "reference": { "type": "Repository", "name": "actions/checkout" },
+                    "condition": "${{ steps.plan.outputs.run-tests == 'true' }}"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert!(
+            plans[0].requires_runtime_context(),
+            "conditional checkout must stay in normal step order"
+        );
+    }
+
+    #[test]
+    fn checkout_with_step_output_token_requires_runtime_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Package update",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "service-token" }
+                    }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [{
+                        "Key": { "lit": "token", "type": 0 },
+                        "Value": { "expr": "steps.app-token.outputs.token", "type": 3 }
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(
+            plans[0].token.as_deref(),
+            Some("${{ steps.app-token.outputs.token }}")
+        );
+        assert!(plans[0].requires_runtime_context());
+        assert_ne!(plans[0].token.as_deref(), Some("service-token"));
+    }
+
+    #[test]
+    fn checkout_with_default_success_condition_is_eager() {
+        // GitHub sets `Condition: "success()"` on every step in the job
+        // message; the trivial default must not defer the checkout, or jobs
+        // using local composite actions can never resolve them.
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Compat",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "tailrocks/velnor-actions-fixture",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/tailrocks/velnor-actions-fixture.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "reference": { "type": "Repository", "name": "actions/checkout" },
+                    "condition": "success()"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert!(
+            !plans[0].requires_runtime_context(),
+            "default success() condition must keep the checkout eager"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_checkout_repository() {
+        let repository = RepositoryResource {
+            alias: Some("self".into()),
+            name: Some("acme/repo".into()),
+            git_ref: None,
+            version: None,
+            url: None,
+            properties: Default::default(),
+        };
+
+        let error =
+            checkout_clone_url(Some("../bad"), &repository, "https://github.com").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unsupported checkout repository"));
+    }
+
+    #[test]
+    fn masks_checkout_token_in_git_error_args() {
+        let args = vec![
+            "-c".to_string(),
+            "http.extraheader=AUTHORIZATION: bearer secret".to_string(),
+            "fetch".to_string(),
+        ];
+
+        let formatted = format_git_args(&args);
+
+        assert!(formatted.contains("AUTHORIZATION: ***"));
+        assert!(!formatted.contains("secret"));
+    }
+
+    #[test]
+    fn masks_persisted_checkout_token_in_git_error_args() {
+        let args = vec![
+            "config".to_string(),
+            "--local".to_string(),
+            "http.https://github.com/.extraheader".to_string(),
+            "AUTHORIZATION: bearer secret".to_string(),
+        ];
+
+        let formatted = format_git_args(&args);
+
+        assert!(formatted.contains("AUTHORIZATION: ***"));
+        assert!(!formatted.contains("secret"));
+    }
+
+    #[test]
+    fn checkout_clean_always_empties_the_ephemeral_workspace() {
+        // No target/ exclusion: the workspace is ephemeral, so clean removes
+        // everything, matching actions/checkout.
+        assert_eq!(
+            checkout_clean_args(Path::new("/__w"), false),
+            ["-C", "/__w", "clean", "-ffdx"]
+        );
+    }
+
+    #[test]
+    fn checkout_clean_on_stable_workspaces_excludes_only_top_level_target() {
+        // Stable workspaces preserve Cargo fingerprints across jobs; the
+        // exclusion is anchored so nested target/ trees still go.
+        assert_eq!(
+            checkout_clean_args(Path::new("/__w"), true),
+            ["-C", "/__w", "clean", "-ffdx", "-e", "/target"]
+        );
+    }
+
+    /// In-memory JSONL sink with the runner's production shape: `fmt::json`
+    /// plus span-close events, the exact layer `telemetry::init` installs.
+    #[derive(Clone)]
+    struct BufferWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn checkout_emits_the_four_bench_phase_spans() {
+        // Span contract for `velnor-bench/src/trace.rs`: the benchmark reads
+        // checkout phase timings from trace.jsonl span-close records, keyed by
+        // these span names and `phase` fields. Renaming either side breaks
+        // this test on purpose. Real git over a file:// origin, so every span
+        // below fires through the production path, not a fake.
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace);
+        let store = fixture.store();
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_current_span(true)
+            .with_writer({
+                let buffer = buffer.clone();
+                move || BufferWriter(buffer.clone())
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut runner = ProcessCommandRunner;
+            let mut log = Vec::new();
+            execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&store), &fixture.root)
+                .expect("checkout over a file:// origin succeeds");
+        });
+
+        let bytes = buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let text = String::from_utf8(bytes).expect("trace output is UTF-8");
+        let mut closed: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            let record: serde_json::Value = serde_json::from_str(line).expect("trace line is JSON");
+            if record["fields"]["message"] != "close" {
+                continue;
+            }
+            let name = record["span"]["name"].as_str().unwrap_or("").to_owned();
+            let phase = record["span"]["phase"].as_str().unwrap_or("").to_owned();
+            closed.push((name, phase));
+        }
+        for (name, phase) in [
+            ("checkout.mirror.lock_wait", "mirror-lock-wait"),
+            ("checkout.mirror.fetch", "mirror-fetch"),
+            ("checkout.workspace.fetch", "workspace-fetch"),
+            ("checkout.workspace.checkout", "workspace-checkout"),
+        ] {
+            assert!(
+                closed
+                    .iter()
+                    .any(|closed| closed.0 == name && closed.1 == phase),
+                "missing span-close ({name}, {phase}) in {closed:?}"
+            );
+        }
+        assert!(
+            !closed.iter().any(|closed| closed.0.contains("mtime")),
+            "the mtime-normalization phase is deleted with the pin: {closed:?}"
+        );
+    }
+
+    #[test]
+    fn checkout_leaves_wall_clock_mtimes() {
+        // Wall-clock conformance (BC-14): checked-out files keep the mtime
+        // git gave them, like GitHub-hosted runners — never the commit
+        // timestamp. The fixture commit is backdated to 2001, so a pin
+        // would set every mtime 25 years in the past.
+        let fixture = RepoFixture::new_backdated();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace.clone());
+        let started = std::time::SystemTime::now();
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("checkout over a file:// origin succeeds");
+
+        let mut checked = 0usize;
+        let mut pending = vec![workspace];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read checkout dir") {
+                let entry = entry.expect("dir entry");
+                let path = entry.path();
+                if entry.file_type().expect("file type").is_dir() {
+                    if entry.file_name() != ".git" {
+                        pending.push(path);
+                    }
+                    continue;
+                }
+                let mtime = std::fs::metadata(&path)
+                    .expect("metadata")
+                    .modified()
+                    .expect("mtime");
+                assert!(
+                    mtime >= started,
+                    "{} has a pinned-looking mtime {mtime:?} (checkout started {started:?})",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the checkout must contain files to check");
+    }
+
+    /// Mtimes of every file under a checkout excluding `.git/` (always
+    /// rewritten) and `target/` (build output, not sources).
+    fn tracked_mtimes(root: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
+        let mut mtimes = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read checkout dir") {
+                let entry = entry.expect("dir entry");
+                let path = entry.path();
+                if entry.file_type().expect("file type").is_dir() {
+                    if !matches!(entry.file_name().to_str(), Some(".git" | "target")) {
+                        pending.push(path);
+                    }
+                    continue;
+                }
+                let mtime = std::fs::metadata(&path)
+                    .expect("metadata")
+                    .modified()
+                    .expect("mtime");
+                mtimes.insert(path, mtime);
+            }
+        }
+        mtimes
+    }
+
+    #[test]
+    fn stable_checkout_preserves_target_and_tracked_mtimes() {
+        // The slot-reuse shape: two checkouts at the same SHA into the same
+        // destination with clean enabled. Stable workspaces keep `target/`
+        // across jobs, and the second checkout must not rewrite any tracked
+        // file — that mtime preservation is what makes Cargo report fresh.
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("stable-workspace");
+        let mut plan = fixture.plan(workspace.clone());
+        plan.clean = true;
+        plan.preserve_target = true;
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("first checkout succeeds");
+        let before = tracked_mtimes(&workspace);
+        assert!(!before.is_empty());
+        let artifact = workspace.join("target").join("artifact");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"fingerprint").unwrap();
+        std::fs::write(workspace.join("scratch.txt"), b"stray").unwrap();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("second checkout succeeds");
+        assert!(artifact.is_file(), "stable clean must keep target/");
+        assert!(
+            !workspace.join("scratch.txt").exists(),
+            "stable clean still removes other untracked files"
+        );
+        assert_eq!(
+            tracked_mtimes(&workspace),
+            before,
+            "same-SHA re-checkout must not rewrite tracked files"
+        );
+    }
+
+    #[test]
+    fn ephemeral_checkout_still_removes_target() {
+        // Default behavior is unchanged: without the stable flag, clean
+        // removes everything including `target/`, matching actions/checkout.
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let mut plan = fixture.plan(workspace.clone());
+        plan.clean = true;
+        assert!(!plan.preserve_target);
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("first checkout succeeds");
+        let artifact = workspace.join("target").join("artifact");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"fingerprint").unwrap();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("second checkout succeeds");
+        assert!(!artifact.exists(), "ephemeral clean must remove target/");
+    }
+
+    /// Units a plain `cargo check` compiles in `workspace`, by status line.
+    /// Hermetic: an isolated `CARGO_HOME` (no ambient config or wrappers),
+    /// offline, no incremental — the production job shape for the opt-out
+    /// path, minus the container.
+    fn cargo_check_units(workspace: &Path, cargo_home: &Path) -> Vec<String> {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let output = std::process::Command::new(cargo)
+            .arg("check")
+            .current_dir(workspace)
+            .env("CARGO_HOME", cargo_home)
+            .env("CARGO_TERM_COLOR", "never")
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_NET_OFFLINE", "true")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+            .env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("CARGO_BUILD_TARGET")
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .output()
+            .expect("spawn cargo check");
+        assert!(
+            output.status.success(),
+            "cargo check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|line| line.contains("Checking ") || line.contains("Compiling "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn stable_workspace_warm_same_sha_rebuild_compiles_nothing() {
+        // Regression pin for the BC-14 warm-build regression on the non-mbx
+        // Rust paths: a warm same-SHA rebuild into a stable workspace must
+        // compile zero units (fresh check), while a changed source must
+        // still rebuild (wall-clock soundness — no false-fresh).
+        let fixture = RepoFixture::new_cargo();
+        let workspace = fixture.root.join("stable-workspace");
+        let mut plan = fixture.plan(workspace.clone());
+        plan.clean = true;
+        plan.preserve_target = true;
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("checkout succeeds");
+        let cargo_home = fixture.root.join("cargo-home");
+        std::fs::create_dir_all(&cargo_home).unwrap();
+
+        let before = tracked_mtimes(&workspace);
+        assert!(!before.is_empty());
+        let first = cargo_check_units(&workspace, &cargo_home);
+        assert!(
+            !first.is_empty(),
+            "the fixture must compile on a cold target"
+        );
+
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("same-SHA re-checkout succeeds");
+        assert_eq!(
+            tracked_mtimes(&workspace),
+            before,
+            "same-SHA re-checkout must not rewrite tracked files"
+        );
+        let second = cargo_check_units(&workspace, &cargo_home);
+        assert!(
+            second.is_empty(),
+            "warm same-SHA rebuild must compile nothing, compiled: {second:?}"
+        );
+
+        // A changed source rebuilds: 1.1 s crosses any whole-second mtime
+        // granularity, so the edit is strictly newer on every filesystem.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let lib = workspace.join("crates/probe-build/src/lib.rs");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("\n// changed\n");
+        std::fs::write(&lib, text).unwrap();
+        let third = cargo_check_units(&workspace, &cargo_home);
+        assert!(!third.is_empty(), "changed sources must rebuild");
+    }
+
+    fn commit_count(runner: &mut ProcessCommandRunner, workspace: &Path) -> usize {
+        let result = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(workspace),
+                    "log".to_string(),
+                    "--oneline".to_string(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(result.code, 0);
+        result
+            .stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    }
+
+    fn extend_fixture_to_three_commits(fixture: &mut RepoFixture) {
+        let work = fixture.root.join("seed");
+        let mut runner = ProcessCommandRunner;
+        for content in ["two", "three"] {
+            std::fs::write(work.join("value"), content).unwrap();
+            for args in [
+                vec![
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "add".to_string(),
+                    ".".to_string(),
+                ],
+                vec![
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "commit".to_string(),
+                    "-m".to_string(),
+                    content.to_string(),
+                ],
+                vec![
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "push".to_string(),
+                    path_arg(&fixture.origin),
+                    "HEAD:master".to_string(),
+                ],
+            ] {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+            }
+        }
+        let result = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "rev-parse".to_string(),
+                    "HEAD".to_string(),
+                ],
+            )
+            .unwrap();
+        fixture.sha = result.stdout.trim().to_string();
+    }
+
+    #[test]
+    fn full_fetch_unshallows_a_reused_workspace_on_both_paths() {
+        // Stable workspaces reuse the directory: a shallow checkout leaves
+        // a shallow marker, and a later full fetch must unshallow or the new
+        // history stays shallow (stickiness across jobs).
+        let mut fixture = RepoFixture::new();
+        extend_fixture_to_three_commits(&mut fixture);
+        let mut runner = ProcessCommandRunner;
+
+        // Direct path: shallow then full without a mirror.
+        let direct = fixture.root.join("workspace-direct");
+        let mut shallow = fixture.plan(direct.clone());
+        shallow.fetch_depth = Some(1);
+        shallow.clean = true;
+        execute_checkout_with_mirror(&mut runner, &shallow, &mut Vec::new(), None, &fixture.root)
+            .unwrap();
+        assert!(
+            direct.join(".git/shallow").is_file(),
+            "shallow checkout must leave a shallow marker"
+        );
+        assert_eq!(commit_count(&mut runner, &direct), 1);
+        let mut full = fixture.plan(direct.clone());
+        full.fetch_depth = None;
+        full.clean = true;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(&mut runner, &full, &mut log, None, &fixture.root).unwrap();
+        assert!(
+            !direct.join(".git/shallow").exists(),
+            "full fetch must unshallow a reused workspace"
+        );
+        assert_eq!(commit_count(&mut runner, &direct), 3);
+        assert!(
+            log.iter().any(|line| line.contains("--unshallow")),
+            "direct full fetch on shallow must run --unshallow: {log:?}"
+        );
+
+        // Mirror path: shallow via direct (mirrors never write shallow
+        // markers), then full via the mirror, which must unshallow from
+        // the local mirror without network.
+        let mirrored = fixture.root.join("workspace-mirror");
+        let mut shallow = fixture.plan(mirrored.clone());
+        shallow.fetch_depth = Some(1);
+        shallow.clean = true;
+        execute_checkout_with_mirror(&mut runner, &shallow, &mut Vec::new(), None, &fixture.root)
+            .unwrap();
+        assert!(mirrored.join(".git/shallow").is_file());
+        let mut full = fixture.plan(mirrored.clone());
+        full.fetch_depth = None;
+        full.clean = true;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &full,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .unwrap();
+        assert!(
+            !mirrored.join(".git/shallow").exists(),
+            "mirror hydration must unshallow a reused workspace"
+        );
+        assert_eq!(commit_count(&mut runner, &mirrored), 3);
+        assert!(
+            log.iter().any(|line| line.contains("--unshallow")),
+            "mirror full fetch on shallow must run --unshallow: {log:?}"
+        );
+    }
+
+    #[test]
+    fn clone_url_change_replaces_origin_and_tree() {
+        // Same destination, different repository: the checkout must remove
+        // the old origin, add the new one, fetch, checkout --force, reset
+        // --hard, and clean — leaving the new tree and no stale files.
+        let first = RepoFixture::new();
+        let mut second = RepoFixture::new();
+        let work = second.root.join("seed");
+        let mut runner = ProcessCommandRunner;
+        std::fs::write(work.join("url-marker"), "two").unwrap();
+        for args in [
+            vec![
+                "-C".to_string(),
+                path_arg(&work),
+                "add".to_string(),
+                ".".to_string(),
+            ],
+            vec![
+                "-C".to_string(),
+                path_arg(&work),
+                "commit".to_string(),
+                "-m".to_string(),
+                "marker".to_string(),
+            ],
+            vec![
+                "-C".to_string(),
+                path_arg(&work),
+                "push".to_string(),
+                path_arg(&second.origin),
+                "HEAD:master".to_string(),
+            ],
+        ] {
+            let result = runner.run("git", &args).unwrap();
+            assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+        }
+        let result = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "rev-parse".to_string(),
+                    "HEAD".to_string(),
+                ],
+            )
+            .unwrap();
+        second.sha = result.stdout.trim().to_string();
+
+        let workspace = first.root.join("workspace-url-change");
+        let mut first_plan = first.plan(workspace.clone());
+        first_plan.clean = true;
+        first_plan.preserve_target = true;
+        execute_checkout_with_mirror(
+            &mut runner,
+            &first_plan,
+            &mut Vec::new(),
+            Some(&first.store()),
+            &first.root,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("value")).unwrap(),
+            "one"
+        );
+        assert!(!workspace.join("url-marker").exists());
+
+        let mut second_plan = second.plan(workspace.clone());
+        second_plan.clean = true;
+        second_plan.preserve_target = true;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &second_plan,
+            &mut log,
+            Some(&second.store()),
+            &first.root,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("url-marker")).unwrap(),
+            "two",
+            "the new repository tree must replace the old one"
+        );
+        let origin = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(&workspace),
+                    "remote".to_string(),
+                    "get-url".to_string(),
+                    "origin".to_string(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(origin.stdout.trim(), second_plan.clone_url);
+        let joined = log.join(
+            "
+",
+        );
+        for needle in [
+            "remote remove",
+            "remote add",
+            "fetch",
+            "checkout --force",
+            "reset --hard",
+            "clean -ffdx",
+        ] {
+            assert!(joined.contains(needle), "log must show {needle}: {log:?}");
+        }
+    }
+}

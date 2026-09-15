@@ -1,0 +1,17 @@
+[package]
+name = "velnor-workflow-contract"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# The generated-surface contract of tailrocks/velnor. The generic engine moved
+# to repo-owned generation input, so the invariants that name THIS repository
+# live here, next to the config they check, instead of inside the crate.
+#
+# Standalone on purpose: it is not a workspace member, so the generator's
+# build graph never depends on it. Its CI unit is declared in
+# .github-gen/velnor-workflow.toml, and its checks run against the checked-in
+# repository state rather than the build graph.
+
+[workspace]

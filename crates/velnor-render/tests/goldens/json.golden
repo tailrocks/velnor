@@ -1,0 +1,167 @@
+[
+  {
+    "resourceKind": "Host",
+    "schemaVersion": 1,
+    "name": "sentry",
+    "source": "LOCAL",
+    "conditions": [
+      {
+        "kind": "Ready",
+        "status": "TRUE",
+        "reason": null,
+        "message": null,
+        "lastTransitionTime": "2026-08-24T12:30:45Z"
+      }
+    ],
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "hostname": "sentry.tailrocks.internal",
+    "agentVersion": "0.1.98",
+    "labels": {
+      "pool": "warm"
+    }
+  },
+  {
+    "resourceKind": "Instance",
+    "schemaVersion": 1,
+    "name": "sentry/main",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "host": "sentry",
+    "version": "0.1.98",
+    "uptimeMs": 3723000,
+    "slotsConfigured": 4,
+    "slotsBusy": 2
+  },
+  {
+    "resourceKind": "Slot",
+    "schemaVersion": 1,
+    "name": "sentry-0",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "host": "sentry",
+    "index": 0,
+    "slotKind": "stable",
+    "phase": "waiting-for-capacity",
+    "job": null
+  },
+  {
+    "resourceKind": "RunnerRegistration",
+    "schemaVersion": 1,
+    "name": "velnor-sentry-slot-0",
+    "source": "GITHUB",
+    "conditions": [
+      {
+        "kind": "Registered",
+        "status": "TRUE",
+        "reason": null,
+        "message": null,
+        "lastTransitionTime": "2026-08-24T12:30:45Z"
+      }
+    ],
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "labels": {
+      "pool": "warm"
+    },
+    "ephemeral": false,
+    "online": true
+  },
+  {
+    "resourceKind": "Job",
+    "schemaVersion": 1,
+    "name": "job-42",
+    "source": "MERGED",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "repository": {
+      "owner": "tailrocks",
+      "name": "velnor-actions-fixture"
+    },
+    "run": "run-32714994603",
+    "workflow": "control-plane.yml",
+    "headBranch": "main",
+    "queuedMs": 4200,
+    "durationMs": 96500,
+    "conclusion": "success"
+  },
+  {
+    "resourceKind": "Run",
+    "schemaVersion": 1,
+    "name": "run-32714994603",
+    "source": "GITHUB",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "repository": {
+      "owner": "tailrocks",
+      "name": "velnor-actions-fixture"
+    },
+    "number": 84,
+    "headSha": "b211326d0e5f4a2c9a1b8d7e6f5a4b3c2d1e0f9a",
+    "headBranch": "main",
+    "event": "workflow_dispatch",
+    "status": "completed",
+    "conclusion": "success",
+    "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32714994603"
+  },
+  {
+    "resourceKind": "QueueEntry",
+    "schemaVersion": 1,
+    "name": "queue/job-43",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "position": 0,
+    "job": "job-43",
+    "waitMs": null
+  },
+  {
+    "resourceKind": "Event",
+    "schemaVersion": 1,
+    "name": "event-000123",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "sequence": 123,
+    "occurredAt": "2026-08-24T12:30:45Z",
+    "eventKind": "slot.phase-changed",
+    "subject": "slot/sentry-0",
+    "detail": "idle -> acquiring"
+  },
+  {
+    "resourceKind": "Reservation",
+    "schemaVersion": 1,
+    "name": "reservation-job-42",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "slot": "slot/sentry-1",
+    "purpose": "job-acquire",
+    "expiresAt": "2026-08-24T12:30:45Z"
+  },
+  {
+    "resourceKind": "Lease",
+    "schemaVersion": 1,
+    "name": "lease/target-store",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "holder": "instance/sentry/main",
+    "ttlMs": 30000,
+    "expiresAt": "2026-08-24T12:30:45Z"
+  },
+  {
+    "resourceKind": "Capability",
+    "schemaVersion": 1,
+    "name": "capability/actions.checkout",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "key": "actions.checkout",
+    "supported": true,
+    "details": null
+  },
+  {
+    "resourceKind": "Adapter",
+    "schemaVersion": 1,
+    "name": "adapter/actions-checkout",
+    "source": "LOCAL",
+    "lastTransitionTime": "2026-08-24T12:30:45Z",
+    "adapter": "actions/checkout",
+    "version": "v6.0.2",
+    "actions": [
+      "actions/checkout@v6"
+    ]
+  }
+]

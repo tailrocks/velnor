@@ -1,0 +1,35 @@
+Host NAME    HOSTNAME                   AGENT   LABELS  SOURCE  REASON  LAST-TRANSITION
+sentry  sentry.tailrocks.internal  0.1.98  pool    LOCAL   -       2026-08-24T12:30:45Z
+
+Instance NAME         HOST    VERSION  UPTIME  SLOTS  BUSY  SOURCE  REASON  LAST-TRANSITION
+sentry/main  sentry  0.1.98   1h02m   4      2     LOCAL   -       2026-08-24T12:30:45Z
+
+Slot NAME      HOST    INDEX  CLASS   PHASE                 JOB  SOURCE  REASON  LAST-TRANSITION
+sentry-0  sentry  0      stable  waiting-for-capacity  -    LOCAL   -       2026-08-24T12:30:45Z
+
+RunnerRegistration NAME                  LABELS  EPHEMERAL  ONLINE  SOURCE  REASON  LAST-TRANSITION
+velnor-sentry-slot-0  pool    false      true    GITHUB  -       2026-08-24T12:30:45Z
+
+Job NAME    REPO                              RUN              WORKFLOW           QUEUED  DURATION  CONCLUSION  SOURCE  REASON  LAST-TRANSITION
+job-42  tailrocks/velnor-actions-fixture  run-32714994603  control-plane.yml  4.2s    1m36s     success     MERGED  -       2026-08-24T12:30:45Z
+
+Run NAME             REPO                              NUMBER  BRANCH  EVENT              STATUS     CONCLUSION  SOURCE  REASON  LAST-TRANSITION
+run-32714994603  tailrocks/velnor-actions-fixture  84      main    workflow_dispatch  completed  success     GITHUB  -       2026-08-24T12:30:45Z
+
+QueueEntry NAME          POSITION  JOB     WAIT  SOURCE  REASON  LAST-TRANSITION
+queue/job-43  0         job-43  -     LOCAL   -       2026-08-24T12:30:45Z
+
+Event NAME          SEQ  OCCURRED              EVENT               SUBJECT        SOURCE  REASON  LAST-TRANSITION
+event-000123  123  2026-08-24T12:30:45Z  slot.phase-changed  slot/sentry-0  LOCAL   -       2026-08-24T12:30:45Z
+
+Reservation NAME                SLOT           PURPOSE      EXPIRES               SOURCE  REASON  LAST-TRANSITION
+reservation-job-42  slot/sentry-1  job-acquire  2026-08-24T12:30:45Z  LOCAL   -       2026-08-24T12:30:45Z
+
+Lease NAME                HOLDER                TTL  EXPIRES               SOURCE  REASON  LAST-TRANSITION
+lease/target-store  instance/sentry/main  30s  2026-08-24T12:30:45Z  LOCAL   -       2026-08-24T12:30:45Z
+
+Capability NAME                         KEY               SUPPORTED  SOURCE  REASON  LAST-TRANSITION
+capability/actions.checkout  actions.checkout  true       LOCAL   -       2026-08-24T12:30:45Z
+
+Adapter NAME                      ADAPTER           VERSION  ACTIONS              SOURCE  REASON  LAST-TRANSITION
+adapter/actions-checkout  actions/checkout  v6.0.2   actions/checkout@v6  LOCAL   -       2026-08-24T12:30:45Z
