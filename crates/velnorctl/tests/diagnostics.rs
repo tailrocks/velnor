@@ -58,6 +58,8 @@ fn bundle_writes_local_evidence_without_a_control_context() {
         .args([
             "--context",
             "missing-local-context",
+            "--instance",
+            "diagnostics-test",
             "--output",
             "json",
             "diagnostics",
@@ -68,6 +70,7 @@ fn bundle_writes_local_evidence_without_a_control_context() {
         .env("VELNOR_CONFIG_DIR", &config)
         .env("VELNOR_STORAGE_ROOT", &storage)
         .env("GITHUB_TOKEN", "diagnostic-test-token")
+        .env("GH_TOKEN", "diagnostic-gh-token")
         .output()
         .expect("spawn velnorctl");
     assert!(
@@ -81,6 +84,16 @@ fn bundle_writes_local_evidence_without_a_control_context() {
     assert_eq!(summary["schemaVersion"], 1);
     assert_eq!(summary["members"], 5);
     assert_eq!(summary["commandSuccess"], false);
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&tar_member(&archive, "metadata.json")).expect("metadata JSON");
+    assert_eq!(
+        metadata["configDir"],
+        config
+            .join("hosts/diagnostics-test")
+            .to_string_lossy()
+            .as_ref()
+    );
 
     let listing = Command::new("tar")
         .args(["-tf"])
@@ -111,6 +124,9 @@ fn bundle_writes_local_evidence_without_a_control_context() {
     assert!(!archive_bytes
         .windows(b"diagnostic-test-token".len())
         .any(|window| window == b"diagnostic-test-token"));
+    assert!(!archive_bytes
+        .windows(b"diagnostic-gh-token".len())
+        .any(|window| window == b"diagnostic-gh-token"));
 
     fs::remove_dir_all(root).ok();
 }

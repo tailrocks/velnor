@@ -2,39 +2,33 @@
 //!
 //! The bundle invokes the existing CLI surfaces in a child process so its
 //! evidence cannot drift from the commands an operator actually runs. The
-//! child receives no credential environment variables and every output stream
-//! is redirected to a bounded temporary file before the process is waited on.
+//! child receives no credential environment variables and both output streams
+//! are drained into bounded in-memory buffers before the process is waited on.
 
 use std::{
     env,
-    ffi::{OsStr, OsString},
-    fs::{self, File, OpenOptions},
-    io::{self, Read},
+    ffi::OsString,
+    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    process::{Child, Command, Stdio},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-
-use crate::{CommandError, BIN_NAME};
+use crate::{host, CommandError, BIN_NAME};
 
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
-const TEMP_FILE_ATTEMPTS: usize = 32;
-const CREDENTIAL_ENV: [&str; 5] = [
+const OUTPUT_TRUNCATION_MARKER: &[u8] = b"\n[output truncated]\n";
+pub(crate) const CREDENTIAL_ENV: [&str; 6] = [
     "GITHUB_TOKEN",
+    "GH_TOKEN",
     "VELNOR_PAT",
     "ACTIONS_RUNTIME_TOKEN",
     "RUNNER_TOKEN",
     "VELNOR_GITHUB_TOKEN",
 ];
-
-static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 /// One bounded invocation of an existing operator command.
 #[derive(Debug, Clone, Serialize)]
@@ -56,119 +50,150 @@ impl CommandEvidence {
     }
 }
 
-/// Resolve the same user-local configuration root used by the macOS CLI.
-pub(crate) fn resolve_config_dir() -> Result<PathBuf, CommandError> {
-    resolve_config_dir_from(
-        env::var_os("VELNOR_CONFIG_DIR").as_deref(),
-        env::var_os("HOME").as_deref().map(Path::new),
-    )
+/// Resolve the same per-host configuration directory used by `host start`.
+pub(crate) fn resolve_config_dir(instance: Option<&str>) -> Result<PathBuf, CommandError> {
+    host::ensure_dev_canonical_storage()?;
+    let name = instance
+        .map(str::to_owned)
+        .unwrap_or_else(host::default_host_name);
+    host::resolve_default_host_config_dir(&name)
 }
 
-fn resolve_config_dir_from(
-    configured: Option<&OsStr>,
-    home: Option<&Path>,
-) -> Result<PathBuf, CommandError> {
-    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(configured));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = home.ok_or_else(|| {
-            CommandError::new(
-                velnor_model::ExitClass::Usage,
-                "config.home_missing",
-                "HOME is not set; pass VELNOR_CONFIG_DIR pointing at the directory containing execution.toml",
-            )
-        })?;
-        Ok(home.join("Library/Application Support/velnor"))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = home;
-        Ok(PathBuf::from("/etc/velnor"))
-    }
-}
-
-/// Capture one invocation of this binary with a bounded wall-clock budget.
-pub(crate) fn capture(args: &[OsString], timeout: Duration) -> CommandEvidence {
-    let command_evidence = std::iter::once(OsString::from(BIN_NAME))
-        .chain(args.iter().cloned())
-        .map(|part| part.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
+/// Capture several invocations concurrently under one shared deadline.
+pub(crate) fn capture_parallel(
+    commands: Vec<(String, Vec<OsString>)>,
+    timeout: Duration,
+) -> Vec<(String, CommandEvidence)> {
     let executable = match env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            return CommandEvidence {
-                command: command_evidence,
-                status: None,
-                stdout: String::new(),
-                stderr: String::new(),
-                timed_out: false,
-                error: Some(format!("resolve {BIN_NAME}: {error}")),
-            };
+            return commands
+                .into_iter()
+                .map(|(name, args)| {
+                    let command = command_evidence(BIN_NAME, &args);
+                    (
+                        name,
+                        failed(command, format!("resolve {BIN_NAME}: {error}")),
+                    )
+                })
+                .collect();
         }
     };
+    capture_parallel_executable(&executable, BIN_NAME, commands, timeout)
+}
 
-    let (stdout_path, stdout_file) = match create_temp_file("stdout") {
-        Ok(value) => value,
-        Err(error) => return failed(command_evidence, format!("create stdout capture: {error}")),
-    };
-    let (stderr_path, stderr_file) = match create_temp_file("stderr") {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = fs::remove_file(&stdout_path);
-            return failed(command_evidence, format!("create stderr capture: {error}"));
-        }
-    };
+fn capture_parallel_executable(
+    executable: &Path,
+    display_name: &str,
+    commands: Vec<(String, Vec<OsString>)>,
+    timeout: Duration,
+) -> Vec<(String, CommandEvidence)> {
+    let deadline = deadline_after(timeout);
+    thread::scope(|scope| {
+        let handles = commands
+            .into_iter()
+            .map(|(name, args)| {
+                let name_for_panic = name.clone();
+                let handle = scope.spawn(move || {
+                    (
+                        name,
+                        capture_executable(executable, display_name, &args, deadline),
+                    )
+                });
+                (name_for_panic, handle)
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|(name, handle)| {
+                handle.join().unwrap_or_else(|_| {
+                    (
+                        name.clone(),
+                        failed(
+                            vec![display_name.to_owned()],
+                            format!("capture thread for {name} panicked"),
+                        ),
+                    )
+                })
+            })
+            .collect()
+    })
+}
 
+fn capture_executable(
+    executable: &Path,
+    display_name: &str,
+    args: &[OsString],
+    deadline: Instant,
+) -> CommandEvidence {
+    let command_evidence = command_evidence(display_name, args);
+    if Instant::now() >= deadline {
+        return timed_out(command_evidence);
+    }
     let mut process = Command::new(executable);
     process
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for name in CREDENTIAL_ENV {
         process.env_remove(name);
     }
+    configure_process_group(&mut process);
     let mut child = match process.spawn() {
         Ok(child) => child,
-        Err(error) => {
-            let _ = fs::remove_file(&stdout_path);
-            let _ = fs::remove_file(&stderr_path);
-            return failed(command_evidence, format!("spawn {BIN_NAME}: {error}"));
-        }
+        Err(error) => return failed(command_evidence, format!("spawn {display_name}: {error}")),
     };
 
-    let started = Instant::now();
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_process_group(&mut child);
+            let _ = child.wait();
+            return failed(
+                command_evidence,
+                format!("{display_name} did not provide a stdout pipe"),
+            );
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_process_group(&mut child);
+            let _ = child.wait();
+            return failed(
+                command_evidence,
+                format!("{display_name} did not provide a stderr pipe"),
+            );
+        }
+    };
+    let stdout_reader = thread::spawn(|| read_capture(stdout));
+    let stderr_reader = thread::spawn(|| read_capture(stderr));
     let mut timed_out = false;
     let mut error = None;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
-            Ok(None) if started.elapsed() < timeout => {
-                thread::sleep(Duration::from_millis(20));
-            }
             Ok(None) => {
-                timed_out = true;
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    timed_out = true;
+                    terminate_process_group(&mut child);
+                    let _ = child.wait();
+                    break None;
+                };
+                thread::sleep(remaining.min(Duration::from_millis(20)));
             }
             Err(wait_error) => {
-                let _ = child.kill();
+                terminate_process_group(&mut child);
                 let _ = child.wait();
-                error = Some(format!("wait for {BIN_NAME}: {wait_error}"));
+                error = Some(format!("wait for {display_name}: {wait_error}"));
                 break None;
             }
         }
     };
 
-    let stdout = read_capture(&stdout_path);
-    let stderr = read_capture(&stderr_path);
-    let _ = fs::remove_file(&stdout_path);
-    let _ = fs::remove_file(&stderr_path);
+    let stdout = join_capture(stdout_reader, display_name, "stdout", &mut error);
+    let stderr = join_capture(stderr_reader, display_name, "stderr", &mut error);
     CommandEvidence {
         command: command_evidence,
         status,
@@ -176,6 +201,28 @@ pub(crate) fn capture(args: &[OsString], timeout: Duration) -> CommandEvidence {
         stderr,
         timed_out,
         error,
+    }
+}
+
+fn command_evidence(display_name: &str, args: &[OsString]) -> Vec<String> {
+    std::iter::once(display_name.to_owned())
+        .chain(args.iter().map(|part| part.to_string_lossy().into_owned()))
+        .collect()
+}
+
+fn deadline_after(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or(now)
+}
+
+fn timed_out(command: Vec<String>) -> CommandEvidence {
+    CommandEvidence {
+        command,
+        status: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: true,
+        error: None,
     }
 }
 
@@ -190,48 +237,87 @@ fn failed(command: Vec<String>, error: String) -> CommandEvidence {
     }
 }
 
-fn create_temp_file(label: &str) -> io::Result<(PathBuf, File)> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let process = std::process::id();
-    for attempt in 0..TEMP_FILE_ATTEMPTS {
-        let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let path = env::temp_dir().join(format!(
-            ".velnorctl-diagnostic-{label}-{process}-{now}-{sequence}-{attempt}"
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "exhausted unique diagnostic capture paths",
-    ))
+#[derive(Debug)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    error: Option<String>,
 }
 
-fn read_capture(path: &Path) -> String {
-    let mut bytes = Vec::new();
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) => return format!("cannot read captured output: {error}"),
-    };
-    let read_limit = u64::try_from(MAX_CAPTURE_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
-    if file.take(read_limit).read_to_end(&mut bytes).is_err() {
-        return "cannot read captured output".to_owned();
+fn read_capture<R: Read>(mut reader: R) -> CapturedOutput {
+    let mut bytes = Vec::with_capacity(MAX_CAPTURE_BYTES);
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut total = 0_usize;
+    let mut truncated = false;
+    let mut error = None;
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let next_total = total.saturating_add(read);
+                if total < MAX_CAPTURE_BYTES {
+                    let keep = (MAX_CAPTURE_BYTES - total).min(read);
+                    bytes.extend_from_slice(&buffer[..keep]);
+                }
+                truncated |= next_total > MAX_CAPTURE_BYTES;
+                total = next_total;
+            }
+            Err(read_error) => {
+                error = Some(read_error.to_string());
+                break;
+            }
+        }
     }
-    if bytes.len() > MAX_CAPTURE_BYTES {
-        bytes.truncate(MAX_CAPTURE_BYTES);
-        bytes.extend_from_slice(b"\n[output truncated]\n");
+    if truncated {
+        let content_limit = MAX_CAPTURE_BYTES.saturating_sub(OUTPUT_TRUNCATION_MARKER.len());
+        bytes.truncate(content_limit);
+        bytes.extend_from_slice(OUTPUT_TRUNCATION_MARKER);
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    CapturedOutput { bytes, error }
+}
+
+fn join_capture(
+    handle: thread::JoinHandle<CapturedOutput>,
+    display_name: &str,
+    stream: &str,
+    error: &mut Option<String>,
+) -> String {
+    let captured = handle.join().unwrap_or_else(|_| CapturedOutput {
+        bytes: Vec::new(),
+        error: Some("capture reader panicked".to_owned()),
+    });
+    if let Some(read_error) = captured.error
+        && error.is_none()
+    {
+        *error = Some(format!("read {display_name} {stream}: {read_error}"));
+    }
+    String::from_utf8_lossy(&captured.bytes).into_owned()
+}
+
+#[cfg(unix)]
+fn configure_process_group(process: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    process.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_process: &mut Command) {}
+
+fn terminate_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        if let Ok(pid) = libc::pid_t::try_from(pid)
+            && pid > 1
+        {
+            // SAFETY: the child was configured with its own process group;
+            // targeting the negative pid reaches that child and descendants.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
 }
 
 #[cfg(test)]
@@ -243,24 +329,117 @@ fn read_capture(path: &Path) -> String {
 )]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn explicit_config_root_wins_over_home() {
-        let configured = OsStr::new("/tmp/velnor-config");
+        let configured = Path::new("/tmp/velnor-config");
         assert_eq!(
-            resolve_config_dir_from(Some(configured), Some(Path::new("/Users/test")))
-                .expect("config root"),
-            PathBuf::from("/tmp/velnor-config")
+            host::host_config_dir_from_root(configured, "velnor-test"),
+            configured.join("hosts/velnor-test")
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn macos_default_config_root_is_user_local() {
+    fn default_config_layout_is_per_host() {
         assert_eq!(
-            resolve_config_dir_from(None, Some(Path::new("/Users/test"))).expect("config root"),
-            PathBuf::from("/Users/test/Library/Application Support/velnor")
+            host::host_config_dir_from_root(
+                Path::new("/Users/test/Library/Application Support/velnor/runner"),
+                "velnor-local-test"
+            ),
+            PathBuf::from(
+                "/Users/test/Library/Application Support/velnor/runner/hosts/velnor-local-test"
+            )
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_bounds_output_while_draining_the_pipe() {
+        let args = vec![
+            OsString::from("-c"),
+            OsString::from("head -c 1048576 /dev/zero"),
+        ];
+        let evidence = capture_executable(
+            Path::new("/bin/sh"),
+            "/bin/sh",
+            &args,
+            deadline_after(Duration::from_secs(5)),
+        );
+        assert_eq!(evidence.status, Some(0));
+        assert!(!evidence.timed_out);
+        assert!(evidence.stdout.len() <= MAX_CAPTURE_BYTES);
+        assert!(evidence.stdout.contains("[output truncated]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_descendants_in_the_child_process_group() {
+        let marker = env::temp_dir().join(format!(
+            "velnorctl-descendant-pid-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let script = format!(
+            "sleep 30 & child=$!; printf '%s' \"$child\" > '{}'; wait",
+            marker.display()
+        );
+        let args = vec![OsString::from("-c"), OsString::from(script)];
+        let evidence = capture_executable(
+            Path::new("/bin/sh"),
+            "/bin/sh",
+            &args,
+            deadline_after(Duration::from_millis(250)),
+        );
+        assert!(evidence.timed_out);
+        let pid = fs::read_to_string(&marker)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("pid number");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            // SAFETY: signal zero only probes the test descendant.
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if !alive {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: signal zero only probes the test descendant.
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "descendant survived timeout"
+        );
+        fs::remove_file(marker).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parallel_capture_uses_one_shared_deadline() {
+        let commands = (0..3)
+            .map(|index| {
+                (
+                    format!("probe-{index}"),
+                    vec![OsString::from("-c"), OsString::from("sleep 2")],
+                )
+            })
+            .collect();
+        let started = Instant::now();
+        let results = capture_parallel_executable(
+            Path::new("/bin/sh"),
+            "/bin/sh",
+            commands,
+            Duration::from_millis(250),
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|(_, evidence)| evidence.timed_out));
     }
 
     #[test]
