@@ -7137,7 +7137,11 @@ mod tests {
         let start = pr
             .find(&marker)
             .unwrap_or_else(|| panic!("ci-required must validate velnor docker caller: {pr}"));
-        let block = &pr[start..pr[start..].find("else").map(|offset| start + offset).unwrap_or(pr.len())];
+        let block = &pr[start
+            ..pr[start..]
+                .find("else")
+                .map(|offset| start + offset)
+                .unwrap_or(pr.len())];
         assert!(
             block.contains("success|skipped"),
             "trust-gated velnor docker skip must satisfy ci-required without a fork PR: {block}"
