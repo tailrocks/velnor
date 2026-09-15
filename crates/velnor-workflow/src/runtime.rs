@@ -4329,7 +4329,7 @@ default_branch = "main"
 runners = "both"
 
 [workflow]
-version_bump_units = ["rust-velnor-workflow-contract"]
+version_bump_units = ["rust-contract"]
 
 [[unit]]
 id = "rust-root"
@@ -4342,7 +4342,7 @@ velnor_pr_commands = ["true"]
 velnor_full_commands = ["true"]
 
 [[unit]]
-id = "rust-velnor-workflow-contract"
+id = "rust-contract"
 kind = "rust"
 root = "crates/velnor-workflow-contract"
 watch = ["crates/velnor-workflow-contract/**", "Cargo.lock", "crates/velnor-workflow-contract/Cargo.lock"]
@@ -5005,7 +5005,7 @@ velnor_full_commands = ["markdownlint docs"]
         assert!(!selection
             .units
             .iter()
-            .any(|unit| unit.id == "rust-velnor-workflow-contract"));
+            .any(|unit| unit.id == "rust-contract"));
         assert!(!selection
             .units
             .iter()
@@ -5027,7 +5027,7 @@ velnor_full_commands = ["markdownlint docs"]
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         let expected = BTreeSet::from([
-            "rust-velnor-workflow-contract".to_owned(),
+            "rust-contract".to_owned(),
             "rust-contract-workspace".to_owned(),
         ]);
         assert_eq!(selected_id_set(&selection), expected);
@@ -5054,7 +5054,7 @@ velnor_full_commands = ["markdownlint docs"]
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         let expected = BTreeSet::from([
             "rust-root".to_owned(),
-            "rust-velnor-workflow-contract".to_owned(),
+            "rust-contract".to_owned(),
             "rust-root-workspace".to_owned(),
             "rust-contract-workspace".to_owned(),
         ]);
@@ -5077,7 +5077,7 @@ velnor_full_commands = ["markdownlint docs"]
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         let expected = BTreeSet::from([
-            "rust-velnor-workflow-contract".to_owned(),
+            "rust-contract".to_owned(),
             "rust-contract-workspace".to_owned(),
         ]);
         assert_eq!(selected_id_set(&selection), expected);
