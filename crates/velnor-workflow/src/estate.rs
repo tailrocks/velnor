@@ -23,13 +23,29 @@ pub(crate) fn approved_velnor_runner_contract_matches(
     labels: &[&str],
     group: Option<&str>,
 ) -> bool {
-    if labels != APPROVED_VELNOR_RUNNER_LABELS {
+    approved_velnor_runner_contract_matches_with_trusted(labels, group, None)
+}
+
+pub(crate) fn approved_velnor_runner_contract_matches_with_trusted(
+    labels: &[&str],
+    group: Option<&str>,
+    trusted_label: Option<&str>,
+) -> bool {
+    if labels == APPROVED_VELNOR_RUNNER_LABELS {
+        return match group {
+            None => true,
+            Some(name) => name == APPROVED_VELNOR_RUNNER_GROUP,
+        };
+    }
+    let Some(trusted_label) = trusted_label else {
+        return false;
+    };
+    if group.is_some() {
         return false;
     }
-    match group {
-        None => true,
-        Some(name) => name == APPROVED_VELNOR_RUNNER_GROUP,
-    }
+    labels.len() == APPROVED_VELNOR_RUNNER_LABELS.len() + 1
+        && labels[..APPROVED_VELNOR_RUNNER_LABELS.len()] == *APPROVED_VELNOR_RUNNER_LABELS
+        && labels.last() == Some(&trusted_label)
 }
 
 /// The runner selector the generator's earliest generated surfaces embedded
@@ -415,5 +431,17 @@ mod tests {
             &["self-hosted", "other-label"],
             None
         ));
+        assert!(super::approved_velnor_runner_contract_matches_with_trusted(
+            &["self-hosted", "velnor-target-mvp", "velnor-host-docker"],
+            None,
+            Some("velnor-host-docker")
+        ));
+        assert!(
+            !super::approved_velnor_runner_contract_matches_with_trusted(
+                &["self-hosted", "velnor-target-mvp", "velnor-host-docker"],
+                None,
+                None
+            )
+        );
     }
 }

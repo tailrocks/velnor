@@ -1698,30 +1698,36 @@ mod tests {
         match phase {
             JobPhase2::Assigned => {}
             JobPhase2::Running => {
-                assert!(!journal
-                    .apply(Event::JobStarted {
-                        job_id: job,
-                        generation,
-                    })
-                    .expect("start")
-                    .rejected);
+                assert!(
+                    !journal
+                        .apply(Event::JobStarted {
+                            job_id: job,
+                            generation,
+                        })
+                        .expect("start")
+                        .rejected
+                );
             }
             JobPhase2::Completing => {
-                assert!(!journal
-                    .apply(Event::JobStarted {
-                        job_id: job.clone(),
-                        generation,
-                    })
-                    .expect("start")
-                    .rejected);
-                assert!(!journal
-                    .apply(Event::JobTerminalResult {
-                        job_id: job,
-                        generation,
-                        conclusion: "success".into(),
-                    })
-                    .expect("terminal")
-                    .rejected);
+                assert!(
+                    !journal
+                        .apply(Event::JobStarted {
+                            job_id: job.clone(),
+                            generation,
+                        })
+                        .expect("start")
+                        .rejected
+                );
+                assert!(
+                    !journal
+                        .apply(Event::JobTerminalResult {
+                            job_id: job,
+                            generation,
+                            conclusion: "success".into(),
+                        })
+                        .expect("terminal")
+                        .rejected
+                );
             }
         }
     }

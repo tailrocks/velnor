@@ -2312,6 +2312,9 @@ fn toml_bool(value: Option<&toml::Value>, field: &str) -> Result<Option<bool>, G
 
 fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
     let path = root.join(DEFAULT_CONFIG);
+    // Advisory sparse-checkout omits `.github/ci`. Do not default the
+    // contract on a missing project.toml: generation toml still carries
+    // runners, labels, and the PR-gate opt-in.
     let runtime = match fs::read_to_string(&path) {
         Ok(content) => Some(toml::from_str::<toml::Value>(&content).map_err(|error| {
             GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
@@ -5085,6 +5088,59 @@ jobs:
         assert!(
             result.is_ok(),
             "generation-only dual-lane fixture rejected: {result:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_generated_pr_gates_when_project_toml_is_absent() -> Result<(), Box<dyn Error>>
+    {
+        // Advisory sparse-checkout never fetches `.github/ci`. Defaulting the
+        // contract there used to skip the generated PR-gate matcher.
+        let group = crate::estate::approved_velnor_runner_group();
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let generation_config = format!(
+            "schema = 1\n\n[workflow]\nrunners = \"velnor\"\ndefault_branch = \"main\"\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\npull_request_on_velnor = true\n"
+        );
+        let runner = format!("{{ group: {group}, labels: [{yaml_labels}] }}");
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))";
+        let root = policy_fixture(
+            "velnor-pr-project-toml-absent",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::remove_file(root.join(".github/ci/project.toml"))?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            &generation_config,
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            format!(
+                r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{{{ {gate} }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+",
+            ),
+        )?;
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION);
+        assert!(
+            result.is_ok(),
+            "generation-only Advisory fixture rejected: {result:?}"
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
