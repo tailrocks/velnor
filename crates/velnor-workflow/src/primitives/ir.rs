@@ -1167,10 +1167,37 @@ fn workflow_dispatch_inputs(
     )
 }
 
-fn aggregate_concurrency_block(ir: &WorkflowIr, cancel_in_progress: &str) -> String {
-    let group = ir.velnor_concurrency_group.as_deref().unwrap_or(
-        "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
-    );
+fn aggregate_concurrency_kind_suffix(kind: WorkflowKind) -> &'static str {
+    match kind {
+        WorkflowKind::PullRequest => "pr",
+        WorkflowKind::Main => "main",
+        WorkflowKind::Nightly => "nightly",
+    }
+}
+
+fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
+    ir.velnor_concurrency_group.as_deref().map_or_else(
+        || {
+            "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+                .to_owned()
+        },
+        |base| {
+            let suffix = aggregate_concurrency_kind_suffix(kind);
+            if kind == WorkflowKind::PullRequest {
+                format!("{base}-{suffix}-${{{{ github.event.pull_request.number || github.ref }}}}")
+            } else {
+                format!("{base}-{suffix}")
+            }
+        },
+    )
+}
+
+fn aggregate_concurrency_block(
+    ir: &WorkflowIr,
+    kind: WorkflowKind,
+    cancel_in_progress: &str,
+) -> String {
+    let group = aggregate_concurrency_group(ir, kind);
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
 }
 
@@ -1388,7 +1415,7 @@ impl WorkflowIr {
             self.automatic,
             &self.default_dispatch_runner,
         );
-        let concurrency = aggregate_concurrency_block(self, cancel_in_progress);
+        let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\n"
@@ -1500,7 +1527,7 @@ impl WorkflowIr {
             self.automatic,
             &self.default_dispatch_runner,
         );
-        let concurrency = aggregate_concurrency_block(self, cancel_in_progress);
+        let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
