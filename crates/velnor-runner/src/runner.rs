@@ -2771,16 +2771,53 @@ fn controller_lifecycle_for_daemon(
     }
 }
 
+fn invalidate_drain_hint_cache() {
+    if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
+        *cache = None;
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn reset_drain_hint_cache_for_tests() {
     // Test-only: a blocking lock is fine here (and must not silently skip
     // the reset). The production path above uses `try_lock` exclusively.
-    if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
-        *cache = None;
-    }
+    invalidate_drain_hint_cache();
     if let Ok(mut cache) = ADMISSION_HINT_CACHE.lock() {
         *cache = None;
     }
+}
+
+/// systemd `Restart=always` starts a new process after a Type=notify drain
+/// exit. The previous process latched a durable journal drain so slots would
+/// stop. If this process honors that leftover marker it returns `Ok(())`
+/// before `READY=1` and systemd reports `Failed with result 'protocol'`.
+///
+/// `Journal::clear_drain` is the restart/resume ownership transfer. The
+/// in-process SIGTERM latch is unchanged.
+fn reclaim_stale_journal_drain_for_supervised_start(journal_path: &Path) {
+    if draining() {
+        return;
+    }
+    if !journal_drain_hint(journal_path) {
+        return;
+    }
+    match velnor_control::journal::Journal::open(journal_path) {
+        Ok(mut journal) => match journal.clear_drain() {
+            Ok(true) => eprintln!(
+                "cleared leftover journal drain from a previous process; this start owns the journal"
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "cannot clear leftover journal drain {}: {error}",
+                journal_path.display()
+            ),
+        },
+        Err(error) => eprintln!(
+            "cannot open journal {} to clear leftover drain: {error}",
+            journal_path.display()
+        ),
+    }
+    invalidate_drain_hint_cache();
 }
 
 /// Emit `drain.completed` exactly once per process, from whichever exit
@@ -2936,6 +2973,11 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // Journal path for the durable drain leg of the daemon gates below.
     // `None` (unresolvable config dir) degrades them to the static latch.
     let drain_journal = daemon_drain_journal(&args);
+    if supervised {
+        if let Some(path) = drain_journal.as_deref() {
+            reclaim_stale_journal_drain_for_supervised_start(path);
+        }
+    }
 
     // Reclaim credentials abandoned by a prior daemon before any slot can
     // accept a job. This runs once per daemon process, outside pass retries.
@@ -15949,6 +15991,59 @@ mod tests {
         // No journal path degrades to the static latch however the latch is
         // set, so latch-only paths observe no behavior change.
         assert_eq!(effective_draining(None), draining());
+    }
+
+    #[test]
+    fn supervised_start_clears_leftover_journal_drain_from_prior_process() {
+        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        let dir = unique_temp_dir("stale-drain-reclaim");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        let mut journal = velnor_control::journal::Journal::open(&path).unwrap();
+        assert!(journal.set_drain(14).unwrap());
+        drop(journal);
+        reset_drain_hint_cache_for_tests();
+        assert!(journal_drain_hint(&path));
+        assert!(effective_draining(Some(&path)));
+
+        reclaim_stale_journal_drain_for_supervised_start(&path);
+
+        assert!(
+            !journal_drain_hint(&path),
+            "leftover drain must not survive a supervised start"
+        );
+        assert!(
+            !effective_draining(Some(&path)),
+            "Type=notify must not see a stale drain and exit before READY"
+        );
+        DRAINING.store(previous_draining, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn supervised_start_does_not_clear_drain_while_this_process_is_draining() {
+        let previous_draining = DRAINING.swap(true, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        let dir = unique_temp_dir("live-drain-kept");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        let mut journal = velnor_control::journal::Journal::open(&path).unwrap();
+        assert!(journal.set_drain(3).unwrap());
+        drop(journal);
+        reset_drain_hint_cache_for_tests();
+
+        reclaim_stale_journal_drain_for_supervised_start(&path);
+
+        reset_drain_hint_cache_for_tests();
+        assert!(
+            journal_drain_hint(&path),
+            "SIGTERM drain in this process must keep the journal marker"
+        );
+        DRAINING.store(previous_draining, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
