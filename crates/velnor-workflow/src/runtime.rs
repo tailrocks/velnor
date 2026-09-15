@@ -1985,6 +1985,7 @@ pub(crate) fn enforce_policy_with_revision(
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
+    let policy_excludes = configured_policy_excludes(root);
     let velnor_policy = configured_velnor_policy(root)?;
     let mut found_policy_entrypoint = false;
     let mut failures = PolicyFindings::default();
@@ -2007,6 +2008,13 @@ pub(crate) fn enforce_policy_with_revision(
         }
         if path == policy_entrypoint {
             found_policy_entrypoint = true;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| policy_excludes.contains(name))
+        {
+            continue;
         }
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow", &path, &error))?;
@@ -2240,6 +2248,20 @@ fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorErro
         GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
     })?;
     Ok(value.get("workflow").cloned())
+}
+
+fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
+    crate::config::discover(root)
+        .ok()
+        .flatten()
+        .map(|config| {
+            config
+                .policy_exclude_workflows()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
