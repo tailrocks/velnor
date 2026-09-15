@@ -822,7 +822,6 @@ jobs:
   velnor-rust-unit-collector:
     name: rust-unit-collector
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1310,7 +1309,7 @@ jobs:
   velnor-rust-velnor-bench:
     name: rust-velnor-bench
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-model, velnor-rust-velnor-runner]
+    needs: [velnor-rust-velnor-model, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1798,7 +1797,7 @@ jobs:
   velnor-rust-velnor-client:
     name: rust-velnor-client
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-model]
+    needs: [velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2286,7 +2285,7 @@ jobs:
   velnor-rust-velnor-control:
     name: rust-velnor-control
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-model]
+    needs: [velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2774,7 +2773,6 @@ jobs:
   velnor-rust-velnor-model:
     name: rust-velnor-model
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3262,7 +3260,7 @@ jobs:
   velnor-rust-velnor-render:
     name: rust-velnor-render
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-model]
+    needs: [velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3750,7 +3748,7 @@ jobs:
   velnor-rust-velnor-runner:
     name: rust-velnor-runner
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-control, velnor-rust-velnor-model]
+    needs: [velnor-rust-velnor-control, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4238,7 +4236,7 @@ jobs:
   velnor-rust-velnor-tools:
     name: rust-velnor-tools
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-client, velnor-rust-velnor-model]
+    needs: [velnor-rust-velnor-client, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4726,7 +4724,7 @@ jobs:
   velnor-rust-velnor-workflow:
     name: rust-velnor-workflow
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-runner]
+    needs: [velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -5701,7 +5699,7 @@ jobs:
   velnor-rust-velnorctl:
     name: rust-velnorctl
     if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
-    needs: [velnor-rust-production-topology, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
+    needs: [velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"

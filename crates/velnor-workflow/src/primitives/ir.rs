@@ -800,32 +800,6 @@ fn cargo_lockfile_root(member: &Unit) -> String {
     }
 }
 
-/// Rust units with a workspace Cargo lockfile mutate the same managed target
-/// root on Velnor. Keep those mutations behind the existing workspace-wide
-/// check, without turning the workspace gate into a self-dependency or
-/// changing the semantic `depends_on` graph.
-fn velnor_rust_workspace_check_needs(lane: RunnerMode, unit: &Unit, units: &[Unit]) -> Vec<String> {
-    if lane != RunnerMode::Velnor
-        || unit.kind != UnitKind::Rust
-        || unit.workspace_check
-        || !cargo_network_is_restricted(unit)
-    {
-        return Vec::new();
-    }
-    let lockfile_root = cargo_lockfile_root(unit);
-    units
-        .iter()
-        .filter(|candidate| {
-            candidate.id != unit.id
-                && candidate.kind == UnitKind::Rust
-                && candidate.workspace_check
-                && lane_supports_unit(lane, candidate)
-                && cargo_lockfile_root(candidate) == lockfile_root
-        })
-        .map(|candidate| unit_job_id(lane, &candidate.id))
-        .collect()
-}
-
 fn append_unique_needs(needs: &mut Vec<String>, additional: impl IntoIterator<Item = String>) {
     for need in additional {
         if !needs.contains(&need) {
@@ -2198,12 +2172,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if uses_lane_cargo_prep {
             needs.push(format!("{}-prepare-cargo-sources", lane.as_str()));
         }
-        if input_unit.is_some() {
-            append_unique_needs(
-                &mut needs,
-                velnor_rust_workspace_check_needs(lane, unit, &self.units),
-            );
-        }
         append_unique_needs(
             &mut needs,
             velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units),
@@ -2798,16 +2766,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             .filter(|unit| lane_supports_unit(lane, unit))
         {
             let id = unit_job_id(lane, &unit.id);
-            let mut needs = unit_needs(
+            let needs = unit_needs(
                 lane,
                 unit,
                 include_policy,
                 self.velnor_rust_needs,
                 &self.units,
-            );
-            append_unique_needs(
-                &mut needs,
-                velnor_rust_workspace_check_needs(lane, unit, &self.units),
             );
             let runner = self.runner_for_unit(lane, unit);
             let job_name = yaml_scalar(&crate::comparison_job_name(lane, unit));
