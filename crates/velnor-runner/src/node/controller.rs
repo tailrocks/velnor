@@ -2092,11 +2092,7 @@ async fn recover_one_orphaned_job(
             let cleanup = if pending_completion {
                 match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
-                    crate::runner::replay_recorded_completion(
-                        &slot_dir,
-                        &stored,
-                        &args.state_dir,
-                    ),
+                    crate::runner::replay_recorded_completion(&slot_dir, &stored, &args.state_dir),
                     "replay recorded completion during orphan recovery",
                 )
                 .await
@@ -2107,13 +2103,14 @@ async fn recover_one_orphaned_job(
                             "Warning: completion replay for job {} failed: {error:#}",
                             job.job_id.0
                         );
-                        if let Some(row) = journal
-                            .materialized_state()?
-                            .outbox
-                            .into_iter()
-                            .find(|row| {
-                                row.job_id == job.job_id && row.generation == job.generation
-                            })
+                        if let Some(row) =
+                            journal
+                                .materialized_state()?
+                                .outbox
+                                .into_iter()
+                                .find(|row| {
+                                    row.job_id == job.job_id && row.generation == job.generation
+                                })
                         {
                             abandon_if_budget_spent(args, journal, &row)?;
                         }
@@ -4689,10 +4686,7 @@ mod tests {
         assert_eq!(completing.phase, JobPhase2::Completing);
         assert!(completing.terminal_conclusion.is_none());
         assert!(
-            state
-                .jobs
-                .iter()
-                .all(|job| job.job_id != running_job),
+            state.jobs.iter().all(|job| job.job_id != running_job),
             "the other slot must still reclaim after the completing job is skipped: {:?}",
             state.jobs
         );
@@ -4884,10 +4878,7 @@ mod tests {
             .find(|job| job.job_id == completing_job)
             .expect("completing job is retried, not reconstructed");
         assert_eq!(completing.phase, JobPhase2::Completing);
-        assert_eq!(
-            completing.terminal_conclusion.as_deref(),
-            Some("success")
-        );
+        assert_eq!(completing.terminal_conclusion.as_deref(), Some("success"));
         let outbox = state
             .outbox
             .iter()
@@ -4904,10 +4895,7 @@ mod tests {
             "replay failure must not reconstruct or clear the in-flight marker"
         );
         assert!(
-            state
-                .jobs
-                .iter()
-                .all(|job| job.job_id != running_job),
+            state.jobs.iter().all(|job| job.job_id != running_job),
             "the other slot must still reclaim after replay failure: {:?}",
             state.jobs
         );
