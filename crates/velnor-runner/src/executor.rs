@@ -7,7 +7,7 @@ use crate::{
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
-    container::{JobContainerSpec, Shell},
+    container::{JobContainerSpec, Shell, JOB_DONE_SENTINEL},
     docker::client::{
         classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
     },
@@ -34,12 +34,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::{
+    fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    io::{AsRawFd, FromRawFd},
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
-    fs::{self, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -1180,23 +1183,82 @@ fn pending_looks_like_workflow_command(pending: &[u8]) -> bool {
 }
 
 /// Tell the container PID 1 supervisor the job is terminal so `tail -F`
-/// cannot keep an otherwise finished container alive.
-fn mark_job_container_done(container: &JobContainerSpec) {
-    let path = container.job_done_host_path();
-    if let Some(parent) = path.parent()
-        && let Err(error) = fs::create_dir_all(parent)
-    {
+/// cannot keep an otherwise finished container alive. The marker is created
+/// exclusively through a verified directory fd: a job-controlled symlink or
+/// replacement path can never redirect this write.
+fn mark_job_container_done(container: &JobContainerSpec) -> bool {
+    if let Err(error) = container.prepare_job_done_mount() {
         eprintln!(
-            "forensics.lifecycle: failed to create job.done parent {}: {error}",
-            parent.display()
+            "forensics.lifecycle: refusing unsafe completion control directory {}: {error}",
+            container.job_done_host_dir().display()
         );
-        return;
+        return false;
     }
-    if let Err(error) = fs::write(&path, b"done\n") {
+    let path = container.job_done_host_path();
+    let result = write_job_done_marker(&path);
+    if let Err(error) = result {
         eprintln!(
-            "forensics.lifecycle: failed to write job.done sentinel {}: {error}",
+            "forensics.lifecycle: refusing unsafe job.done sentinel {}: {error}",
             path.display()
         );
+        return false;
+    }
+    true
+}
+
+fn write_job_done_marker(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "job.done path has no parent")
+    })?;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "job.done path is not a normalized absolute path",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)?;
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "job.done parent is not a private runner-owned directory",
+            ));
+        }
+        let marker_name = std::ffi::CString::new(JOB_DONE_SENTINEL).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "job.done name contains NUL")
+        })?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                marker_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut marker = unsafe { File::from_raw_fd(fd) };
+        marker.write_all(b"done\n")?;
+        marker.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let mut marker = OpenOptions::new().write(true).create_new(true).open(path)?;
+        marker.write_all(b"done\n")?;
+        marker.sync_all()
     }
 }
 
@@ -15875,9 +15937,42 @@ mod tests {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        mark_job_container_done(&spec);
+        assert!(mark_job_container_done(&spec));
         let path = spec.job_done_host_path();
         assert_eq!(fs::read_to_string(&path).unwrap(), "done\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_job_container_done_rejects_symlink_sentinel() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        spec.prepare_job_done_mount().unwrap();
+        let target = temp.join("must-not-change");
+        fs::write(&target, "unchanged\n").unwrap();
+        std::os::unix::fs::symlink(&target, spec.job_done_host_path()).unwrap();
+
+        assert!(!mark_job_container_done(&spec));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "unchanged\n");
+        assert!(fs::symlink_metadata(spec.job_done_host_path())
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_job_container_done_rejects_symlink_control_directory() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let redirected = temp.join("redirected-control");
+        fs::create_dir(&redirected).unwrap();
+        std::os::unix::fs::symlink(&redirected, spec.job_done_host_dir()).unwrap();
+
+        assert!(!mark_job_container_done(&spec));
+        assert!(!redirected.join(JOB_DONE_SENTINEL).exists());
     }
 
     fn assert_uuid(value: &str) {

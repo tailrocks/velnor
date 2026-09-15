@@ -7,6 +7,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
 use sha2::{Digest, Sha256};
 
 use crate::container::host_budget::{BuildkitSize, HostBudget, SlotBudget};
@@ -23,16 +26,19 @@ const JOB_NOFILE_LIMIT: &str = "65536:65536";
 const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 const JOB_WORKFLOW_CLI: &str = "/usr/local/bin/velnor-workflow";
 const JOB_WORKFLOW_CLI_SHA256: &str = "/usr/local/share/velnor/velnor-workflow.sha256";
+const JOB_DONE_CONTAINER_DIR: &str = "/__velnor";
 
 /// PID 1: tail the live console so `docker logs` mirrors GitHub, then exit
-/// when Velnor writes the job-owned done sentinel. `exec tail -F` alone made
+/// when Velnor writes the runner-owned done sentinel. `exec tail -F` alone made
 /// finished/cancelled jobs immortal — the tailer outlived every job process.
 /// A virtiofs hiccup can kill `tail`; respawn it until `job.done` rather
-/// than exiting PID 1 and tearing down in-flight `docker exec`s.
-pub(crate) const JOB_CONTAINER_PID1: &str = "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; while [ ! -f /__t/_velnor/job.done ]; do if ! kill -0 \"$tail_pid\" 2>/dev/null; then echo '[velnor] console tail exited; restarting logger' >&2; tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; fi; sleep 1; done; kill \"$tail_pid\" 2>/dev/null; wait \"$tail_pid\" 2>/dev/null; exit 0";
+/// than exiting PID 1 and tearing down in-flight `docker exec`s. The
+/// completion directory is a separate read-only mount, not part of the
+/// job-writable temp tree.
+pub(crate) const JOB_CONTAINER_PID1: &str = "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; while [ ! -f /__velnor/job.done ]; do if ! kill -0 \"$tail_pid\" 2>/dev/null; then echo '[velnor] console tail exited; restarting logger' >&2; tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; fi; sleep 1; done; kill \"$tail_pid\" 2>/dev/null; wait \"$tail_pid\" 2>/dev/null; exit 0";
 
-/// Host-relative sentinel that ends PID 1. Written on every terminal path
-/// before `docker rm` so a stalled remove cannot leave `tail -F` running.
+/// Name of the host-relative sentinel that ends PID 1. The host path is in a
+/// private sibling directory, never beneath the job's RW temp mount.
 pub(crate) const JOB_DONE_SENTINEL: &str = "job.done";
 
 /// Daemon-owned runner identity. Dropped from step env by exact match in
@@ -504,6 +510,7 @@ impl JobContainerSpec {
     pub fn start_args(&self) -> io::Result<PreparedDockerArgs> {
         self.validate_docker_host_path_mapping()?;
         let image = self.image_reference()?;
+        self.prepare_job_done_mount()?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
         let args = &mut command;
         args.flags([
@@ -521,6 +528,11 @@ impl JobContainerSpec {
             self.mount_arg(&self.workspace_host, "/__w"),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/__t"),
+            "-v".into(),
+            format!(
+                "{}:ro",
+                self.mount_arg(&self.job_done_host_dir(), JOB_DONE_CONTAINER_DIR)
+            ),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
@@ -669,7 +681,7 @@ impl JobContainerSpec {
 
         // PID 1 supervises the live console tail. `tail -F` alone would
         // keep the container alive after the job is terminal; the supervisor
-        // exits when Velnor writes `/__t/_velnor/job.done`.
+        // exits when Velnor writes the runner-owned `/__velnor/job.done`.
         command
             .image(&image)
             .operands(["sh", "-c", JOB_CONTAINER_PID1])
@@ -1465,9 +1477,73 @@ impl JobContainerSpec {
         })
     }
 
+    /// Host directory of the sentinel that ends the container's PID 1
+    /// supervisor. It is a sibling of the job temp directory, so the job's
+    /// RW `/__t` mount cannot create or replace it.
+    pub(crate) fn job_done_host_dir(&self) -> PathBuf {
+        let temp_name = self
+            .temp_host
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("temp");
+        self.temp_host
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(".{temp_name}-velnor-control"))
+    }
+
+    /// Ensure Docker receives an existing, private directory for the
+    /// read-only completion mount. Docker otherwise creates a missing `-v`
+    /// source as a directory with daemon-dependent semantics.
+    pub(crate) fn prepare_job_done_mount(&self) -> io::Result<()> {
+        if !self.temp_host.is_absolute() || has_parent_component(&self.temp_host) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "job temp path is not a normalized absolute path",
+            ));
+        }
+        if self.temp_host.parent().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "job temp path has no parent for private completion control",
+            ));
+        }
+        fs::create_dir_all(&self.temp_host)?;
+        let dir = self.job_done_host_dir();
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(&dir)?;
+        if !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "private completion control path is not a directory: {}",
+                    dir.display()
+                ),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            if metadata.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "private completion control directory is not runner-owned: {}",
+                        dir.display()
+                    ),
+                ));
+            }
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
     /// Host path of the sentinel that ends the container's PID 1 supervisor.
     pub(crate) fn job_done_host_path(&self) -> PathBuf {
-        self.temp_host.join("_velnor").join(JOB_DONE_SENTINEL)
+        self.job_done_host_dir().join(JOB_DONE_SENTINEL)
     }
 
     fn mbx_slot_key(&self) -> String {
@@ -2728,12 +2804,20 @@ mod tests {
                 "macOS guest Docker must mount the resolved host socket, got {args:?}"
             );
         }
-        // PID 1 supervises the console tail and exits on the job.done sentinel.
+        // PID 1 supervises the console tail and exits only on the private
+        // read-only completion sentinel.
         assert_eq!(args.last().map(String::as_str), Some(JOB_CONTAINER_PID1));
         assert!(
-            JOB_CONTAINER_PID1.contains("/__t/_velnor/job.done"),
-            "PID 1 must terminate when the job-owned done sentinel appears"
+            JOB_CONTAINER_PID1.contains("/__velnor/job.done"),
+            "PID 1 must terminate when the runner-owned done sentinel appears"
         );
+        assert!(!JOB_CONTAINER_PID1.contains("/__t/_velnor/job.done"));
+        assert!(has_read_only_mount(
+            &args,
+            &job.job_done_host_dir(),
+            "/__velnor"
+        ));
+        assert!(!job.job_done_host_path().starts_with(&job.temp_host));
         assert!(
             !JOB_CONTAINER_PID1.contains("exec tail"),
             "exec tail -F as PID 1 keeps finished containers alive"
