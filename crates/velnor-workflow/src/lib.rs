@@ -8151,7 +8151,13 @@ channel = "stable"
         assert!(action.contains("total_seconds:"));
         assert!(action.contains("jq -nc"));
         assert!(action.contains("VELNOR_CI_REPORT "));
+        assert!(action.contains("VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}"));
         assert!(action.contains("VELNOR_RUN_STARTED_AT"));
+        assert!(action.contains("VELNOR_JOB_QUEUED_AT"));
+        assert!(action.contains("queue_source"));
+        assert!(action.contains("job_ended=\"$(date +%s)\""));
+        assert!(!action.contains("VELNOR_RUN_STARTED_AT: ${{ github.run_started_at }}"));
+        assert!(!action.contains("echo \"VELNOR_JOB_ENDED_EPOCH=$(date +%s)\""));
         assert!(!action.contains("gh api"));
         assert!(!action.contains("GH_TOKEN"));
         assert!(!action.contains("GH_REPO"));
@@ -10798,6 +10804,10 @@ channel = "stable"
         );
         assert!(workflow.contains("backend: local"));
         assert!(workflow.contains("Prepare Cargo sources"));
+        assert!(
+            workflow.contains("Cargo sources warm; skipping fetch"),
+            "Velnor lane prep must probe host-persistent stores before fetching"
+        );
     }
 
     #[test]
@@ -11104,11 +11114,11 @@ channel = "stable"
             "prep must fetch the workspace root and the independent lockfile tree"
         );
         assert!(
-            !workflow.contains("cd -- 'crates/model'\n          cargo fetch --locked"),
+            !workflow.contains("cd -- 'crates/model'"),
             "workspace members must not fetch per crate: {workflow}"
         );
         assert!(
-            workflow.contains("cd -- 'crates/contract'\n          cargo fetch --locked"),
+            workflow.contains("cd -- 'crates/contract'\n          if cargo metadata --locked --offline"),
             "independent lockfile trees keep their own fetch root"
         );
     }

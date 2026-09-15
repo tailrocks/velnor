@@ -1780,12 +1780,18 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     unit.id
                 );
             }
+            let skip_when_offline_ready = lane == RunnerMode::Velnor
+                && unit
+                    .cache
+                    .as_ref()
+                    .is_some_and(super::cache::cache_is_velnor_host_persistent);
             render_cargo_source_preparation(
                 &mut output,
                 &[unit],
                 &unit.id,
                 false,
                 cargo_cache_restored,
+                skip_when_offline_ready,
             );
             let cargo_offline = checks_env(unit);
             let _ = writeln!(

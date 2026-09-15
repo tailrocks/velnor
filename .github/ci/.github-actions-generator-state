@@ -6,7 +6,7 @@ scan	fddf59dcb67898af
 generator	33
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
-.github/actions/report-velnor-ci-outcomes/action.yml	05a0b2a663f08430
+.github/actions/report-velnor-ci-outcomes/action.yml	b822b97f8df27d3c
 .github/actions/setup-velnor-workflow/action.yml	4fd2a3a993721411
 .github/ci/project.toml	0fea45e16e881c07
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
@@ -18,8 +18,8 @@ generator	33
 .github/workflows/ci-unit-docker.yml	80365ea231916776
 .github/workflows/ci-unit-docs.yml	f7e64aaed8a3de10
 .github/workflows/ci-unit-opentofu.yml	f192d1e63c90e5c9
-.github/workflows/ci-unit-rust.yml	a35e30c2c9e5a278
+.github/workflows/ci-unit-rust.yml	1034d42a893a3e9a
 .github/workflows/maintenance.yml	a76d5d29553bc4bc
 .github/workflows/nightly.yml	9015b5a7285ff18e
 .github/workflows/preview.yml	50a028e96dba119b
-.github/workflows/release.yml	1ed7d36ef868dd92
+.github/workflows/release.yml	349bc467515a8198
