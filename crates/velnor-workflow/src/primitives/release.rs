@@ -3055,6 +3055,10 @@ mod tests {
         // The publisher verifies before it publishes; the rolling preview and
         // the signer stay tag- and attestation-driven.
         let release = rendered(&surface, "release.yml");
+        assert!(
+            !release.contains("cargo fetch --locked      - name:"),
+            "cargo fetch must terminate the run block before the next step: {release}"
+        );
         assert!(release.contains("name: Release"), "{release}");
         assert!(release.contains("Publish GitHub release"), "{release}");
         assert!(release.contains("Verify archive checksums"), "{release}");

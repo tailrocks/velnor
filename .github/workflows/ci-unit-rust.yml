@@ -22,7 +22,7 @@ on:
 jobs:
   velnor-prepare-cargo-sources:
     name: "Velnor / Prepare Cargo sources"
-    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') || contains(format(',{0},', inputs.selected_units), ',rust-production-topology,') }}
+    if: ${{ (contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') || contains(format(',{0},', inputs.selected_units), ',rust-production-topology,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 20
     steps:
@@ -50,19 +50,6 @@ jobs:
             printf 'units=%s\n' "$SELECTION_UNITS"
             printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
           } > .velnor-ci-selection/velnor-ci-selection
-      - name: Restore Rust toolchain
-        id: rustup-toolchain
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.rustup
-          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
-      - name: Provision Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install
-          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Prepare Cargo sources
         env:
           MISE_AUTO_INSTALL: "false"
