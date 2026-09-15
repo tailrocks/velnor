@@ -167,8 +167,9 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
 /// Reconnect an explicitly restarted on-demand host to its durable state.
 /// `host start` is the operator's ownership boundary: after the PID guard is
 /// installed, a previous graceful drain marker may be cleared and a durable
-/// `draining` intent is changed to `ready` with OCC. Active jobs block the
-/// restart so a new controller cannot race a surviving worker.
+/// `draining` intent is changed to `ready` with OCC. Live workers still block
+/// the restart so a new controller cannot race a surviving process. Dead
+/// persisted jobs are left for controller orphan recovery.
 fn resume_host_state(
     config_dir: &Path,
     state_db: &Path,

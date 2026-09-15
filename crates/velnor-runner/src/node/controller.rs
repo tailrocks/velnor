@@ -4473,6 +4473,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completing_job_without_payload_does_not_abort_orphan_reclaim() {
+        let dir = metrics_test_dir("completing-no-payload-reclaim");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let generation = Generation::INITIAL;
+        let completing_slot = SlotId("velnor-1".to_owned());
+        let running_slot = SlotId("velnor-2".to_owned());
+        let completing_job = JobId("job-completing".to_owned());
+        let running_job = JobId("job-running".to_owned());
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 2 },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        for slot_id in [completing_slot.clone(), running_slot.clone()] {
+            for event in [
+                Event::PermitReserved {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::ExecutorProven {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::SessionLive {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::RegistrationIntended {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::Registered {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::ReadyAttempt {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+            ] {
+                assert!(!journal.apply(event).unwrap().rejected);
+            }
+        }
+        for (slot_id, job_id, message_id) in [
+            (
+                completing_slot.clone(),
+                completing_job.clone(),
+                "msg-completing",
+            ),
+            (running_slot.clone(), running_job.clone(), "msg-running"),
+        ] {
+            for event in [
+                Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: job_id.clone(),
+                    generation,
+                    message_id: message_id.into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
+                },
+                Event::JobOwned {
+                    job_id: job_id.clone(),
+                    slot_id: slot_id.clone(),
+                    attempt: 1,
+                    generation,
+                    worker: format!("worker-{}", job_id.0),
+                    accepted_unix: 1,
+                },
+                Event::JobStarted {
+                    job_id: job_id.clone(),
+                    generation,
+                },
+            ] {
+                assert!(!journal.apply(event).unwrap().rejected);
+            }
+        }
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: completing_job.clone(),
+                    generation,
+                    payload_sha256: velnor_control::journal::payload_checksum(b"payload"),
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+        rusqlite::Connection::open(dir.join("journal.db"))
+            .unwrap()
+            .execute("DELETE FROM outbox", [])
+            .unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
+        let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        std::fs::write(
+            slot_dir.join("in-flight-job.json"),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": completing_job.0,
+                "run_service_url": "https://example.invalid/run-service",
+                "billing_owner_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let stale = stale_pid();
+        for isolation in [
+            completing_job.0.as_str(),
+            running_job.0.as_str(),
+            "wait-velnor-1",
+            "wait-velnor-2",
+        ] {
+            cleanup::write_owned_pid(&dir, isolation, generation.0, stale).unwrap();
+        }
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 2,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+        )
+        .await
+        .expect("missing completion payload must not abort the controller cycle");
+
+        let state = journal.materialized_state().unwrap();
+        let completing = state
+            .jobs
+            .iter()
+            .find(|job| job.job_id == completing_job)
+            .expect("completing job is retried, not discarded");
+        assert_eq!(completing.phase, JobPhase2::Completing);
+        assert!(completing.terminal_conclusion.is_none());
+        assert!(
+            state.jobs.iter().all(|job| job.job_id != running_job),
+            "the other slot must still reclaim after the completing job is skipped: {:?}",
+            state.jobs
+        );
+        assert_eq!(
+            state
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == running_slot)
+                .map(|slot| slot.phase),
+            Some(SlotPhase2::Ready)
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
     async fn marker_only_in_flight_job_reclaims_once_worker_and_waiter_are_dead() {
         let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("dead-waiter");
         cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
