@@ -6,7 +6,7 @@ description: Emit VELNOR_CI_REPORT telemetry and a step summary from the unit lo
 
 inputs:
   job_label:
-    description: Actions API job name for queue-time lookup
+    description: Stable Actions job label included in the telemetry record
     required: true
 
 runs:
@@ -16,8 +16,7 @@ runs:
       shell: bash
       env:
         VELNOR_JOB_NAME: ${{ inputs.job_label }}
-        GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
+        VELNOR_RUN_STARTED_AT: ${{ github.run_started_at }}
       run: |
         set -uo pipefail
         echo "VELNOR_JOB_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
@@ -50,17 +49,11 @@ runs:
         total="$(phase_seconds "$job_started" "$job_ended")"
         queue=""
         job_name="${VELNOR_JOB_NAME:-}"
-        if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-          run_started="$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq '.run_started_at // empty' 2>/dev/null || true)"
-          jobs_json="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" 2>/dev/null || true)"
-          if [[ -n "$job_name" && -n "$run_started" ]]; then
-            job_started_at="$(printf '%s' "$jobs_json" | jq -r --arg name "$job_name" '.jobs[]? | select(.name == $name) | .started_at' 2>/dev/null | head -n1 || true)"
-            if [[ -n "$job_started_at" ]]; then
-              queue="$(jq -n --arg job "$job_started_at" --arg run "$run_started" '($job | fromdateiso8601) - ($run | fromdateiso8601)' 2>/dev/null || true)"
-            fi
-          fi
-          if [[ -z "$queue" && -n "$run_started" && "$job_started" =~ ^[0-9]+$ ]]; then
-            queue="$(jq -n --argjson job "$job_started" --arg run "$run_started" '($job - ($run | fromdateiso8601))' 2>/dev/null || true)"
+        run_started="${VELNOR_RUN_STARTED_AT:-}"
+        if command -v jq >/dev/null 2>&1 && [[ -n "$run_started" && "$job_started" =~ ^[0-9]+$ ]]; then
+          queue_candidate="$(jq -nr --argjson job "$job_started" --arg run "$run_started" 'try ($job - ($run | fromdateiso8601)) catch empty' 2>/dev/null || true)"
+          if [[ "$queue_candidate" =~ ^[0-9]+$ ]]; then
+            queue="$queue_candidate"
           fi
         fi
         if [[ -z "$job_name" ]]; then

@@ -8149,7 +8149,10 @@ channel = "stable"
         assert!(action.contains("total_seconds:"));
         assert!(action.contains("jq -nc"));
         assert!(action.contains("VELNOR_CI_REPORT "));
-        assert!(action.contains("command -v gh"));
+        assert!(action.contains("VELNOR_RUN_STARTED_AT"));
+        assert!(!action.contains("gh api"));
+        assert!(!action.contains("GH_TOKEN"));
+        assert!(!action.contains("GH_REPO"));
     }
 
     #[test]
