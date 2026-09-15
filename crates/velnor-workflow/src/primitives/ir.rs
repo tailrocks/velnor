@@ -21,7 +21,8 @@ use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_setup, hosted_mold_setup,
     kind_reusable_lane_display_name,
     kind_unit_workflow_shard_file, lane_supports_unit, nested_unit_workflow_file,
-    prepare_cargo_caller_job_id, rendered_cache_values, sidebar_group_name, stack_group_job_id,
+    is_prepare_cargo_caller_job_id, prepare_cargo_caller_job_id_for_file, rendered_cache_values,
+    sidebar_group_name, stack_group_job_id,
     unit_group, unit_group_job_id, unit_job_display_name, unit_job_id, unit_needs, velnor_runner,
     velnor_runner_group, velnor_rust_dependency_needs, workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
@@ -33,24 +34,8 @@ use crate::{
 
 /// GitHub rejects reusable workflow files above this size.
 pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
-/// Leave headroom for parser overhead and future pin growth.
-const KIND_WORKFLOW_SHARD_BUDGET: usize = 480_000;
-/// GitHub rejects collapsed verify jobs once inlined unit steps exceed this budget.
-const COLLAPSED_VERIFY_STEP_BUDGET: usize = 80;
-
-fn collapsed_verify_job_id(base: &str, shard_index: usize) -> String {
-    if shard_index == 0 {
-        base.to_owned()
-    } else {
-        format!("{base}-{}", shard_index + 1)
-    }
-}
-
-fn count_collapsed_verify_steps(body: &str) -> usize {
-    body.lines()
-        .filter(|line| line.starts_with("      - name:"))
-        .count()
-}
+/// Leave headroom below GitHub's parsed reusable-workflow object limit (~240 KiB).
+const KIND_WORKFLOW_SHARD_BUDGET: usize = 120_000;
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
@@ -1972,10 +1957,11 @@ impl WorkflowIr {
         conditions.push(format!(
             "contains(format(',{{0}},', needs.plan.outputs.units), ',{sample_unit},')"
         ));
+        let job_id = prepare_cargo_caller_job_id_for_file(file);
         let _ = writeln!(
             output,
             "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      lane: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
-            prepare_cargo_caller_job_id(),
+            job_id,
             crate::control_job_name("Prepare Cargo"),
             conditions.join(" && "),
             needs.join(", "),
@@ -2012,7 +1998,10 @@ impl WorkflowIr {
         }
         append_unique_needs(&mut needs, extra_needs.iter().cloned());
         if lane == RunnerMode::Velnor && self.kind_file_needs_prepare_cargo(&caller.file) {
-            append_unique_needs(&mut needs, [prepare_cargo_caller_job_id().to_owned()]);
+            append_unique_needs(
+                &mut needs,
+                [prepare_cargo_caller_job_id_for_file(&caller.file)],
+            );
         }
         append_unique_needs(
             &mut needs,
@@ -2026,10 +2015,10 @@ impl WorkflowIr {
             conditions.push("needs.policy.result == 'success'".to_owned());
         }
         if lane == RunnerMode::Velnor && self.kind_file_needs_prepare_cargo(&caller.file) {
-            conditions.push(
-                "(needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped')"
-                    .to_owned(),
-            );
+            let prep_job = prepare_cargo_caller_job_id_for_file(&caller.file);
+            conditions.push(format!(
+                "(needs.{prep_job}.result == 'success' || needs.{prep_job}.result == 'skipped')"
+            ));
         }
         for dependency in velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units)
         {
@@ -2124,7 +2113,10 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                caller_jobs.push((prepare_cargo_caller_job_id().to_owned(), unit_id.to_owned()));
+                caller_jobs.push((
+                    prepare_cargo_caller_job_id_for_file(file),
+                    unit_id.to_owned(),
+                ));
             }
             for caller in self.unit_lane_callers(unit, file) {
                 caller_jobs.push((caller.job_id, caller.unit_id));
@@ -2188,7 +2180,7 @@ impl WorkflowIr {
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         for (job_id, unit_id) in &caller_jobs {
-            if job_id == prepare_cargo_caller_job_id() {
+            if is_prepare_cargo_caller_job_id(job_id) {
                 let _ = writeln!(
                     output,
                     "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$result\" != success ]]; then\n              echo \"selected CI prerequisite {job_id} did not pass: $result\" >&2\n              exit 1\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI prerequisite {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
@@ -2530,7 +2522,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let github_members =
             self.collapsed_lane_members(members, contracts, RunnerMode::Github, None);
         if !github_members.is_empty() {
-            self.render_collapsed_lane_verify_shards(
+            self.render_collapsed_lane_verify_job(
                 output,
                 &github_members,
                 contracts,
@@ -2545,7 +2537,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let velnor_trusted =
             self.collapsed_lane_members(members, contracts, RunnerMode::Velnor, Some(true));
         if !velnor_plain.is_empty() {
-            self.render_collapsed_lane_verify_shards(
+            self.render_collapsed_lane_verify_job(
                 output,
                 &velnor_plain,
                 contracts,
@@ -2557,7 +2549,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         if !velnor_trusted.is_empty() {
             let sample = velnor_trusted[0];
-            self.render_collapsed_lane_verify_shards(
+            self.render_collapsed_lane_verify_job(
                 output,
                 &velnor_trusted,
                 contracts,
@@ -2565,67 +2557,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "verify-velnor-trusted",
                 RunnerMode::Velnor.display_name(),
                 self.runner_for_unit(RunnerMode::Velnor, sample),
-            );
-        }
-    }
-
-    fn render_collapsed_lane_verify_shards(
-        &self,
-        output: &mut String,
-        members: &[&Unit],
-        contracts: Option<&BTreeMap<String, UnitContract>>,
-        lane: RunnerMode,
-        base_job_id: &str,
-        display_name: &str,
-        runs_on: String,
-    ) {
-        if members.is_empty() {
-            return;
-        }
-        let mut shard: Vec<&Unit> = Vec::new();
-        let mut shard_index = 0_usize;
-        for member in members {
-            let mut trial = shard.clone();
-            trial.push(*member);
-            let mut trial_body = String::new();
-            self.render_collapsed_lane_verify_job(
-                &mut trial_body,
-                &trial,
-                contracts,
-                lane,
-                base_job_id,
-                display_name,
-                runs_on.clone(),
-            );
-            if !shard.is_empty()
-                && count_collapsed_verify_steps(&trial_body) > COLLAPSED_VERIFY_STEP_BUDGET
-            {
-                let job_id = collapsed_verify_job_id(base_job_id, shard_index);
-                self.render_collapsed_lane_verify_job(
-                    output,
-                    &shard,
-                    contracts,
-                    lane,
-                    &job_id,
-                    display_name,
-                    runs_on.clone(),
-                );
-                shard_index += 1;
-                shard = vec![*member];
-            } else {
-                shard = trial;
-            }
-        }
-        if !shard.is_empty() {
-            let job_id = collapsed_verify_job_id(base_job_id, shard_index);
-            self.render_collapsed_lane_verify_job(
-                output,
-                &shard,
-                contracts,
-                lane,
-                &job_id,
-                display_name,
-                runs_on,
             );
         }
     }

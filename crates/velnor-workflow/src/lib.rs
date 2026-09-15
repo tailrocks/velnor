@@ -2213,6 +2213,24 @@ pub(crate) fn prepare_cargo_caller_job_id() -> &'static str {
     "prepare-cargo"
 }
 
+/// One prepare-cargo caller per kind shard file; the base shard keeps `prepare-cargo`.
+pub(crate) fn prepare_cargo_caller_job_id_for_file(file: &str) -> String {
+    let stem = file.strip_suffix(".yml").unwrap_or(file);
+    if let Some((_, shard)) = stem.rsplit_once('-')
+        && shard.chars().all(|c| c.is_ascii_digit())
+    {
+        return format!("prepare-cargo-{shard}");
+    }
+    prepare_cargo_caller_job_id().to_owned()
+}
+
+pub(crate) fn is_prepare_cargo_caller_job_id(job_id: &str) -> bool {
+    job_id == prepare_cargo_caller_job_id()
+        || job_id
+            .strip_prefix("prepare-cargo-")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
 pub(crate) fn nested_unit_workflow_file(unit: &Unit) -> String {
     unit.workflow_file
         .clone()
@@ -9228,18 +9246,34 @@ channel = "stable"
             crate::generated_files(&scanned.config),
             "generate workflow files",
         );
-        let ci_units = must_some(
-            generated.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
-            "Rust unit workflow",
+        let rust_unit_workflows = generated
+            .iter()
+            .filter(|(path, _)| {
+                path.file_name().is_some_and(|name| {
+                    name.to_str().is_some_and(|name| {
+                        name.starts_with("ci-unit-rust") && name.ends_with(".yml")
+                    })
+                })
+            })
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !rust_unit_workflows.is_empty(),
+            "Rust kind reusable shards must be generated"
         );
         assert!(
-            ci_units.contains("  verify-github:"),
-            "Rust kind reusable must keep a collapsed GitHub verify job: {ci_units}"
+            rust_unit_workflows
+                .iter()
+                .any(|workflow| workflow.contains("  verify-github:")),
+            "Rust kind reusable must keep a collapsed GitHub verify job"
         );
         assert!(
-            ci_units.contains("  verify-velnor:"),
-            "Rust kind reusable must keep a collapsed Velnor verify job: {ci_units}"
+            rust_unit_workflows
+                .iter()
+                .any(|workflow| workflow.contains("  verify-velnor:")),
+            "Rust kind reusable must keep a collapsed Velnor verify job"
         );
+        let rust_units_surface = rust_unit_workflows.join("\n");
         for unit in scanned
             .config
             .units
@@ -9248,8 +9282,8 @@ channel = "stable"
         {
             let id = &unit.id;
             assert!(
-                ci_units.contains(&format!("inputs.unit == '{id}'")),
-                "native verification unit lost its collapsed lane guard: {id}: {ci_units}"
+                rust_units_surface.contains(&format!("inputs.unit == '{id}'")),
+                "native verification unit lost its collapsed lane guard: {id}"
             );
         }
         let ci_pr = must_some(
@@ -10406,7 +10440,7 @@ channel = "stable"
                 .cloned(),
             "fixture rust unit",
         );
-        // KIND_WORKFLOW_SHARD_BUDGET is 480 KiB; each both-lane rust unit is
+        // KIND_WORKFLOW_SHARD_BUDGET is 120 KiB; each both-lane rust unit is
         // roughly 15 KiB. Thirty extra units overflow into ci-unit-rust-2.yml.
         for index in 0..32 {
             let mut unit = rust.clone();
