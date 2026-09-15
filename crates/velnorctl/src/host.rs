@@ -8,8 +8,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use velnor_control::journal::Journal;
+use velnor_control::lifecycle::LifecycleService;
+use velnor_control::ports::{MutationKind, MutationPort, MutationRequest};
+use velnor_control::store::Store;
 use velnor_model::ExitClass;
 
 use crate::commands::{HostBootstrapImageArgs, HostCommand, HostStartArgs};
@@ -91,8 +96,8 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
 
     let trust_scope = env::var("VELNOR_TRUST_SCOPE").unwrap_or_else(|_| "untrusted".into());
     let daemon = DaemonArgs {
-        state_db: Some(state_db),
-        config_dir: Some(config_dir),
+        state_db: Some(state_db.clone()),
+        config_dir: Some(config_dir.clone()),
         url: Some(url),
         pat: github_pat(),
         name: Some(name.clone()),
@@ -133,6 +138,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         )
     })?;
     let _pid_guard = HostProcessGuard::install(&instance_dir, &name)?;
+    resume_host_state(&config_dir, &state_db, &name)?;
     println!("  process_pid      {}", std::process::id());
 
     runtime::run_daemon(daemon).await.map_err(|error| {
@@ -142,6 +148,142 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
             format!("unable to start on-demand host: {error}"),
         )
     })
+}
+
+/// Reconnect an explicitly restarted on-demand host to its durable state.
+/// `host start` is the operator's ownership boundary: after the PID guard is
+/// installed, a previous graceful drain marker may be cleared and a durable
+/// `draining` intent is changed to `ready` with OCC. Active jobs block the
+/// restart so a new controller cannot race a surviving worker.
+fn resume_host_state(
+    config_dir: &Path,
+    state_db: &Path,
+    api_instance: &str,
+) -> Result<(), CommandError> {
+    let journal_path = config_dir.join("journal.db");
+    if !journal_path.is_file() {
+        return Ok(());
+    }
+    let mut journal = Journal::open(&journal_path).map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.journal_unavailable",
+            format!(
+                "cannot inspect {} before reconnect: {error}",
+                journal_path.display()
+            ),
+        )
+    })?;
+    let journal_state = journal.materialized_state().map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.journal_unavailable",
+            format!(
+                "cannot read {} before reconnect: {error}",
+                journal_path.display()
+            ),
+        )
+    })?;
+    if journal_state
+        .jobs
+        .iter()
+        .any(|job| job.phase.occupies_slot())
+    {
+        return Err(CommandError::new(
+            ExitClass::Conflict,
+            "host.active_jobs",
+            "cannot reconnect while a previous host still owns an active job; wait for completion and retry",
+        ));
+    }
+
+    let store = Arc::new(Store::open(state_db).map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.lifecycle_unavailable",
+            format!(
+                "cannot open {} before reconnect: {error}",
+                state_db.display()
+            ),
+        )
+    })?);
+    let store_instance = velnor_runner::scaffold::operational_instance_slug();
+    let lifecycle = LifecycleService::with_store_and_api_instance(
+        Arc::clone(&store),
+        &store_instance,
+        api_instance,
+    )
+    .map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.lifecycle_unavailable",
+            format!("cannot bind lifecycle instance {api_instance}: {error}"),
+        )
+    })?;
+    let fresh = lifecycle.desired_fresh(api_instance).map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.lifecycle_unavailable",
+            format!("cannot read lifecycle instance {api_instance}: {error}"),
+        )
+    })?;
+
+    if fresh.desired == "draining" {
+        lifecycle
+            .mutate(MutationRequest {
+                kind: MutationKind::Resume,
+                target: api_instance.to_owned(),
+                reason: "on-demand host reconnect".to_owned(),
+                idempotency_key: format!(
+                    "host-resume-{}-{}",
+                    std::process::id(),
+                    velnor_model::Timestamp::now()
+                        .as_offset_datetime()
+                        .unix_timestamp_nanos()
+                        .unsigned_abs()
+                ),
+                expected_version: Some(fresh.version),
+                scale_to: None,
+            })
+            .map_err(|error| {
+                CommandError::new(
+                    ExitClass::Operation,
+                    "host.resume_failed",
+                    format!("cannot resume lifecycle instance {api_instance}: {error}"),
+                )
+            })?;
+        println!("  lifecycle         resumed durable drain for {api_instance}");
+    } else if fresh.desired != "ready" && fresh.desired != "cordoned" {
+        return Err(CommandError::new(
+            ExitClass::Conflict,
+            "host.lifecycle_state_unsupported",
+            format!(
+                "lifecycle instance {api_instance} has unsupported desired state {:?}; reconcile it explicitly before reconnect",
+                fresh.desired
+            ),
+        ));
+    }
+
+    if journal_state.drain_active {
+        journal.clear_drain().map_err(|error| {
+            CommandError::new(
+                ExitClass::Operation,
+                "host.resume_failed",
+                format!("cannot clear durable drain marker: {error}"),
+            )
+        })?;
+        println!("  lifecycle         cleared durable drain marker");
+    }
+    if journal_state.admission_blocked && fresh.desired == "ready" {
+        journal.clear_admission_blocked().map_err(|error| {
+            CommandError::new(
+                ExitClass::Operation,
+                "host.resume_failed",
+                format!("cannot clear durable admission fence: {error}"),
+            )
+        })?;
+        println!("  lifecycle         cleared durable admission fence");
+    }
+    Ok(())
 }
 
 async fn status(globals: &GlobalArgs) -> Result<(), CommandError> {
@@ -1245,5 +1387,51 @@ mod tests {
             resolve_host_config_dir(&args, "ignored").expect("explicit"),
             PathBuf::from("/tmp/explicit-host")
         );
+    }
+
+    #[test]
+    fn reconnect_resumes_drained_host_before_clearing_journal_marker() {
+        use velnor_control::ports::{MutationKind, MutationPort, MutationRequest};
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-host-resume-{}-{}",
+            std::process::id(),
+            velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        let state_db = root.join("state.db");
+        let store = Arc::new(Store::open(&state_db).expect("store"));
+        let store_instance = velnor_runner::scaffold::operational_instance_slug();
+        let lifecycle = LifecycleService::with_store_and_api_instance(
+            Arc::clone(&store),
+            &store_instance,
+            "primary",
+        )
+        .expect("lifecycle");
+        lifecycle
+            .mutate(MutationRequest {
+                kind: MutationKind::Drain,
+                target: "primary".to_owned(),
+                reason: "test drain".to_owned(),
+                idempotency_key: "host-drain".to_owned(),
+                expected_version: None,
+                scale_to: None,
+            })
+            .expect("drain");
+        let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+        journal.set_drain(2).expect("drain marker");
+        drop(journal);
+
+        resume_host_state(&config_dir, &state_db, "primary").expect("resume");
+
+        let journal = Journal::open(config_dir.join("journal.db")).expect("reopen journal");
+        assert!(!journal.materialized_state().expect("state").drain_active);
+        let state = lifecycle.desired_fresh("primary").expect("fresh lifecycle");
+        assert_eq!(state.desired, "ready");
+        std::fs::remove_dir_all(root).ok();
     }
 }
