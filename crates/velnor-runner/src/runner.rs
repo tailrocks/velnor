@@ -4998,7 +4998,8 @@ fn maybe_startup_host_docker_reclaim_with(
 /// job fails with the address-pool error above. Foreign daemons are not in
 /// `containers`.
 fn prune_stale_velnor_docker_resources(daemon_id: &str, config_base: &Path) {
-    let live_job_containers = match startup_live_job_container_names(config_base) {
+    let scan_root = in_flight_marker_scan_root(config_base);
+    let live_job_containers = match startup_live_job_container_names(scan_root) {
         Ok(names) => names,
         Err(error) => {
             eprintln!(
@@ -5008,19 +5009,32 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str, config_base: &Path) {
             return;
         }
     };
-    let docker = |args: &[&str]| {
-        let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
-            .1
-            .min(STARTUP_DOCKER_CLEANUP_TIMEOUT);
-        crate::docker::client::host_call_bounded(&owned, deadline)
-            .ok()
-            .map(|stdout| std::process::Output {
-                status: success_exit_status(),
-                stdout: stdout.into_bytes(),
-                stderr: Vec::new(),
-            })
-    };
+    prune_stale_velnor_docker_resources_refreshing(
+        daemon_id,
+        &live_job_containers,
+        || startup_live_job_container_names(scan_root),
+        |args| {
+            let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
+            let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
+                .1
+                .min(STARTUP_DOCKER_CLEANUP_TIMEOUT);
+            crate::docker::client::host_call_bounded(&owned, deadline)
+                .ok()
+                .map(|stdout| std::process::Output {
+                    status: success_exit_status(),
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                })
+        },
+    );
+}
+
+fn prune_stale_velnor_docker_resources_refreshing(
+    daemon_id: &str,
+    live_job_containers: &BTreeSet<String>,
+    refresh_live: impl Fn() -> Result<BTreeSet<String>>,
+    docker: impl Fn(&[&str]) -> Option<std::process::Output>,
+) {
     let ids_from = |args: &[&str]| -> Vec<String> {
         docker(args)
             .filter(|o| o.status.success())
@@ -5050,30 +5064,52 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str, config_base: &Path) {
     container_ids.sort();
     container_ids.dedup();
     const STARTUP_CONTAINER_INSPECT_FORMAT: &str = r#"{{ index .Config.Labels "velnor.daemon-id" }}{{ "\t" }}{{ index .Config.Labels "velnor.job-id" }}"#;
-    let containers = container_ids
+    let owned: Vec<(String, String)> = container_ids
         .into_iter()
-        .filter(|id| {
-            docker(&["inspect", "--format", STARTUP_CONTAINER_INSPECT_FORMAT, id])
+        .filter_map(|id| {
+            docker(&["inspect", "--format", STARTUP_CONTAINER_INSPECT_FORMAT, &id])
                 .filter(|output| output.status.success())
-                .is_some_and(|output| {
+                .and_then(|output| {
                     let text = String::from_utf8_lossy(&output.stdout);
                     let mut parts = text.trim().split('\t');
                     let owner = parts.next().unwrap_or("");
-                    let job_container = parts.next().unwrap_or("");
-                    if !job_container.is_empty() && live_job_containers.contains(job_container) {
-                        return false;
+                    let job_container = parts.next().unwrap_or("").to_string();
+                    if !job_container.is_empty() && live_job_containers.contains(&job_container) {
+                        return None;
                     }
-                    daemon_owns_resource(owner, daemon_id)
+                    daemon_owns_resource(owner, daemon_id).then_some((id, job_container))
                 })
         })
-        .collect::<Vec<_>>();
-    if !containers.is_empty() {
-        let args = stale_job_container_remove_args(&containers);
-        let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
-        eprintln!(
-            "Pruned {} stale Velnor container(s) at startup.",
-            containers.len()
-        );
+        .collect();
+    // A sibling slot can persist a marker and create a container after the
+    // first live-set snapshot. Re-read immediately before `rm --force`.
+    let candidates = match refresh_live() {
+        Ok(live) => owned
+            .into_iter()
+            .filter(|(_, job_container)| job_container.is_empty() || !live.contains(job_container))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            eprintln!(
+                "Skipped startup Velnor Docker cleanup: live-set refresh failed: {}",
+                sanitized_retry_error(&error)
+            );
+            Vec::new()
+        }
+    };
+    let mut removed = 0usize;
+    for (id, job_container) in candidates {
+        match refresh_live() {
+            Ok(live) if job_container.is_empty() || !live.contains(&job_container) => {
+                let args = stale_job_container_remove_args(std::slice::from_ref(&id));
+                let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
+                removed += 1;
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    if removed > 0 {
+        eprintln!("Pruned {removed} stale Velnor container(s) at startup.");
     }
 
     let networks = ids_from(&["network", "ls", "-q", "--filter", "name=velnor-net"])
@@ -5409,8 +5445,11 @@ fn reclaim_orphan_job_containers_refreshing(
         .collect();
     // A sibling slot can persist a marker and create a container after the
     // first live-set snapshot. Re-read immediately before `rm --force`.
-    let live = match refresh_live() {
-        Ok(names) => names,
+    let candidates = match refresh_live() {
+        Ok(live) => owned
+            .into_iter()
+            .filter(|(_, job_container)| job_container.is_empty() || !live.contains(job_container))
+            .collect::<Vec<_>>(),
         Err(error) => {
             eprintln!(
                 "periodic orphan job-container reclaim skipped: live-set refresh failed: {}",
@@ -5419,18 +5458,19 @@ fn reclaim_orphan_job_containers_refreshing(
             return 0;
         }
     };
-    let stale: Vec<String> = owned
-        .into_iter()
-        .filter(|(_, job_container)| job_container.is_empty() || !live.contains(job_container))
-        .map(|(id, _)| id)
-        .collect();
-    if stale.is_empty() {
-        return 0;
+    let mut removed = 0usize;
+    for (id, job_container) in candidates {
+        match refresh_live() {
+            Ok(live) if job_container.is_empty() || !live.contains(&job_container) => {
+                let args = stale_job_container_remove_args(std::slice::from_ref(&id));
+                let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
+                removed += 1;
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
     }
-    let args = stale_job_container_remove_args(&stale);
-    let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let _ = docker(&argv);
-    stale.len()
+    removed
 }
 
 /// In-flight markers live under the daemon config root (`config_base` and
@@ -17781,15 +17821,24 @@ jobs:
     #[test]
     fn reclaim_rechecks_in_flight_markers_immediately_before_rm() {
         let live = BTreeSet::new();
+        let refreshes = std::cell::Cell::new(0);
         let removed = reclaim_orphan_job_containers_refreshing(
             "/daemon/work",
             &live,
-            || Ok(BTreeSet::from(["velnor-job-new".to_owned()])),
+            || {
+                let n = refreshes.get();
+                refreshes.set(n + 1);
+                if n == 0 {
+                    Ok(BTreeSet::new())
+                } else {
+                    Ok(BTreeSet::from(["velnor-job-new".to_owned()]))
+                }
+            },
             |args| {
                 if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
                     return Some(std::process::Output {
                         status: success_exit_status(),
-                        stdout: b"id-new\n".to_vec(),
+                        stdout: b"id-dead\nid-new\n".to_vec(),
                         stderr: Vec::new(),
                     });
                 }
@@ -17797,6 +17846,13 @@ jobs:
                     return Some(std::process::Output {
                         status: success_exit_status(),
                         stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"inspect") && args.last() == Some(&"id-dead") {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"/daemon/work/slot-1\tvelnor-job-dead\n".to_vec(),
                         stderr: Vec::new(),
                     });
                 }
@@ -17808,14 +17864,95 @@ jobs:
                     });
                 }
                 if args.first() == Some(&"rm") {
-                    panic!(
-                        "a container admitted after the first snapshot must not be force-removed"
+                    let expected = stale_job_container_remove_args(&["id-dead".to_owned()]);
+                    assert_eq!(
+                        args,
+                        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+                        "late marker after the batch snapshot must keep id-new; rm is one-id"
                     );
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
                 }
                 None
             },
         );
-        assert_eq!(removed, 0);
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn prune_rechecks_in_flight_markers_immediately_before_rm() {
+        let live = BTreeSet::new();
+        let refreshes = std::cell::Cell::new(0);
+        let removed = std::cell::Cell::new(0);
+        prune_stale_velnor_docker_resources_refreshing(
+            "/daemon/work",
+            &live,
+            || {
+                let n = refreshes.get();
+                refreshes.set(n + 1);
+                if n == 0 {
+                    Ok(BTreeSet::new())
+                } else {
+                    Ok(BTreeSet::from(["velnor-job-new".to_owned()]))
+                }
+            },
+            |args| {
+                if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"id-dead\nid-new\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args == ["ps", "-aq", "--filter", "name=velnor-mise-seed"] {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"inspect") && args.last() == Some(&"id-dead") {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"/daemon/work/slot-1\tvelnor-job-dead\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"inspect") && args.last() == Some(&"id-new") {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"/daemon/work/slot-2\tvelnor-job-new\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args == ["network", "ls", "-q", "--filter", "name=velnor-net"] {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"rm") {
+                    let expected = stale_job_container_remove_args(&["id-dead".to_owned()]);
+                    assert_eq!(
+                        args,
+                        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+                        "late marker after the batch snapshot must keep id-new; rm is one-id"
+                    );
+                    removed.set(removed.get() + 1);
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                None
+            },
+        );
+        assert_eq!(removed.get(), 1);
     }
 
     #[test]

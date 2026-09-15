@@ -1102,18 +1102,31 @@ fn stream_reader<R: std::io::Read + Send + 'static>(
         }
     });
     let mut pending = Vec::new();
+    // A receive timeout is not a clock: a busy producer can satisfy every
+    // receive before the timeout elapses. Keep an absolute deadline so the
+    // live partial-line bound remains real under continuous output, matching
+    // the Docker engine's periodic partial flush.
+    let mut next_flush = Instant::now() + PARTIAL_LINE_FLUSH;
     loop {
-        match chunk_rx.recv_timeout(PARTIAL_LINE_FLUSH) {
+        let wait = next_flush.saturating_duration_since(Instant::now());
+        match chunk_rx.recv_timeout(wait) {
             Ok(chunk) => {
                 pending.extend_from_slice(&chunk);
                 if !emit_complete_stream_lines(&mut pending, stream, &sender) {
                     break;
+                }
+                if Instant::now() >= next_flush {
+                    if !flush_partial_stream_line(&mut pending, stream, &sender) {
+                        break;
+                    }
+                    next_flush = Instant::now() + PARTIAL_LINE_FLUSH;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !flush_partial_stream_line(&mut pending, stream, &sender) {
                     break;
                 }
+                next_flush = Instant::now() + PARTIAL_LINE_FLUSH;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = emit_complete_stream_lines(&mut pending, stream, &sender);
@@ -15888,6 +15901,37 @@ mod tests {
             .recv_timeout(Duration::from_millis(200))
             .expect("remainder after a partial flush must not stall");
         assert_eq!(second, (CommandStream::Stdout, " part-two".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_reader_flushes_during_continuous_output() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader_thread =
+            thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        let writer_thread = thread::spawn(move || {
+            // Keep data arriving for longer than PARTIAL_LINE_FLUSH. A
+            // receive-timeout implementation never flushes this tail until
+            // EOF, while a real deadline must emit it while the stream stays
+            // busy.
+            for _ in 0..40 {
+                writer.write_all(b"x").unwrap();
+                writer.flush().unwrap();
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let first = receiver
+            .recv_timeout(Duration::from_millis(600))
+            .expect("continuous output must not postpone partial flushing until EOF");
+        assert_eq!(first.0, CommandStream::Stdout);
+        assert!(!first.1.is_empty());
+        assert!(first.1.bytes().all(|byte| byte == b'x'));
+
+        writer_thread.join().unwrap();
+        reader_thread.join().unwrap();
     }
 
     #[cfg(unix)]
