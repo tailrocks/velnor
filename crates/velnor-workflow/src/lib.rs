@@ -7126,6 +7126,29 @@ mod tests {
     }
 
     #[test]
+    fn trust_gated_velnor_docker_skip_is_accepted_by_ci_required() {
+        let (mut config, index) = both_runner_docker_config();
+        config.velnor_trusted_label = Some("example-trusted".to_owned());
+        config.velnor_trusted_runner_available = Some(false);
+        config.units[index].requires_trusted = true;
+        let docker_id = config.units[index].id.clone();
+        let pr = generated_ci_pr(&WorkflowIr::from_config(&config));
+        let marker = format!("result=\"$(result_for_job velnor-{docker_id})\"");
+        let start = pr
+            .find(&marker)
+            .unwrap_or_else(|| panic!("ci-required must validate velnor docker caller: {pr}"));
+        let block = &pr[start..pr[start..].find("else").map(|offset| start + offset).unwrap_or(pr.len())];
+        assert!(
+            block.contains("success|skipped"),
+            "trust-gated velnor docker skip must satisfy ci-required without a fork PR: {block}"
+        );
+        assert!(
+            !block.contains("FORK_PR"),
+            "trust-gated skip must not depend on fork admission: {block}"
+        );
+    }
+
+    #[test]
     fn trusted_project_toml_round_trips_through_the_pinned_runtime() {
         let root = configured_repository("trusted-runtime-roundtrip", None);
         let id = scanned_rust_unit_id(&root);
