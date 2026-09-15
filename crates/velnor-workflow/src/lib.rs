@@ -80,7 +80,7 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "91a900bed611cfd3c7e176fcd90a4bd2d4b741d6";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "8e438e06855e10b4bfe5072912f47d2ae9dc5a02";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
@@ -90,7 +90,7 @@ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // PRs; anything older fails dispatch/schedule planning or poisons macOS
 // builds with the Linux mold link arg. Bump after publishing a Velnor commit
 // that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "91a900bed611cfd3c7e176fcd90a4bd2d4b741d6";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "8e438e06855e10b4bfe5072912f47d2ae9dc5a02";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
@@ -2149,6 +2149,24 @@ pub(crate) fn sidebar_group_name(unit: &Unit) -> String {
     )
 }
 
+/// Unit-first caller display name: `{Kind} · {label}` (D1). GitHub renders
+/// reusable checks as `<caller> / <callee>`; the callee lane name is derived
+/// separately from `inputs.lane`.
+pub(crate) fn unit_job_display_name(unit: &Unit, lane: RunnerMode, runners: RunnerMode) -> String {
+    let _ = (lane, runners);
+    sidebar_group_name(unit)
+}
+
+/// Inner kind-reusable job name: trailing `GitHub` or `Velnor` segment (D1).
+pub(crate) fn kind_reusable_lane_display_name() -> String {
+    github_expression("inputs.lane == 'github' && 'GitHub' || 'Velnor'")
+}
+
+/// Aggregate caller that invokes a kind reusable with `lane: control`.
+pub(crate) fn prepare_cargo_caller_job_id() -> &'static str {
+    "prepare-cargo"
+}
+
 pub(crate) fn nested_unit_workflow_file(unit: &Unit) -> String {
     unit.workflow_file
         .clone()
@@ -2302,8 +2320,8 @@ pub(crate) fn render_pinned_toolchain_fill(
             ActionPin::CacheSave.reference(),
             &toolchain,
             Some(&format!(
-                "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
-                config.default_branch
+                "{} && steps.rustup-toolchain.outputs.cache-hit != 'true'",
+                primitives::default_branch_push_cache_save_expression(&config.default_branch)
             )),
         );
         template
@@ -3399,9 +3417,7 @@ pub(crate) fn hosted_mold_setup(default_branch: &str, cache_save: bool) -> Strin
         ActionPin::CacheRestore.reference()
     );
     if cache_save {
-        let trusted = format!(
-            "((github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}'))"
-        );
+        let trusted = primitives::trusted_cache_save_expression(default_branch);
         let _ = writeln!(
             output,
             "      - name: Save mold {MOLD_VERSION} cache\n        if: ({trusted}) && steps.mold-cache.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}",
@@ -6186,6 +6202,12 @@ mod tests {
     #[test]
     fn setup_action_bootstrap_allows_same_repository_prs_only() {
         let action = declared_setup_action();
+        let bootstrap = must_some(
+            action
+                .lines()
+                .find(|line| line.contains("CONTROLLED_BOOTSTRAP:")),
+            "CONTROLLED_BOOTSTRAP expression",
+        );
         assert!(action.contains("same-repository PRs may bootstrap"));
         assert!(action.contains(
             "CONTROLLED_BOOTSTRAP: ${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
@@ -6196,9 +6218,10 @@ mod tests {
         assert!(action.contains("cd \"$RUNNER_TEMP\""));
         assert!(action.contains("-u RUSTFLAGS"));
         assert!(action.contains("-u CARGO_ENCODED_RUSTFLAGS"));
-        assert!(!action.contains(
-            "(github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))"
-        ));
+        assert!(
+            !bootstrap.contains("github.event_name == 'push' && github.ref =="),
+            "CONTROLLED_BOOTSTRAP must gate on ref, not push&&ref: {bootstrap}"
+        );
         let expected_source = format!("SOURCE_REPOSITORY: {VELNOR_WORKFLOW_INSTALL_GIT_URL}");
         assert!(action.contains(&expected_source));
         assert!(!action
@@ -9049,6 +9072,14 @@ channel = "stable"
             generated.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
             "Rust unit workflow",
         );
+        assert!(
+            ci_units.contains("  verify-github:"),
+            "Rust kind reusable must keep a collapsed GitHub verify job: {ci_units}"
+        );
+        assert!(
+            ci_units.contains("  verify-velnor:"),
+            "Rust kind reusable must keep a collapsed Velnor verify job: {ci_units}"
+        );
         for unit in scanned
             .config
             .units
@@ -9057,12 +9088,28 @@ channel = "stable"
         {
             let id = &unit.id;
             assert!(
-                ci_units.contains(&format!("  github-{id}:\n    name: {id}")),
-                "native verification unit lost its GitHub lane: {id}: {ci_units}"
+                ci_units.contains(&format!("inputs.unit == '{id}'")),
+                "native verification unit lost its collapsed lane guard: {id}: {ci_units}"
+            );
+        }
+        let ci_pr = must_some(
+            generated.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
+            "ci-pr workflow",
+        );
+        for unit in scanned
+            .config
+            .units
+            .iter()
+            .filter(|unit| unit.kind == UnitKind::Rust)
+        {
+            let id = &unit.id;
+            assert!(
+                ci_pr.contains(&format!("  github-{id}:")),
+                "native verification unit lost its GitHub lane caller: {id}: {ci_pr}"
             );
             assert!(
-                ci_units.contains(&format!("  velnor-{id}:\n    name: {id}")),
-                "native verification unit lost its Docker-backed Velnor lane: {id}: {ci_units}"
+                ci_pr.contains(&format!("  velnor-{id}:")),
+                "native verification unit lost its Velnor lane caller: {id}: {ci_pr}"
             );
         }
 
@@ -9245,7 +9292,7 @@ channel = "stable"
         // outcome: an exact-key hit means the seed is already current, so
         // re-saving under an immutable key would write nothing new.
         assert!(rendered.contains(
-            "Save Docker build seed\n        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main')"
+            "Save Docker build seed\n        if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main')"
         ));
         assert!(rendered.contains("&& steps.cache.outputs.cache-hit != 'true'"));
 
@@ -9631,18 +9678,16 @@ channel = "stable"
         );
         assert!(workflows[0].contains("selected=\",$SELECTED_UNITS,\""));
 
-        // Kind-group aggregate reads selection from plan matrix outputs in
-        // NEEDS_JSON. An unused selected= assignment trips actionlint SC2034.
+        // Per-unit lane callers keep selection matching on SELECTED_UNITS.
         for workflow in &workflows[1..] {
-            assert!(
-                !workflow.contains("SELECTED_UNITS:"),
-                "kind-group required check must not emit unused SELECTED_UNITS"
+            assert_eq!(
+                workflow
+                    .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
+                    .count(),
+                1,
+                "nested required check must preserve the plan selection output"
             );
-            assert!(
-                !workflow.contains("selected=\",$SELECTED_UNITS,\""),
-                "kind-group required check must not assign unused selected"
-            );
-            assert!(workflow.contains("matrix=\"$(jq -r --arg key '"));
+            assert!(workflow.contains("selected=\",$SELECTED_UNITS,\""));
         }
 
         assert!(workflows[2].contains("SIMULATE_FAILURE: ${{ inputs.simulate_failure }}"));
@@ -9676,11 +9721,6 @@ channel = "stable"
                 .map(|(_, script)| script),
             "large required-check script",
         );
-        assert!(
-            required_script.len() < GITHUB_EXPRESSION_LIMIT,
-            "kind groups must keep the required script under GitHub's 21k ceiling: {} bytes",
-            required_script.len()
-        );
         let expression_payload_length = required_script
             .split("${{")
             .skip(1)
@@ -9694,14 +9734,10 @@ channel = "stable"
                 .count(),
             1
         );
-        assert!(
-            !required_block.contains("SELECTED_UNITS:"),
-            "kind-group required check must not emit unused SELECTED_UNITS"
-        );
-        assert!(!required_script.contains("selected=\",$SELECTED_UNITS,\""));
+        assert!(required_block.contains("SELECTED_UNITS:"));
+        assert!(required_script.contains("selected=\",$SELECTED_UNITS,\""));
         assert!(required_block.contains("result=\"$(result_for_job plan)\""));
         assert!(required_block.contains("result=\"$(result_for_job policy)\""));
-        assert!(required_script.contains("matrix=\"$(jq -r --arg key '"));
     }
 
     #[test]
@@ -9713,8 +9749,6 @@ channel = "stable"
             !workflow.contains(r#"// \"[]\""#),
             "jq empty default must not be over-escaped inside single quotes"
         );
-        assert!(workflow.contains("--arg empty '[]' '.plan.outputs[$key] // $empty'"));
-
         let invocation = crate::primitives::jq_read_plan_matrix("bun_matrix");
         assert!(
             !invocation.contains(r#"\""#),
@@ -10144,9 +10178,15 @@ channel = "stable"
             "Rust fixture unit",
         );
         assert!(root.contains("selected_units: ${{ needs.plan.outputs.units }}"));
-        assert!(root.contains("needs.plan.outputs.rust_matrix != '[]'"));
+        assert!(root.contains(&format!(
+            "contains(format(',{{0}},', needs.plan.outputs.units), ',{},')",
+            rust_unit.id
+        )));
+        assert!(root.contains(&format!("  github-{}:", rust_unit.id)));
+        assert!(root.contains(&format!("  velnor-{}:", rust_unit.id)));
         assert!(!root.contains("name: ${{ matrix.label }}"));
         assert!(!root.contains("fromJSON(needs.plan.outputs.rust_matrix)"));
+        assert!(!root.contains("needs.plan.outputs.rust_matrix != '[]'"));
         for unit in &config.units {
             let sidebar_name = sidebar_group_name(unit);
             assert!(!sidebar_name.contains(" / "));
@@ -10171,14 +10211,14 @@ channel = "stable"
                 .map(|(_, content)| content),
             "Rust crate workflow",
         );
-        assert!(root.contains("name: \"GitHub / "));
-        assert!(root.contains("name: \"Velnor / "));
+        assert!(root.contains("lane: github"));
+        assert!(root.contains("lane: velnor"));
         assert!(crate_workflow.contains("lane:\n        required: true"));
         assert!(crate_workflow.contains("runs-on: ubuntu-24.04"));
         assert!(crate_workflow.contains(&fixture_lane_selector()));
         assert!(crate_workflow.contains("CI_SCOPE: ${{ inputs.scope }}"));
-        assert!(crate_workflow.contains("CI_UNIT_ID: rust-"));
-        assert!(crate_workflow.contains("inputs:\n      selected_units:"));
+        assert!(crate_workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
+        assert!(crate_workflow.contains("selected_units:\n        required: true"));
         assert!(crate_workflow.contains("BASE_SHA: ${{ inputs.base_sha }}"));
         assert!(crate_workflow.contains("HEAD_SHA: ${{ inputs.head_sha }}"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'velnor'"));
@@ -10236,18 +10276,18 @@ channel = "stable"
                 name,
             );
             assert!(
-                workflow.contains("  group-rust-2-github:\n")
-                    && workflow.contains("  group-rust-2-velnor:\n")
-                    && workflow.contains("  group-rust-2-control:\n"),
-                "{name} must declare group-rust-2 lane callers:\n{workflow}"
-            );
-            assert!(
                 workflow.contains("uses: ./.github/workflows/ci-unit-rust-2.yml"),
                 "{name} must invoke ci-unit-rust-2.yml:\n{workflow}"
             );
             assert!(
-                workflow.contains("group-rust-2"),
-                "{name} ci-required must need group-rust-2:\n{workflow}"
+                workflow.contains("github-rust-shard-pad")
+                    && workflow.contains("velnor-rust-shard-pad"),
+                "{name} must declare per-(unit,lane) callers for shard-2 units:\n{workflow}"
+            );
+            assert!(
+                workflow.contains("github-rust-shard-pad00")
+                    && workflow.contains("velnor-rust-shard-pad00"),
+                "{name} ci-required must need shard-2 unit callers:\n{workflow}"
             );
             assert!(
                 workflow.contains("rust-2_matrix"),
@@ -10641,7 +10681,7 @@ channel = "stable"
         let main = generator.render(WorkflowKind::Main);
         assert!(pr.contains("name: CI / PR\nrun-name: CI / PR"));
         assert!(pr.contains("pull_request:"));
-        assert!(pr.contains("merge_group:"));
+        assert!(!pr.contains("merge_group:"));
         assert!(pr.contains("permissions:\n  actions: read\n  contents: read"));
         assert!(pr.contains("cancel-in-progress: true"));
         assert!(pr.contains("  ci-required:\n    name: ci-required"));
@@ -10689,26 +10729,26 @@ channel = "stable"
     }
 
     #[test]
-    fn generated_pr_workflow_validates_merge_group_on_the_github_lane() {
+    fn generated_pr_workflow_omits_merge_group() {
         for runners in [RunnerMode::Github, RunnerMode::Both] {
             let config = scanned_fixture(runners);
             let generator = WorkflowIr::from_config(&config);
             let pr = generator.render(WorkflowKind::PullRequest);
             assert!(
-                pr.contains("on:\n  pull_request:\n  merge_group:\n"),
-                "PR triggers must carry merge_group beside pull_request: {pr}"
+                !pr.contains("merge_group:"),
+                "PR triggers must not carry the dead merge_group trigger: {pr}"
             );
             let nested =
                 generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator));
             assert!(
-                nested.contains("on:\n  pull_request:\n  merge_group:\n"),
-                "the nested PR render must carry the same triggers: {nested}"
+                !nested.contains("merge_group:"),
+                "the nested PR render must omit merge_group too: {nested}"
             );
             for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
                 let other = generator.render(kind);
                 assert!(
                     !other.contains("merge_group:\n"),
-                    "the merge_group trigger belongs to the PR workflow only: {other}"
+                    "merge_group must not appear on {kind:?}: {other}"
                 );
             }
             let index = must_some(
@@ -10721,21 +10761,9 @@ channel = "stable"
             let surface =
                 generator.render_nested_unit(&config.units[index], WorkflowKind::PullRequest);
             assert!(
-                surface.contains("github.event_name == 'merge_group'"),
-                "the github lane gate must admit merge_group runs: {surface}"
+                !surface.contains("github.event_name == 'merge_group'"),
+                "lane gates must not admit merge_group: {surface}"
             );
-            let gate = velnor_lane_gate(&surface);
-            if runners == RunnerMode::Both {
-                assert!(
-                    !gate.is_empty() && !gate.contains("merge_group"),
-                    "the velnor lane keeps its trusted gate and skips merge_group: {surface}"
-                );
-            } else {
-                assert!(
-                    !surface.contains("\n  velnor:") && !surface.contains("\n  velnor-"),
-                    "a github-only surface renders no velnor lane: {surface}"
-                );
-            }
             for surface in [pr.as_str(), nested.as_str()] {
                 assert!(
                     job_gate(surface, "plan").is_empty(),
@@ -11483,6 +11511,196 @@ channel = "stable"
         assert!(!velnor_lane.contains("name: Save \"Rust crate (fixture)\" cache"));
     }
 
+    fn github_lane_cache_key_lines(workflow: &str) -> Vec<String> {
+        workflow
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                trimmed
+                    .strip_prefix("key: ")
+                    .or_else(|| {
+                        trimmed.starts_with("cache-key: ").then(|| {
+                            trimmed.strip_prefix("cache-key: ").unwrap_or(trimmed)
+                        })
+                    })
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    fn cache_save_if_bodies(workflow: &str) -> Vec<String> {
+        workflow
+            .lines()
+            .filter_map(|line| {
+                line.trim_start()
+                    .strip_prefix("if: ")
+                    .filter(|body| {
+                        body.contains("cache-hit")
+                            || body.contains("rustup-toolchain.outputs")
+                            || body.contains("mold-cache.outputs")
+                    })
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn github_lane_cache_keys_unchanged_for_scanned_fixture() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
+        let keys = github_lane_cache_key_lines(&workflow);
+        assert!(
+            keys.iter().any(|key| {
+                key.contains("velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(")
+            }),
+            "rustup cache key shape must stay stable: {keys:?}"
+        );
+        assert!(
+            keys.iter()
+                .any(|key| key.starts_with("velnor-mbx-v3-")),
+            "mbx cache keys must stay on the velnor-mbx namespace: {keys:?}"
+        );
+        assert!(
+            keys.iter().any(|key| key.starts_with("ci-${{ runner.os }}-rust-")),
+            "cargo bundle keys must stay on the ci-<os>-rust- prefix: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn github_lane_save_gates_exclude_untrusted_events() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
+        for body in cache_save_if_bodies(&workflow) {
+            assert!(
+                !body.contains("pull_request"),
+                "trusted cache saves must not mention pull_request: {body}"
+            );
+            assert!(
+                !body.contains("merge_group"),
+                "trusted cache saves must not mention merge_group: {body}"
+            );
+        }
+        let action = declared_setup_action();
+        let save = must_some(
+            action.split("- name: Save runtime cache").nth(1),
+            "setup action runtime save step",
+        );
+        assert!(!save.contains("pull_request"));
+        assert!(!save.contains("merge_group"));
+    }
+
+    #[test]
+    fn github_lane_restores_before_checks_on_hosted_lane() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let rust = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        let workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
+        let github_lane = workflow
+            .split_once("\n  velnor:")
+            .map_or(workflow.as_str(), |(lane, _)| lane);
+        let restore = must_some(
+            github_lane.find("name: Restore \"Rust crate (fixture)\" cache"),
+            "cargo restore",
+        );
+        let checks = must_some(github_lane.find("name: Run "), "checks step");
+        assert!(restore < checks, "restore must precede checks on GitHub lane");
+    }
+
+    #[test]
+    fn ci_pr_unit_callers_declare_read_only_cache_mode() {
+        let ir = WorkflowIr::from_config(&scanned_fixture(RunnerMode::Both));
+        let pr = generated_ci_pr(&ir);
+        assert!(
+            pr.contains("cache-mode: read"),
+            "PR aggregate callers must declare read-only cache mode"
+        );
+        let main = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir));
+        assert!(
+            !main.contains("cache-mode: read"),
+            "main producers must not declare read-only cache mode"
+        );
+    }
+
+    #[test]
+    fn dependency_bundle_saves_use_always_and_trusted_gate() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let rust = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        let workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
+        let save = must_some(
+            workflow.find("name: Save \"Rust crate (fixture)\" cache"),
+            "cargo save step",
+        );
+        let save_body = &workflow[save..];
+        assert!(save_body.contains("if: always() &&"));
+        assert!(save_body.contains("steps.cache.outputs.cache-hit != 'true'"));
+    }
+
+    #[test]
+    fn mise_action_cache_save_is_trusted_gated_on_github_lane() {
+        let mut config = scanned_fixture(RunnerMode::Both);
+        config.analysis.detected.push("mise-present".to_owned());
+        let rust = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Rust)
+                .cloned(),
+            "scanned Rust unit",
+        );
+        config.units.push(Unit {
+            id: "rust-mise-tools".to_owned(),
+            label: "Rust mise tools".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            pinned_lockfile: true,
+            watch: vec!["Cargo.toml".to_owned()],
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
+            depends_on: Vec::new(),
+            cache: None,
+            tool_version: None,
+            mise_tools: vec!["node".to_owned()],
+            toolchain: rust.toolchain.clone(),
+            services: Vec::new(),
+            workflow_file: None,
+            requires_trusted: false,
+            workspace_check: false,
+        });
+        let workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(&config.units.last().unwrap(), WorkflowKind::Main);
+        let github_lane = workflow
+            .split_once("\n  velnor:")
+            .map_or(workflow.as_str(), |(lane, _)| lane);
+        assert!(github_lane.contains("cache_save: ${{ (github.event_name == 'push'"));
+        let velnor_lane = workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane);
+        assert!(!velnor_lane.contains("jdx/mise-action"));
+    }
+
+    #[test]
+    fn setup_action_runtime_save_is_trusted_gated() {
+        let action = declared_setup_action();
+        let save = must_some(
+            action.split("- name: Save runtime cache").nth(1),
+            "setup action runtime save step",
+        );
+        assert!(save.contains("github.event_name == 'schedule'"));
+        assert!(save.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(!save.contains("pull_request"));
+    }
+
     #[test]
     fn velnor_only_lane_omits_actions_cache_for_host_persistent_cargo_sources() {
         let mut config = scanned_fixture(RunnerMode::Velnor);
@@ -11507,6 +11725,90 @@ channel = "stable"
                 .contains("cargo metadata --locked --offline --all-features --format-version 1"),
             "Velnor lane prep must probe host-persistent stores before fetching"
         );
+    }
+
+    fn velnor_lane_job_bodies(workflow: &str) -> Vec<(&str, String)> {
+        let mut jobs = Vec::new();
+        let mut current_job = None::<&str>;
+        let mut current_body = String::new();
+        for line in workflow.lines() {
+            let is_job = line.starts_with("  ")
+                && !line.starts_with("    ")
+                && line.trim_end().ends_with(':');
+            if is_job {
+                if let Some(job_id) = current_job {
+                    jobs.push((job_id, std::mem::take(&mut current_body)));
+                }
+                current_job = Some(line.trim_end().trim_start());
+                continue;
+            }
+            if current_job.is_some() {
+                current_body.push_str(line);
+                current_body.push('\n');
+            }
+        }
+        if let Some(job_id) = current_job {
+            jobs.push((job_id, current_body));
+        }
+        jobs
+            .into_iter()
+            .filter(|(job_id, _)| job_id.starts_with("velnor-"))
+            .collect()
+    }
+
+    #[test]
+    fn velnor_lane_yaml_omits_actions_cache_for_every_supported_unit_kind() {
+        let root = must(
+            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            "repository root",
+        );
+        let scanned = must(scan_target(&root, RunnerMode::Both, "main"), "scan repository");
+        let ir = WorkflowIr::from_config(&scanned.config);
+        let mut covered_kinds = std::collections::BTreeSet::new();
+        for kind in scanned
+            .config
+            .units
+            .iter()
+            .map(|unit| unit.kind)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if !lane_supports_unit_kind(RunnerMode::Velnor, kind) {
+                continue;
+            }
+            let members = scanned
+                .config
+                .units
+                .iter()
+                .filter(|unit| unit.kind == kind)
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                continue;
+            }
+            covered_kinds.insert(kind);
+            let (files, _) = ir.render_kind_unit_workflows(kind, None);
+            for (file, workflow) in files {
+                for (job_id, body) in velnor_lane_job_bodies(&workflow) {
+                    assert!(
+                        !body.contains("actions/cache"),
+                        "{file} job {job_id} ({kind:?}) must not emit actions/cache on the Velnor lane"
+                    );
+                }
+            }
+        }
+        for kind in scanned
+            .config
+            .units
+            .iter()
+            .map(|unit| unit.kind)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if lane_supports_unit_kind(RunnerMode::Velnor, kind) {
+                assert!(
+                    covered_kinds.contains(&kind),
+                    "missing Velnor lane actions/cache audit for unit kind {kind:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -11826,12 +12128,18 @@ channel = "stable"
             ),
             "independent lockfile trees keep their own fetch root"
         );
-        assert_eq!(
+        let prep = must_some(
             workflow
-                .matches("cargo metadata --locked --offline --all-features --format-version 1")
+                .split_once("  velnor-prepare-cargo-sources:\n")
+                .map(|(_, block)| block),
+            "velnor cargo prep job",
+        );
+        let prep = prep.split("\n  verify-").next().unwrap_or(prep);
+        assert_eq!(
+            prep.matches("cargo metadata --locked --offline --all-features --format-version 1")
                 .count(),
             2,
-            "every Cargo fetch root must use the full feature graph for its offline probe"
+            "deduplicated cargo prep must use the full feature graph for each fetch root"
         );
     }
 
@@ -11877,18 +12185,33 @@ channel = "stable"
             ],
             ..header_fixture_config()
         };
-        let workflow = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust, None);
-        assert!(
-            workflow.contains("needs: [velnor-prepare-cargo-sources, velnor-rust-model]"),
-            "dependent crate jobs must wait on direct dependency unit jobs: {workflow}"
+        let ir = WorkflowIr::from_config(&config);
+        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir));
+        let job_needs = |job: &str| {
+            let start = must_some(
+                workflow.find(&format!("  {job}:\n")),
+                "missing generated job",
+            );
+            let mut lines = workflow[start..].lines();
+            let _ = lines.next();
+            for line in lines {
+                if line.starts_with("  ") && !line.starts_with("    ") {
+                    break;
+                }
+                if let Some(needs) = line.strip_prefix("    needs: ") {
+                    return Some(needs.to_owned());
+                }
+            }
+            None
+        };
+        assert_eq!(
+            job_needs("velnor-rust-client").as_deref(),
+            Some("[plan, policy, velnor-rust-model]")
         );
+        assert_eq!(job_needs("velnor-rust-model"), Some("[plan, policy]".to_owned()));
         assert!(
-            workflow.contains("needs: [velnor-prepare-cargo-sources]"),
-            "root crate jobs still only need cargo prep"
-        );
-        assert!(
-            !workflow.contains("needs: [velnor-prepare-cargo-sources, velnor-rust-client]"),
-            "GitHub lane is absent and dependency edges must not invent reverse needs"
+            !workflow.contains("needs: [plan, policy, velnor-rust-client]"),
+            "dependency edges must not invent reverse needs: {workflow}"
         );
     }
 
@@ -11995,7 +12318,8 @@ channel = "stable"
             ],
             ..header_fixture_config()
         };
-        let workflow = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust, None);
+        let ir = WorkflowIr::from_config(&config);
+        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir));
         let job_needs = |job: &str| {
             let start = must_some(
                 workflow.find(&format!("  {job}:\n")),
@@ -12014,16 +12338,33 @@ channel = "stable"
             None
         };
 
-        assert_eq!(job_needs("velnor-rust-workspace"), None);
-        assert_eq!(job_needs("velnor-rust-model"), None);
+        assert_eq!(
+            job_needs("velnor-rust-workspace"),
+            Some("[plan, policy, prepare-cargo]".to_owned())
+        );
+        assert_eq!(
+            job_needs("velnor-rust-model"),
+            Some("[plan, policy, prepare-cargo]".to_owned())
+        );
         assert_eq!(
             job_needs("velnor-rust-child").as_deref(),
-            Some("[velnor-rust-model]")
+            Some("[plan, policy, prepare-cargo, velnor-rust-model]")
         );
-        assert_eq!(job_needs("velnor-rust-contract"), None);
-        assert_eq!(job_needs("velnor-rust-policy"), None);
-        assert_eq!(job_needs("github-rust-model"), None);
-        assert_eq!(job_needs("github-rust-child"), None);
+        assert_eq!(
+            job_needs("velnor-rust-contract"),
+            Some("[plan, policy, prepare-cargo]".to_owned())
+        );
+        assert_eq!(
+            job_needs("velnor-rust-policy"),
+            Some("[plan, policy, prepare-cargo]".to_owned())
+        );
+        assert_eq!(job_needs("github-rust-model"), Some("[plan, policy]".to_owned()));
+        assert_eq!(job_needs("github-rust-child"), Some("[plan, policy]".to_owned()));
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            !kind.contains("needs: [velnor-rust-model]"),
+            "workspace_check must stay coverage inside the kind reusable, not an ordering barrier: {kind}"
+        );
     }
 
     #[test]
@@ -12095,12 +12436,12 @@ channel = "stable"
             "Velnor recovery PR aggregate must use the derived -pr concurrency group: {pr}"
         );
         assert!(
-            pr.contains("group-bun:\n    name: \"Velnor / Bun\"\n    if:"),
-            "missing bun group caller: {pr}"
+            pr.contains("velnor-bun-root:\n    name:"),
+            "missing bun lane caller: {pr}"
         );
         assert!(
-            pr.contains("needs: [plan, group-bun]"),
-            "serial stack groups must chain after plan: {pr}"
+            pr.contains("needs: [plan, velnor-bun-root]"),
+            "serial stack groups must chain velnor lane callers after plan: {pr}"
         );
         let policy = render_policy_entrypoint(&config);
         assert!(
@@ -13629,7 +13970,7 @@ channel = "stable"
         let nightly = workflow.render(WorkflowKind::Nightly);
 
         assert!(pr.contains("pull_request:"));
-        assert!(pr.contains("merge_group:"));
+        assert!(!pr.contains("merge_group:"));
         assert!(pr.contains("runs-on: ubuntu-24.04"));
         assert!(pr.contains(&fixture_lane_selector()));
         assert!(pr.contains("  github-"));

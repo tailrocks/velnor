@@ -11,6 +11,9 @@ const VELNOR_CARGO_GIT_MOUNT: &str = "/github/home/.cargo/git";
 const VELNOR_MISE_INSTALLS_MOUNT: &str = "/opt/mise/installs";
 const VELNOR_MISE_CACHE_MOUNT: &str = "/opt/mise/cache";
 const VELNOR_SCCACHE_MOUNT: &str = "/var/cache/sccache";
+const VELNOR_BUN_INSTALL_CACHE_MOUNT: &str = "/github/home/.bun/install/cache";
+const VELNOR_NPM_CACHE_MOUNT: &str = "/github/home/.npm";
+const VELNOR_TERRAFORM_PLUGIN_CACHE_MOUNT: &str = "/github/home/.terraform.d/plugin-cache";
 
 /// Declare the cache contract the unit pipelines render.
 ///
@@ -105,10 +108,16 @@ pub(crate) fn velnor_host_persistent_cache_path(path: &str) -> bool {
         || path_or_child(path, VELNOR_MISE_INSTALLS_MOUNT)
         || path_or_child(path, VELNOR_MISE_CACHE_MOUNT)
         || path_or_child(path, VELNOR_SCCACHE_MOUNT)
+        || path_or_child(path, VELNOR_BUN_INSTALL_CACHE_MOUNT)
+        || path_or_child(path, VELNOR_NPM_CACHE_MOUNT)
+        || path_or_child(path, VELNOR_TERRAFORM_PLUGIN_CACHE_MOUNT)
         || path_or_child(path, "~/.cargo/registry")
         || path_or_child(path, "~/.cargo/git")
         || path_or_child(path, ".cargo/registry")
         || path_or_child(path, ".cargo/git")
+        || path_or_child(path, "~/.bun/install/cache")
+        || path_or_child(path, "~/.npm")
+        || path_or_child(path, "~/.terraform.d/plugin-cache")
 }
 
 /// True when every declared cache path is host-persistent on Velnor.
@@ -174,10 +183,19 @@ mod tests {
             "/opt/mise/cache/downloads",
             "/var/cache/sccache",
             "/var/cache/sccache/objects",
+            "/github/home/.bun/install/cache",
+            "/github/home/.bun/install/cache/abc123",
+            "/github/home/.npm",
+            "/github/home/.npm/_cacache",
+            "/github/home/.terraform.d/plugin-cache",
+            "/github/home/.terraform.d/plugin-cache/registry.terraform.io",
             "~/.cargo/registry",
             "~/.cargo/git",
             ".cargo/registry",
             ".cargo/git/db",
+            "~/.bun/install/cache",
+            "~/.npm",
+            "~/.terraform.d/plugin-cache",
         ] {
             assert!(
                 velnor_host_persistent_cache_path(path),
@@ -187,7 +205,10 @@ mod tests {
         for path in [
             "target",
             "target/debug",
-            "~/.terraform.d/plugin-cache",
+            "~/.bun",
+            "~/.terraform.d",
+            "/github/home/.bun",
+            "/github/home/.terraform.d",
             "/github/home/.cargo",
             "/opt/mise",
             "/var/cache",

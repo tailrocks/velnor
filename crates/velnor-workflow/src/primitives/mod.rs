@@ -32,10 +32,11 @@ use crate::{
 };
 
 pub(crate) use ir::{
-    checks_env, config_snapshot_identity, render_cargo_source_preparation,
-    render_pinned_toolchain_steps, render_retained_output_cache_note,
-    render_velnor_runner_identity_step, validate_nextest_tools_are_locked, WorkflowIr,
-    WorkflowKind, GITHUB_WORKFLOW_BYTE_LIMIT,
+    checks_env, config_snapshot_identity, default_branch_push_cache_save_expression,
+    render_cargo_source_preparation, render_pinned_toolchain_steps,
+    render_retained_output_cache_note, render_velnor_runner_identity_step,
+    trusted_cache_save_expression, validate_nextest_tools_are_locked, WorkflowIr, WorkflowKind,
+    GITHUB_WORKFLOW_BYTE_LIMIT,
 };
 
 #[cfg(test)]

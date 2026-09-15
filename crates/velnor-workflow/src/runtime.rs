@@ -2496,8 +2496,13 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     [automatic.as_str(), automatic_merge_group.as_str()]
         .into_iter()
         .any(|automatic| {
-            value == format!("{automatic}||{explicit_dispatch}")
-                || value == format!("{automatic}||{default_dispatch}")
+            for dispatch in [explicit_dispatch.as_str(), default_dispatch.as_str()] {
+                let combined = format!("{automatic}||{dispatch}");
+                if value == combined || value == format!("({combined})") {
+                    return true;
+                }
+            }
+            false
         })
 }
 
