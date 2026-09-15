@@ -2586,10 +2586,23 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         display_name: &str,
         runs_on: String,
     ) {
-        let Some(gate) = self.collapsed_lane_gate(members, contracts, lane) else {
+        let Some(mut gate) = self.collapsed_lane_gate(members, contracts, lane) else {
             return;
         };
-        let display_name = yaml_scalar(display_name);
+        let mut display_name = display_name.to_owned();
+        if lane == RunnerMode::Velnor {
+            if let Some(unit) = members
+                .iter()
+                .find(|unit| self.trust_gated_velnor_job_skipped(lane, unit))
+            {
+                if let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref() {
+                    let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
+                }
+                gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
+                display_name = self.trusted_unit_display_name(lane, unit, display_name);
+            }
+        }
+        let display_name = yaml_scalar(&display_name);
         let _ = writeln!(
             output,
             "  {job_id}:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    runs-on: {runs_on}\n    timeout-minutes: {}",
