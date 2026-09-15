@@ -898,3 +898,5 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Policy prefetch `cargo install` package name | V | `lib.rs:4509` `velnor-workflow --bin velnor-workflow`; fixes run 35030781895 `Rust · velnor-workflow / GitHub` multi-binary error |
 | Fork aggregate gate D17 cleanup | V | `ir.rs:2208-2219`; github callers require success; velnor callers accept skipped on fork PR |
 | Pins @ `284f1091` (D19) | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 455 passed |
+| Run 35031834569 Planning green + docker skip visible | V | `Control / Planning` pass; `Docker · Docker / Velnor · skipped (no online velnor-host-docker runner)` |
+| rustfmt + manifest pin drift (run 35031834569) | P | `snapshot.rs` fmt + `manifest.rs` `284f1091` pin pending commit |

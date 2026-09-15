@@ -478,12 +478,7 @@ fn classify_key<'a>(key: &str, policy: &'a RetentionPolicy) -> (&'a str, u64, u3
     let class = policy
         .classes
         .iter()
-        .find(|class| {
-            class
-                .markers
-                .iter()
-                .any(|matcher| matcher.matches(key))
-        })
+        .find(|class| class.markers.iter().any(|matcher| matcher.matches(key)))
         .map_or("unclassified", |class| class.id);
     let budget_bytes = policy
         .classes
@@ -505,12 +500,7 @@ pub(crate) fn budget_report(entries: &[CacheEntry], policy: &RetentionPolicy) ->
                 *count += 1;
                 *budget = budget_bytes;
             }
-            None => classes.push((
-                class_id.to_owned(),
-                entry.size_in_bytes,
-                1,
-                budget_bytes,
-            )),
+            None => classes.push((class_id.to_owned(), entry.size_in_bytes, 1, budget_bytes)),
         }
     }
     classes.sort_by(|(left, _, _, _), (right, _, _, _)| left.cmp(right));
@@ -524,12 +514,14 @@ pub(crate) fn budget_report(entries: &[CacheEntry], policy: &RetentionPolicy) ->
         headroom_bytes,
         classes: classes
             .into_iter()
-            .map(|(id, held_bytes, entry_count, budget_bytes)| ClassBudgetTotal {
-                id,
-                budget_bytes,
-                held_bytes,
-                entry_count,
-            })
+            .map(
+                |(id, held_bytes, entry_count, budget_bytes)| ClassBudgetTotal {
+                    id,
+                    budget_bytes,
+                    held_bytes,
+                    entry_count,
+                },
+            )
             .collect(),
     }
 }
@@ -1156,9 +1148,8 @@ mod tests {
         };
 
         assert!(CacheKeyMatcher::CiRustCargoSources.matches("ci-Linux-X64-rust-abc123"));
-        assert!(CacheKeyMatcher::CiRustCargoSources.matches(
-            "ci-release-Linux-rust-example-runner-abc123"
-        ));
+        assert!(CacheKeyMatcher::CiRustCargoSources
+            .matches("ci-release-Linux-rust-example-runner-abc123"));
         let source = generic_class("ci-Linux-X64-rust-abc123");
         assert_eq!(source.0.as_str(), "source-bundles");
         assert_eq!(source.1, CachePurpose::CargoSources);
@@ -1197,7 +1188,10 @@ mod tests {
             );
             assert_eq!(actual.1, CachePurpose::Generic, "unit cache key: {key}");
         }
-        for key in ["prefix-ci-Linux-rust-unit-abc123", "ci-Linux-rustlike-abc123"] {
+        for key in [
+            "prefix-ci-Linux-rust-unit-abc123",
+            "ci-Linux-rustlike-abc123",
+        ] {
             let actual = generic_class(key);
             assert_eq!(
                 actual.0.as_str(),
@@ -1219,15 +1213,10 @@ mod tests {
                 1,
                 30 * HOUR,
             ),
-            aged(
-                "guest",
-                "guest-seed-x86_64-deadbeef",
-                1,
-                30 * HOUR,
-            ),
+            aged("guest", "guest-seed-x86_64-deadbeef", 1, 30 * HOUR),
             aged(
                 "policy",
-                "velnor-policy-mbx-1.8.3-Linux-X64-deadbeef",
+                "velnor-policy-mbx-1.11.1-Linux-X64-deadbeef",
                 1,
                 30 * HOUR,
             ),
@@ -1252,8 +1241,18 @@ mod tests {
     fn budget_report_exposes_per_class_totals_and_headroom() {
         let policy = RetentionPolicy::default_policy();
         let entries = vec![
-            entry("a", "velnor-rustup-Linux-X64-seed", 100, "2026-09-01T00:00:00Z"),
-            entry("b", "mise-v1-linux-x64-ubuntu24", 200, "2026-09-01T00:00:00Z"),
+            entry(
+                "a",
+                "velnor-rustup-Linux-X64-seed",
+                100,
+                "2026-09-01T00:00:00Z",
+            ),
+            entry(
+                "b",
+                "mise-v1-linux-x64-ubuntu24",
+                200,
+                "2026-09-01T00:00:00Z",
+            ),
             entry(
                 "c",
                 "velnor-workflow-v1-Linux-X64-deadbeef",
@@ -1264,7 +1263,10 @@ mod tests {
         let report = budget_report(&entries, &policy);
         assert_eq!(report.total_budget_bytes, policy.total_bytes);
         assert_eq!(report.total_held_bytes, 600);
-        assert_eq!(report.headroom_bytes, i64::try_from(policy.total_bytes).unwrap() - 600);
+        assert_eq!(
+            report.headroom_bytes,
+            i64::try_from(policy.total_bytes).unwrap() - 600
+        );
         let toolchain = report
             .classes
             .iter()

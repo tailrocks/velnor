@@ -709,12 +709,8 @@ pub static ACTIONS: &[ActionCapability] = &[
         adapter: ActionAdapter::Composite,
         allowed_refs: &[
             allowed(
-                "8e438e06855e10b4bfe5072912f47d2ae9dc5a02",
+                "284f109157fe37bcf7bedbbe4f0f2d5c55c460dc",
                 "hosted runtime source pin",
-            ),
-            allowed(
-                "7fa4a0731ee8bedc5b02d90507d6dbe8b719153a",
-                "hosted runtime source pin (legacy)",
             ),
         ],
         allowed_subpaths: &[".github/actions/setup-velnor-workflow"],

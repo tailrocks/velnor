@@ -438,7 +438,11 @@ where
 
 fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, GeneratorError> {
     let entries_text = fs::read_to_string(entries_path).map_err(|error| {
-        GeneratorError::io("read cache account snapshot", Path::new(entries_path), &error)
+        GeneratorError::io(
+            "read cache account snapshot",
+            Path::new(entries_path),
+            &error,
+        )
     })?;
     let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
         GeneratorError::usage(format!(
@@ -474,7 +478,8 @@ fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &report)
         .map_err(|error| GeneratorError::usage(format!("write budget report: {error}")))?;
-    writeln!(handle).map_err(|error| GeneratorError::usage(format!("write budget report: {error}")))?;
+    writeln!(handle)
+        .map_err(|error| GeneratorError::usage(format!("write budget report: {error}")))?;
     Ok(())
 }
 
