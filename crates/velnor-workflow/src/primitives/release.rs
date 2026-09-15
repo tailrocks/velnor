@@ -1832,6 +1832,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 false,
                 cargo_cache_restored,
                 skip_when_offline_ready,
+                cargo_cache_restored.then_some("cache"),
             );
             let cargo_offline = checks_env(unit);
             let _ = writeln!(

@@ -101,12 +101,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-8decfeeb8599345c4d047301550ffd0e894fc06f-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-69f94748c331920b9411bbc227694988afebc78c-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 8decfeeb8599345c4d047301550ffd0e894fc06f
+          EXPECTED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -506,7 +506,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-unit-collector' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-unit-collector' && (steps.rust-unit-collector-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -726,7 +726,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-bench' && (steps.rust-velnor-bench-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -946,7 +946,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-client' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-client' && (steps.rust-velnor-client-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1166,7 +1166,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-control' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-control' && (steps.rust-velnor-control-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1386,7 +1386,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-model' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-model' && (steps.rust-velnor-model-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1606,7 +1606,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-render' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (steps.rust-velnor-render-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1826,7 +1826,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-runner' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (steps.rust-velnor-runner-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2046,7 +2046,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-tools' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (steps.rust-velnor-tools-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2266,7 +2266,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-workflow' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (steps.rust-velnor-workflow-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2486,7 +2486,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (steps.rust-velnor-workflow-contract-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2706,7 +2706,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnorctl' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnorctl' && (steps.rust-velnorctl-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2924,7 +2924,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-production-topology' && (steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-production-topology' && (steps.rust-production-topology-cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
