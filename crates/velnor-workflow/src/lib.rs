@@ -538,6 +538,10 @@ pub struct Unit {
     /// carries the decision, and pinned Planning runtimes must never see a
     /// field they predate.
     pub(crate) requires_trusted: bool,
+    /// Workspace-wide `cargo check` gate declared through generation config.
+    /// Watch-graph uses this to omit per-crate source trees that narrower
+    /// crate units already cover.
+    pub(crate) workspace_check: bool,
 }
 
 /// A GitHub Actions service container one unit job starts.
@@ -1738,6 +1742,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: row.requires_trusted(),
+            workspace_check: row.workspace_check(),
         });
         return;
     };
@@ -1754,6 +1759,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
         unit.watch = watch.to_vec();
     }
     if row.workspace_check() {
+        unit.workspace_check = true;
         unit.pr_commands = vec!["cargo check --workspace --all-targets --locked".to_owned()];
         unit.full_commands.clone_from(&unit.pr_commands);
     }
@@ -3312,10 +3318,38 @@ fn generated_files_with_surface(
             render_static_template_for_config(&config, name, template)?,
         );
     }
+    for (path, content) in builtin_generated_actions() {
+        files.entry(path).or_insert(content);
+    }
     for owned in &config.static_files {
         files.insert(PathBuf::from(&owned.path), owned.content.clone());
     }
     Ok(files)
+}
+
+/// Composite actions the generator always emits; repository `static_files`
+/// rows may override these paths when a consumer owns a forked copy.
+fn builtin_generated_actions() -> BTreeMap<PathBuf, String> {
+    let template = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("templates/report-velnor-ci-outcomes/action.yml");
+    let content = fs::read_to_string(&template).unwrap_or_else(|error| {
+        panic!("read {}: {error}", template.display())
+    });
+    let mut files = BTreeMap::new();
+    files.insert(
+        PathBuf::from(".github/actions/report-velnor-ci-outcomes/action.yml"),
+        content,
+    );
+    files
+}
+
+#[cfg(test)]
+fn report_velnor_ci_outcomes_action_template() -> String {
+    fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("templates/report-velnor-ci-outcomes/action.yml"),
+    )
+    .expect("read report action template")
 }
 
 // One named function per generated workflow family: the name-keyed arms of
@@ -7039,6 +7073,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: false,
+            workspace_check: false,
         });
         config.units.push(Unit {
             id: "rust-declared-base".to_owned(),
@@ -7061,6 +7096,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: false,
+            workspace_check: false,
         });
         config.units.push(Unit {
             id: "rust-declared-mise-free".to_owned(),
@@ -7083,6 +7119,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: false,
+            workspace_check: false,
         });
         let ir = WorkflowIr::from_config(&config);
         let step = |unit: &str| {
@@ -7182,6 +7219,49 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(workflow.contains("MISE_EXEC_AUTO_INSTALL: \"false\""));
         assert!(workflow.contains("MISE_NOT_FOUND_AUTO_INSTALL: \"false\""));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn velnor_lane_installs_only_unit_scoped_mise_tools() {
+        let root = nextest_fixture_repository("mise-velnor-scoped");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[settings]\nlockfile = true\n\n[tools]\n\"aqua:nextest-rs/nextest/cargo-nextest\" = \"0.9.0\"\n\"aqua:rust-cross/cargo-zigbuild\" = \"0.23.3\"\nzig = \"0.16.0\"\n",
+            ),
+            "write Mise configuration with release-only tools",
+        );
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.\"aqua:nextest-rs/nextest/cargo-nextest\"]]\nversion = \"0.9.0\"\n\n[[tools.\"aqua:rust-cross/cargo-zigbuild\"]]\nversion = \"0.23.3\"\n\n[[tools.zig]]\nversion = \"0.16.0\"\n",
+            ),
+            "write Mise lock",
+        );
+        let mut config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan workspace with release-only mise tools",
+        );
+        config.runners = RunnerMode::Velnor;
+        config.velnor_labels = vec!["self-hosted".to_owned(), "example-runner".to_owned()];
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
+        assert!(
+            workflow.contains("mise --yes install aqua:nextest-rs/nextest/cargo-nextest"),
+            "Velnor lane must install only nextest for crate units: {workflow}"
+        );
+        assert!(
+            !workflow.contains("mise --yes install\n"),
+            "Velnor lane must not install the whole root manifest: {workflow}"
+        );
+        assert!(
+            !workflow.contains("mise --yes install zig"),
+            "Velnor lane must not install release-only zig for CI units: {workflow}"
+        );
+        assert!(
+            !workflow.contains("cargo-zigbuild"),
+            "Velnor lane must not install cargo-zigbuild for CI units: {workflow}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -7885,20 +7965,39 @@ channel = "stable"
         let legacy = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
         for workflow in [nested, legacy] {
             assert!(workflow.contains("set -o pipefail"));
+            assert!(workflow.contains("VELNOR_JOB_STARTED_EPOCH=$(date +%s)"));
+            assert!(workflow.contains("VELNOR_RUNNER_SETUP_ENDED_EPOCH=$(date +%s)"));
+            assert!(workflow.contains("VELNOR_SELECTION_ENDED_EPOCH=$(date +%s)"));
+            assert!(workflow.contains("VELNOR_TOOL_BOOTSTRAP_ENDED_EPOCH=$(date +%s)"));
+            assert!(workflow.contains("VELNOR_CACHE_PREP_ENDED_EPOCH=$(date +%s)"));
+            assert!(workflow.contains("VELNOR_CARGO_FETCH_ENDED_EPOCH=$(date +%s)"));
+            assert!(workflow.contains("VELNOR_CLEANUP_ENDED_EPOCH=$(date +%s)"));
             assert!(workflow.contains("VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)"));
             assert!(workflow.contains("| tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?"));
             assert!(workflow.contains("VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)"));
             assert!(workflow.contains("\n          exit $rc"));
             assert!(workflow.contains("- name: Report phase timings and cache outcomes"));
             assert!(workflow.contains("\n        if: always()\n"));
-            assert!(workflow.contains("VELNOR_WORKFLOW_NAME: "));
-            assert!(workflow.contains("VELNOR_LANE_NAME: "));
-            assert!(workflow.contains("select(.name == ($wf + \" / \" + $lane))"));
-            assert!(workflow.contains("endswith(\" / \" + $lane)"));
-            assert!(workflow.contains("jq -nc"));
-            assert!(workflow.contains("VELNOR_CI_REPORT "));
-            assert!(workflow.contains("command -v gh"));
+            assert!(workflow.contains("uses: ./.github/actions/report-velnor-ci-outcomes"));
+            assert!(workflow.contains("job_label: "));
+            assert!(
+                workflow.find("- name: Report phase timings and cache outcomes")
+                    > workflow.find("- name: Mark cleanup end"),
+                "report step must run after cleanup markers"
+            );
         }
+        let action = report_velnor_ci_outcomes_action_template();
+        assert!(action.contains("schema_version: 1"));
+        assert!(action.contains("runner_setup_seconds:"));
+        assert!(action.contains("selection_transport_seconds:"));
+        assert!(action.contains("tool_bootstrap_seconds:"));
+        assert!(action.contains("cache_prep_seconds:"));
+        assert!(action.contains("cargo_fetch_seconds:"));
+        assert!(action.contains("cleanup_seconds:"));
+        assert!(action.contains("total_seconds:"));
+        assert!(action.contains("jq -nc"));
+        assert!(action.contains("VELNOR_CI_REPORT "));
+        assert!(action.contains("command -v gh"));
     }
 
     #[test]
@@ -9418,6 +9517,7 @@ channel = "stable"
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: false,
+            workspace_check: false,
         };
         let config = ProjectConfig {
             repository: String::new(),
@@ -10505,16 +10605,39 @@ channel = "stable"
         let velnor_lane = workflow
             .split_once("\n  velnor:")
             .map_or("", |(_, lane)| lane);
-        for lane in [github_lane, velnor_lane] {
-            // Audit 4.1: the declared Cargo-source cache must be restored
-            // exactly where the compiler cache is restored.
-            assert!(lane.contains("name: Restore \"Rust crate (fixture)\" cache"));
-            assert!(lane.contains("~/.cargo/registry"));
-            assert!(!lane.contains("target/"));
-        }
+        // Audit 4.1: the hosted lane restores Cargo sources through actions/cache.
+        assert!(github_lane.contains("name: Restore \"Rust crate (fixture)\" cache"));
+        assert!(github_lane.contains("~/.cargo/registry"));
+        assert!(!github_lane.contains("target/"));
+        // The Velnor lane mounts registry/git on host-persistent stores, so
+        // actions/cache restore is omitted; Mr. Boxington local carries compiler
+        // state instead.
+        assert!(!velnor_lane.contains("name: Restore \"Rust crate (fixture)\" cache"));
+        assert!(velnor_lane.contains("backend: local"));
         // Only the hosted lane saves, and only on trusted events.
         assert!(github_lane.contains("name: Save \"Rust crate (fixture)\" cache"));
         assert!(!velnor_lane.contains("name: Save \"Rust crate (fixture)\" cache"));
+    }
+
+    #[test]
+    fn velnor_only_lane_omits_actions_cache_for_host_persistent_cargo_sources() {
+        let mut config = scanned_fixture(RunnerMode::Velnor);
+        let rust_index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        config.units[rust_index].pinned_lockfile = true;
+        let workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(&config.units[rust_index], WorkflowKind::Main);
+        assert!(
+            !workflow.contains("name: Restore \"Rust crate (fixture)\" cache"),
+            "Velnor-only jobs must not emit redundant actions/cache restore"
+        );
+        assert!(workflow.contains("backend: local"));
+        assert!(workflow.contains("Prepare Cargo sources"));
     }
 
     #[test]
@@ -10607,6 +10730,7 @@ channel = "stable"
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: false,
+            workspace_check: false,
         });
         let ir = WorkflowIr::from_config(&config);
         let rust = must_some(
@@ -10708,25 +10832,25 @@ channel = "stable"
             services: Vec::new(),
             workflow_file: None,
             requires_trusted: false,
+            workspace_check: false,
         });
         let kind = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust, None);
         assert!(
-            kind.contains("            'rust-dependency-policy') exit 0 ;;"),
-            "kind fetch must skip deny/audit members, not fail closed: {kind}"
+            !kind.contains("unknown unit for cargo fetch"),
+            "kind jobs with fixed unit ids must not carry the union fetch case: {kind}"
         );
         assert!(kind.contains("          cargo fetch --locked"));
-        assert!(kind.contains("unknown unit for cargo fetch"));
         assert!(
             kind.contains("tool: cargo-deny"),
             "kind reusable must provision cargo-deny for the policy member"
         );
         assert!(
-            kind.contains("export CARGO_NET_OFFLINE=true"),
-            "restricted matrix units must opt into offline at run time"
+            kind.contains("CARGO_NET_OFFLINE: \"true\""),
+            "restricted kind jobs bake offline env per unit"
         );
         assert!(
-            !kind.contains("CARGO_NET_OFFLINE: \"true\""),
-            "baked offline env would break deny members that share the kind body"
+            !kind.contains("export CARGO_NET_OFFLINE=true"),
+            "kind jobs must not carry the union offline run prelude"
         );
     }
 

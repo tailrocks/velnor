@@ -555,7 +555,22 @@ fn pull_request_on_velnor_rejects_a_github_only_runner_mode() {
 fn velnor_lane_installs_declared_mise_tools() {
     let root = unique_dir("mise-velnor");
     write_rust_fixture(&root, 1);
-    fs::write(root.join("mise.toml"), "[tools]\nnode = \"24.20.0\"\n").unwrap();
+    fs::write(
+        root.join("mise.toml"),
+        "[settings]\nlockfile = true\n\n[tools]\nnode = \"24.20.0\"\n\"aqua:nextest-rs/nextest/cargo-nextest\" = \"0.9.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("mise.lock"),
+        "[[tools.\"aqua:nextest-rs/nextest/cargo-nextest\"]]\nversion = \"0.9.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".config")).unwrap();
+    fs::write(
+        root.join(".config/nextest.toml"),
+        "[profile.ci]\nfail-fast = false\n",
+    )
+    .unwrap();
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(
@@ -563,8 +578,12 @@ fn velnor_lane_installs_declared_mise_tools() {
         "Velnor lane must install lockfile tools: {unit}"
     );
     assert!(
-        unit.contains("mise --yes install"),
-        "Velnor lane must run mise install: {unit}"
+        unit.contains("mise --yes install aqua:nextest-rs/nextest/cargo-nextest"),
+        "Velnor lane must install only unit-scoped tools: {unit}"
+    );
+    assert!(
+        !unit.contains("mise --yes install\n"),
+        "Velnor lane must not install the whole root manifest: {unit}"
     );
 }
 
@@ -588,8 +607,14 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     }
     assert!(!workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
     assert!(!workflow.contains("inputs.unit"));
-    assert!(workflow.contains("'rust-crate00') root='crates/crate00' ;;"));
-    assert!(workflow.contains("'rust-crate01') root='crates/crate01' ;;"));
+    assert!(workflow.contains("github-prepare-cargo-sources:"));
+    assert!(workflow.contains("velnor-prepare-cargo-sources:"));
+    assert!(workflow.contains("needs: [github-prepare-cargo-sources]"));
+    assert!(workflow.contains("needs: [velnor-prepare-cargo-sources]"));
+    assert!(
+        !workflow.contains("unknown unit for cargo fetch"),
+        "kind unit jobs must not repeat per-unit fetch bodies"
+    );
 }
 
 #[test]
@@ -617,8 +642,14 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
-    assert_eq!(unit.matches("name: \"Velnor / rust-crate").count(), 8);
-    assert_eq!(unit.matches("name: \"GitHub / rust-crate").count(), 8);
+    assert_eq!(
+        unit.matches("    name: \"Velnor / rust-crate").count(),
+        8
+    );
+    assert_eq!(
+        unit.matches("    name: \"GitHub / rust-crate").count(),
+        8
+    );
     let pr = generated.workflow("ci-pr.yml");
     assert_eq!(
         pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")

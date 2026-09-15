@@ -299,136 +299,59 @@ fn unit_snapshot(ir: &WorkflowIr, unit: &Unit, namespace: &str) -> (String, Stri
     )
 }
 
-/// Shell body of the post-checks report step.
-///
-/// Classifies the captured unit log into the three outcome classes the
-/// performance contract is measured against — package-origin downloads,
-/// compiler-cache outcomes (mbx counters, Cargo compile segments), and queue
-/// time — then emits one machine-readable `VELNOR_CI_REPORT` line plus a
-/// step-summary table. The step never fails the job.
-const CHECKS_REPORT_SCRIPT: &str = r#"set -uo pipefail
-log="$RUNNER_TEMP/velnor-unit-log.txt"
-log_present=false
-if [[ -s "$log" ]]; then log_present=true; fi
-started="${VELNOR_CHECKS_STARTED_EPOCH:-}"
-ended="${VELNOR_CHECKS_ENDED_EPOCH:-}"
-wall=""
-if [[ "$started" =~ ^[0-9]+$ && "$ended" =~ ^[0-9]+$ ]]; then
-  wall=$((ended - started))
-fi
-queue=""
-job_name=""
-expected_job="$VELNOR_WORKFLOW_NAME / $VELNOR_LANE_NAME"
-if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  run_started="$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq '.run_started_at // empty' 2>/dev/null || true)"
-  jobs_json="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" 2>/dev/null || true)"
-  job_name="$(printf '%s' "$jobs_json" | jq -r --arg wf "$VELNOR_WORKFLOW_NAME" --arg lane "$VELNOR_LANE_NAME" '[.jobs[]? | select(.name == ($wf + " / " + $lane))][0].name // empty' 2>/dev/null | head -n1 || true)"
-  if [[ -z "$job_name" ]]; then
-    job_name="$(printf '%s' "$jobs_json" | jq -r --arg lane "$VELNOR_LANE_NAME" '[.jobs[]? | select(.name | endswith(" / " + $lane))][0].name // empty' 2>/dev/null | head -n1 || true)"
-  fi
-  if [[ -n "$job_name" && -n "$run_started" ]]; then
-    job_started="$(printf '%s' "$jobs_json" | jq -r --arg name "$job_name" '.jobs[]? | select(.name == $name) | .started_at' 2>/dev/null | head -n1 || true)"
-    if [[ -n "$job_started" ]]; then
-      queue="$(jq -n --arg job "$job_started" --arg run "$run_started" '($job | fromdateiso8601) - ($run | fromdateiso8601)' 2>/dev/null || true)"
-    fi
-  fi
-fi
-if [[ -z "$job_name" ]]; then
-  job_name="$expected_job"
-fi
-updating_index=0
-updating_git=0
-downloading_crates=0
-compiling_count=0
-downloaded_lines=""
-mbx_lines=""
-finished_lines=""
-if [[ -s "$log" ]]; then
-  updating_index="$(grep -c 'Updating crates.io index' "$log" || true)"
-  updating_git="$(grep -cE 'Updating git (repository|submodule)' "$log" || true)"
-  downloading_crates="$(grep -c 'Downloading crates' "$log" || true)"
-  compiling_count="$(grep -c 'Compiling ' "$log" || true)"
-  downloaded_lines="$(grep -E 'Downloaded [0-9]+ crate' "$log" || true)"
-  mbx_lines="$(grep -E 'mbx(\[cache\])?:' "$log" | grep -E 'hits|misses' || true)"
-  finished_lines="$(grep -E 'Finished .* in ' "$log" || true)"
-fi
-positive_int() {
-  local value="$1"
-  [[ "$value" =~ ^[0-9]+$ ]] || value=0
-  printf '%s' "$value"
+/// Append one epoch marker step for CI phase timing.
+fn render_phase_epoch_marker(output: &mut String, epoch_key: &str, step_name: &str) {
+    let _ = writeln!(
+        output,
+        "      - name: {step_name}\n        if: always()\n        run: echo \"VELNOR_{epoch_key}_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\""
+    );
 }
-report_json="$(jq -nc \
-  --arg job "$job_name" \
-  --arg queue "$queue" \
-  --arg wall "$wall" \
-  --argjson log_present "$log_present" \
-  --argjson updating_index "$(positive_int "$updating_index")" \
-  --argjson updating_git "$(positive_int "$updating_git")" \
-  --argjson downloading_crates "$(positive_int "$downloading_crates")" \
-  --argjson compiling_count "$(positive_int "$compiling_count")" \
-  --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
-  --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
-  --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
-  '{
-    job: $job,
-    log_present: $log_present,
-    queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
-    checks_wall_seconds: ($wall | if test("^[0-9]+$") then tonumber else null end),
-    origin_downloads: {
-      updating_crates_io_index: $updating_index,
-      updating_git: $updating_git,
-      downloading_crates: $downloading_crates,
-      downloaded_lines: $downloaded_lines
-    },
-    compiler: {
-      mbx_outcomes: $mbx,
-      finished_segments: $finished,
-      compiling_lines: $compiling_count
-    }
-  }' 2>/dev/null || true)"
-if [[ -z "$report_json" ]]; then
-  report_json="VELNOR_CI_REPORT_FALLBACK job=$job_name"
-fi
-echo "VELNOR_CI_REPORT $report_json"
-{
-  echo ""
-  echo '### Phase timings and cache outcomes'
-  echo ""
-  echo '```json'
-  echo "$report_json"
-  echo '```'
-  echo ""
-  echo "| metric | value |"
-  echo "| --- | --- |"
-  echo "| queue_seconds | ${queue:-unknown} |"
-  echo "| checks_wall_seconds | ${wall:-unknown} |"
-  echo "| updating_crates_io_index | $updating_index |"
-  echo "| updating_git | $updating_git |"
-  echo "| downloading_crates | $downloading_crates |"
-  echo "| compiling_lines | $compiling_count |"
-} >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-exit 0
-"#;
+
+/// Mark the start of a unit job before checkout.
+pub(crate) fn render_ci_job_started_marker(output: &mut String) {
+    render_phase_epoch_marker(output, "JOB_STARTED", "Mark CI job start");
+}
+
+pub(crate) fn render_ci_runner_setup_end_marker(output: &mut String) {
+    render_phase_epoch_marker(output, "RUNNER_SETUP_ENDED", "Mark runner setup end");
+}
+
+pub(crate) fn render_ci_selection_end_marker(output: &mut String) {
+    render_phase_epoch_marker(output, "SELECTION_ENDED", "Mark selection transport end");
+}
+
+pub(crate) fn render_ci_tool_bootstrap_end_marker(output: &mut String) {
+    render_phase_epoch_marker(output, "TOOL_BOOTSTRAP_ENDED", "Mark tool bootstrap end");
+}
+
+pub(crate) fn render_ci_cache_prep_end_marker(output: &mut String) {
+    render_phase_epoch_marker(output, "CACHE_PREP_ENDED", "Mark cache prep end");
+}
+
+pub(crate) fn render_ci_cargo_fetch_end_marker(output: &mut String) {
+    render_phase_epoch_marker(output, "CARGO_FETCH_ENDED", "Mark cargo fetch end");
+}
+
+pub(crate) fn render_ci_cleanup_end_marker(output: &mut String) {
+    render_phase_epoch_marker(output, "CLEANUP_ENDED", "Mark cleanup end");
+}
+
+/// Local composite action every generated surface invokes for post-check
+/// telemetry. The script lives in one emitted action file instead of being
+/// duplicated into every lane job.
+pub(crate) const VELNOR_CI_REPORT_ACTION: &str = "./.github/actions/report-velnor-ci-outcomes";
 
 /// Emit the post-checks report step shared by both render paths.
 ///
-/// `workflow_name` and `lane_name` compose the job name the Actions API
-/// reports for this job (`<workflow name> / <job name>` for a `workflow_call`
-/// callee), which the queue-time lookup matches on.
-pub(crate) fn render_phase_report_step(output: &mut String, workflow_name: &str, lane_name: &str) {
+/// `job_display_name` is the Actions API job name for this job (the workflow
+/// `jobs.<id>.name` value), which queue-time lookup matches on exactly.
+pub(crate) fn render_phase_report_step(output: &mut String, job_display_name: &str) {
     output.push_str("      - name: Report phase timings and cache outcomes\n");
     output.push_str("        if: always()\n");
-    output.push_str("        env:\n");
-    let _ = writeln!(output, "          VELNOR_WORKFLOW_NAME: {workflow_name}");
-    let _ = writeln!(output, "          VELNOR_LANE_NAME: {lane_name}");
-    output.push_str("          GH_TOKEN: ${{ github.token }}\n");
-    output.push_str("          GH_REPO: ${{ github.repository }}\n");
-    output.push_str("        run: |\n");
-    for line in CHECKS_REPORT_SCRIPT.lines() {
-        output.push_str("          ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    let _ = writeln!(
+        output,
+        "        uses: {VELNOR_CI_REPORT_ACTION}\n        with:\n          job_label: {job_display_name}"
+    );
 }
 
 /// The Cargo subcommands whose inputs are resolved by the command itself:
@@ -658,14 +581,74 @@ pub(crate) fn render_pinned_toolchain_steps(
 pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<String> {
     let mut tools = Vec::new();
     if needs_nextest(unit) {
-        tools.push(nextest_tool_id(lock_keys).to_owned());
+        push_mise_tool(&mut tools, nextest_tool_id(lock_keys).to_owned());
     }
     for declared in &unit.mise_tools {
-        if !tools.iter().any(|tool| tool == declared) {
-            tools.push(declared.clone());
+        push_mise_tool(&mut tools, declared.clone());
+    }
+    tools
+}
+
+pub(crate) fn needs_cargo_deny(unit: &Unit) -> bool {
+    unit_commands(unit)
+        .any(|command| command.contains("cargo deny") || command.contains("mbx deny"))
+}
+
+/// Lock spellings for cargo-deny. Repositories and job images may pin either
+/// the aqua prebuilt or the cargo backend; install args must match the lock.
+pub(crate) const QUALIFIED_CARGO_DENY_TOOL: &str = "aqua:EmbarkStudios/cargo-deny";
+pub(crate) const BARE_CARGO_DENY_TOOL: &str = "cargo:cargo-deny";
+
+/// Resolve the cargo-deny tool id against the root lock keys.
+pub(crate) fn cargo_deny_tool_id(lock_keys: &BTreeSet<String>) -> Option<String> {
+    if lock_keys.contains(QUALIFIED_CARGO_DENY_TOOL) {
+        Some(QUALIFIED_CARGO_DENY_TOOL.to_owned())
+    } else if lock_keys.contains(BARE_CARGO_DENY_TOOL) {
+        Some(BARE_CARGO_DENY_TOOL.to_owned())
+    } else if lock_keys.is_empty() {
+        Some(QUALIFIED_CARGO_DENY_TOOL.to_owned())
+    } else {
+        None
+    }
+}
+
+/// Tool ids the Velnor lane installs explicitly. The job image already pins
+/// common CI tools (Bun, OpenTofu, mold, Mr. Boxington); this list covers
+/// only what a unit's commands or repo declarations pull from the root lock,
+/// plus policy tools the hosted lane supplies through dedicated setup actions.
+pub(crate) fn velnor_mise_install_tool_ids(
+    unit: &Unit,
+    lock_keys: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut tools = mise_tool_ids(unit, lock_keys);
+    if needs_cargo_deny(unit) {
+        if let Some(deny) = cargo_deny_tool_id(lock_keys) {
+            push_mise_tool(&mut tools, deny);
         }
     }
     tools
+}
+
+fn push_mise_tool(tools: &mut Vec<String>, tool: String) {
+    if !tools.iter().any(|existing| existing == &tool) {
+        tools.push(tool);
+    }
+}
+
+fn render_velnor_mise_install(
+    output: &mut String,
+    unit: &Unit,
+    lock_keys: &BTreeSet<String>,
+) {
+    let tools = velnor_mise_install_tool_ids(unit, lock_keys);
+    if tools.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        output,
+        "      - name: Install declared Mise tools\n        run: |\n          set -euo pipefail\n          mise --yes install {}",
+        tools.join(" ")
+    );
 }
 
 /// Refuse a unit that needs nextest while the root lock pins neither spelling
@@ -708,21 +691,38 @@ pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
     })
 }
 
-/// Fetch every declared Cargo source up front, after the cache restore and
-/// before verification. Verification then runs without package-origin
-/// downloads: registry archives and Git dependencies arrive here, once, where
-/// the fetch is visible and measurable on its own. The fetch itself runs
-/// online (`preparation_env`, never `checks_env`) — it is the recovery path
-/// the offline restriction presumes already happened.
+/// Fetch declared Cargo sources after cache restore and before verification.
 ///
-/// Kind reusables share one YAML body across many units. Fetch the current
-/// rendered job's sources, not the first scanned member's directory.
+/// When `runtime_unit_id` is false the rendered job's unit id is fixed at
+/// generation time, so the step targets that unit alone. When true the id comes
+/// from `workflow_call` inputs and the step carries the union case over every
+/// restricted member.
 pub(crate) fn render_cargo_source_preparation(
     output: &mut String,
     members: &[&Unit],
     unit_id: &str,
+    runtime_unit_id: bool,
+    skip_on_cache_hit: bool,
 ) {
     if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
+        return;
+    }
+    let cache_hit_gate = skip_on_cache_hit
+        .then_some("        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n")
+        .unwrap_or_default();
+    if !runtime_unit_id {
+        let Some(active) = members.iter().find(|member| member.id == unit_id) else {
+            return;
+        };
+        if !cargo_network_is_restricted(active) {
+            return;
+        }
+        let root = yaml_scalar(&active.root);
+        let _ = write!(
+            output,
+            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
+            preparation_env()
+        );
         return;
     }
     let mut cases = String::new();
@@ -743,12 +743,65 @@ pub(crate) fn render_cargo_source_preparation(
             );
         }
     }
-    let _ = writeln!(
+    let _ = write!(
         output,
-        "      - name: Prepare Cargo sources\n        env:\n          CI_UNIT_ID: {}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
-        yaml_scalar(unit_id),
+        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
         preparation_env()
     );
+}
+
+/// Unique manifest roots that need `cargo fetch --locked` for `members`.
+fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
+    let mut roots = BTreeSet::new();
+    for member in members {
+        if cargo_network_is_restricted(member) {
+            roots.insert(member.root.clone());
+        }
+    }
+    roots.into_iter().collect()
+}
+
+/// Selection gate for a lane-level cargo prep job: any restricted unit selected.
+fn restricted_unit_selection_if(members: &[&Unit]) -> Option<String> {
+    let selectors = members
+        .iter()
+        .filter(|member| cargo_network_is_restricted(member))
+        .map(|member| reusable_selected_unit_selector(&member.id))
+        .collect::<Vec<_>>();
+    if selectors.is_empty() {
+        None
+    } else {
+        Some(selectors.join(" || "))
+    }
+}
+
+fn cargo_prep_cache_unit<'a>(members: &[&'a Unit]) -> Option<&'a Unit> {
+    members
+        .iter()
+        .copied()
+        .find(|member| cargo_network_is_restricted(member) && member.root == ".")
+        .or_else(|| {
+            members
+                .iter()
+                .copied()
+                .find(|member| cargo_network_is_restricted(member))
+        })
+}
+
+fn render_cargo_fetch_roots_script(roots: &[String]) -> String {
+    let mut script = String::from("          set -euo pipefail\n");
+    for root in roots {
+        let quoted = crate::shell_quote(root);
+        if root == "." {
+            let _ = writeln!(script, "          cargo fetch --locked");
+        } else {
+            let _ = writeln!(
+                script,
+                "          cd -- {quoted}\n          cargo fetch --locked\n          cd -- \"$GITHUB_WORKSPACE\""
+            );
+        }
+    }
+    script
 }
 
 /// The files a Docker mutable mount seed exchange carries: what the image's
@@ -1689,6 +1742,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let mut shard_index = 0_usize;
         let mut current_file = kind_unit_workflow_shard_file(kind, shard_index);
         let mut current = header.clone();
+        self.append_lane_cargo_prep_jobs(&mut current, &members, contracts);
 
         for unit in &members {
             let contract = contracts
@@ -1715,6 +1769,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 shard_index += 1;
                 current_file = kind_unit_workflow_shard_file(kind, shard_index);
                 current.clone_from(&header);
+                self.append_lane_cargo_prep_jobs(&mut current, &members, contracts);
             }
             current.push_str(&unit_body);
             assignments.insert(unit.id.clone(), current_file.clone());
@@ -1723,6 +1778,89 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             files.insert(current_file, current);
         }
         (files, assignments)
+    }
+
+    fn append_lane_cargo_prep_jobs(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) {
+        let roots = cargo_fetch_roots(members);
+        if roots.is_empty() {
+            return;
+        }
+        let Some(if_gate) = restricted_unit_selection_if(members) else {
+            return;
+        };
+        let Some(cache_unit) = cargo_prep_cache_unit(members) else {
+            return;
+        };
+        let fetch_script = render_cargo_fetch_roots_script(&roots);
+        for lane in [RunnerMode::Github, RunnerMode::Velnor] {
+            if !members.iter().any(|unit| {
+                let contract = contracts
+                    .and_then(|contracts| contracts.get(&unit.id))
+                    .cloned()
+                    .unwrap_or_else(|| self.default_unit_contract(unit, true));
+                contract
+                    .lanes
+                    .iter()
+                    .any(|job| job.lane == lane && lane_supports_unit(lane, unit))
+            }) {
+                continue;
+            }
+            let prep_id = format!("{}-prepare-cargo-sources", lane.as_str());
+            let prep_name = format!("{} / Prepare Cargo sources", lane.display_name());
+            let _ = writeln!(
+                output,
+                "  {prep_id}:\n    name: {}\n    if: ${{{{ {if_gate} }}}}\n    runs-on: {}\n    timeout-minutes: 20\n    steps:",
+                yaml_scalar(&prep_name),
+                self.runner_for(lane),
+            );
+            let _ = writeln!(
+                output,
+                "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+                self.pins.checkout
+            );
+            output.push_str(&workflow_selection_artifact_download(Some(
+                "${{ inputs.selection-artifact }}",
+            )));
+            if let Some(toolchain) = cache_unit.toolchain.as_ref() {
+                render_pinned_toolchain_steps(
+                    output,
+                    &self.pins.cache_restore,
+                    &self.pins.cache_save,
+                    toolchain,
+                    None,
+                );
+            }
+            if CacheBackend::Detected.lane_enables_actions_cache(lane, self, cache_unit)
+                && let Some(cache) = &cache_unit.cache
+            {
+                let (paths, key) = rendered_cache_values(cache);
+                let cache_key = format!(
+                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                    cache_unit.kind.id_prefix()
+                );
+                let _ = writeln!(
+                    output,
+                    "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
+                    yaml_scalar(&cache_unit.label),
+                    self.pins.cache_restore,
+                    cache_unit.kind.id_prefix()
+                );
+            }
+            let cache_hit_gate = CacheBackend::Detected
+                .lane_enables_actions_cache(lane, self, cache_unit)
+                .then_some("        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n")
+                .unwrap_or_default();
+            let _ = write!(
+                output,
+                "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n{fetch_script}",
+                preparation_env()
+            );
+        }
     }
 
     /// Legacy entry point returning one unsplit kind workflow.
@@ -1804,6 +1942,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             )
         });
         let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
+        let uses_lane_cargo_prep =
+            input_unit.is_some() && cargo_network_is_restricted(unit) && !members.is_empty();
+        if uses_lane_cargo_prep {
+            let prep_id = format!("{}-prepare-cargo-sources", lane.as_str());
+            let _ = writeln!(output, "    needs: [{prep_id}]");
+        }
         let _ = writeln!(output, "    runs-on: {}", self.runner_for_unit(lane, unit));
         if input_unit.is_some() {
             self.render_job_env(output, lane, unit);
@@ -1811,20 +1955,25 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let _ = writeln!(output, "    timeout-minutes: {}", contract.timeout_minutes);
         Self::render_job_services(output, unit);
         output.push_str("    steps:\n");
+        render_ci_job_started_marker(output);
         let _ = writeln!(
             output,
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
             self.pins.checkout
         );
         self.render_unit_runtime(output, lane, unit);
+        render_ci_runner_setup_end_marker(output);
         output.push_str(&workflow_selection_artifact_download(Some(
             "${{ inputs.selection-artifact }}",
         )));
+        render_ci_selection_end_marker(output);
         self.render_tool_provisioning_for_unit(output, lane, unit, cache_save);
+        render_ci_tool_bootstrap_end_marker(output);
         let seed = contract.mutable_mount_seed;
-        if seed && lane == RunnerMode::Github {
+        let skip_fetch_on_cache_hit = if seed && lane == RunnerMode::Github {
             render_mutable_mount_seed_restore(output, self, unit);
-        } else if contract.cache.enables_actions_cache(self, unit)
+            false
+        } else if contract.cache.lane_enables_actions_cache(lane, self, unit)
             && let Some(cache) = &unit.cache
         {
             render_retained_output_cache_note(output, self, unit, cache);
@@ -1840,28 +1989,45 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 self.pins.cache_restore,
                 unit.kind.id_prefix()
             );
+            true
+        } else {
+            false
+        };
+        render_ci_cache_prep_end_marker(output);
+        let runtime_unit_id = input_unit.is_none();
+        if !uses_lane_cargo_prep {
+            render_cargo_source_preparation(
+                output,
+                members,
+                &unit.id,
+                runtime_unit_id,
+                skip_fetch_on_cache_hit,
+            );
+            render_ci_cargo_fetch_end_marker(output);
         }
-        render_cargo_source_preparation(output, members, &unit.id);
         let unit_id_value =
             input_unit.map_or_else(|| "${{ inputs.unit }}".to_owned(), ToOwned::to_owned);
-        let checks_env = checks_env_for_members(unit, members);
+        let checks_env = if runtime_unit_id {
+            checks_env_for_members(unit, members)
+        } else {
+            checks_env(unit)
+        };
+        let offline_prelude = if runtime_unit_id {
+            cargo_offline_run_prelude(members)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{}          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{offline_prelude}          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
             yaml_scalar(&unit.label),
             checks_env,
-            cargo_offline_run_prelude(members),
-        );
-        render_phase_report_step(
-            output,
-            &yaml_scalar(&sidebar_group_name(unit)),
-            yaml_scalar(lane.display_name()).as_str(),
         );
         if seed && lane == RunnerMode::Github {
             render_mutable_mount_seed_collection(output, self, unit, cache_save);
         } else if cache_save
             && lane == RunnerMode::Github
-            && contract.cache.enables_actions_cache(self, unit)
+            && contract.cache.lane_enables_actions_cache(lane, self, unit)
             && let Some(cache) = unit.cache.as_ref()
         {
             let trusted_cache = format!(
@@ -1880,6 +2046,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 self.pins.cache_save
             );
         }
+        render_ci_cleanup_end_marker(output);
+        render_phase_report_step(output, &yaml_scalar(&name));
         output.push('\n');
     }
 
@@ -2379,32 +2547,42 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 output,
                 "    runs-on: {runner}\n    timeout-minutes: 45\n    steps:",
             );
+            render_ci_job_started_marker(output);
             let _ = writeln!(
                 output,
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 self.pins.checkout,
             );
             self.render_unit_runtime(output, lane, unit);
+            render_ci_runner_setup_end_marker(output);
             output.push_str(&workflow_selection_artifact_download(None));
+            render_ci_selection_end_marker(output);
             self.render_tool_provisioning(output, lane, unit, cache_save);
-            if CacheBackend::Detected.enables_actions_cache(self, unit)
-                && let Some(cache) = &unit.cache
-            {
-                render_retained_output_cache_note(output, self, unit, cache);
-                let (paths, key) = rendered_cache_values(cache);
-                let cache_key = format!(
-                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                    unit.id
-                );
-                let _ = writeln!(
-                    output,
-                    "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
-                    verify_name,
-                    self.pins.cache_restore,
-                    unit.id,
-                );
-            }
-            render_cargo_source_preparation(output, &[unit], &unit.id);
+            render_ci_tool_bootstrap_end_marker(output);
+            let cargo_cache_restored =
+                if CacheBackend::Detected.lane_enables_actions_cache(lane, self, unit)
+                    && let Some(cache) = &unit.cache
+                {
+                    render_retained_output_cache_note(output, self, unit, cache);
+                    let (paths, key) = rendered_cache_values(cache);
+                    let cache_key = format!(
+                        "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                        unit.id
+                    );
+                    let _ = writeln!(
+                        output,
+                        "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
+                        verify_name,
+                        self.pins.cache_restore,
+                        unit.id,
+                    );
+                    true
+                } else {
+                    false
+                };
+            render_ci_cache_prep_end_marker(output);
+            render_cargo_source_preparation(output, &[unit], &unit.id, false, cargo_cache_restored);
+            render_ci_cargo_fetch_end_marker(output);
             let base_sha = self.base_sha_expression();
             let _ = writeln!(
                 output,
@@ -2415,14 +2593,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 checks_env(unit),
                 yaml_scalar(&unit.id),
             );
-            render_phase_report_step(
-                output,
-                &yaml_scalar(&format!("{lane_label} / {group}")),
-                yaml_scalar(label).as_str(),
-            );
             if cache_save
                 && lane == RunnerMode::Github
-                && CacheBackend::Detected.enables_actions_cache(self, unit)
+                && CacheBackend::Detected.lane_enables_actions_cache(lane, self, unit)
                 && let Some(cache) = &unit.cache
             {
                 let (paths, key) = rendered_cache_values(cache);
@@ -2441,6 +2614,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     self.pins.cache_save,
                 );
             }
+            render_ci_cleanup_end_marker(output);
+            render_phase_report_step(output, &job_name);
             output.push('\n');
         }
     }
@@ -2593,10 +2768,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if !github_lane && self.mise_present {
             // Hosted mise-action is not admitted on Velnor. Auto-install is
             // off on the checks step, so declared lockfile tools must be
-            // installed explicitly or shims fail closed.
-            output.push_str(
-                "      - name: Install declared Mise tools\n        run: |\n          set -euo pipefail\n          mise --yes install\n",
-            );
+            // installed explicitly or shims fail closed. Install only what
+            // this unit's commands need — never the whole root manifest.
+            render_velnor_mise_install(output, unit, &self.mise_lock_keys);
         }
         if github_lane && let Some(toolchain) = &unit.toolchain {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);

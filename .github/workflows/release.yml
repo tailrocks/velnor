@@ -92,10 +92,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install
       - name: Restore "Bun package (velnor)" cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -124,10 +120,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install
       - name: Run Docker checks
         env:
           CI_SCOPE: full
@@ -150,10 +142,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install
       - name: Restore Documentation cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -182,10 +170,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install
       - name: Restore OpenTofu cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -217,18 +201,11 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:EmbarkStudios/cargo-deny
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust dependency policy" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: full
@@ -254,35 +231,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (unit-collector)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.toml', 'tools/unit-collector/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-unit-collector
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-unit-collector') root='tools/unit-collector' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="tools/unit-collector"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (unit-collector)" checks
+          cargo fetch --locked      - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-unit-collector
@@ -308,35 +273,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-bench)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-bench/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-bench
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-bench') root='crates/velnor-bench' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-bench"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-bench)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-bench
@@ -362,35 +315,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-client)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-client/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-client
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-client') root='crates/velnor-client' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-client"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-client)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-client
@@ -416,35 +357,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-control)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-control-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-control/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-control
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-control') root='crates/velnor-control' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-control"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-control)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-control
@@ -470,35 +399,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-model)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-model-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-model/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-model
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-model') root='crates/velnor-model' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-model"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-model)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-model
@@ -524,35 +441,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-render)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-render-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-render/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-render
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-render') root='crates/velnor-render' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-render"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-render)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-render
@@ -578,35 +483,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-runner)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-runner/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-runner
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-runner') root='crates/velnor-runner' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-runner"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-runner)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-runner
@@ -632,35 +525,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-tools)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-tools/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-tools
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-tools') root='crates/velnor-tools' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-tools"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-tools)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-tools
@@ -686,35 +567,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-workflow)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-workflow/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-workflow
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-workflow"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-workflow)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow
@@ -740,35 +609,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnor-workflow-contract)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnor-workflow-contract-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-workflow-contract/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnor-workflow-contract
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnor-workflow-contract"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnor-workflow-contract)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow-contract
@@ -794,35 +651,23 @@ jobs:
       - name: Install declared Mise tools
         run: |
           set -euo pipefail
-          mise --yes install
+          mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust crate (velnorctl)" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnorctl/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-velnorctl
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-velnorctl') root='crates/velnorctl' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root="crates/velnorctl"
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust crate (velnorctl)" checks
+          cargo fetch --locked      - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnorctl
@@ -845,38 +690,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install declared Mise tools
-        run: |
-          set -euo pipefail
-          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Restore "Rust production topology" cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ci-release-${{ runner.os }}-rust-production-topology-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
       - name: Prepare Cargo sources
         env:
-          CI_UNIT_ID: rust-production-topology
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          case "$CI_UNIT_ID" in
-            'rust-production-topology') root='.' ;;
-            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
-          esac
+          root=.
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked
-      - name: Run "Rust production topology" checks
+          cargo fetch --locked      - name: Run "Rust production topology" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-production-topology
