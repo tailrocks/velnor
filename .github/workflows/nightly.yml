@@ -37,7 +37,7 @@ on:
 
 
 concurrency:
-  group: velnor-${{ github.repository }}
+  group: velnor-${{ github.repository }}-nightly
   cancel-in-progress: true
 
 permissions:

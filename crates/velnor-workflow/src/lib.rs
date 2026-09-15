@@ -11680,8 +11680,10 @@ channel = "stable"
             &legacy_plan(&WorkflowIr::from_config(&config)),
         );
         assert!(
-            pr.contains("group: example-${{ github.repository }}"),
-            "Velnor recovery host must share one repository-scoped concurrency group: {pr}"
+            pr.contains(
+                "group: example-${{ github.repository }}-pr-${{ github.event.pull_request.number || github.ref }}\n"
+            ),
+            "Velnor recovery PR aggregate must use the derived -pr concurrency group: {pr}"
         );
         assert!(
             pr.contains("group-bun:\n    name: \"Bun / Packages\"\n    if:"),
@@ -11695,6 +11697,102 @@ channel = "stable"
         assert!(
             policy.contains("group: example-${{ github.repository }}-policy"),
             "policy must use a derived Velnor policy concurrency group: {policy}"
+        );
+    }
+
+    #[test]
+    fn ci_main_and_ci_pr_concurrency_groups_differ() {
+        let config = ProjectConfig {
+            runners: RunnerMode::Velnor,
+            automatic: RunnerMode::Velnor,
+            velnor_concurrency_group: Some("example-${{ github.repository }}".to_owned()),
+            ..header_fixture_config()
+        };
+        let ir = WorkflowIr::from_config(&config);
+        let pr = ir.render(WorkflowKind::PullRequest);
+        let main = ir.render(WorkflowKind::Main);
+        let nightly = ir.render(WorkflowKind::Nightly);
+        assert!(
+            pr.contains(
+                "group: example-${{ github.repository }}-pr-${{ github.event.pull_request.number || github.ref }}\n"
+            ),
+            "ci-pr must use the derived -pr concurrency group: {pr}"
+        );
+        assert!(
+            main.contains("group: example-${{ github.repository }}-main\n"),
+            "ci-main must use the derived -main concurrency group: {main}"
+        );
+        assert!(
+            nightly.contains("group: example-${{ github.repository }}-nightly\n"),
+            "nightly must use the derived -nightly concurrency group: {nightly}"
+        );
+        assert!(
+            !main.contains("group: example-${{ github.repository }}-pr"),
+            "a ci-main push must not share the ci-pr concurrency group: {main}"
+        );
+        assert!(
+            !nightly.contains("group: example-${{ github.repository }}-main\n"),
+            "nightly must not share the ci-main concurrency group: {nightly}"
+        );
+        assert!(
+            !nightly.contains("group: example-${{ github.repository }}-pr"),
+            "nightly must not share the ci-pr concurrency group: {nightly}"
+        );
+        let policy = render_policy_entrypoint(&config);
+        assert!(
+            policy.contains("group: example-${{ github.repository }}-policy"),
+            "policy must stay on the derived -policy group: {policy}"
+        );
+        assert!(
+            !policy.contains("group: example-${{ github.repository }}-main"),
+            "policy must not share the ci-main concurrency group: {policy}"
+        );
+    }
+
+    #[test]
+    fn configured_pr_concurrency_group_isolates_by_pull_request_number() {
+        let config = ProjectConfig {
+            velnor_concurrency_group: Some("example-${{ github.repository }}".to_owned()),
+            ..header_fixture_config()
+        };
+        let pr = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
+        assert!(
+            pr.contains(
+                "group: example-${{ github.repository }}-pr-${{ github.event.pull_request.number || github.ref }}\n"
+            ),
+            "distinct PRs must not share a configured concurrency group: {pr}"
+        );
+        assert!(
+            !pr.contains("group: example-${{ github.repository }}\n"),
+            "the raw configured group must not be emitted for ci-pr: {pr}"
+        );
+        assert!(
+            pr.contains("cancel-in-progress: true"),
+            "same-PR pushes may cancel the previous PR run: {pr}"
+        );
+    }
+
+    #[test]
+    fn default_aggregate_concurrency_isolates_by_workflow_and_ref() {
+        let config = header_fixture_config();
+        assert!(config.velnor_concurrency_group.is_none());
+        let ir = WorkflowIr::from_config(&config);
+        let pr = ir.render(WorkflowKind::PullRequest);
+        let main = ir.render(WorkflowKind::Main);
+        let nightly = ir.render(WorkflowKind::Nightly);
+        let default_group =
+            "group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}\n";
+        assert!(
+            pr.contains(default_group),
+            "unset velnor_concurrency_group must isolate PR by workflow+ref: {pr}"
+        );
+        assert!(
+            main.contains(default_group),
+            "unset velnor_concurrency_group must isolate main by workflow+ref: {main}"
+        );
+        assert!(
+            nightly.contains(default_group),
+            "unset velnor_concurrency_group must isolate nightly by workflow+ref: {nightly}"
         );
     }
 
