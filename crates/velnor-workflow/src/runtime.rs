@@ -243,7 +243,11 @@ impl CiUnit {
         ]
         .into_iter()
         .flatten()
-        .any(|command| command.contains("cargo check --workspace"))
+        .any(|command| {
+            command.contains("check --workspace --all-targets")
+                && (command.contains("cargo check --workspace")
+                    || command.contains("mbx check --workspace"))
+        })
     }
 
     /// Return the Cargo lockfile root recorded by the generator metadata.
