@@ -129,6 +129,20 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         skip_preflight: false,
         require_docker_socket: true,
     };
+    // `run_daemon` also creates the socket root, but the PID guard lives in
+    // the instance directory and is installed before that call. A fresh
+    // `VELNOR_STORAGE_ROOT` has no `run/velnor` yet; inspecting that missing
+    // parent fails closed and the host never starts.
+    velnor_client::ensure_socket_root().map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.socket_dir_unavailable",
+            format!(
+                "cannot create {}: {error}",
+                velnor_client::socket_root().display()
+            ),
+        )
+    })?;
     let instance_dir = socket.join(&name);
     crate::http::prepare_instance_dir(&instance_dir).map_err(|error| {
         CommandError::new(
@@ -1496,6 +1510,42 @@ mod tests {
             resolve_host_config_dir(&args, "ignored").expect("explicit"),
             PathBuf::from("/tmp/explicit-host")
         );
+    }
+
+    #[test]
+    fn host_start_creates_a_missing_user_socket_root() {
+        let root = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .expect("HOME")
+            .join(format!(
+                ".vn-sock-root-{}-{}",
+                std::process::id(),
+                velnor_model::Timestamp::now()
+                    .as_offset_datetime()
+                    .unix_timestamp_nanos()
+                    .unsigned_abs()
+            ));
+        let previous = env::var_os("VELNOR_STORAGE_ROOT");
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { env::set_var("VELNOR_STORAGE_ROOT", value) },
+                    None => unsafe { env::remove_var("VELNOR_STORAGE_ROOT") },
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        // SAFETY: Restore puts the previous value back even if prepare panics.
+        unsafe { env::set_var("VELNOR_STORAGE_ROOT", &root) };
+        let prepared = {
+            velnor_client::ensure_socket_root().expect("create socket root");
+            let instance = velnor_client::socket_root().join("vn24");
+            crate::http::prepare_instance_dir(&instance).map(|()| instance)
+        };
+        let instance = prepared.expect("prepare instance dir on a fresh storage root");
+        assert!(instance.is_dir(), "{}", instance.display());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

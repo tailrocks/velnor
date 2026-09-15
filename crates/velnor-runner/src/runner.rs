@@ -10870,6 +10870,14 @@ fn take_teardown_owner(slot: &TeardownSlot) -> Option<TeardownHandle> {
 
 impl TeardownHandle {
     fn run(self, job_claim: &JobClaim, forensics: &SlotForensics) -> Result<()> {
+        // The job process installs the job token as the process-wide active
+        // cancellation. Teardown runs on a worker thread in that same process
+        // and must not inherit it: `ProcessCommandRunner` registers every
+        // host `docker rm` with `active()`, and a cancelled token SIGKILLs
+        // those cleanup processes, then this function retries forever.
+        let _teardown_cancellation = crate::execution::cancel::set_active(
+            crate::execution::cancel::JobCancellation::inert(),
+        );
         let TeardownHandle {
             container,
             job_dir,
