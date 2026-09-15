@@ -709,7 +709,7 @@ pub static ACTIONS: &[ActionCapability] = &[
         adapter: ActionAdapter::Composite,
         allowed_refs: &[
             allowed(
-                "284f109157fe37bcf7bedbbe4f0f2d5c55c460dc",
+                "f3fc75ad2c566f38c6f469aec2261d552331b3b7",
                 "hosted runtime source pin",
             ),
         ],
