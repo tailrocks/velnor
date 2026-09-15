@@ -10065,14 +10065,16 @@ fn execute_script_job(
         teardown_slot,
         runner_name,
     );
-    if result.is_err()
-        && !has_teardown_owner(teardown_slot)
-        && let Err(e) = fs::remove_dir_all(&job_dir)
-    {
-        eprintln!(
-            "Warning: failed to clean up job workspace at {}: {e:#}",
-            job_dir.display()
-        );
+    if result.is_err() && !has_teardown_owner(teardown_slot) {
+        if let Err(e) = fs::remove_dir_all(&job_dir) {
+            eprintln!(
+                "Warning: failed to clean up job workspace at {}: {e:#}",
+                job_dir.display()
+            );
+        }
+        // No teardown owner means no container ever ran, so the slot's
+        // stable tree is released here rather than by `TeardownHandle::run`.
+        reclaim_stable_workspaces_after_job(&slot_work_dir);
     }
     result
 }
@@ -11428,7 +11430,26 @@ impl TeardownHandle {
             .join()
             .map_err(|panic| anyhow::anyhow!("BuildKit teardown worker panicked: {panic:?}"))??;
         remove_job_workspace(&job_dir)?;
+        // The job's stable workspace (if any) is released once its container
+        // and job directory are gone; the next job on this slot joins this
+        // teardown before it allocates, so the pass cannot race an allocation.
+        if let Some(slot_work_dir) = job_dir.parent() {
+            reclaim_stable_workspaces_after_job(slot_work_dir);
+        }
         Ok(())
+    }
+}
+
+/// Post-job stable-workspace budget pass: reclaim over-budget scopes
+/// oldest-first so growth during the job is bounded before the next
+/// admission, not discovered by it.
+fn reclaim_stable_workspaces_after_job(slot_work_dir: &Path) {
+    let outcome = crate::stable_workspace::reclaim_after_job(slot_work_dir);
+    for evicted in &outcome.evicted {
+        eprintln!(
+            "forensics.lifecycle: post-job stable workspace reclaim evicted {}",
+            evicted.display()
+        );
     }
 }
 
