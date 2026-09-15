@@ -81,7 +81,7 @@ id = "opentofu"
 label = "OpenTofu"
 kind = "opentofu"
 root = "."
-watch = []
+watch = ["**/*.tf", "**/*.tofu", "**/.terraform.lock.hcl"]
 github_pr_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
 github_full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
 velnor_pr_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
