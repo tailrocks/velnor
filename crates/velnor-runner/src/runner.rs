@@ -7202,17 +7202,7 @@ async fn handle_job_request(
     // admission row and every observation below record this admitted scope,
     // never the raw pool flag — the secrets gate, the storage leases, the
     // container spec, and the executor all enforce it.
-    let admitted_trust = crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope);
-    let effective_trust_scope = admitted_trust.effective_scope().to_owned();
-    let read_through_scope = admitted_trust.read_through_scope().map(str::to_owned);
-    forensics.lifecycle(&format!(
-        "job admitted job_id={} trust={} admitted_scope={} pool_scope={}",
-        job.job_id,
-        admitted_trust.class().as_str(),
-        effective_trust_scope,
-        args.trust_scope,
-    ));
-
+    //
     // One load for persist and advertise. Execute already fail-closes here;
     // do not swallow a missing or invalid execution.toml into a null
     // isolation fact.
@@ -7235,6 +7225,73 @@ async fn handle_job_request(
             anyhow::bail!("{REASON}: {error}");
         }
     };
+    // The backend's ability to mount D18 read-through store layers is part of
+    // the admission input: a job whose class and pool call for a layer the
+    // backend cannot mount is admitted on its write scope alone, with the
+    // denial recorded and shown in its "Set up job" log. The Docker answer is
+    // the probed daemon capability (one probe per daemon generation).
+    let read_through_support = match execution_backend {
+        velnor_model::ExecutionBackendKind::Docker => {
+            let work_dir = args
+                .work_dir
+                .clone()
+                .unwrap_or_else(|| config_dir.join("_work"));
+            let docker_host_work_dir = args.docker_host_work_dir.clone();
+            let docker_image = args.docker_image.clone();
+            let probed = tokio::task::spawn_blocking(move || {
+                crate::execution::store_overlay_support(
+                    &mut ProcessCommandRunner,
+                    Some(&docker_image),
+                    &work_dir,
+                    docker_host_work_dir.as_deref(),
+                )
+            })
+            .await
+            .context("store overlay capability probe task")?;
+            match probed {
+                Ok(support) => crate::trust_class::ReadThroughSupport::from_store_overlay(&support),
+                Err(error) => {
+                    const REASON: &str = "Docker store overlay capability probe could not reach a verdict; job failed closed before execution";
+                    let completion = complete_acquired_job_failure(
+                        &run_service_job,
+                        &AcquiredJobIdentity::from_job(&job),
+                        Some(&job),
+                        Some("store_overlay_probe".to_string()),
+                        &format!("{REASON}: {error}"),
+                    )
+                    .await;
+                    completion.context(
+                        "failed to complete the job rejected for the store overlay probe",
+                    )?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear completed in-flight job")?;
+                    anyhow::bail!("{REASON}: {error}");
+                }
+            }
+        }
+        velnor_model::ExecutionBackendKind::MicroVm => {
+            crate::trust_class::ReadThroughSupport::Unsupported {
+                reason: "the microVM backend shares stores without a read-through layer".to_owned(),
+            }
+        }
+    };
+    let admitted_trust =
+        crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope, &read_through_support);
+    let effective_trust_scope = admitted_trust.effective_scope().to_owned();
+    let store_read_through = admitted_trust.store_read_through();
+    forensics.lifecycle(&format!(
+        "job admitted job_id={} trust={} admitted_scope={} pool_scope={} read_through={}",
+        job.job_id,
+        admitted_trust.class().as_str(),
+        effective_trust_scope,
+        args.trust_scope,
+        match &store_read_through {
+            crate::trust_class::StoreReadThrough::Layered { lower_scope } =>
+                format!("{lower_scope} (overlay)"),
+            crate::trust_class::StoreReadThrough::Denied { reason } => format!("denied ({reason})"),
+            crate::trust_class::StoreReadThrough::None => "none".to_owned(),
+        },
+    ));
 
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
@@ -7848,7 +7905,7 @@ async fn handle_job_request(
         let slot_count = args.slot_count;
         let node_action_image = args.node_action_image.clone();
         let effective_trust_scope = effective_trust_scope.clone();
-        let read_through_scope = read_through_scope.clone();
+        let store_read_through = store_read_through.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
         let daemon_id = args
@@ -7880,7 +7937,7 @@ async fn handle_job_request(
                 &node_action_image,
                 &admission_graph,
                 &effective_trust_scope,
-                read_through_scope.as_deref(),
+                &store_read_through,
                 &run_service_url,
                 billing_owner_id,
                 &job_to_execute,
@@ -9906,7 +9963,7 @@ fn execute_script_job(
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
-    read_through_scope: Option<&str>,
+    store_read_through: &crate::trust_class::StoreReadThrough,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -9933,7 +9990,7 @@ fn execute_script_job(
         node_action_image,
         admission_graph,
         effective_trust_scope,
-        read_through_scope,
+        store_read_through,
         run_service_url,
         billing_owner_id,
         job,
@@ -10433,7 +10490,7 @@ fn execute_script_job_inner(
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
-    read_through_scope: Option<&str>,
+    store_read_through: &crate::trust_class::StoreReadThrough,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -10520,7 +10577,7 @@ fn execute_script_job_inner(
         node_action_image,
         daemon_id,
         effective_trust_scope,
-        read_through_scope,
+        store_read_through.lower_scope(),
     )?;
     let identity = identity_from_agent_name(runner_name);
     crate::github_adapter::push_runner_identity_env(&mut container.env, &identity);
@@ -10536,21 +10593,40 @@ fn execute_script_job_inner(
         });
     }
     let setup_ts = unix_now_iso8601();
+    let mut setup_lines =
+        setup_job_lines(job, docker_image, Some(&identity), Some(execution_backend));
+    let (store_lines, store_warning) = store_read_through.setup_job_lines(effective_trust_scope);
+    setup_lines.push("##[group]Persistent stores".to_string());
+    setup_lines.extend(store_lines);
+    setup_lines.push("##[endgroup]".to_string());
+    let store_annotations: Vec<crate::script_step::StepAnnotation> = store_warning
+        .into_iter()
+        .map(|message| crate::script_step::StepAnnotation {
+            level: crate::script_step::StepAnnotationLevel::Warning,
+            message,
+            title: Some("Read-through store unavailable".to_string()),
+            path: None,
+            start_line: None,
+            end_line: None,
+            start_column: None,
+            end_column: None,
+        })
+        .collect();
     let setup_log = StepLog {
         step_id: setup_step_id,
         display_name: "Set up job".to_string(),
         order: 1,
         started_at: setup_ts.clone(),
         completed_at: setup_ts,
-        lines: setup_job_lines(job, docker_image, Some(&identity), Some(execution_backend)),
+        lines: setup_lines,
         masks: Vec::new(),
-        annotations: Vec::new(),
+        warning_count: i32::try_from(store_annotations.len()).unwrap_or(i32::MAX),
+        annotations: store_annotations,
         telemetry: Vec::new(),
         exit_code: 0,
         skipped: false,
         failure_ignored: false,
         error_count: 0,
-        warning_count: 0,
         notice_count: 0,
         summary: String::new(),
     };
@@ -16892,7 +16968,11 @@ mod tests {
         // event, narrow the pool ceiling by it, and enforce the admitted scope
         // on all three axes — secrets, socket, stores.
         let job = admission_job("pull_request", Some("mallory/base"), true);
-        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        let admitted = crate::trust_class::AdmittedTrust::admit(
+            &job,
+            "trusted",
+            &crate::trust_class::ReadThroughSupport::Supported,
+        );
         assert_eq!(admitted.class(), TrustClass::ForkPR);
         assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
 
@@ -16928,7 +17008,11 @@ mod tests {
             }
         }));
 
-        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        let admitted = crate::trust_class::AdmittedTrust::admit(
+            &job,
+            "trusted",
+            &crate::trust_class::ReadThroughSupport::Supported,
+        );
         assert_eq!(admitted.class(), TrustClass::ForkPR);
         let admitted_scope = admitted.effective_scope().to_owned();
         validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
@@ -16981,7 +17065,11 @@ mod tests {
         // signals keeps the trusted pool's capabilities — secrets flow and the
         // admitted scope is the pool value itself.
         let job = admission_job("push", None, true);
-        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        let admitted = crate::trust_class::AdmittedTrust::admit(
+            &job,
+            "trusted",
+            &crate::trust_class::ReadThroughSupport::Supported,
+        );
         assert_eq!(admitted.class(), TrustClass::Trusted);
         assert_eq!(admitted.effective_scope(), "trusted");
         validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
@@ -17010,7 +17098,11 @@ mod tests {
         ] {
             let job = admission_job(event, head, false);
             assert_eq!(TrustClass::derive(&job), class);
-            let trust = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+            let trust = crate::trust_class::AdmittedTrust::admit(
+                &job,
+                "trusted",
+                &crate::trust_class::ReadThroughSupport::Supported,
+            );
             assert_eq!(trust.class(), class);
             assert_eq!(trust.effective_scope(), scope);
 
@@ -24931,9 +25023,7 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             store_trust_scope: "trusted".to_owned(),
-            store_read_through_scope: None,
-            store_overlay_mounts: Vec::new(),
-            prepared_cargo_store: None,
+            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         }

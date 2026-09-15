@@ -1192,6 +1192,24 @@ fn pending_looks_like_workflow_command(pending: &[u8]) -> bool {
 /// cannot keep an otherwise finished container alive. The marker is created
 /// exclusively through a verified directory fd: a job-controlled symlink or
 /// replacement path can never redirect this write.
+/// Remove every read-through overlay work directory the job owned. Runs after
+/// the job-owned reclaim removed the volumes: the kernel holds the work
+/// directory while the overlay is mounted.
+fn remove_store_overlay_work_dirs(container: &JobContainerSpec) -> Result<()> {
+    for overlay in &container.store_overlays {
+        remove_dir_if_present(&overlay.work)?;
+    }
+    Ok(())
+}
+
+fn remove_dir_if_present(dir: &Path) -> Result<()> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", dir.display())),
+    }
+}
+
 fn mark_job_container_done(container: &JobContainerSpec) -> bool {
     if let Err(error) = container.prepare_job_done_mount() {
         eprintln!(
@@ -5637,7 +5655,6 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard("cleanup")?;
-        crate::storage::teardown_store_overlays(container);
         mark_job_container_done(container);
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
@@ -5652,11 +5669,15 @@ where
         // that lock if the lease still holds `POST /containers/{id}/start`.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
+        // The overlay volumes went with the job-owned reclaim above; their
+        // work directories are host state the daemon does not own.
+        let overlay_result = remove_store_overlay_work_dirs(container);
         let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
 
         let result = (|| {
             container_result?;
             owned_result?;
+            overlay_result?;
             buildkit_result?;
             service_result
         })();
@@ -5689,10 +5710,12 @@ where
         // held, so the worker's `docker rm` of Created BuildKit hung.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
+        let overlay_result = remove_store_overlay_work_dirs(container);
 
         let result = (|| {
             container_result?;
             owned_result?;
+            overlay_result?;
             service_result
         })();
         if result.is_ok() {
@@ -5964,6 +5987,7 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
+        self.create_store_overlays(container)?;
         if container.mount_docker_socket
             && crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease()
         {
@@ -6031,6 +6055,42 @@ where
         }
         if container.verify_bind_mounts {
             self.verify_bind_mounts(container)?;
+        }
+        Ok(())
+    }
+
+    /// Create the D18 read-through overlay volumes the container spec asks
+    /// for. overlayfs needs every layer directory to exist before the daemon
+    /// mounts the volume at container start, and a work directory left by a
+    /// crashed predecessor of the same job name is stale state, not reuse.
+    /// Admission already established that this daemon can mount such a
+    /// layer, so every failure here is the job's error.
+    fn create_store_overlays(&mut self, container: &JobContainerSpec) -> Result<()> {
+        for overlay in &container.store_overlays {
+            for dir in [&overlay.lower, &overlay.upper] {
+                fs::create_dir_all(dir).with_context(|| {
+                    format!("create read-through store layer {}", dir.display())
+                })?;
+            }
+            remove_dir_if_present(&overlay.work)?;
+            fs::create_dir_all(&overlay.work).with_context(|| {
+                format!(
+                    "create read-through store overlay work dir {}",
+                    overlay.work.display()
+                )
+            })?;
+            let args = container.create_store_overlay_args(overlay)?;
+            self.with_docker_lifecycle("create-store-overlay", |executor| {
+                executor.run_docker(&args)
+            })
+            .with_context(|| {
+                format!(
+                    "create read-through store overlay volume {} ({} over {})",
+                    overlay.volume,
+                    overlay.upper.display(),
+                    overlay.lower.display()
+                )
+            })?;
         }
         Ok(())
     }
@@ -16411,9 +16471,7 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             store_trust_scope: "trusted".to_owned(),
-            store_read_through_scope: None,
-            store_overlay_mounts: Vec::new(),
-            prepared_cargo_store: None,
+            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         }

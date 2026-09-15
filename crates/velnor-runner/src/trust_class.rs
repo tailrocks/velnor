@@ -174,6 +174,33 @@ pub struct AdmittedTrust {
     /// (write) layer. Same-repo PR jobs on trusted pools use `pr` over
     /// `trusted` so PR writes never reach trusted stores (D18).
     read_through_scope: Option<String>,
+    /// Set when the class and pool asked for a read-through layer but the
+    /// execution backend cannot mount one: the reason the job runs on its
+    /// write scope alone. Surfaced in the job's "Set up job" log; never a
+    /// silent fallback.
+    read_through_denied: Option<String>,
+}
+
+/// Whether the execution backend can mount D18 read-through store layers for
+/// the jobs admitted on this pool. The Docker backend answers through the
+/// probed daemon capability ([`crate::execution::store_overlay_support`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadThroughSupport {
+    Supported,
+    Unsupported { reason: String },
+}
+
+impl ReadThroughSupport {
+    /// The Docker backend's answer, from the probed daemon capability.
+    #[must_use]
+    pub fn from_store_overlay(support: &crate::execution::StoreOverlaySupport) -> Self {
+        match support {
+            crate::execution::StoreOverlaySupport::Supported => Self::Supported,
+            crate::execution::StoreOverlaySupport::Unsupported { reason } => Self::Unsupported {
+                reason: reason.clone(),
+            },
+        }
+    }
 }
 
 impl AdmittedTrust {
@@ -192,6 +219,7 @@ impl AdmittedTrust {
             class,
             effective_scope,
             read_through_scope,
+            read_through_denied: None,
         }
     }
 
@@ -200,16 +228,33 @@ impl AdmittedTrust {
     /// `handle_job_request` and its conformance test call, so the narrowed
     /// pair the test asserts is the one production persists — never a
     /// hand-assembled pair production cannot produce.
+    ///
+    /// `read_through` is the backend's ability to mount the read-through
+    /// layer. When the class and pool call for one and the backend cannot
+    /// provide it, the job is admitted on its write scope alone with the
+    /// denial recorded ([`Self::read_through_denied`]); the store overlay is
+    /// then never attempted, so no job can degrade to that state silently at
+    /// mount time.
     #[must_use]
-    pub fn admit(job: &AgentJobRequestMessage, pool_scope: &str) -> Self {
+    pub fn admit(
+        job: &AgentJobRequestMessage,
+        pool_scope: &str,
+        read_through: &ReadThroughSupport,
+    ) -> Self {
         let class = TrustClass::derive(job);
         let pool = crate::trust_scope::normalize_scope(pool_scope);
         let event = event_name(job);
         let (effective_scope, read_through_scope) = store_scopes_for_class(class, pool, event);
+        let (read_through_scope, read_through_denied) = match (read_through_scope, read_through) {
+            (Some(scope), ReadThroughSupport::Supported) => (Some(scope), None),
+            (Some(_), ReadThroughSupport::Unsupported { reason }) => (None, Some(reason.clone())),
+            (None, _) => (None, None),
+        };
         Self {
             class,
             effective_scope,
             read_through_scope,
+            read_through_denied,
         }
     }
 
@@ -231,6 +276,76 @@ impl AdmittedTrust {
     #[must_use]
     pub fn read_through_scope(&self) -> Option<&str> {
         self.read_through_scope.as_deref()
+    }
+
+    /// Why the job runs without the read-through layer its class and pool
+    /// called for. `None` when no layer was called for or one is mounted.
+    #[must_use]
+    pub fn read_through_denied(&self) -> Option<&str> {
+        self.read_through_denied.as_deref()
+    }
+
+    /// The store layering this admission decided, as one value the executor
+    /// threads to the container spec and the job log.
+    #[must_use]
+    pub fn store_read_through(&self) -> StoreReadThrough {
+        match (&self.read_through_scope, &self.read_through_denied) {
+            (Some(lower_scope), _) => StoreReadThrough::Layered {
+                lower_scope: lower_scope.clone(),
+            },
+            (None, Some(reason)) => StoreReadThrough::Denied {
+                reason: reason.clone(),
+            },
+            (None, None) => StoreReadThrough::None,
+        }
+    }
+}
+
+/// What a job's persistent stores read beneath their write scope (D18).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreReadThrough {
+    /// A single store namespace: the write scope is the only scope.
+    None,
+    /// `lower_scope` is layered read-only beneath the write scope.
+    Layered { lower_scope: String },
+    /// The class and pool called for a layer the backend cannot mount; the
+    /// job runs on its write scope alone and the log says why.
+    Denied { reason: String },
+}
+
+impl StoreReadThrough {
+    /// The lower scope the container spec layers, when any.
+    #[must_use]
+    pub fn lower_scope(&self) -> Option<&str> {
+        match self {
+            Self::Layered { lower_scope } => Some(lower_scope),
+            Self::None | Self::Denied { .. } => None,
+        }
+    }
+
+    /// Log lines for the "Set up job" step's `Persistent stores` group and
+    /// the warning annotation a denial raises. Every admission says what its
+    /// stores read; a denial is a warning the job's summary counts.
+    #[must_use]
+    pub fn setup_job_lines(&self, write_scope: &str) -> (Vec<String>, Option<String>) {
+        let mut lines = vec![format!("Store scope: '{write_scope}'")];
+        let warning = match self {
+            Self::None => None,
+            Self::Layered { lower_scope } => {
+                lines.push(format!(
+                    "Read-through: '{lower_scope}' (daemon-mounted overlay; writes stay in '{write_scope}')"
+                ));
+                None
+            }
+            Self::Denied { reason } => {
+                let message = format!(
+                    "Read-through store unavailable: this execution backend cannot mount a read-through layer ({reason}); the job runs cold on the '{write_scope}' store only"
+                );
+                lines.push(format!("##[warning]{message}"));
+                Some(message)
+            }
+        };
+        (lines, warning)
     }
 }
 
@@ -1257,7 +1372,7 @@ mod tests {
             self_repository("octo/base"),
             Some("scope"),
         );
-        let admitted = AdmittedTrust::admit(&job, "trusted");
+        let admitted = AdmittedTrust::admit(&job, "trusted", &ReadThroughSupport::Supported);
         assert_eq!(admitted.class(), TrustClass::Trusted);
         assert_eq!(
             admitted.effective_scope(),
@@ -1267,6 +1382,41 @@ mod tests {
             admitted.read_through_scope(),
             Some(crate::trust_scope::TRUSTED)
         );
+        assert_eq!(admitted.read_through_denied(), None);
+
+        // A backend that cannot mount the layer admits the same job on the
+        // PR write scope alone and records why: the write scope never
+        // widens, and the denial is a fact of the admission, not a warning
+        // some mount path may or may not log later.
+        let denied = AdmittedTrust::admit(
+            &job,
+            "trusted",
+            &ReadThroughSupport::Unsupported {
+                reason: "virtiofs upper".into(),
+            },
+        );
+        assert_eq!(denied.class(), TrustClass::Trusted);
+        assert_eq!(denied.effective_scope(), crate::trust_scope::PR_STORE_SCOPE);
+        assert_eq!(denied.read_through_scope(), None);
+        assert_eq!(denied.read_through_denied(), Some("virtiofs upper"));
+
+        // A job that never asked for a layer records no denial either way.
+        let push = signal_job(
+            variables("push", "octo/base"),
+            None,
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        let plain = AdmittedTrust::admit(
+            &push,
+            "trusted",
+            &ReadThroughSupport::Unsupported {
+                reason: "virtiofs upper".into(),
+            },
+        );
+        assert_eq!(plain.effective_scope(), crate::trust_scope::TRUSTED);
+        assert_eq!(plain.read_through_scope(), None);
+        assert_eq!(plain.read_through_denied(), None);
     }
 
     #[test]

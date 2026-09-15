@@ -32,6 +32,18 @@ static CGROUP_DRIVER: Fact<String> = Fact::new("docker-info-cgroup", FactLifetim
 static VM_RESOURCE_CONTROLS: Fact<()> =
     Fact::new("docker-vm-resource-controls", FactLifetime::Daemon);
 
+/// Whether this daemon can mount a D18 read-through store layer: an overlay
+/// volume whose upper directory lives on the shared Velnor store filesystem.
+///
+/// A daemon-generation fact: it is decided by the VM kernel's overlayfs and
+/// the filesystem the daemon sees the store through (native ext4/xfs on
+/// Linux; virtiofs or gRPC-FUSE under Docker Desktop/OrbStack, which
+/// overlayfs accepts as an upper only read-only, if at all). It is probed by
+/// mounting one and writing through it — a mount that succeeds and then
+/// refuses writes is exactly the failure mode the probe exists to catch.
+static STORE_OVERLAY: Fact<StoreOverlaySupport> =
+    Fact::new("docker-store-overlay", FactLifetime::Daemon);
+
 /// The `CPUQuota=` the job slice's unit configuration declares.
 ///
 /// A host fact: it changes only when the drop-in on disk changes, which is the
@@ -68,6 +80,253 @@ impl HostPlatform {
             Self::Other => "this host platform",
         }
     }
+}
+
+/// Outcome of the read-through store overlay capability probe
+/// ([`store_overlay_support`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreOverlaySupport {
+    /// The daemon mounted an overlay over the store filesystem and a write
+    /// through it landed in the upper layer.
+    Supported,
+    /// The daemon cannot back a writable overlay upper on the store
+    /// filesystem. The reason is the probe's own observation, suitable for
+    /// preflight output and the job log.
+    Unsupported { reason: String },
+}
+
+impl StoreOverlaySupport {
+    #[must_use]
+    pub fn is_supported(&self) -> bool {
+        matches!(self, Self::Supported)
+    }
+
+    /// One line for preflight and diagnostics output.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Supported => "supported".to_owned(),
+            Self::Unsupported { reason } => format!("unsupported: {reason}"),
+        }
+    }
+}
+
+/// Label carried by every disposable resource the store overlay probe
+/// creates, so a crashed probe can be recognised and reclaimed.
+pub const STORE_OVERLAY_PROBE_LABEL: &str = "velnor.preflight=store-overlay";
+
+/// Whether the daemon behind `runner` can mount D18 read-through store
+/// layers, probed once per daemon generation.
+///
+/// `work_dir` is the runner's host-visible work root and
+/// `docker_host_work_dir` the daemon's view of it (see
+/// [`crate::container::JobContainerSpec::docker_host_work_dir`]); the probe
+/// builds its layers beneath `work_dir` so they sit on the same filesystem
+/// the real store does.
+///
+/// # Errors
+/// The probe could not run to a verdict: the daemon refused to create or
+/// remove the disposable volume/container, or the paths could not be mapped
+/// into the daemon's view. An overlay that mounts but does not behave is a
+/// verdict ([`StoreOverlaySupport::Unsupported`]), not an error.
+pub fn store_overlay_support(
+    runner: &mut dyn CommandRunner,
+    image: Option<&str>,
+    work_dir: &Path,
+    docker_host_work_dir: Option<&Path>,
+) -> Result<StoreOverlaySupport, ExecutionError> {
+    let host_runner = runner.is_host_process_runner();
+    STORE_OVERLAY.get_or_try_init(host_runner.then(facts::daemon).flatten(), || {
+        probe_store_overlay(
+            runner,
+            image.unwrap_or(MACOS_DOCKER_CAPABILITY_PROBE_IMAGE),
+            work_dir,
+            docker_host_work_dir,
+        )
+    })
+}
+
+const STORE_OVERLAY_PROBE_LOWER_MARKER: &str = "velnor-lower-marker";
+const STORE_OVERLAY_PROBE_WRITTEN: &str = "velnor-written-through-overlay";
+
+fn probe_store_overlay(
+    runner: &mut dyn CommandRunner,
+    image: &str,
+    work_dir: &Path,
+    docker_host_work_dir: Option<&Path>,
+) -> Result<StoreOverlaySupport, ExecutionError> {
+    let sequence = CAPABILITY_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        "velnor-store-overlay-probe-{}-{sequence}",
+        std::process::id()
+    );
+    let probe_root = work_dir.join("preflight").join(&name);
+    let overlay = crate::storage::StoreOverlay {
+        volume: name.clone(),
+        lower: probe_root.join("lower"),
+        upper: probe_root.join("upper"),
+        work: probe_root.join("work"),
+        target: "/__store".to_owned(),
+    };
+    let prepared = (|| -> std::io::Result<()> {
+        for dir in [&overlay.lower, &overlay.upper, &overlay.work] {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(
+            overlay.lower.join(STORE_OVERLAY_PROBE_LOWER_MARKER),
+            "velnor\n",
+        )
+    })();
+    if let Err(error) = prepared {
+        let _ = std::fs::remove_dir_all(&probe_root);
+        return Err(ExecutionError::DockerPreflight(format!(
+            "store overlay probe could not prepare its layers under {}: {error}",
+            probe_root.display()
+        )));
+    }
+    let verdict = run_store_overlay_probe(
+        runner,
+        image,
+        &name,
+        &overlay,
+        work_dir,
+        docker_host_work_dir,
+    );
+    // Cleanup runs on every path; a failed cleanup is an error even when the
+    // verdict was reached, since a leaked volume would pin the probe layers.
+    let removed = runner.run(
+        "docker",
+        &[
+            "volume".to_owned(),
+            "rm".to_owned(),
+            "--force".to_owned(),
+            "--".to_owned(),
+            name.clone(),
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&probe_root);
+    let removed = removed.map_err(|error| {
+        ExecutionError::DockerPreflight(format!(
+            "store overlay probe cleanup failed for volume {name}: {error}"
+        ))
+    })?;
+    if removed.code != 0 {
+        return Err(ExecutionError::DockerPreflight(format!(
+            "store overlay probe cleanup failed for volume {name}: exited {}: {}",
+            removed.code,
+            removed.stderr.trim()
+        )));
+    }
+    verdict
+}
+
+fn run_store_overlay_probe(
+    runner: &mut dyn CommandRunner,
+    image: &str,
+    name: &str,
+    overlay: &crate::storage::StoreOverlay,
+    work_dir: &Path,
+    docker_host_work_dir: Option<&Path>,
+) -> Result<StoreOverlaySupport, ExecutionError> {
+    let (label_key, label_value) = STORE_OVERLAY_PROBE_LABEL
+        .split_once('=')
+        .unwrap_or((STORE_OVERLAY_PROBE_LABEL, ""));
+    let create_args = overlay
+        .create_volume_args(&[(label_key, label_value)], |path, label| {
+            probe_daemon_path(path, label, work_dir, docker_host_work_dir)
+        })
+        .map_err(|error| {
+            ExecutionError::DockerPreflight(format!(
+                "store overlay probe could not map its layers into the daemon's view: {error}"
+            ))
+        })?;
+    let created = runner.run("docker", &create_args).map_err(|error| {
+        ExecutionError::DockerPreflight(format!(
+            "store overlay probe could not create volume {name}: {error}"
+        ))
+    })?;
+    if created.code != 0 {
+        return Err(ExecutionError::DockerPreflight(format!(
+            "store overlay probe could not create overlay volume {name}: exited {}: {}",
+            created.code,
+            created.stderr.trim()
+        )));
+    }
+    let run_args = vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "--name".to_owned(),
+        name.to_owned(),
+        "--label".to_owned(),
+        STORE_OVERLAY_PROBE_LABEL.to_owned(),
+        "-v".to_owned(),
+        overlay.mount_operand(),
+        image.to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "test -f {target}/{lower} && echo velnor > {target}/{written} && test -f {target}/{written}",
+            target = overlay.target,
+            lower = STORE_OVERLAY_PROBE_LOWER_MARKER,
+            written = STORE_OVERLAY_PROBE_WRITTEN,
+        ),
+    ];
+    let ran = runner.run("docker", &run_args).map_err(|error| {
+        ExecutionError::DockerPreflight(format!(
+            "store overlay probe could not run its container: {error}"
+        ))
+    })?;
+    if ran.code != 0 {
+        return Ok(StoreOverlaySupport::Unsupported {
+            reason: format!(
+                "the daemon could not mount a writable overlay with its upper on the store filesystem (probe container exited {}: {})",
+                ran.code,
+                ran.stderr.trim()
+            ),
+        });
+    }
+    Ok(store_overlay_verdict(
+        overlay.upper.join(STORE_OVERLAY_PROBE_WRITTEN).is_file(),
+        overlay.lower.join(STORE_OVERLAY_PROBE_WRITTEN).exists(),
+    ))
+}
+
+/// Decide the probe verdict from where the write through the overlay landed.
+fn store_overlay_verdict(written_in_upper: bool, written_in_lower: bool) -> StoreOverlaySupport {
+    match (written_in_upper, written_in_lower) {
+        (true, false) => StoreOverlaySupport::Supported,
+        (_, true) => StoreOverlaySupport::Unsupported {
+            reason: "a write through the overlay reached the lower (trusted) layer".to_owned(),
+        },
+        (false, false) => StoreOverlaySupport::Unsupported {
+            reason:
+                "a write through the overlay did not land in the upper layer visible to the host"
+                    .to_owned(),
+        },
+    }
+}
+
+/// Map a probe path into the daemon's view of the work root.
+fn probe_daemon_path(
+    path: &Path,
+    label: &str,
+    work_dir: &Path,
+    docker_host_work_dir: Option<&Path>,
+) -> std::io::Result<std::path::PathBuf> {
+    let Some(daemon_work_dir) = docker_host_work_dir else {
+        return Ok(path.to_path_buf());
+    };
+    let relative = path.strip_prefix(work_dir).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{label} '{}' is outside the runner work root '{}'",
+                path.display(),
+                work_dir.display()
+            ),
+        )
+    })?;
+    Ok(daemon_work_dir.join(relative))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -617,6 +876,228 @@ mod tests {
     use super::*;
     use crate::execution::{HostFs, MemoryFs, RecordingCommands, RecordingFirecracker};
     use std::path::PathBuf;
+
+    /// A daemon double for the store overlay probe: records every call and
+    /// answers `docker run` by acting like an overlay of the given behaviour.
+    struct OverlayDaemon {
+        calls: Vec<Vec<String>>,
+        behaviour: OverlayBehaviour,
+        volume_options: Option<String>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum OverlayBehaviour {
+        /// A native Linux daemon: the write lands in the upper layer.
+        WritesToUpper,
+        /// OrbStack/Docker Desktop over virtiofs: the mount is read-only,
+        /// so the write inside the container fails.
+        ReadOnlyMount,
+        /// A broken overlay that writes straight through to the lower layer.
+        WritesToLower,
+        /// The daemon refuses to create the volume at all.
+        RefusesVolume,
+    }
+
+    impl CommandRunner for OverlayDaemon {
+        fn run(
+            &mut self,
+            program: &str,
+            args: &[String],
+        ) -> anyhow::Result<crate::executor::CommandResult> {
+            assert_eq!(program, "docker");
+            self.calls.push(args.to_vec());
+            let ok = crate::executor::CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+            if args.starts_with(&["volume".to_owned(), "create".to_owned()]) {
+                if matches!(self.behaviour, OverlayBehaviour::RefusesVolume) {
+                    return Ok(crate::executor::CommandResult {
+                        code: 1,
+                        stdout: String::new(),
+                        stderr: "Error response from daemon: invalid option".to_owned(),
+                    });
+                }
+                self.volume_options = Some(
+                    args.windows(2)
+                        .find_map(|pair| {
+                            (pair[0] == "--opt")
+                                .then(|| pair[1].strip_prefix("o="))
+                                .flatten()
+                        })
+                        .expect("overlay mount options")
+                        .to_owned(),
+                );
+                return Ok(ok);
+            }
+            if args.first().is_some_and(|arg| arg == "run") {
+                let options = self.volume_options.clone().expect("volume created first");
+                let layer = |key: &str| -> PathBuf {
+                    options
+                        .split(',')
+                        .find_map(|part| part.strip_prefix(key))
+                        .map(PathBuf::from)
+                        .expect(key)
+                };
+                assert!(layer("lowerdir=")
+                    .join(STORE_OVERLAY_PROBE_LOWER_MARKER)
+                    .is_file());
+                return Ok(match self.behaviour {
+                    OverlayBehaviour::WritesToUpper => {
+                        std::fs::write(
+                            layer("upperdir=").join(STORE_OVERLAY_PROBE_WRITTEN),
+                            "velnor\n",
+                        )
+                        .unwrap();
+                        ok
+                    }
+                    OverlayBehaviour::WritesToLower => {
+                        std::fs::write(
+                            layer("lowerdir=").join(STORE_OVERLAY_PROBE_WRITTEN),
+                            "velnor\n",
+                        )
+                        .unwrap();
+                        ok
+                    }
+                    OverlayBehaviour::ReadOnlyMount => crate::executor::CommandResult {
+                        code: 1,
+                        stdout: String::new(),
+                        stderr: "sh: can't create /__store/velnor-written-through-overlay: Read-only file system".to_owned(),
+                    },
+                    OverlayBehaviour::RefusesVolume => {
+                        panic!("a daemon that refused the volume never runs the probe")
+                    }
+                });
+            }
+            Ok(ok)
+        }
+    }
+
+    impl OverlayDaemon {
+        fn new(behaviour: OverlayBehaviour) -> Self {
+            Self {
+                calls: Vec::new(),
+                behaviour,
+                volume_options: None,
+            }
+        }
+
+        fn probe(
+            &mut self,
+            docker_host_work_dir: Option<&Path>,
+        ) -> Result<StoreOverlaySupport, ExecutionError> {
+            static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+            let work_dir = std::env::temp_dir().join(format!(
+                "velnor-store-overlay-probe-test-{}-{}",
+                std::process::id(),
+                TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&work_dir).unwrap();
+            let verdict = probe_store_overlay(self, "alpine:3.20", &work_dir, docker_host_work_dir);
+            assert!(
+                std::fs::read_dir(work_dir.join("preflight"))
+                    .map(|entries| entries.count() == 0)
+                    .unwrap_or(true),
+                "the probe must remove its layers"
+            );
+            let _ = std::fs::remove_dir_all(&work_dir);
+            verdict
+        }
+    }
+
+    #[test]
+    fn store_overlay_probe_reports_a_native_daemon_as_supported() {
+        let mut daemon = OverlayDaemon::new(OverlayBehaviour::WritesToUpper);
+        assert_eq!(daemon.probe(None).unwrap(), StoreOverlaySupport::Supported);
+        // create volume, run, remove volume — and nothing mounted by the host.
+        let verbs: Vec<String> = daemon
+            .calls
+            .iter()
+            .map(|call| call[..2.min(call.len())].join(" "))
+            .collect();
+        assert_eq!(verbs, ["volume create", "run --rm", "volume rm"]);
+        let run = &daemon.calls[1];
+        assert!(run.contains(&STORE_OVERLAY_PROBE_LABEL.to_owned()));
+        assert!(run.iter().any(
+            |arg| arg.ends_with(":/__store") && arg.starts_with("velnor-store-overlay-probe-")
+        ));
+    }
+
+    #[test]
+    fn store_overlay_probe_reports_a_read_only_vm_mount_as_unsupported() {
+        // The OrbStack/Docker Desktop shape: overlayfs takes the virtiofs
+        // upper but mounts read-only, so the mount "succeeds" and the write
+        // fails. That is a verdict with the daemon's own words, not an
+        // error, and the volume is still removed.
+        let mut daemon = OverlayDaemon::new(OverlayBehaviour::ReadOnlyMount);
+        let StoreOverlaySupport::Unsupported { reason } = daemon.probe(None).unwrap() else {
+            panic!("a read-only overlay must be unsupported");
+        };
+        assert!(reason.contains("Read-only file system"), "{reason}");
+        assert!(daemon
+            .calls
+            .last()
+            .is_some_and(|call| call.starts_with(&["volume".to_owned(), "rm".to_owned()])));
+    }
+
+    #[test]
+    fn store_overlay_probe_rejects_writes_that_reach_the_lower_layer() {
+        let mut daemon = OverlayDaemon::new(OverlayBehaviour::WritesToLower);
+        let StoreOverlaySupport::Unsupported { reason } = daemon.probe(None).unwrap() else {
+            panic!("a write into the trusted layer must be unsupported");
+        };
+        assert!(reason.contains("lower"), "{reason}");
+    }
+
+    #[test]
+    fn store_overlay_probe_maps_its_layers_into_the_daemon_view() {
+        let mut daemon = OverlayDaemon::new(OverlayBehaviour::WritesToUpper);
+        // Mapping the layers under a daemon root the double cannot see makes
+        // the marker lookup fail loudly inside the double; use the identity
+        // mapping through an explicit daemon root equal to the work dir.
+        let work_dir = std::env::temp_dir().join(format!(
+            "velnor-store-overlay-map-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let verdict = probe_store_overlay(&mut daemon, "alpine:3.20", &work_dir, Some(&work_dir));
+        let _ = std::fs::remove_dir_all(&work_dir);
+        assert_eq!(verdict.unwrap(), StoreOverlaySupport::Supported);
+        let mapped = probe_daemon_path(
+            Path::new("/host/work/preflight/p/upper"),
+            "upper",
+            Path::new("/host/work"),
+            Some(Path::new("/daemon/work")),
+        )
+        .unwrap();
+        assert_eq!(mapped, PathBuf::from("/daemon/work/preflight/p/upper"));
+        assert!(probe_daemon_path(
+            Path::new("/elsewhere/upper"),
+            "upper",
+            Path::new("/host/work"),
+            Some(Path::new("/daemon/work")),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn store_overlay_probe_without_a_verdict_is_an_error() {
+        let mut daemon = OverlayDaemon::new(OverlayBehaviour::RefusesVolume);
+        let error = daemon.probe(None).unwrap_err();
+        assert!(error.to_string().contains("invalid option"), "{error}");
+    }
+
+    #[test]
+    fn store_overlay_verdict_needs_the_write_in_upper_and_not_in_lower() {
+        assert_eq!(
+            store_overlay_verdict(true, false),
+            StoreOverlaySupport::Supported
+        );
+        assert!(!store_overlay_verdict(false, false).is_supported());
+        assert!(!store_overlay_verdict(true, true).is_supported());
+        assert!(!store_overlay_verdict(false, true).is_supported());
+    }
 
     #[test]
     fn linux_systemd_v2_keeps_the_host_slice_proof() {

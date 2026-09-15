@@ -220,14 +220,12 @@ pub struct JobContainerSpec {
     /// the lease side and the mount side instead of collapsing to `untrusted`
     /// on one of them.
     pub store_trust_scope: String,
-    /// Trusted scope read through beneath [`Self::store_trust_scope`] for PR
-    /// jobs on trusted pools (D18). Absent for single-namespace stores.
-    pub store_read_through_scope: Option<String>,
-    /// Merged overlay mount points to unmount at job teardown.
-    pub store_overlay_mounts: Vec<PathBuf>,
-    /// Overlay-resolved Cargo store root when [`Self::prepare_store_overlays`]
-    /// ran; otherwise [`start_args`] resolves directly.
-    pub(crate) prepared_cargo_store: Option<PathBuf>,
+    /// Read-through store layers for PR jobs on trusted pools (D18): the
+    /// trusted scope's Cargo store read beneath [`Self::store_trust_scope`].
+    /// Empty for single-namespace stores. Each layer replaces the plain bind
+    /// of its `target` in [`Self::start_args`] with a daemon-mounted overlay
+    /// volume; the executor creates the volumes before the container starts.
+    pub store_overlays: Vec<crate::storage::StoreOverlay>,
     /// Docker-only Mr Boxington store. `None` for MicroVM jobs.
     pub mbx_store_host: Option<PathBuf>,
     /// Docker-only explicit sccache action store.
@@ -262,51 +260,42 @@ const MBX_CONTAINER_EXEC_PATH: &str =
     "/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 impl JobContainerSpec {
-    /// Resolve a trust-scoped store root, layering `store_read_through_scope`
-    /// beneath `store_trust_scope` when configured (D18).
-    pub(crate) fn overlay_aware_store<F>(&mut self, class: &str, resolve: F) -> PathBuf
-    where
-        F: Fn(&Path, &str) -> PathBuf,
-    {
-        let upper = resolve(&self.temp_host, self.store_trust_scope.as_str());
-        let Some(lower_scope) = self.store_read_through_scope.as_deref() else {
-            return upper;
-        };
-        let lower = resolve(&self.temp_host, lower_scope);
-        let overlay_dir = self
-            .temp_host
-            .join("_store-overlay")
-            .join(sanitize_store_key(class));
-        match crate::storage::prepare_read_through_overlay(&overlay_dir, &upper, &lower) {
-            Ok(merged) if merged != upper => {
-                self.store_overlay_mounts.push(merged.clone());
-                merged
-            }
-            Ok(merged) => merged,
-            Err(error) => {
-                tracing::warn!(
-                    class,
-                    ?error,
-                    "read-through store overlay unavailable; using PR scope only"
-                );
-                upper
-            }
-        }
+    /// The `-v` operands of the daemon-shared Cargo subtrees: an overlay
+    /// volume where a read-through layer targets the subtree, the trust-scoped
+    /// bind otherwise.
+    fn cargo_store_mount_operands(&self) -> Vec<String> {
+        let store = cargo_store_host(&self.temp_host, self.store_trust_scope.as_str());
+        CARGO_STORE_LAYERS
+            .iter()
+            .map(|(subpath, target)| {
+                self.store_overlays
+                    .iter()
+                    .find(|overlay| overlay.target == *target)
+                    .map_or_else(
+                        || self.mount_arg(&store.join(subpath), target),
+                        crate::storage::StoreOverlay::mount_operand,
+                    )
+            })
+            .collect()
     }
 
-    /// Prepare read-through store overlays for PR-scoped jobs (D18). No-op
-    /// when [`Self::store_read_through_scope`] is absent.
-    pub fn prepare_store_overlays(&mut self) {
-        if self.store_read_through_scope.is_none() {
-            return;
-        }
-        self.prepared_cargo_store = Some(self.overlay_aware_store("cargo", cargo_store_host));
-    }
-
-    fn cargo_store_mount_root(&self) -> PathBuf {
-        self.prepared_cargo_store
-            .clone()
-            .unwrap_or_else(|| cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()))
+    /// `docker volume create` argv for one read-through layer of this job,
+    /// labelled like every other job-owned Docker resource.
+    ///
+    /// # Errors
+    /// A layer path cannot be mapped into the daemon's view of the work root.
+    pub fn create_store_overlay_args(
+        &self,
+        overlay: &crate::storage::StoreOverlay,
+    ) -> io::Result<Vec<String>> {
+        let daemon_id = self.daemon_id.as_str();
+        overlay.create_volume_args(
+            &[
+                ("velnor.daemon-id", daemon_id),
+                ("velnor.job-id", self.name.as_str()),
+            ],
+            |path, label| self.docker_host_path_checked(path, label),
+        )
     }
 
     /// The tightest valid `--cpus` limit declared by the operator
@@ -634,26 +623,16 @@ impl JobContainerSpec {
                 &self.terraform_plugin_cache_store_host(),
                 "/github/home/.terraform.d/plugin-cache",
             ),
-            // Share immutable Cargo downloads and indexes across the daemon,
-            // but keep extracted registry sources and git checkouts in the
-            // job home. Separate containers can otherwise race while creating
-            // `.cargo-ok` in the same extracted crate (Cargo's package-cache
-            // lock does not serialize that mutation across container jobs).
-            "-v".into(),
-            self.mount_arg(
-                &self.cargo_store_mount_root().join("registry/cache"),
-                "/github/home/.cargo/registry/cache",
-            ),
-            "-v".into(),
-            self.mount_arg(
-                &self.cargo_store_mount_root().join("registry/index"),
-                "/github/home/.cargo/registry/index",
-            ),
-            "-v".into(),
-            self.mount_arg(
-                &self.cargo_store_mount_root().join("git/db"),
-                "/github/home/.cargo/git/db",
-            ),
+        ]);
+        // Share immutable Cargo downloads and indexes across the daemon,
+        // but keep extracted registry sources and git checkouts in the
+        // job home. Separate containers can otherwise race while creating
+        // `.cargo-ok` in the same extracted crate (Cargo's package-cache
+        // lock does not serialize that mutation across container jobs).
+        for operand in self.cargo_store_mount_operands() {
+            args.flags(["-v".into(), operand]);
+        }
+        args.flags([
             // $CARGO_HOME/bin holds executable proxies on PATH, so it is
             // shared only inside one trust/repository scope. Registry/git data
             // above stays daemon-shared for warmth because cargo does not
@@ -1365,6 +1344,9 @@ impl JobContainerSpec {
         for (label, path) in paths {
             self.docker_host_path_checked(&path, label)?;
         }
+        for overlay in &self.store_overlays {
+            self.create_store_overlay_args(overlay)?;
+        }
         if let Some(path) = &self.mbx_store_host {
             self.docker_host_path_checked(path, "MBX store")?;
         }
@@ -1982,6 +1964,17 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
 /// scope on the execution path). It selects the canonical namespace; the
 /// legacy root carries no trust segment.
+/// The daemon-shared Cargo store subtrees and their container mount points.
+/// Registry sources and git checkouts stay in the job home (see
+/// [`JobContainerSpec::start_args`]); these three are the immutable-by-key
+/// downloads and indexes worth sharing, and the ones a read-through layer
+/// (D18) overlays for PR jobs on trusted pools.
+pub(crate) const CARGO_STORE_LAYERS: [(&str, &str); 3] = [
+    ("registry/cache", "/github/home/.cargo/registry/cache"),
+    ("registry/index", "/github/home/.cargo/registry/index"),
+    ("git/db", "/github/home/.cargo/git/db"),
+];
+
 pub(crate) fn cargo_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
     crate::storage::cache_class_path(
         &daemon_store_root(temp_host),
@@ -2332,11 +2325,80 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             store_trust_scope: "trusted".to_owned(),
-            store_read_through_scope: None,
-            store_overlay_mounts: Vec::new(),
-            prepared_cargo_store: None,
+            store_overlays: Vec::new(),
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
+        }
+    }
+
+    #[test]
+    fn read_through_layers_replace_the_cargo_binds_with_overlay_volumes() {
+        // A PR job on a trusted pool (D18): the three daemon-shared Cargo
+        // subtrees mount as daemon-created overlay volumes — `pr` writable
+        // over `trusted` read-only — while every other store keeps its
+        // trust-scoped bind. The host never mounts anything itself.
+        let mut job = spec();
+        job.store_trust_scope = crate::trust_scope::PR_STORE_SCOPE.to_owned();
+        job.store_overlays = crate::storage::StoreOverlay::cargo_layers(
+            &job.name,
+            &job.temp_host,
+            crate::trust_scope::PR_STORE_SCOPE,
+            crate::trust_scope::TRUSTED,
+        );
+        assert_eq!(job.store_overlays.len(), CARGO_STORE_LAYERS.len());
+        let args = rendered(&job.start_args().unwrap());
+        let pr_store = cargo_store_host(&job.temp_host, crate::trust_scope::PR_STORE_SCOPE);
+        let trusted_store = cargo_store_host(&job.temp_host, crate::trust_scope::TRUSTED);
+        for ((subpath, target), overlay) in CARGO_STORE_LAYERS.iter().zip(&job.store_overlays) {
+            assert_eq!(overlay.target, *target);
+            assert_eq!(overlay.upper, pr_store.join(subpath));
+            assert_eq!(overlay.lower, trusted_store.join(subpath));
+            assert!(
+                overlay
+                    .work
+                    .starts_with(pr_store.join(crate::storage::OVERLAY_WORK_DIR)),
+                "work dir {} must live beside the upper, outside every mounted subtree",
+                overlay.work.display()
+            );
+            assert!(
+                args.contains(&format!("{}:{target}", overlay.volume)),
+                "expected overlay volume mount for {target}, got {args:?}"
+            );
+            assert!(
+                !has_mount(&args, &pr_store.join(subpath), target),
+                "the plain PR bind must not shadow the overlay for {target}"
+            );
+            assert!(!has_mount(&args, &trusted_store.join(subpath), target));
+        }
+        // The volume carries the job-id label so job-owned reclaim removes
+        // it, and its layers are spelled in the daemon's view of the work
+        // root when one is configured.
+        job.docker_host_work_dir = Some("/daemon/work".into());
+        let overlay = &job.store_overlays[0];
+        let create = job.create_store_overlay_args(overlay).unwrap();
+        assert_eq!(&create[..4], ["volume", "create", "--driver", "local"]);
+        assert!(create
+            .windows(2)
+            .any(|pair| pair == ["--label", "velnor.job-id=velnor-job-1"]));
+        let options = create
+            .windows(2)
+            .find_map(|pair| {
+                (pair[0] == "--opt")
+                    .then(|| pair[1].strip_prefix("o="))
+                    .flatten()
+            })
+            .expect("overlay mount options");
+        assert!(options.starts_with("lowerdir=/daemon/work/"), "{options}");
+        assert!(options.contains(",upperdir=/daemon/work/"), "{options}");
+        assert!(options.contains(",workdir=/daemon/work/"), "{options}");
+        assert!(!options.contains(&job.temp_host.display().to_string()));
+        assert_eq!(create.last(), Some(&overlay.volume));
+        // Without a layer the same subtree is the plain trust-scoped bind.
+        job.store_overlays.clear();
+        job.docker_host_work_dir = None;
+        let args = rendered(&job.start_args().unwrap());
+        for (subpath, target) in CARGO_STORE_LAYERS {
+            assert!(has_mount(&args, &pr_store.join(subpath), target));
         }
     }
 

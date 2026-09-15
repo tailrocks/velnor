@@ -93,8 +93,23 @@ pub fn github_job_container_spec(
              unset it — compiler reuse is content-addressed (mbx/sccache) now"
         );
     }
+    let name = job_container_name(job);
+    let store_trust_scope = crate::trust_scope::normalize_scope(trust_scope).to_owned();
+    // D18 read-through layers: admission decided whether the backend can
+    // mount them; here the layers are only spelled out for the container.
+    let store_overlays = read_through_scope
+        .map(crate::trust_scope::normalize_scope)
+        .map(|lower_scope| {
+            crate::storage::StoreOverlay::cargo_layers(
+                &name,
+                &paths.temp_host,
+                &store_trust_scope,
+                lower_scope,
+            )
+        })
+        .unwrap_or_default();
     Ok(JobContainerSpec {
-        name: job_container_name(job),
+        name,
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
         network: job_network_name(job),
         workspace_host: paths.workspace_host,
@@ -117,12 +132,8 @@ pub fn github_job_container_spec(
         verify_bind_mounts: true,
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
-        store_trust_scope: crate::trust_scope::normalize_scope(trust_scope).to_owned(),
-        store_read_through_scope: read_through_scope
-            .map(crate::trust_scope::normalize_scope)
-            .map(str::to_owned),
-        store_overlay_mounts: Vec::new(),
-        prepared_cargo_store: None,
+        store_trust_scope,
+        store_overlays,
         sccache_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
             && explicit_sccache)
             .then(|| crate::sccache_compat::store_host(job, &paths.temp_host, trust_scope)),
@@ -1135,9 +1146,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             store_trust_scope: "trusted".to_owned(),
-            store_read_through_scope: None,
-            store_overlay_mounts: Vec::new(),
-            prepared_cargo_store: None,
+            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         };

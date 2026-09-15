@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use anyhow::{Context, Result};
@@ -183,52 +182,130 @@ pub fn prefer_canonical_or_existing_legacy(canonical: PathBuf, legacy: PathBuf) 
     }
 }
 
-/// Mount a read-through overlay when `lower` exists: writes go to `upper`,
-/// reads fall through to `lower`. Returns `upper` unchanged when overlay is
-/// unavailable or `lower` is absent (D18 PR-scope warm start).
-pub fn prepare_read_through_overlay(
-    overlay_dir: &Path,
-    upper: &Path,
-    lower: &Path,
-) -> Result<PathBuf> {
-    fs::create_dir_all(upper).with_context(|| format!("create upper store {}", upper.display()))?;
-    if !lower.exists() {
-        return Ok(upper.to_path_buf());
+/// One read-through store layer for the Docker backend (D18).
+///
+/// `lower` is the trusted scope's store, read beneath `upper`, the PR scope's
+/// store that receives every write. The layer is an overlay the *daemon*
+/// mounts — a `local` volume with `type=overlay` — so the runner needs no
+/// `CAP_SYS_ADMIN` of its own and a VM-hosted daemon (OrbStack, Docker
+/// Desktop) mounts it inside the VM kernel that also runs the job. The job
+/// container sees one merged tree at `target`; the host still sees `upper`
+/// as the plain PR-scope directory the storage catalog, leases and GC know.
+///
+/// Whether the daemon can back an overlay upper on the shared store
+/// filesystem is a probed capability
+/// ([`crate::execution::store_overlay_support`]); admission only asks for a
+/// layer when the probe passed, so a failure to mount one at job start is a
+/// job error, never a silent fallback to `upper` alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreOverlay {
+    /// Daemon volume name; carries the job-id label so job-owned reclaim
+    /// removes it with the rest of the job's Docker resources.
+    pub volume: String,
+    /// Host-visible trusted store directory read beneath `upper`.
+    pub lower: PathBuf,
+    /// Host-visible PR-scope store directory that receives the writes.
+    pub upper: PathBuf,
+    /// overlayfs work directory: same filesystem as `upper`, outside every
+    /// mounted subtree, owned by this job alone.
+    pub work: PathBuf,
+    /// Container path the merged tree is mounted at.
+    pub target: String,
+}
+
+/// Directory under a store root that holds the per-job overlay work
+/// directories. Never a mount source or a GC root, so it neither leaks into a
+/// container nor counts as a reclaimable store scope.
+pub const OVERLAY_WORK_DIR: &str = ".velnor-overlay-work";
+
+impl StoreOverlay {
+    /// The overlay layers of the Cargo store for one job: every daemon-shared
+    /// Cargo subtree gets `upper_scope` layered over `lower_scope`.
+    ///
+    /// Pure path arithmetic; the executor creates the directories and the
+    /// volume when the job starts.
+    #[must_use]
+    pub fn cargo_layers(
+        container_name: &str,
+        temp_host: &Path,
+        upper_scope: &str,
+        lower_scope: &str,
+    ) -> Vec<Self> {
+        let upper_root = crate::container::cargo_store_host(temp_host, upper_scope);
+        let lower_root = crate::container::cargo_store_host(temp_host, lower_scope);
+        let work_root = upper_root
+            .join(OVERLAY_WORK_DIR)
+            .join(crate::container::sanitize_store_key(container_name));
+        crate::container::CARGO_STORE_LAYERS
+            .iter()
+            .map(|(subpath, target)| {
+                let key = crate::container::sanitize_store_key(subpath);
+                Self {
+                    volume: format!("{container_name}-overlay-cargo-{key}"),
+                    lower: lower_root.join(subpath),
+                    upper: upper_root.join(subpath),
+                    work: work_root.join(key),
+                    target: (*target).to_owned(),
+                }
+            })
+            .collect()
     }
-    let work = overlay_dir.join("work");
-    let merged = overlay_dir.join("merged");
-    fs::create_dir_all(&work)
-        .with_context(|| format!("create overlay workdir {}", work.display()))?;
-    fs::create_dir_all(&merged)
-        .with_context(|| format!("create overlay merged mount {}", merged.display()))?;
-    let options = format!(
+
+    /// `docker volume create` argv for this layer. `daemon_visible` maps a
+    /// host-visible path to the path the daemon mounts (identity on a native
+    /// Linux daemon; the VM mapping for Docker Desktop/OrbStack).
+    ///
+    /// # Errors
+    /// A layer path could not be mapped into the daemon's view.
+    pub fn create_volume_args<F>(
+        &self,
+        labels: &[(&str, &str)],
+        mut daemon_visible: F,
+    ) -> std::io::Result<Vec<String>>
+    where
+        F: FnMut(&Path, &str) -> std::io::Result<PathBuf>,
+    {
+        let lower = daemon_visible(&self.lower, "store overlay lower")?;
+        let upper = daemon_visible(&self.upper, "store overlay upper")?;
+        let work = daemon_visible(&self.work, "store overlay work")?;
+        let mut args = vec![
+            "volume".to_owned(),
+            "create".to_owned(),
+            "--driver".to_owned(),
+            "local".to_owned(),
+        ];
+        for (key, value) in labels {
+            args.push("--label".to_owned());
+            args.push(format!("{key}={value}"));
+        }
+        args.extend([
+            "--opt".to_owned(),
+            "type=overlay".to_owned(),
+            "--opt".to_owned(),
+            "device=overlay".to_owned(),
+            "--opt".to_owned(),
+            format!("o={}", overlay_mount_options(&lower, &upper, &work)),
+            self.volume.clone(),
+        ]);
+        Ok(args)
+    }
+
+    /// The `-v` operand that mounts the merged tree into the job container.
+    #[must_use]
+    pub fn mount_operand(&self) -> String {
+        format!("{}:{}", self.volume, self.target)
+    }
+}
+
+/// overlayfs `-o` options for one lower/upper/work triple.
+#[must_use]
+pub fn overlay_mount_options(lower: &Path, upper: &Path, work: &Path) -> String {
+    format!(
         "lowerdir={},upperdir={},workdir={}",
         lower.display(),
         upper.display(),
         work.display()
-    );
-    let status = Command::new("mount")
-        .arg("-t")
-        .arg("overlay")
-        .arg("overlay")
-        .arg("-o")
-        .arg(options)
-        .arg(&merged)
-        .status()
-        .context("mount read-through store overlay")?;
-    if status.success() {
-        Ok(merged)
-    } else {
-        Ok(upper.to_path_buf())
-    }
-}
-
-/// Best-effort unmount of every merged overlay path recorded on the container
-/// spec at job teardown (D18).
-pub fn teardown_store_overlays(container: &crate::container::JobContainerSpec) {
-    for merged in &container.store_overlay_mounts {
-        let _ = Command::new("umount").arg(merged).status();
-    }
+    )
 }
 
 pub fn append_legacy_trust(root: PathBuf, trust_scope: &str) -> PathBuf {
