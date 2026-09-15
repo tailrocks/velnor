@@ -14,6 +14,11 @@ runners = "both"
 automatic = "both"
 default_branch = "main"
 github_runner = "ubuntu-24.04"
+# Routing contract: the release-side guest-payload producer builds Linux
+# cross-target guest agents and Firecracker kernel/rootfs images, so the
+# generator keeps that job on `github_runner`. The verification units below
+# only run native Linux checks and remain eligible for Docker-backed Velnor
+# capacity, including a macOS host.
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
 default_dispatch_runner = "both"

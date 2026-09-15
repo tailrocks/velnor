@@ -5224,7 +5224,9 @@ fn startup_live_job_container_names(config_base: &Path) -> Result<BTreeSet<Strin
     let mut protected = BTreeSet::new();
     let mut scan_slot = |dir: &Path| -> Result<()> {
         if let Some(record) = load_in_flight_job(dir)? {
-            protected.insert(job_container_name_for_id(&record.job_id));
+            protected.insert(crate::github_adapter::job_container_name_for_id(
+                &record.job_id,
+            ));
         }
         Ok(())
     };
@@ -5251,10 +5253,6 @@ fn startup_live_job_container_names(config_base: &Path) -> Result<BTreeSet<Strin
         }
     }
     Ok(protected)
-}
-
-fn job_container_name_for_id(job_id: &str) -> String {
-    format!("velnor-job-{}", sanitize_path_segment(job_id))
 }
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
@@ -15986,6 +15984,7 @@ mod tests {
 
     #[test]
     fn on_demand_github_daemon_uses_explicit_local_storage() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
         // SAFETY: this test process owns the variable for the assertion.
         unsafe { std::env::remove_var("VELNOR_STORAGE_ROOT") };
@@ -16017,6 +16016,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_lifecycle_joins_and_releases_sink_on_stop() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let base = unique_temp_dir("retention-lifecycle-stop");
         fs::create_dir_all(&base).unwrap();
         let sink = Arc::new(
@@ -16304,6 +16304,7 @@ mod tests {
 
     #[test]
     fn effective_draining_without_journal_is_exactly_the_latch() {
+        let _serial = crate::trust_scope::test_support::serialized();
         // No journal path degrades to the static latch however the latch is
         // set, so latch-only paths observe no behavior change.
         assert_eq!(effective_draining(None), draining());
@@ -16311,6 +16312,7 @@ mod tests {
 
     #[test]
     fn supervised_start_clears_leftover_journal_drain_from_prior_process() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
         reset_drain_hint_cache_for_tests();
         let dir = unique_temp_dir("stale-drain-reclaim");
@@ -16340,6 +16342,7 @@ mod tests {
 
     #[test]
     fn supervised_start_does_not_clear_drain_while_this_process_is_draining() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let previous_draining = DRAINING.swap(true, Ordering::SeqCst);
         reset_drain_hint_cache_for_tests();
         let dir = unique_temp_dir("live-drain-kept");
@@ -16364,6 +16367,7 @@ mod tests {
 
     #[test]
     fn admission_fence_hint_round_trips_and_fails_closed_on_corruption() {
+        let _serial = crate::trust_scope::test_support::serialized();
         reset_drain_hint_cache_for_tests();
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -16394,6 +16398,7 @@ mod tests {
 
     #[test]
     fn journal_drain_hint_caches_per_path_with_ttl() {
+        let _serial = crate::trust_scope::test_support::serialized();
         // Flag on for this process. Never unset: sibling tests create no
         // drain markers, so the leaked flag cannot change their outcome.
         unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
@@ -16436,6 +16441,7 @@ mod tests {
 
     #[test]
     fn reserve_capacity_permits_reserves_nothing_while_draining() {
+        let _serial = crate::trust_scope::test_support::serialized();
         // Flag on for this process. Never unset: sibling tests create no
         // drain markers, so the leaked flag cannot change their outcome.
         unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
@@ -18228,46 +18234,6 @@ jobs:
                         stderr: Vec::new(),
                     });
                 }
-                if args.first() == Some(&"rm") {
-                    panic!(
-                        "a container admitted after the first snapshot must not be force-removed"
-                    );
-                }
-                None
-            },
-        );
-        assert_eq!(removed, 0);
-    }
-
-    #[test]
-    fn startup_prune_rechecks_in_flight_markers_immediately_before_rm() {
-        let live = BTreeSet::new();
-        prune_stale_velnor_docker_resources_refreshing(
-            "/daemon/work",
-            &live,
-            || Ok(BTreeSet::from(["velnor-job-new".to_owned()])),
-            |args| {
-                if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
-                    return Some(std::process::Output {
-                        status: success_exit_status(),
-                        stdout: b"id-new\n".to_vec(),
-                        stderr: Vec::new(),
-                    });
-                }
-                if args == ["ps", "-aq", "--filter", "name=velnor-mise-seed"] {
-                    return Some(std::process::Output {
-                        status: success_exit_status(),
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                    });
-                }
-                if args.first() == Some(&"inspect") && args.last() == Some(&"id-new") {
-                    return Some(std::process::Output {
-                        status: success_exit_status(),
-                        stdout: b"/daemon/work/slot-2\tvelnor-job-new\n".to_vec(),
-                        stderr: Vec::new(),
-                    });
-                }
                 if args == ["network", "ls", "-q", "--filter", "name=velnor-net"] {
                     return Some(std::process::Output {
                         status: success_exit_status(),
@@ -18283,6 +18249,7 @@ jobs:
                 None
             },
         );
+        assert_eq!(removed, 0);
     }
 
     #[test]

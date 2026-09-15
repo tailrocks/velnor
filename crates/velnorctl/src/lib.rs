@@ -23,11 +23,13 @@ use velnor_render::{ColorPolicy, OutputFormat};
 
 pub mod commands;
 pub mod completion;
+pub mod diagnostics;
 pub mod host;
 pub mod http;
 #[cfg(target_os = "macos")]
 pub mod local_diagnostics;
 pub mod man;
+pub mod preflight;
 pub mod runtime;
 
 /// Binary name used across generated surfaces.
@@ -1137,16 +1139,8 @@ async fn execute_diagnostics(
     globals: &GlobalArgs,
     args: commands::DiagnosticsArgs,
 ) -> Result<(), CommandError> {
-    let _ = client_for(globals)?.info().await?;
     match args.command {
-        commands::DiagnosticsCommand::Bundle(args) => Err(CommandError::new(
-            ExitClass::Operation,
-            "diagnostics.bundle_unavailable",
-            format!(
-                "diagnostics archive cannot be created at {}",
-                args.archive.display()
-            ),
-        )),
+        commands::DiagnosticsCommand::Bundle(args) => diagnostics::bundle(globals, args),
     }
 }
 

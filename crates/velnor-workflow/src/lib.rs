@@ -78,7 +78,7 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "92f933fdb7f84ef8d6e6eb3c1b5809d8231fbaea";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "4790f7cc326c5387a974bd9d1a1d77bd6779a733";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
@@ -5835,7 +5835,7 @@ mod tests {
         );
         assert_eq!(
             VELNOR_POLICY_WORKFLOW_REV,
-            "92f933fdb7f84ef8d6e6eb3c1b5809d8231fbaea"
+            "4790f7cc326c5387a974bd9d1a1d77bd6779a733"
         );
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
@@ -8793,6 +8793,36 @@ channel = "stable"
             "{preview}"
         );
 
+        let guest_start = must_some(preview.find("  guest-payload:\n"), "guest payload job");
+        let guest_len = must_some(
+            preview[guest_start..].find("\n  metadata:"),
+            "guest payload job boundary",
+        );
+        let guest = &preview[guest_start..guest_start + guest_len];
+        assert_eq!(guest.matches("runs-on:").count(), 1, "{guest}");
+        assert!(
+            guest.contains("    runs-on: ${{ matrix.runner }}\n"),
+            "the guest producer must honor each architecture's hosted runner: {guest}"
+        );
+        let configured_hosted_runner = yaml_scalar(&scanned.config.github_runner);
+        assert!(
+            guest.contains(&format!(
+                "          - arch: x86_64\n            target: x86_64-unknown-linux-gnu\n            runner: {configured_hosted_runner}\n"
+            )),
+            "x86_64 guest payload must stay on the configured hosted runner: {guest}"
+        );
+        assert!(
+            guest.contains(
+                "          - arch: aarch64\n            target: aarch64-unknown-linux-gnu\n            runner: ubuntu-24.04-arm\n"
+            ),
+            "aarch64 guest payload must use GitHub's hosted arm64 runner: {guest}"
+        );
+        assert!(
+            !guest.contains("self-hosted"),
+            "the guest producer must never enter the Velnor lane: {guest}"
+        );
+
+        
         let generated = must(
             crate::generated_files(&scanned.config),
             "generate workflow files",
