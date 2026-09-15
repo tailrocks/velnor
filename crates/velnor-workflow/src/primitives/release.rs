@@ -1402,7 +1402,9 @@ fn render_native_publish_job(
 /// the moving branch tip. Every downstream job consumes these outputs.
 fn render_preview_identity_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let checkout = ActionPin::Checkout.reference();
-    let setup = workflow_runtime_setup_for_config(config);
+    // The identity job below always runs on the hosted github runner, so its
+    // runtime install is keyed to that placement — never to the repo lane.
+    let setup = workflow_runtime_setup(RunnerMode::Github);
     let manifest = match rust_package_unit(config, &release.package) {
         Some(unit) if unit.root == "." || unit.root.is_empty() => "Cargo.toml".to_owned(),
         Some(unit) => format!("{}/Cargo.toml", unit.root.trim_end_matches('/')),
@@ -3151,6 +3153,34 @@ mod tests {
             divergent.join("\n  ")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_preview_identity_provisions_the_hosted_runtime_on_the_velnor_lane() {
+        let mut config = native_identity_config(&["preview.yml"]);
+        config.runners = RunnerMode::Velnor;
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let identity = yaml_job(&preview, "identity");
+        assert!(
+            identity.contains("runs-on: ubuntu-24.04"),
+            "the identity job stays hosted whatever the lane: {identity}"
+        );
+        let setup = must_some(
+            identity.find("Set up Velnor workflow runtime"),
+            "identity runtime setup",
+        );
+        let enforce = must_some(identity.find("Enforce workflow policy"), "identity enforce");
+        assert!(
+            setup < enforce,
+            "the hosted identity job must provision its runtime before enforcing policy: {identity}"
+        );
     }
 
     #[test]
