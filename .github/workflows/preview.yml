@@ -175,7 +175,7 @@ on:
 
 concurrency:
   group: preview-${{ github.repository }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
