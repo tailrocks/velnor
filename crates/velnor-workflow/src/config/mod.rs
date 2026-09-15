@@ -335,6 +335,9 @@ struct PolicySection {
     action_pin_admission: Option<String>,
     /// Emit `config-variables: null` in the generated actionlint config.
     actionlint_config_variables_null: Option<bool>,
+    /// Workflow basenames skipped by `velnor-workflow policy` until migrated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    exclude_workflows: Vec<String>,
 }
 
 impl ReleaseSection {
@@ -676,6 +679,11 @@ impl RepoGenerationConfig {
     /// Whether the generated CI aggregate should be required.
     pub(crate) fn ci_required(&self) -> Option<bool> {
         self.policy.ci_required
+    }
+
+    /// Workflow basenames excluded from static policy validation.
+    pub(crate) fn policy_exclude_workflows(&self) -> &[String] {
+        &self.policy.exclude_workflows
     }
 
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
