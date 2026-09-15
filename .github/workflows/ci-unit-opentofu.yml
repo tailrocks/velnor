@@ -91,5 +91,5 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / opentofu"
+          job_label: "Velnor / opentofu"
 

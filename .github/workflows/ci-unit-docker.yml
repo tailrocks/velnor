@@ -81,5 +81,5 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / docker"
+          job_label: "Velnor / docker"
 

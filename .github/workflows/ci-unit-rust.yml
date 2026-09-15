@@ -57,39 +57,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --locked
-          cd -- 'crates/velnor-bench'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-client'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-control'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-model'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-render'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-runner'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-tools'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-workflow'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnor-workflow-contract'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'crates/velnorctl'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
-          cd -- 'tools/unit-collector'
-          cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
   velnor-rust-policy:
     name: "Velnor / rust-policy"
     if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
@@ -159,7 +126,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-policy"
+          job_label: "Velnor / rust-policy"
 
   velnor-rust-unit-collector:
     name: "Velnor / rust-unit-collector"
@@ -229,7 +196,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-unit-collector"
+          job_label: "Velnor / rust-unit-collector"
 
   velnor-rust-velnor-bench:
     name: "Velnor / rust-velnor-bench"
@@ -299,7 +266,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-bench"
+          job_label: "Velnor / rust-velnor-bench"
 
   velnor-rust-velnor-client:
     name: "Velnor / rust-velnor-client"
@@ -369,7 +336,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-client"
+          job_label: "Velnor / rust-velnor-client"
 
   velnor-rust-velnor-control:
     name: "Velnor / rust-velnor-control"
@@ -439,7 +406,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-control"
+          job_label: "Velnor / rust-velnor-control"
 
   velnor-rust-velnor-model:
     name: "Velnor / rust-velnor-model"
@@ -509,7 +476,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-model"
+          job_label: "Velnor / rust-velnor-model"
 
   velnor-rust-velnor-render:
     name: "Velnor / rust-velnor-render"
@@ -579,7 +546,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-render"
+          job_label: "Velnor / rust-velnor-render"
 
   velnor-rust-velnor-runner:
     name: "Velnor / rust-velnor-runner"
@@ -649,7 +616,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-runner"
+          job_label: "Velnor / rust-velnor-runner"
 
   velnor-rust-velnor-tools:
     name: "Velnor / rust-velnor-tools"
@@ -719,7 +686,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-tools"
+          job_label: "Velnor / rust-velnor-tools"
 
   velnor-rust-velnor-workflow:
     name: "Velnor / rust-velnor-workflow"
@@ -789,7 +756,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-workflow"
+          job_label: "Velnor / rust-velnor-workflow"
 
   velnor-rust-velnor-workflow-contract:
     name: "Velnor / rust-velnor-workflow-contract"
@@ -859,7 +826,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnor-workflow-contract"
+          job_label: "Velnor / rust-velnor-workflow-contract"
 
   velnor-rust-velnorctl:
     name: "Velnor / rust-velnorctl"
@@ -929,7 +896,7 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-velnorctl"
+          job_label: "Velnor / rust-velnorctl"
 
   velnor-rust-production-topology:
     name: "Velnor / rust-production-topology"
@@ -995,5 +962,5 @@ jobs:
         if: always()
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
-          job_name: "Velnor / rust-production-topology"
+          job_label: "Velnor / rust-production-topology"
 
