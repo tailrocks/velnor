@@ -3131,7 +3131,7 @@ mod tests {
             ),
             (
                 "preview.yml",
-                "128215c9ed4019f5e536a548fd9e50ad95ad7e6dcc8f5f08530da994d23b7c35",
+                "0c06637d16174946ec5161e3dcce1a0d012ed86a13a52e3feae72723a65f3039",
             ),
         ];
         let root = scanned_root("identity-pinned");
