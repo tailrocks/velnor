@@ -95,13 +95,9 @@ fn enable_approved_velnor_pull_requests(root: &Path) {
         "velnor_runner_group =",
         "pull_request_on_velnor =",
     ] {
-        lines.push(
-            approved
-                .lines()
-                .find(|line| line.starts_with(prefix))
-                .unwrap()
-                .to_owned(),
-        );
+        if let Some(line) = approved.lines().find(|line| line.starts_with(prefix)) {
+            lines.push(line.to_owned());
+        }
     }
     fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
 }
