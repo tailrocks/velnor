@@ -236,6 +236,7 @@ pub struct LifecycleOperationRow {
     pub reason: String,
     pub desired_state: String,
     pub desired_slots: Option<u32>,
+    pub expected_version: Option<u64>,
     pub resource_version: u64,
     pub phase: String,
     pub created_at: Timestamp,
@@ -387,6 +388,7 @@ impl Store {
                 || existing.reason != request.reason
                 || existing.desired_state != request.desired_state
                 || existing.desired_slots != request.desired_slots
+                || existing.expected_version != request.expected_version
             {
                 return Err(StoreError::new(
                     ExitClass::Conflict,
@@ -445,6 +447,13 @@ impl Store {
                 "store.lifecycle.version_conflict",
             ));
         }
+        let expected_version = request
+            .expected_version
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+                StoreError::new(ExitClass::Usage, "store.lifecycle.expected_version.range")
+            })?;
         let next_version = current_version.saturating_add(1);
         transaction.execute(
             "INSERT INTO instances (instance_slug, host, daemon_version, slots_configured, slots_busy,
@@ -466,8 +475,8 @@ impl Store {
         transaction.execute(
             "INSERT INTO lifecycle_operations
              (instance_slug, idempotency_key, operation_id, kind, target, reason,
-              desired_state, desired_slots, resource_version, phase, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'accepted', ?10)",
+              desired_state, desired_slots, expected_version, resource_version, phase, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'accepted', ?11)",
             params![
                 request.instance_slug,
                 request.idempotency_key,
@@ -477,6 +486,7 @@ impl Store {
                 request.reason,
                 request.desired_state,
                 request.desired_slots.map(i64::from),
+                expected_version,
                 next_version as i64,
                 rfc3339(accepted_at),
             ],
@@ -492,6 +502,7 @@ impl Store {
                 reason: request.reason.clone(),
                 desired_state: request.desired_state.clone(),
                 desired_slots: request.desired_slots,
+                expected_version: request.expected_version,
                 resource_version: next_version,
                 phase: "accepted".to_owned(),
                 created_at: accepted_at,
@@ -2135,13 +2146,14 @@ fn lifecycle_operation_query(
     transaction
         .query_row(
             "SELECT instance_slug, idempotency_key, operation_id, kind, target, reason,
-                    desired_state, desired_slots, resource_version, phase, created_at
+                    desired_state, desired_slots, expected_version, resource_version,
+                    phase, created_at
              FROM lifecycle_operations
              WHERE instance_slug = ?1 AND idempotency_key = ?2",
             params![instance_slug, idempotency_key],
             |row| {
-                let version = row.get::<_, i64>(8)?;
-                let created_at = Timestamp::parse(&row.get::<_, String>(10)?)
+                let version = row.get::<_, i64>(9)?;
+                let created_at = Timestamp::parse(&row.get::<_, String>(11)?)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 Ok(LifecycleOperationRow {
                     instance_slug: row.get(0)?,
@@ -2156,10 +2168,15 @@ fn lifecycle_operation_query(
                         .map(|slots| slots.try_into())
                         .transpose()
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    expected_version: row
+                        .get::<_, Option<i64>>(8)?
+                        .map(|version| version.try_into())
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     resource_version: version
                         .try_into()
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(8, version))?,
-                    phase: row.get(9)?,
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(9, version))?,
+                    phase: row.get(10)?,
                     created_at,
                 })
             },
