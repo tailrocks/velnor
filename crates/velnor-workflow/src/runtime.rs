@@ -5761,7 +5761,7 @@ jobs:
     fn policy_accepts_trusted_label_suffix_and_combined_unit_selectors(
     ) -> Result<(), Box<dyn Error>> {
         let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
-        let trusted_label = "velnor-host-docker";
+        let trusted_label = "example-trusted";
         let toml_labels = crate::estate::approved_velnor_runner_labels()
             .iter()
             .map(|label| format!("\"{label}\""))
@@ -5772,10 +5772,10 @@ jobs:
         );
         let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
         let combined_gate = format!(
-            "(contains(format(',{{0}},',inputs.selected_units),',rust-policy,')||contains(format(',{{0}},',inputs.selected_units),',rust-velnor-workflow,'))&&({gate})"
+            "(contains(format(',{{0}},',inputs.selected_units),',rust-policy,')||contains(format(',{{0}},',inputs.selected_units),',example-unit,'))&&({gate})"
         );
         let root = policy_fixture(
-            "velnor-trusted-and-combined-gates",
+            "trusted-suffix-and-combined-gates",
             "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
             "both",
         )?;
