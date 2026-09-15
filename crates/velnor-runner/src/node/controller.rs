@@ -1129,7 +1129,14 @@ async fn reconcile_once(
     spawn_ready_waiters(args, journal, jobs)?;
     reap(jobs);
     let outbox_reconcile_due = last_outbox_reconcile.elapsed() >= OUTBOX_RECONCILIATION_INTERVAL;
-    reclaim_orphaned_jobs(args, journal, remote_deadline, outbox_reconcile_due).await?;
+    reclaim_orphaned_jobs(
+        args,
+        journal,
+        remote_deadline,
+        outbox_reconcile_due,
+        crate::docker::client::host_call,
+    )
+    .await?;
     if outbox_reconcile_due {
         reconcile_orphaned_outboxes(args, journal)?;
         *last_outbox_reconcile = Instant::now();
@@ -1879,6 +1886,25 @@ fn stop_idle_waiters(
     Ok(())
 }
 
+/// Force-remove a provably dead worker's containers before its slot returns
+/// to Ready. Best-effort by design: a wedged Docker daemon must not wedge
+/// slot recovery (capacity loss is worse than a leaked container), so
+/// failures are loud warnings, never errors.
+fn teardown_orphaned_job_containers(
+    job_id: &str,
+    docker_backend: bool,
+    docker: impl FnMut(&[String]) -> anyhow::Result<String>,
+) {
+    if !docker_backend {
+        return;
+    }
+    if let Err(error) = crate::docker_lease::force_remove_job_owned_containers(job_id, docker) {
+        eprintln!(
+            "Warning: orphan recovery for job {job_id} could not remove its containers: {error:#}"
+        );
+    }
+}
+
 /// Return slots occupied by job workers that died without a terminal
 /// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
 /// slot stays `Assigned` forever and advertised capacity never recovers.
@@ -1887,6 +1913,7 @@ async fn reclaim_orphaned_jobs(
     journal: &mut Journal,
     remote_deadline: tokio::time::Instant,
     scan_persisted_markers: bool,
+    mut docker: impl FnMut(&[String]) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
     let orphan_jobs: Vec<_> = state
@@ -1943,11 +1970,29 @@ async fn reclaim_orphaned_jobs(
         return Ok(());
     };
 
+    // Container teardown runs only on the docker backend. Missing or
+    // unparsable selection is never treated as docker, which also keeps
+    // backend-less unit fixtures hermetic.
+    let backend = crate::execution::load_execution_file(&args.state_dir, None)
+        .ok()
+        .map(|file| file.backend());
+    let docker_backend =
+        velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend);
+
     for job in orphan_jobs {
         // One Completing row must not abort the fleet cycle. Log and move on
         // so other slots still reclaim; the next tick retries this job.
-        if let Err(error) =
-            recover_one_orphaned_job(args, journal, &exec, &state, &job, remote_deadline).await
+        if let Err(error) = recover_one_orphaned_job(
+            args,
+            journal,
+            &exec,
+            &state,
+            &job,
+            remote_deadline,
+            docker_backend,
+            &mut docker,
+        )
+        .await
         {
             eprintln!(
                 "Warning: orphan recovery for job {} failed this cycle: {error:#}",
@@ -2055,6 +2100,8 @@ async fn recover_one_orphaned_job(
     state: &velnor_control::journal::FleetState,
     job: &velnor_control::journal::JobRecord,
     remote_deadline: tokio::time::Instant,
+    docker_backend: bool,
+    docker: &mut impl FnMut(&[String]) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let slot_dir = recovery_slot_config_dir(&args.state_dir, exec, state, &job.slot_id)?;
     let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
@@ -2096,11 +2143,7 @@ async fn recover_one_orphaned_job(
             let cleanup = if pending_completion {
                 match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
-                    crate::runner::replay_recorded_completion(
-                        &slot_dir,
-                        &stored,
-                        &args.state_dir,
-                    ),
+                    crate::runner::replay_recorded_completion(&slot_dir, &stored, &args.state_dir),
                     "replay recorded completion during orphan recovery",
                 )
                 .await
@@ -2117,13 +2160,14 @@ async fn recover_one_orphaned_job(
                             "Warning: completion replay for job {} failed: {error:#}",
                             job.job_id.0
                         );
-                        if let Some(row) = journal
-                            .materialized_state()?
-                            .outbox
-                            .into_iter()
-                            .find(|row| {
-                                row.job_id == job.job_id && row.generation == job.generation
-                            })
+                        if let Some(row) =
+                            journal
+                                .materialized_state()?
+                                .outbox
+                                .into_iter()
+                                .find(|row| {
+                                    row.job_id == job.job_id && row.generation == job.generation
+                                })
                         {
                             abandon_if_budget_spent(args, journal, &row)?;
                         }
@@ -2172,7 +2216,9 @@ async fn recover_one_orphaned_job(
     let current = journal.materialized_state()?;
     if current.jobs.iter().all(|row| row.job_id != job.job_id) {
         // complete_recorded_in_flight_job already committed the terminal
-        // acknowledgement and removed this job from the journal.
+        // acknowledgement and removed this job from the journal. The worker
+        // is still dead: tear down leftover containers before Ready.
+        teardown_orphaned_job_containers(&job.job_id.0, docker_backend, docker);
         return Ok(());
     }
     if pending_completion {
@@ -2181,6 +2227,11 @@ async fn recover_one_orphaned_job(
             job.job_id.0
         ));
     }
+    // The worker is dead (both ownership pids are gone), so any
+    // container still carrying this job's label is a leak. Remove them
+    // before the slot returns to Ready; after JobWorkerLost no path
+    // would ever touch them again.
+    teardown_orphaned_job_containers(&job.job_id.0, docker_backend, docker);
     let lost = journal.apply(Event::JobWorkerLost {
         job_id: job.job_id.clone(),
         generation: job.generation,
@@ -4268,6 +4319,7 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             false,
+            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .unwrap();
@@ -4279,6 +4331,238 @@ mod tests {
             .find(|job| job.job_id == JobId("job-1".to_owned()))
             .unwrap();
         assert_eq!(job.phase, JobPhase2::Running);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Journal with one Running job whose worker and waiter pids are both
+    /// dead, plus an exec config whose two-slot layout maps `velnor-1` to
+    /// `slots/slot-1`. With `backend`, the state dir also selects that
+    /// execution backend; without it no `execution.toml` exists.
+    fn stale_running_job_fixture(label: &str, backend: Option<&str>) -> (PathBuf, Journal) {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-orphan-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(backend) = backend {
+            std::fs::write(
+                dir.join("execution.toml"),
+                format!("[execution]\nbackend = \"{backend}\"\n"),
+            )
+            .unwrap();
+        }
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ReadyAttempt {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::JobAcquisitionIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
+            },
+            Event::JobOwned {
+                job_id: JobId("job-1".to_owned()),
+                slot_id: SlotId("velnor-1".to_owned()),
+                attempt: 1,
+                generation: Generation::INITIAL,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_234,
+            },
+            Event::JobStarted {
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        cleanup::write_owned_pid(&dir, "job-1", Generation::INITIAL.0, stale_pid()).unwrap();
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
+            .unwrap();
+        (dir, journal)
+    }
+
+    #[tokio::test]
+    async fn stale_recovery_force_removes_containers_before_restoring_slot() {
+        let (dir, mut journal) = stale_running_job_fixture("teardown", Some("docker"));
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        let listing =
+            "job-cid\tjob-1\tjob-1\trunning\nguest-cid\tguest-sidecar\tjob-1\texited\n".to_string();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+            move |docker_args: &[String]| {
+                recorded.lock().unwrap().push(docker_args.to_vec());
+                if docker_args.first().is_some_and(|command| command == "ps") {
+                    return Ok(listing.clone());
+                }
+                Ok(String::new())
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            crate::docker_lease::list_owned_containers_state_args("job-1")
+        );
+        assert_eq!(
+            calls[1],
+            crate::docker_lease::force_remove_container_args(&[
+                "guest-cid".to_string(),
+                "job-cid".to_string()
+            ])
+        );
+        assert_eq!(calls.len(), 2);
+
+        let state = journal.load_state().unwrap();
+        assert!(
+            state
+                .jobs
+                .iter()
+                .all(|job| job.job_id != JobId("job-1".to_owned())),
+            "JobWorkerLost must remove the job row"
+        );
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
+            .unwrap();
+        assert_eq!(slot.phase, SlotPhase2::Ready);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stale_recovery_without_docker_backend_restores_slot_without_docker() {
+        let (dir, mut journal) = stale_running_job_fixture("no-backend", None);
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+            |docker_args| {
+                panic!("docker must not be invoked without a docker backend: {docker_args:?}")
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = journal.load_state().unwrap();
+        assert!(
+            state
+                .jobs
+                .iter()
+                .all(|job| job.job_id != JobId("job-1".to_owned())),
+            "JobWorkerLost must remove the job row"
+        );
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
+            .unwrap();
+        assert_eq!(slot.phase, SlotPhase2::Ready);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stale_recovery_on_microvm_backend_restores_slot_without_docker() {
+        let (dir, mut journal) = stale_running_job_fixture("microvm", Some("microvm"));
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+            |docker_args| {
+                panic!("docker must not be invoked on the microvm backend: {docker_args:?}")
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = journal.load_state().unwrap();
+        assert!(
+            state
+                .jobs
+                .iter()
+                .all(|job| job.job_id != JobId("job-1".to_owned())),
+            "JobWorkerLost must remove the job row"
+        );
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
+            .unwrap();
+        assert_eq!(slot.phase, SlotPhase2::Ready);
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -4445,6 +4729,7 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             true,
+            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .unwrap();
@@ -4595,6 +4880,7 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             false,
+            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .expect("missing completion payload must not abort the controller cycle");
@@ -4642,6 +4928,7 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             true,
+            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .unwrap_err();
@@ -4673,6 +4960,7 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             true,
+            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .unwrap_err();
