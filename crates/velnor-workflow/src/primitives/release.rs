@@ -1514,7 +1514,7 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         sign_job.is_some(),
     ));
     format!(
-        "{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n{jobs}",
+        "{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{jobs}",
         yaml_scalar(&config.default_branch),
         paths = release_watch_paths(config),
     )
@@ -4002,9 +4002,15 @@ mod tests {
             panic!("identity fixture must carry a release contract")
         };
         let preview = super::render_preview(&config, Some(release));
-        // A newer main must cancel a stale preview so it cannot publish after
-        // the current tip; only one run is active, so replaces cannot race.
-        assert!(preview.contains("cancel-in-progress: true"), "{preview}");
+        // Guest/rootfs/deb can run 180 minutes. A newer main must wait, not
+        // cancel, or the rolling replace never publishes.
+        assert!(
+            preview.contains(
+                "concurrency:\n  group: preview-${{ github.repository }}\n  cancel-in-progress: false\n"
+            ),
+            "{preview}"
+        );
+        assert!(!preview.contains("cancel-in-progress: true"), "{preview}");
         // Identity resolves one preview version from the crate manifest.
         let identity = yaml_job(&preview, "identity");
         assert!(identity.contains("name=Preview $version"), "{identity}");
