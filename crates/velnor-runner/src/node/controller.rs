@@ -1985,6 +1985,9 @@ async fn reclaim_orphaned_jobs(
         .map(|file| file.backend());
     let docker_backend =
         velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend);
+    let mut teardown = |job_id: &str| {
+        teardown_orphaned_job_containers(job_id, docker_backend, &mut docker);
+    };
 
     for job in orphan_jobs {
         // One Completing row must not abort the fleet cycle. Log and move on
@@ -1996,8 +1999,7 @@ async fn reclaim_orphaned_jobs(
             &state,
             &job,
             remote_deadline,
-            docker_backend,
-            &mut docker,
+            &mut teardown,
         )
         .await
         {
@@ -2108,8 +2110,7 @@ async fn recover_one_orphaned_job(
     state: &velnor_control::journal::FleetState,
     job: &velnor_control::journal::JobRecord,
     remote_deadline: tokio::time::Instant,
-    docker_backend: bool,
-    docker: &mut impl FnMut(&[String]) -> anyhow::Result<String>,
+    teardown: &mut impl FnMut(&str),
 ) -> anyhow::Result<()> {
     let slot_dir = recovery_slot_config_dir(&args.state_dir, exec, state, &job.slot_id)?;
     let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
@@ -2253,7 +2254,7 @@ async fn recover_one_orphaned_job(
         // complete_recorded_in_flight_job already committed the terminal
         // acknowledgement and removed this job from the journal. The worker
         // is still dead: tear down leftover containers before Ready.
-        teardown_orphaned_job_containers(&job.job_id.0, docker_backend, docker);
+        teardown(&job.job_id.0);
         return Ok(());
     }
     if pending_completion {
@@ -2267,7 +2268,7 @@ async fn recover_one_orphaned_job(
     // container still carrying this job's label is a leak. Remove them
     // before the slot returns to Ready; after JobWorkerLost no path
     // would ever touch them again.
-    teardown_orphaned_job_containers(&job.job_id.0, docker_backend, docker);
+    teardown(&job.job_id.0);
     let lost = journal.apply(Event::JobWorkerLost {
         job_id: job.job_id.clone(),
         generation: job.generation,
