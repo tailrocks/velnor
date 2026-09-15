@@ -607,14 +607,44 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     }
     assert!(!workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
     assert!(!workflow.contains("inputs.unit"));
-    assert!(workflow.contains("github-prepare-cargo-sources:"));
+    assert!(!workflow.contains("github-prepare-cargo-sources:"));
     assert!(workflow.contains("velnor-prepare-cargo-sources:"));
-    assert!(workflow.contains("needs: [github-prepare-cargo-sources]"));
+    assert!(!workflow.contains("needs: [github-prepare-cargo-sources]"));
     assert!(workflow.contains("needs: [velnor-prepare-cargo-sources]"));
     assert!(
         !workflow.contains("unknown unit for cargo fetch"),
         "kind unit jobs must not repeat per-unit fetch bodies"
     );
+
+    let github_job = workflow
+        .split_once("  github-rust-crate00:\n")
+        .and_then(|(_, body)| body.split_once("\n  velnor-rust-crate00:\n"))
+        .map_or("", |(body, _)| body);
+    assert!(
+        github_job.contains("Restore \"Rust crate (crate00)\" cache"),
+        "GitHub jobs must retain their per-job Cargo cache: {github_job}"
+    );
+    assert!(
+        github_job.contains("Prepare Cargo sources")
+            && github_job.contains("cargo fetch --locked"),
+        "GitHub jobs must fetch Cargo sources in their own workspace: {github_job}"
+    );
+    assert!(
+        github_job.contains("CARGO_NET_OFFLINE: \"true\""),
+        "GitHub verification must remain offline after its local fetch: {github_job}"
+    );
+
+    let velnor_prep = workflow
+        .split_once("  velnor-prepare-cargo-sources:\n")
+        .and_then(|(_, body)| body.split_once("\n  github-rust-crate00:\n"))
+        .map_or("", |(body, _)| body);
+    assert!(
+        velnor_prep.contains("github.event_name == 'workflow_dispatch'")
+            && velnor_prep.contains("github.ref == 'refs/heads/main'"),
+        "Velnor prep must use the Velnor lane event gate: {velnor_prep}"
+    );
+    assert!(!velnor_prep.contains("Restore Rust toolchain"));
+    assert!(!velnor_prep.contains("Provision Rust toolchain"));
 }
 
 #[test]
