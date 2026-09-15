@@ -35,6 +35,22 @@ use crate::{
 pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
 /// Leave headroom for parser overhead and future pin growth.
 const KIND_WORKFLOW_SHARD_BUDGET: usize = 480_000;
+/// GitHub rejects collapsed verify jobs once inlined unit steps exceed this budget.
+const COLLAPSED_VERIFY_STEP_BUDGET: usize = 80;
+
+fn collapsed_verify_job_id(base: &str, shard_index: usize) -> String {
+    if shard_index == 0 {
+        base.to_owned()
+    } else {
+        format!("{base}-{}", shard_index + 1)
+    }
+}
+
+fn count_collapsed_verify_steps(body: &str) -> usize {
+    body.lines()
+        .filter(|line| line.starts_with("      - name:"))
+        .count()
+}
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
@@ -2514,7 +2530,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let github_members =
             self.collapsed_lane_members(members, contracts, RunnerMode::Github, None);
         if !github_members.is_empty() {
-            self.render_collapsed_lane_verify_job(
+            self.render_collapsed_lane_verify_shards(
                 output,
                 &github_members,
                 contracts,
@@ -2529,7 +2545,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let velnor_trusted =
             self.collapsed_lane_members(members, contracts, RunnerMode::Velnor, Some(true));
         if !velnor_plain.is_empty() {
-            self.render_collapsed_lane_verify_job(
+            self.render_collapsed_lane_verify_shards(
                 output,
                 &velnor_plain,
                 contracts,
@@ -2541,7 +2557,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         if !velnor_trusted.is_empty() {
             let sample = velnor_trusted[0];
-            self.render_collapsed_lane_verify_job(
+            self.render_collapsed_lane_verify_shards(
                 output,
                 &velnor_trusted,
                 contracts,
@@ -2549,6 +2565,67 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "verify-velnor-trusted",
                 RunnerMode::Velnor.display_name(),
                 self.runner_for_unit(RunnerMode::Velnor, sample),
+            );
+        }
+    }
+
+    fn render_collapsed_lane_verify_shards(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        lane: RunnerMode,
+        base_job_id: &str,
+        display_name: &str,
+        runs_on: String,
+    ) {
+        if members.is_empty() {
+            return;
+        }
+        let mut shard: Vec<&Unit> = Vec::new();
+        let mut shard_index = 0_usize;
+        for member in members {
+            let mut trial = shard.clone();
+            trial.push(*member);
+            let mut trial_body = String::new();
+            self.render_collapsed_lane_verify_job(
+                &mut trial_body,
+                &trial,
+                contracts,
+                lane,
+                base_job_id,
+                display_name,
+                runs_on.clone(),
+            );
+            if !shard.is_empty()
+                && count_collapsed_verify_steps(&trial_body) > COLLAPSED_VERIFY_STEP_BUDGET
+            {
+                let job_id = collapsed_verify_job_id(base_job_id, shard_index);
+                self.render_collapsed_lane_verify_job(
+                    output,
+                    &shard,
+                    contracts,
+                    lane,
+                    &job_id,
+                    display_name,
+                    runs_on.clone(),
+                );
+                shard_index += 1;
+                shard = vec![*member];
+            } else {
+                shard = trial;
+            }
+        }
+        if !shard.is_empty() {
+            let job_id = collapsed_verify_job_id(base_job_id, shard_index);
+            self.render_collapsed_lane_verify_job(
+                output,
+                &shard,
+                contracts,
+                lane,
+                &job_id,
+                display_name,
+                runs_on,
             );
         }
     }
