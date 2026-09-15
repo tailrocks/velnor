@@ -2096,11 +2096,7 @@ async fn recover_one_orphaned_job(
             let cleanup = if pending_completion {
                 match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
-                    crate::runner::replay_recorded_completion(
-                        &slot_dir,
-                        &stored,
-                        &args.state_dir,
-                    ),
+                    crate::runner::replay_recorded_completion(&slot_dir, &stored, &args.state_dir),
                     "replay recorded completion during orphan recovery",
                 )
                 .await
@@ -2117,13 +2113,14 @@ async fn recover_one_orphaned_job(
                             "Warning: completion replay for job {} failed: {error:#}",
                             job.job_id.0
                         );
-                        if let Some(row) = journal
-                            .materialized_state()?
-                            .outbox
-                            .into_iter()
-                            .find(|row| {
-                                row.job_id == job.job_id && row.generation == job.generation
-                            })
+                        if let Some(row) =
+                            journal
+                                .materialized_state()?
+                                .outbox
+                                .into_iter()
+                                .find(|row| {
+                                    row.job_id == job.job_id && row.generation == job.generation
+                                })
                         {
                             abandon_if_budget_spent(args, journal, &row)?;
                         }
