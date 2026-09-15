@@ -1403,7 +1403,7 @@ fn render_preview_identity_job(config: &ProjectConfig, release: &ReleaseSpec) ->
     let checkout = ActionPin::Checkout.reference();
     // The identity job below always runs on the hosted github runner, so its
     // runtime install is keyed to that placement — never to the repo lane.
-    let setup = workflow_runtime_setup(RunnerMode::Github);
+    let setup = workflow_runtime_setup(RunnerMode::Github, &config.repository);
     let manifest = match rust_package_unit(config, &release.package) {
         Some(unit) if unit.root == "." || unit.root.is_empty() => "Cargo.toml".to_owned(),
         Some(unit) => format!("{}/Cargo.toml", unit.root.trim_end_matches('/')),
@@ -1544,7 +1544,7 @@ fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
     if config.runners == RunnerMode::Velnor {
         String::new()
     } else {
-        workflow_runtime_setup(RunnerMode::Github)
+        workflow_runtime_setup(RunnerMode::Github, &config.repository)
     }
 }
 
@@ -1803,7 +1803,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
             if lane == crate::RunnerMode::Velnor {
                 super::render_velnor_runner_identity_step(&mut output);
             }
-            WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
+            workflow.render_workflow_runtime_setup(&mut output, lane);
             workflow.render_tool_provisioning(&mut output, lane, unit, false);
             let cargo_cache_restored = CacheBackend::Detected
                 .lane_enables_actions_cache(lane, &workflow, unit)
@@ -2660,8 +2660,19 @@ fn render_maintenance(config: &ProjectConfig) -> String {
     let setup = if cache_lane == RunnerMode::Github {
         let mut setup = workflow_runtime_setup_with_install_rev(
             RunnerMode::Github,
+            &config.repository,
             &workflow_setup_install_rev(&config.repository),
         );
+        if crate::workflow_setup_action_uses(&config.repository)
+            == crate::VELNOR_WORKFLOW_LOCAL_SETUP_ACTION
+        {
+            // The owner runs its own checkout of the setup action; the cache
+            // retention job otherwise never checks the repository out.
+            setup = format!(
+                "      - name: Checkout setup action\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          sparse-checkout: |\n            .github/actions\n          sparse-checkout-cone-mode: true\n          fetch-depth: 1\n          persist-credentials: false\n{setup}",
+                ActionPin::Checkout.reference()
+            );
+        }
         setup = setup.replace(
             "if: ${{ runner.environment == 'github-hosted' }}",
             "if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}",
@@ -2805,15 +2816,25 @@ mod tests {
             "maintenance must install the hosted workflow runtime: {workflow}"
         );
         let uses_line = must_some(
-            workflow.lines().find(|line| {
-                line.contains(&format!("uses: {}", crate::VELNOR_WORKFLOW_SETUP_ACTION))
-            }),
+            workflow
+                .lines()
+                .find(|line| line.contains("uses: ") && line.contains("setup-velnor-workflow")),
             "setup-velnor-workflow uses line",
         );
-        assert!(
-            uses_line.contains(&format!("@{}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
-            "uses: must pin SOURCE_REV: {uses_line}"
-        );
+        if config.repository == crate::workflow_setup_action_repository() {
+            assert!(
+                uses_line.contains(&format!(
+                    "uses: {}",
+                    crate::VELNOR_WORKFLOW_LOCAL_SETUP_ACTION
+                )),
+                "the owner runs its own checkout of the action: {uses_line}"
+            );
+        } else {
+            assert!(
+                uses_line.contains(&format!("@{}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
+                "uses: must pin SOURCE_REV: {uses_line}"
+            );
+        }
         assert!(
             !uses_line.contains("github.sha"),
             "GitHub Actions forbids expressions in uses: versions: {uses_line}"

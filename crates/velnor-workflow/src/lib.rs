@@ -67,7 +67,23 @@ const OWNERSHIP_STATE_SCHEMA: &str = "2";
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 pub(crate) const VELNOR_WORKFLOW_SETUP_ACTION: &str =
     "tailrocks/velnor/.github/actions/setup-velnor-workflow";
+/// The same composite from the owner's own checkout. The owner never pins
+/// itself by `uses:@<sha>`: that third self-referential pin broke every D19
+/// bump (`velnor-runner`'s compiled action manifest had to list it), so the
+/// owner runs the action at the checked-out ref and `rev:` alone selects the
+/// runtime.
+pub(crate) const VELNOR_WORKFLOW_LOCAL_SETUP_ACTION: &str =
+    "./.github/actions/setup-velnor-workflow";
 const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/velnor";
+/// The source commit this binary was built from, stamped by `build.rs`
+/// (`unknown` when the build tree had no git). `velnor-workflow --revision`
+/// prints it; the D19 guard compares it against the pinned policy revision.
+pub const SOURCE_REVISION: &str = env!("VELNOR_WORKFLOW_SOURCE_SHA");
+/// Names a `velnor-workflow` binary built at the pinned policy revision. The
+/// D19 guard consults it first; generated hosted jobs export it after
+/// installing the runtime artifact's policy binary so `--check` never needs
+/// the network.
+pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINARY";
 // The pinned revision of the policy-enforcing runtime binary. It is the single
 // literal inside the inline policy job: the `cargo install --rev` pin, the Mr.
 // Boxington cache-key suffix, and the `VELNOR_WORKFLOW_POLICY_REVISION` value
@@ -352,6 +368,10 @@ struct RawCli {
     /// Use the line-oriented CLI report instead of the default interactive TUI.
     #[arg(long)]
     plain: bool,
+
+    /// Print the source commit this binary was built from and exit.
+    #[arg(long, exclusive = true)]
+    revision: bool,
 }
 
 impl Cli {
@@ -3387,8 +3407,19 @@ pub(crate) fn yaml_scalar(value: &str) -> String {
     }
 }
 
-fn workflow_runtime_setup(lane: RunnerMode) -> String {
-    workflow_runtime_setup_with_install_rev(lane, VELNOR_WORKFLOW_SOURCE_REV)
+fn workflow_runtime_setup(lane: RunnerMode, repository: &str) -> String {
+    workflow_runtime_setup_with_install_rev(lane, repository, VELNOR_WORKFLOW_SOURCE_REV)
+}
+
+/// The `uses:` reference for `setup-velnor-workflow`: the owner's checkout
+/// (`./…`, no version) for the repository that ships the action, the
+/// published [`VELNOR_WORKFLOW_SOURCE_REV`] pin for every consumer.
+pub(crate) fn workflow_setup_action_uses(repository: &str) -> String {
+    if !repository.is_empty() && repository == workflow_setup_action_repository() {
+        VELNOR_WORKFLOW_LOCAL_SETUP_ACTION.to_owned()
+    } else {
+        format!("{VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}")
+    }
 }
 
 /// Hosted `rev:` for `setup-velnor-workflow`. The setup action lives in this
@@ -3412,24 +3443,59 @@ pub(crate) fn workflow_setup_install_rev(repository: &str) -> String {
     }
 }
 
-/// Hosted runtime install. `uses:` is always [`VELNOR_WORKFLOW_SOURCE_REV`]:
-/// GitHub Actions rejects expressions in `uses:` versions (HTTP 422). `rev:` is
+/// Hosted runtime install. `uses:` is [`workflow_setup_action_uses`] (the
+/// owner's checkout, or the published pin for consumers — GitHub Actions
+/// rejects expressions in `uses:` versions, HTTP 422). `rev:` is
 /// `install_rev`. Same-repo Planning and Maintenance use a context-gated
 /// `${{ github.sha }}` with a static fallback; consumers keep the published
 /// pin.
-fn workflow_runtime_setup_with_install_rev(lane: RunnerMode, install_rev: &str) -> String {
+fn workflow_runtime_setup_with_install_rev(
+    lane: RunnerMode,
+    repository: &str,
+    install_rev: &str,
+) -> String {
     if lane != RunnerMode::Github {
         return String::new();
     }
     format!(
-        "      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}\n        with:\n          rev: {install_rev}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n"
+        "      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          rev: {install_rev}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n",
+        workflow_setup_action_uses(repository)
     )
+}
+
+/// Hosted Planning provisions the **pinned** runtime next to the event
+/// runtime when the two differ (same-repository PRs and default-branch events
+/// install `github.sha`). The pinned binary is proven by the revision it
+/// reports, staged outside `~/.cargo/bin` (the event install overwrites that
+/// path), exported as [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`], and shipped in
+/// the runtime artifact so unit jobs can run the D19 guard offline.
+fn workflow_pinned_policy_runtime_setup(repository: &str) -> String {
+    format!(
+        "      - name: Set up pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          rev: {VELNOR_WORKFLOW_SOURCE_REV}\n      - name: Stage pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        shell: bash\n        env:\n          PINNED_REVISION: {VELNOR_POLICY_WORKFLOW_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-policy\"\n          install -Dm0755 \"$HOME/.cargo/bin/velnor-workflow\" \"$stage/velnor-workflow\"\n          reported=\"$(\"$stage/velnor-workflow\" --revision)\"\n          [[ \"$reported\" == \"$PINNED_REVISION\" ]] || {{ echo \"::error::pinned workflow runtime reports revision $reported, expected $PINNED_REVISION\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$stage/velnor-workflow\" >> \"$GITHUB_ENV\"\n",
+        workflow_setup_action_uses(repository)
+    )
+}
+
+/// Hosted Planning runtime: the pinned policy runtime first when the event
+/// runtime may differ from it, then the event runtime.
+pub(crate) fn workflow_planning_runtime_setup(repository: &str) -> String {
+    let install_rev = workflow_setup_install_rev(repository);
+    let mut setup = String::new();
+    if install_rev != VELNOR_WORKFLOW_SOURCE_REV {
+        setup.push_str(&workflow_pinned_policy_runtime_setup(repository));
+    }
+    setup.push_str(&workflow_runtime_setup_with_install_rev(
+        RunnerMode::Github,
+        repository,
+        &install_rev,
+    ));
+    setup
 }
 
 fn workflow_runtime_download(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
+            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and .policy_revision == $revision and (.policy_binary_sha256 | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n          expected=\"$(jq -er '.policy_binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_POLICY_WORKFLOW_REV}\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy \"$HOME/.cargo/bin/velnor-workflow-policy\"\n          reported=\"$(\"$HOME/.cargo/bin/velnor-workflow-policy\" --revision)\"\n          [[ \"$reported\" == \"$EXPECTED_REVISION\" ]] || {{ echo \"::error::policy runtime reports revision $reported, expected $EXPECTED_REVISION\" >&2; exit 1; }}\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$HOME/.cargo/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\"\n",
             ActionPin::DownloadArtifact.reference()
         )
     } else {
@@ -3439,7 +3505,7 @@ fn workflow_runtime_download(lane: RunnerMode) -> String {
 
 fn workflow_runtime_artifact_upload() -> String {
     format!(
-        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
+        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          policy_src=\"${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}\"\n          install -m 0755 \"$policy_src\" \"$stage/velnor-workflow-policy\"\n          policy_revision=\"$(\"$stage/velnor-workflow-policy\" --revision)\"\n          [[ \"$policy_revision\" == \"$EXPECTED_REVISION\" ]] || {{ echo \"::error::policy runtime reports revision $policy_revision, expected $EXPECTED_REVISION\" >&2; exit 1; }}\n          policy_digest=\"$(sha256sum \"$stage/velnor-workflow-policy\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" --arg policy_revision \"$policy_revision\" --arg policy_binary_sha256 \"$policy_digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_binary_sha256: $policy_binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
         ActionPin::UploadArtifact.reference()
     )
 }
@@ -3561,6 +3627,10 @@ pub fn run_from_env() -> Result<(), GeneratorError> {
         }
         Err(error) => return Err(clap_usage_error(&error)),
     };
+    if raw.revision {
+        println!("{SOURCE_REVISION}");
+        return Ok(());
+    }
     let cli = raw.try_into()?;
     run(&cli)
 }
@@ -4520,40 +4590,162 @@ fn policy_install_root(revision: &str) -> PathBuf {
         .join(format!("velnor-workflow-policy-{revision}"))
 }
 
-fn run_installed_policy(root: &Path, revision: &str) -> Result<(), GeneratorError> {
-    let install_root = policy_install_root(revision);
-    let binary = install_root.join("bin").join("velnor-workflow");
-    if !binary.is_file() {
-        fs::create_dir_all(&install_root).map_err(|error| {
-            GeneratorError::usage(format!(
-                "prepare pinned policy runtime at {}: {error}",
-                install_root.display()
-            ))
-        })?;
-        let status = Command::new("cargo")
-            .args([
-                "install",
-                "--locked",
-                "--git",
-                VELNOR_WORKFLOW_INSTALL_GIT_URL,
-                "--rev",
-                revision,
-                "--root",
-            ])
-            .arg(&install_root)
-            .args(["velnor-workflow", "--bin", "velnor-workflow"])
-            .status()
-            .map_err(|error| {
-                GeneratorError::usage(format!(
-                    "install velnor-workflow at pinned revision {revision}: {error}"
-                ))
-            })?;
-        if !status.success() {
-            return Err(GeneratorError::usage(format!(
-                "install velnor-workflow at pinned revision {revision} failed"
-            )));
+/// The revision a `velnor-workflow` binary reports for itself.
+fn binary_revision(binary: &Path) -> Result<String, String> {
+    let output = Command::new(binary)
+        .arg("--revision")
+        .output()
+        .map_err(|error| format!("{}: cannot run `--revision`: {error}", binary.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{}: `--revision` failed ({}): {}",
+            binary.display(),
+            output.status,
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The process environment the pinned-binary lookup reads, captured once so
+/// tests can drive the resolver without mutating global state.
+struct PinnedBinaryLookup {
+    /// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`].
+    pinned_binary: Option<PathBuf>,
+    /// `PATH`.
+    search_path: Option<OsString>,
+    /// Where an earlier guard run installed the pin.
+    install_root: PathBuf,
+    /// `CARGO_NET_OFFLINE=true`: never reach for the network.
+    offline: bool,
+}
+
+impl PinnedBinaryLookup {
+    fn from_env(revision: &str) -> Self {
+        Self {
+            pinned_binary: env::var_os(VELNOR_WORKFLOW_PINNED_BINARY_ENV).map(PathBuf::from),
+            search_path: env::var_os("PATH"),
+            install_root: policy_install_root(revision),
+            offline: env::var("CARGO_NET_OFFLINE").is_ok_and(|value| value == "true"),
         }
     }
+
+    /// Every `velnor-workflow` on the search path, in search order.
+    fn path_binaries(&self) -> Vec<PathBuf> {
+        let name = format!("velnor-workflow{}", env::consts::EXE_SUFFIX);
+        self.search_path
+            .as_ref()
+            .map(|path| {
+                env::split_paths(path)
+                    .filter(|directory| !directory.as_os_str().is_empty())
+                    .map(|directory| directory.join(&name))
+                    .filter(|candidate| candidate.is_file())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Locate a `velnor-workflow` binary built at the pinned policy `revision`,
+/// proven by the revision it reports (`--revision`), never by where it lives:
+///
+/// 1. [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`] — an explicit pointer; a binary
+///    there that is not the pin is a configuration error, not a fallback.
+/// 2. a `velnor-workflow` on `PATH` (hosted jobs install the pinned runtime
+///    there; release/preview/maintenance jobs install the pin itself).
+/// 3. a binary installed earlier by this guard under [`policy_install_root`].
+/// 4. `cargo install --git … --rev <pin>` (local development; needs the
+///    network, so it is refused under `CARGO_NET_OFFLINE=true`).
+///
+/// Fails closed with every attempt listed when none of these yields the pin.
+fn resolve_pinned_policy_binary(
+    revision: &str,
+    lookup: &PinnedBinaryLookup,
+) -> Result<PathBuf, GeneratorError> {
+    let mut attempts = Vec::new();
+    if let Some(binary) = lookup.pinned_binary.clone() {
+        return match binary_revision(&binary) {
+            Ok(reported) if reported == revision => Ok(binary),
+            Ok(reported) => Err(GeneratorError::usage(format!(
+                "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}={} reports revision {reported}, but the pinned workflow policy revision is {revision}",
+                binary.display()
+            ))),
+            Err(detail) => Err(GeneratorError::usage(format!(
+                "{VELNOR_WORKFLOW_PINNED_BINARY_ENV} does not name a usable velnor-workflow binary: {detail}"
+            ))),
+        };
+    }
+    let install_root = &lookup.install_root;
+    let installed = install_root.join("bin").join("velnor-workflow");
+    let mut candidates = lookup.path_binaries();
+    if installed.is_file() {
+        candidates.push(installed.clone());
+    }
+    for candidate in candidates {
+        match binary_revision(&candidate) {
+            Ok(reported) if reported == revision => return Ok(candidate),
+            Ok(reported) => attempts.push(format!(
+                "{} reports revision {reported}",
+                candidate.display()
+            )),
+            Err(detail) => attempts.push(detail),
+        }
+    }
+    if lookup.offline {
+        let tried = if attempts.is_empty() {
+            "no velnor-workflow on PATH".to_owned()
+        } else {
+            attempts.join("; ")
+        };
+        return Err(GeneratorError::usage(format!(
+            "no velnor-workflow binary built at the pinned workflow policy revision {revision} is available and CARGO_NET_OFFLINE=true forbids installing one ({tried}); export {VELNOR_WORKFLOW_PINNED_BINARY_ENV}=<binary built at {revision}> or put one on PATH"
+        )));
+    }
+    fs::create_dir_all(install_root).map_err(|error| {
+        GeneratorError::usage(format!(
+            "prepare pinned policy runtime at {}: {error}",
+            install_root.display()
+        ))
+    })?;
+    let status = Command::new("cargo")
+        .args([
+            "install",
+            "--locked",
+            "--force",
+            "--git",
+            VELNOR_WORKFLOW_INSTALL_GIT_URL,
+            "--rev",
+            revision,
+            "--root",
+        ])
+        .arg(install_root)
+        .args(["velnor-workflow", "--bin", "velnor-workflow"])
+        .status()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "install velnor-workflow at pinned revision {revision}: {error}"
+            ))
+        })?;
+    if !status.success() {
+        return Err(GeneratorError::usage(format!(
+            "install velnor-workflow at pinned revision {revision} failed"
+        )));
+    }
+    match binary_revision(&installed) {
+        Ok(reported) if reported == revision => Ok(installed),
+        Ok(reported) => Err(GeneratorError::usage(format!(
+            "velnor-workflow installed at {} reports revision {reported}, expected the pinned {revision}",
+            installed.display()
+        ))),
+        Err(detail) => Err(GeneratorError::usage(format!(
+            "velnor-workflow installed for pinned revision {revision} is unusable: {detail}"
+        ))),
+    }
+}
+
+fn run_pinned_policy(root: &Path, revision: &str) -> Result<(), GeneratorError> {
+    let binary = resolve_pinned_policy_binary(revision, &PinnedBinaryLookup::from_env(revision))?;
     let output = Command::new(&binary)
         .args(["policy", "--workflow-root"])
         .arg(root)
@@ -4587,7 +4779,7 @@ fn enforce_policy_at_revision(root: &Path, revision: &str) -> Result<(), Generat
     }
     match repository_head_revision(root) {
         Ok(head) if head == revision => runtime::enforce_policy_with_revision(root, revision),
-        Ok(_) => run_installed_policy(root, revision),
+        Ok(_) => run_pinned_policy(root, revision),
         Err(_) => runtime::enforce_policy_with_revision(root, revision),
     }
 }
@@ -6220,11 +6412,15 @@ mod tests {
     #[test]
     fn github_sha_install_rev_keeps_literal_uses_pin() {
         let head_rev = github_expression("github.sha");
-        let maintenance = workflow_runtime_setup_with_install_rev(RunnerMode::Github, &head_rev);
+        let maintenance = workflow_runtime_setup_with_install_rev(
+            RunnerMode::Github,
+            "example/consumer",
+            &head_rev,
+        );
         let uses_line = setup_action_uses_line(&maintenance);
         assert!(
             uses_line.contains(&format!("@{VELNOR_WORKFLOW_SOURCE_REV}")),
-            "uses: is always SOURCE_REV: {uses_line}"
+            "a consumer's uses: is always SOURCE_REV: {uses_line}"
         );
         assert!(
             !uses_line.contains("github.sha"),
@@ -6233,6 +6429,19 @@ mod tests {
         assert!(
             maintenance.contains(&format!("rev: {head_rev}")),
             "maintenance must install HEAD runtime: {maintenance}"
+        );
+        let owner = workflow_runtime_setup_with_install_rev(
+            RunnerMode::Github,
+            workflow_setup_action_repository(),
+            &head_rev,
+        );
+        assert!(
+            owner.contains(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n")),
+            "the owner runs its own checkout of the action, never a self pin: {owner}"
+        );
+        assert!(
+            !owner.contains(VELNOR_WORKFLOW_SETUP_ACTION),
+            "the owner must not reference itself by remote path: {owner}"
         );
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
@@ -6329,6 +6538,222 @@ mod tests {
         assert!(publish.contains("head_branch"));
         assert!(publish.contains("${{ runner.os }}-${{ runner.arch }}"));
         assert!(publish.contains("name: Publish Velnor workflow runtime"));
+    }
+
+    #[test]
+    fn hosted_runtime_artifact_carries_a_proven_policy_binary() {
+        let publish = workflow_runtime_artifact_upload();
+        assert!(publish.contains("velnor-workflow-policy"), "{publish}");
+        assert!(
+            publish.contains(&format!("${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}")),
+            "the policy binary is the staged pin, or the event runtime when both are the pin: {publish}"
+        );
+        assert!(publish.contains("--revision"), "{publish}");
+        assert!(
+            publish.contains("policy_revision: $policy_revision"),
+            "{publish}"
+        );
+        assert!(publish.contains("policy_binary_sha256"), "{publish}");
+
+        let mut download = String::new();
+        WorkflowIr::render_workflow_runtime_download(&mut download, RunnerMode::Github);
+        assert!(
+            download.contains(".policy_revision == $revision"),
+            "{download}"
+        );
+        assert!(
+            download.contains("policy runtime digest mismatch"),
+            "{download}"
+        );
+        assert!(
+            download.contains("$HOME/.cargo/bin/velnor-workflow-policy\" --revision"),
+            "{download}"
+        );
+        assert!(
+            download.contains(&format!(
+                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$HOME/.cargo/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\""
+            )),
+            "unit jobs export the pinned binary for the D19 guard: {download}"
+        );
+        assert!(
+            !download.contains("cargo install"),
+            "unit jobs never install from the network: {download}"
+        );
+    }
+
+    #[test]
+    fn owner_planning_provisions_the_pinned_policy_runtime_before_the_event_runtime() {
+        let owner = workflow_planning_runtime_setup(workflow_setup_action_repository());
+        let pinned = must_some(
+            owner.find("name: Set up pinned Velnor workflow policy runtime"),
+            "pinned policy runtime step",
+        );
+        let staged = must_some(
+            owner.find("name: Stage pinned Velnor workflow policy runtime"),
+            "stage step",
+        );
+        let event = must_some(
+            owner.find("name: Set up Velnor workflow runtime"),
+            "event runtime step",
+        );
+        assert!(pinned < staged && staged < event, "{owner}");
+        assert!(
+            owner.contains(&format!(
+                "          rev: {VELNOR_WORKFLOW_SOURCE_REV}\n      - name: Stage pinned"
+            )),
+            "the pinned install uses the literal pin: {owner}"
+        );
+        assert!(
+            owner.contains(&format!(
+                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$stage/velnor-workflow\" >> \"$GITHUB_ENV\""
+            )),
+            "{owner}"
+        );
+        assert_eq!(
+            owner
+                .matches(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n"))
+                .count(),
+            2,
+            "both installs run the owner's own checkout of the action: {owner}"
+        );
+        assert!(
+            !owner.contains(VELNOR_WORKFLOW_SETUP_ACTION),
+            "the owner never pins itself by remote path: {owner}"
+        );
+
+        let foreign = workflow_planning_runtime_setup("example/consumer");
+        assert!(
+            !foreign.contains("pinned Velnor workflow policy runtime"),
+            "a consumer installs the pin as its runtime, so PATH already is the pin: {foreign}"
+        );
+        assert_eq!(
+            foreign,
+            workflow_runtime_setup_with_install_rev(
+                RunnerMode::Github,
+                "example/consumer",
+                VELNOR_WORKFLOW_SOURCE_REV
+            )
+        );
+    }
+
+    fn fake_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
+        let binary = directory.join("velnor-workflow");
+        must(
+            fs::write(
+                &binary,
+                format!("#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nexit 2\n"),
+            ),
+            "write fake velnor-workflow",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            must(
+                fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+                "mark fake velnor-workflow executable",
+            );
+        }
+        binary
+    }
+
+    const PIN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PIN_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
+        let root = temporary_directory("pinned-env");
+        let pinned = fake_velnor_workflow(&root, PIN_A);
+        let lookup = PinnedBinaryLookup {
+            pinned_binary: Some(pinned.clone()),
+            search_path: None,
+            install_root: root.join("install"),
+            offline: true,
+        };
+        assert_eq!(
+            must(
+                resolve_pinned_policy_binary(PIN_A, &lookup),
+                "env binary at the pin"
+            ),
+            pinned
+        );
+        let error = must_fail(
+            resolve_pinned_policy_binary(PIN_B, &lookup),
+            "env binary at another revision",
+        )
+        .to_string();
+        assert!(error.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV), "{error}");
+        assert!(
+            error.contains(&format!("reports revision {PIN_A}")),
+            "an explicit pointer at the wrong revision is refused, not skipped: {error}"
+        );
+        assert!(error.contains(PIN_B), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_binary_is_used_when_its_reported_revision_is_the_pin() {
+        let root = temporary_directory("pinned-path");
+        let stale = root.join("stale");
+        let current = root.join("current");
+        must(fs::create_dir_all(&stale), "stale dir");
+        must(fs::create_dir_all(&current), "current dir");
+        fake_velnor_workflow(&stale, PIN_B);
+        let wanted = fake_velnor_workflow(&current, PIN_A);
+        let lookup = PinnedBinaryLookup {
+            pinned_binary: None,
+            search_path: env::join_paths([&stale, &current]).ok(),
+            install_root: root.join("install"),
+            offline: true,
+        };
+        assert_eq!(
+            must(resolve_pinned_policy_binary(PIN_A, &lookup), "PATH search"),
+            wanted,
+            "the first PATH entry reporting the pin wins; stale entries are skipped"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_guard_fails_closed_listing_every_candidate() {
+        let root = temporary_directory("pinned-offline");
+        let stale_dir = root.join("stale");
+        must(fs::create_dir_all(&stale_dir), "stale dir");
+        let stale = fake_velnor_workflow(&stale_dir, PIN_B);
+        let install_root = root.join("install");
+        must(fs::create_dir_all(install_root.join("bin")), "install bin");
+        let installed = fake_velnor_workflow(&install_root.join("bin"), PIN_B);
+        let lookup = PinnedBinaryLookup {
+            pinned_binary: None,
+            search_path: env::join_paths([&stale_dir]).ok(),
+            install_root,
+            offline: true,
+        };
+        let error =
+            must_fail(resolve_pinned_policy_binary(PIN_A, &lookup), "offline miss").to_string();
+        assert!(error.contains("CARGO_NET_OFFLINE=true"), "{error}");
+        assert!(error.contains(PIN_A), "{error}");
+        assert!(
+            error.contains(&format!("{} reports revision {PIN_B}", stale.display())),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("{} reports revision {PIN_B}", installed.display())),
+            "a previously installed binary is proven by revision, not by its directory name: {error}"
+        );
+        assert!(error.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV), "{error}");
+        assert!(!error.contains("cargo install"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn this_binary_reports_its_own_source_revision() {
+        assert!(
+            is_full_revision(SOURCE_REVISION) || SOURCE_REVISION == "unknown",
+            "build.rs stamps a full SHA or `unknown`: {SOURCE_REVISION}"
+        );
     }
 
     #[test]
@@ -10537,7 +10962,10 @@ channel = "stable"
         );
         // GitHub loads the callee once per caller into one template-memory
         // budget, so the callee must not grow with the kind's unit count.
-        for index in 0..32 {
+        // 25 both-lane rust units (50 callers) stay under the 5 MiB ceiling
+        // the generator enforces on the aggregate; the ceiling itself is
+        // covered by `template_memory`'s tests.
+        for index in 0..24 {
             let mut unit = rust.clone();
             unit.id = format!("rust-pad{index:02}");
             unit.label = format!("Rust crate (pad{index:02})");

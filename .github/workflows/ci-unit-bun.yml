@@ -141,16 +141,25 @@ jobs:
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
-          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and .policy_revision == $revision and (.policy_binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
           expected="$(jq -er '.binary_sha256' "$manifest")"
           actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
           [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+          expected="$(jq -er '.policy_binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
       - name: Add Velnor workflow runtime to PATH
         shell: bash
+        env:
+          EXPECTED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
         run: |
           set -euo pipefail
           install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$HOME/.cargo/bin/velnor-workflow-policy"
+          reported="$("$HOME/.cargo/bin/velnor-workflow-policy" --revision)"
+          [[ "$reported" == "$EXPECTED_REVISION" ]] || { echo "::error::policy runtime reports revision $reported, expected $EXPECTED_REVISION" >&2; exit 1; }
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$HOME/.cargo/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
       - name: Mark runner setup end
         if: always()
         run: |

@@ -356,6 +356,38 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             release(&arguments[1..])?;
             Ok(true)
         }
+        "version" => {
+            let json = match arguments.get(1..).unwrap_or_default() {
+                [] => false,
+                [flag] if flag == "--json" => true,
+                other => {
+                    return Err(GeneratorError::usage(format!(
+                        "version accepts only --json, got {}",
+                        other
+                            .iter()
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )));
+                }
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "crate_version": env!("CARGO_PKG_VERSION"),
+                        "revision": crate::SOURCE_REVISION,
+                    })
+                );
+            } else {
+                println!(
+                    "velnor-workflow {} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    crate::SOURCE_REVISION
+                );
+            }
+            Ok(true)
+        }
         "cache-plan" => {
             let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
             let mode = options.get("mode").map_or("plan", String::as_str);

@@ -23,11 +23,10 @@ use crate::{
     prepare_cargo_caller_job_id, rendered_cache_values, sidebar_group_name, stack_group_job_id,
     unit_group, unit_group_job_id, unit_job_display_name, unit_job_id, unit_needs, velnor_runner,
     velnor_runner_group, velnor_rust_dependency_needs, workflow_runtime_artifact_upload,
-    workflow_runtime_download, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
-    workflow_selection_file_materialize, workflow_setup_install_rev, yaml_scalar, CachePurpose,
-    CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources,
-    Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
-    VELNOR_POLICY_WORKFLOW_REV,
+    workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
+    yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain,
+    SelectionFieldSources, Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION,
+    OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -3891,8 +3890,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
-    pub(crate) fn render_workflow_runtime_setup(output: &mut String, lane: RunnerMode) {
-        output.push_str(&workflow_runtime_setup(lane));
+    pub(crate) fn render_workflow_runtime_setup(&self, output: &mut String, lane: RunnerMode) {
+        output.push_str(&workflow_runtime_setup(lane, &self.repository));
     }
 
     pub(crate) fn render_workflow_runtime_download(output: &mut String, lane: RunnerMode) {
@@ -3910,7 +3909,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             || self.runners == RunnerMode::Velnor
             || unit.kind == UnitKind::Swift
         {
-            Self::render_workflow_runtime_setup(output, lane);
+            self.render_workflow_runtime_setup(output, lane);
         } else {
             Self::render_workflow_runtime_download(output, lane);
         }
@@ -3942,10 +3941,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
-            workflow_runtime_setup_with_install_rev(
-                RunnerMode::Github,
-                &workflow_setup_install_rev(&self.repository),
-            )
+            crate::workflow_planning_runtime_setup(&self.repository)
         };
         let base_sha = self.base_sha_expression();
         // Both-mode planning consumes the admitted lanes: a velnor-only

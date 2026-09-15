@@ -60,31 +60,30 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up pinned Velnor workflow policy runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: ./.github/actions/setup-velnor-workflow
+        with:
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+      - name: Stage pinned Velnor workflow policy runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        shell: bash
+        env:
+          PINNED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/velnor-workflow-policy"
+          install -Dm0755 "$HOME/.cargo/bin/velnor-workflow" "$stage/velnor-workflow"
+          reported="$("$stage/velnor-workflow" --revision)"
+          [[ "$reported" == "$PINNED_REVISION" ]] || { echo "::error::pinned workflow runtime reports revision $reported, expected $PINNED_REVISION" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$stage/velnor-workflow" >> "$GITHUB_ENV"
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-<<<<<<< HEAD
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
-=======
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: ./.github/actions/setup-velnor-workflow
         with:
-<<<<<<< HEAD
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '643f33123abe01adee09662a366cb9a5d2b3c3bf' }}
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || 'f3fc75ad2c566f38c6f469aec2261d552331b3b7' }}
-=======
           rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '69f94748c331920b9411bbc227694988afebc78c' }}
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
-<<<<<<< HEAD
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
-=======
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Select affected units
         id: plan
         env:
@@ -101,13 +100,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-<<<<<<< HEAD
-          EXPECTED_REVISION: 643f33123abe01adee09662a366cb9a5d2b3c3bf
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-          EXPECTED_REVISION: f3fc75ad2c566f38c6f469aec2261d552331b3b7
-=======
           EXPECTED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -116,17 +109,16 @@ jobs:
           src="$(command -v velnor-workflow)"
           install -m 0755 "$src" "$stage/velnor-workflow"
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
-          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' > "$stage/manifest.json"
+          policy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"
+          install -m 0755 "$policy_src" "$stage/velnor-workflow-policy"
+          policy_revision="$("$stage/velnor-workflow-policy" --revision)"
+          [[ "$policy_revision" == "$EXPECTED_REVISION" ]] || { echo "::error::policy runtime reports revision $policy_revision, expected $EXPECTED_REVISION" >&2; exit 1; }
+          policy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-<<<<<<< HEAD
-          name: velnor-workflow-runtime-643f33123abe01adee09662a366cb9a5d2b3c3bf-${{ runner.os }}-${{ runner.arch }}
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-          name: velnor-workflow-runtime-f3fc75ad2c566f38c6f469aec2261d552331b3b7-${{ runner.os }}-${{ runner.arch }}
-=======
           name: velnor-workflow-runtime-69f94748c331920b9411bbc227694988afebc78c-${{ runner.os }}-${{ runner.arch }}
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -166,13 +158,7 @@ jobs:
         with:
           backend: github
           version: 1.11.1
-<<<<<<< HEAD
-          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-643f33123abe01adee09662a366cb9a5d2b3c3bf
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-f3fc75ad2c566f38c6f469aec2261d552331b3b7
-=======
           cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-69f94748c331920b9411bbc227694988afebc78c
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
           restore-keys: |
             velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -192,13 +178,7 @@ jobs:
             cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-<<<<<<< HEAD
-            --rev 643f33123abe01adee09662a366cb9a5d2b3c3bf \
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-            --rev f3fc75ad2c566f38c6f469aec2261d552331b3b7 \
-=======
             --rev 69f94748c331920b9411bbc227694988afebc78c \
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -206,13 +186,7 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
-<<<<<<< HEAD
-          VELNOR_WORKFLOW_POLICY_REVISION: 643f33123abe01adee09662a366cb9a5d2b3c3bf
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-          VELNOR_WORKFLOW_POLICY_REVISION: f3fc75ad2c566f38c6f469aec2261d552331b3b7
-=======
           VELNOR_WORKFLOW_POLICY_REVISION: 69f94748c331920b9411bbc227694988afebc78c
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
       - name: Set up actionlint
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
@@ -1399,10 +1373,17 @@ jobs:
           fi
           if [[ "$selected" == *",docker,"* ]]; then
             result="$(result_for_job velnor-docker)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$FORK_PR" == true ]]; then
+              case "$result" in
+                success|skipped) ;;
+                *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job velnor-docker)"
             case "$result" in
