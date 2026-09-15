@@ -472,6 +472,7 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
     }
 }
 
+#[cfg(test)]
 fn read_bounded_metadata_body<R: Read>(reader: R, content_length: Option<u64>) -> Result<String> {
     crate::protocol::read_bounded_http_body(reader, content_length, MAX_ACTION_METADATA_BYTES)
 }
