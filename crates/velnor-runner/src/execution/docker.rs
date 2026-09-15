@@ -22,6 +22,16 @@ const JOB_CGROUP_DROPIN: &str = "/etc/systemd/system/velnor-jobs.slice.d/10-host
 /// failing user step, which cannot change a cgroup driver.
 static CGROUP_DRIVER: Fact<String> = Fact::new("docker-info-cgroup", FactLifetime::Daemon);
 
+/// Proof that the Docker VM preserves Velnor's per-container resource controls
+/// (`--cpus`, `--memory`, `--cgroup-parent`).
+///
+/// A daemon-generation fact: the projection is decided by the Engine and the
+/// VM kernel it runs on, both of which are part of the daemon key. It used to
+/// create, inspect and remove a disposable probe container at every preflight
+/// because the daemon generation could not be observed on macOS.
+static VM_RESOURCE_CONTROLS: Fact<()> =
+    Fact::new("docker-vm-resource-controls", FactLifetime::Daemon);
+
 /// The `CPUQuota=` the job slice's unit configuration declares.
 ///
 /// A host fact: it changes only when the drop-in on disk changes, which is the
@@ -282,8 +292,10 @@ pub(crate) fn verify_docker_job_cgroup_boundary_with_image(
     // A fact learned through a runner that does not spawn host processes is not
     // a fact about this host, so it is never cached as one.
     let host_runner = runner.is_host_process_runner();
+    // One generation read guards every daemon-lifetime fact below.
+    let generation = host_runner.then(facts::daemon).flatten();
     let driver = CGROUP_DRIVER.get_or_try_init(
-        host_runner.then(facts::daemon).flatten(),
+        generation.clone(),
         || -> Result<String, ExecutionError> {
             let probed = crate::docker::Docker::job(&mut *runner)
                 .daemon_cgroup()
@@ -320,10 +332,12 @@ pub(crate) fn verify_docker_job_cgroup_boundary_with_image(
 
     if mode == DockerIsolationMode::DockerVmCgroupV2 {
         if host_runner {
-            verify_docker_vm_resource_controls(
-                runner,
-                image.unwrap_or(MACOS_DOCKER_CAPABILITY_PROBE_IMAGE),
-            )?;
+            VM_RESOURCE_CONTROLS.get_or_try_init(generation, || {
+                verify_docker_vm_resource_controls(
+                    runner,
+                    image.unwrap_or(MACOS_DOCKER_CAPABILITY_PROBE_IMAGE),
+                )
+            })?;
         }
         return Ok(());
     }

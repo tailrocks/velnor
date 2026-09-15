@@ -18,10 +18,10 @@
 //!
 //! The rule that makes this safe: **a fact whose generation cannot be observed
 //! is not cached.** [`host`] and [`daemon`] return `None` when their key cannot
-//! be read — a missing drop-in, a daemon that is not the local systemd-managed
-//! `dockerd`, a host without `/proc` — and [`Fact::get_or_try_init`] then
-//! recomputes every time. Caching without an invalidation signal is how a fact
-//! becomes quietly wrong, so it is not offered.
+//! be read — a missing drop-in, an Engine that does not answer `/info`, the
+//! Engine API disabled — and [`Fact::get_or_try_init`] then recomputes every
+//! time. Caching without an invalidation signal is how a fact becomes quietly
+//! wrong, so it is not offered.
 
 use std::fmt;
 use std::path::Path;
@@ -93,57 +93,39 @@ pub fn host(witness: &Path) -> Option<FactKey> {
     })
 }
 
-/// Identity of the running `dockerd` generation.
+/// Identity of the running Engine generation.
 ///
-/// Built from two host observations and no Engine round trip, because the point
-/// of the key is to avoid asking the Engine:
+/// Built from the Engine's own account of itself plus one host observation,
+/// so a native Linux daemon, an OrbStack/Docker Desktop VM and a
+/// socket-forwarded engine all share one path:
 ///
-/// * the daemon's pid and its kernel start time, read from `/proc`, which
-///   together are unique per daemon process — a restart always changes one;
-/// * the API socket's device, inode and modification time, which changes when a
-///   daemon that is not socket-activated recreates it.
+/// * `/info` `ID`, `ServerVersion`, `KernelVersion`, `CgroupDriver` and
+///   `CgroupVersion` — everything a daemon-lifetime fact is a function of. A
+///   restart that changes the daemon's configuration or the kernel it runs on
+///   changes this part of the key; a restart that changes nothing observable
+///   leaves facts that are still true cached, which is correct;
+/// * the API socket's device, inode and modification time, which changes when
+///   a daemon that is not socket-activated recreates it.
 ///
-/// Returns `None` when the daemon is not a local process this host can see —
-/// no pidfile, no `/proc`, a remote or VM-backed Engine. A daemon whose restart
-/// cannot be observed has no invalidation signal, so its facts are not cached.
+/// Returns `None` when the generation cannot be observed — no resolvable
+/// endpoint, no socket, the Engine API disabled or not answering. A daemon
+/// whose generation cannot be observed has no invalidation signal, so its
+/// facts are not cached.
 #[must_use]
 pub fn daemon() -> Option<FactKey> {
     let socket = crate::docker::engine::resolve_docker_endpoint()
         .ok()?
         .socket;
-    daemon_from(Path::new(DOCKER_PIDFILE), &socket)
+    let socket_identity = socket_identity(&socket)?;
+    let identity = crate::docker::engine::daemon_identity_blocking(&socket)?;
+    Some(daemon_key(&identity.token(), &socket_identity))
 }
 
-const DOCKER_PIDFILE: &str = "/var/run/docker.pid";
-const DOCKER_PROCESS_NAME: &str = "dockerd";
-
-fn daemon_from(pidfile: &Path, socket: &Path) -> Option<FactKey> {
-    let pid = std::fs::read_to_string(pidfile)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()?;
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    if comm.trim() != DOCKER_PROCESS_NAME {
-        return None;
-    }
-    let start_time = process_start_time(pid)?;
-    let socket_identity = socket_identity(socket)?;
-    Some(FactKey {
+fn daemon_key(identity_token: &str, socket_identity: &str) -> FactKey {
+    FactKey {
         lifetime: FactLifetime::Daemon,
-        token: format!("{pid}.{start_time}.{socket_identity}"),
-    })
-}
-
-/// Field 22 of `/proc/<pid>/stat`: process start time in clock ticks since
-/// boot. Parsed after the last `)` because the second field is a comm that may
-/// itself contain spaces and parentheses.
-fn process_start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = stat.rsplit_once(')')?.1;
-    // Field 3 (state) is the first entry after the comm, so start time (field
-    // 22) is at offset 19 here.
-    after_comm.split_whitespace().nth(19)?.parse::<u64>().ok()
+        token: format!("{identity_token}.{socket_identity}"),
+    }
 }
 
 fn socket_identity(socket: &Path) -> Option<String> {
@@ -382,13 +364,20 @@ mod tests {
     }
 
     #[test]
-    fn daemon_generation_is_unobservable_without_a_local_dockerd() {
+    fn daemon_generation_is_unobservable_without_a_socket() {
         let dir = std::env::temp_dir().join(format!("velnor-daemon-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let pidfile = dir.join("docker.pid");
-        assert_eq!(daemon_from(&pidfile, &dir), None);
-        std::fs::write(&pidfile, "not-a-pid").unwrap();
-        assert_eq!(daemon_from(&pidfile, &dir), None);
+        assert_eq!(socket_identity(&dir.join("missing.sock")), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn daemon_generation_changes_with_engine_identity_or_socket() {
+        let a = daemon_key("id.29.4.0.kernel.cgroupfs.2", "1.2.3");
+        assert_eq!(a.lifetime, FactLifetime::Daemon);
+        assert_eq!(a, daemon_key("id.29.4.0.kernel.cgroupfs.2", "1.2.3"));
+        assert_ne!(a, daemon_key("id.29.5.0.kernel.cgroupfs.2", "1.2.3"));
+        assert_ne!(a, daemon_key("id.29.4.0.kernel.systemd.2", "1.2.3"));
+        assert_ne!(a, daemon_key("id.29.4.0.kernel.cgroupfs.2", "1.2.4"));
     }
 }

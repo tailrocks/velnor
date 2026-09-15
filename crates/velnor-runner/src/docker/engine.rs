@@ -866,6 +866,35 @@ where
     std::thread::scope(|scope| scope.spawn(|| runtime.block_on(future)).join().ok())
 }
 
+/// Read the daemon generation identity from the Engine at `socket`,
+/// synchronously, under the daemon-query API budget. `None` when the Engine
+/// API is disabled, the runtime cannot be built, or the call fails: the
+/// caller treats every `None` as "generation unobservable" and does not
+/// cache. Never falls back to the CLI — a generation key derived through a
+/// different transport than the facts it guards would be a second source
+/// of truth about the same daemon.
+pub(crate) fn daemon_identity_blocking(socket: &Path) -> Option<EngineDaemonIdentity> {
+    if !engine_api_enabled() {
+        return None;
+    }
+    let (_, class_deadline) =
+        crate::docker::deadline_for(&["info".to_owned()], crate::executor::DEFAULT_STEP_TIMEOUT);
+    let budget = api_budget(class_deadline);
+    let client = EngineClient::new(socket.to_path_buf());
+    match block_on_engine(async move { client.daemon_identity(budget).await })? {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            tracing::debug!(
+                target: "velnor.docker",
+                docker_op = DockerOp::DaemonQuery.label(),
+                error = %error,
+                "daemon generation unobservable through the Engine API"
+            );
+            None
+        }
+    }
+}
+
 /// Poll interval for the cancellation race: a cancelled job abandons the
 /// socket wait within this bound instead of riding the API budget.
 const CANCEL_POLL: Duration = Duration::from_millis(10);
@@ -1193,6 +1222,18 @@ impl EngineClient {
         let op = DockerOp::DaemonQuery;
         let value = self.get_json("/info", op, budget).await?;
         parse_info(&value).map_err(|fault| EngineError::fault(op, fault))
+    }
+
+    /// `GET /info`, read for the fields that identify the daemon generation
+    /// ([`super::facts::daemon`]). Separate from [`Self::daemon_info`] so the
+    /// cgroup query's schema stays exactly the two fields it needs.
+    pub(crate) async fn daemon_identity(
+        &self,
+        budget: Duration,
+    ) -> EngineResult<EngineDaemonIdentity> {
+        let op = DockerOp::DaemonQuery;
+        let value = self.get_json("/info", op, budget).await?;
+        parse_daemon_identity(&value).map_err(|fault| EngineError::fault(op, fault))
     }
 
     /// `GET /version`. Client-layer coverage for daemon-version reads; no
@@ -2087,6 +2128,35 @@ pub(crate) struct EngineInfo {
     pub cgroup_version: String,
 }
 
+/// The `/info` fields that together identify one daemon generation: the
+/// Engine's persistent `ID`, its version, the kernel it runs on, and its
+/// cgroup configuration. Any daemon-lifetime fact Velnor caches is a
+/// function of these (plus the socket identity the caller adds), so a
+/// generation change that could alter a fact always changes the key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EngineDaemonIdentity {
+    pub id: String,
+    pub server_version: String,
+    pub kernel_version: String,
+    pub cgroup_driver: String,
+    pub cgroup_version: String,
+}
+
+impl EngineDaemonIdentity {
+    /// Stable token for a [`super::facts::FactKey`].
+    #[must_use]
+    pub fn token(&self) -> String {
+        format!(
+            "{}.{}.{}.{}.{}",
+            self.id,
+            self.server_version,
+            self.kernel_version,
+            self.cgroup_driver,
+            self.cgroup_version
+        )
+    }
+}
+
 /// Daemon version identity.
 #[cfg_attr(
     not(test),
@@ -2209,8 +2279,17 @@ fn parse_image(value: &serde_json::Value) -> FaultResult<EngineImage> {
 }
 
 fn parse_info(value: &serde_json::Value) -> FaultResult<EngineInfo> {
+    Ok(EngineInfo {
+        cgroup_driver: require_str(value, "/CgroupDriver")?.to_string(),
+        cgroup_version: parse_cgroup_version(value)?,
+    })
+}
+
+/// `CgroupVersion` is a string in the documented schema and a number on some
+/// daemons; both read as the same value.
+fn parse_cgroup_version(value: &serde_json::Value) -> FaultResult<String> {
     let version = value.pointer("/CgroupVersion");
-    let cgroup_version = version
+    version
         .and_then(serde_json::Value::as_u64)
         .map(|version| version.to_string())
         .or_else(|| {
@@ -2218,10 +2297,16 @@ fn parse_info(value: &serde_json::Value) -> FaultResult<EngineInfo> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         })
-        .ok_or_else(|| schema_missing("/CgroupVersion"))?;
-    Ok(EngineInfo {
+        .ok_or_else(|| schema_missing("/CgroupVersion"))
+}
+
+fn parse_daemon_identity(value: &serde_json::Value) -> FaultResult<EngineDaemonIdentity> {
+    Ok(EngineDaemonIdentity {
+        id: require_str(value, "/ID")?.to_string(),
+        server_version: require_str(value, "/ServerVersion")?.to_string(),
+        kernel_version: require_str(value, "/KernelVersion")?.to_string(),
         cgroup_driver: require_str(value, "/CgroupDriver")?.to_string(),
-        cgroup_version,
+        cgroup_version: parse_cgroup_version(value)?,
     })
 }
 
@@ -2808,6 +2893,29 @@ mod tests {
                 cgroup_version: "2".into(),
             }
         );
+        // The generation identity reads the live OrbStack shape (string
+        // CgroupVersion) and the documented one; a missing field is skew,
+        // never a defaulted guess.
+        let identity: serde_json::Value = serde_json::from_str(
+            r#"{"ID":"bc9058a0-c807-412b-a088-6c1d96ddd462","ServerVersion":"29.4.0","KernelVersion":"7.0.14-orbstack","CgroupDriver":"cgroupfs","CgroupVersion":"2","OperatingSystem":"OrbStack"}"#,
+        )
+        .unwrap();
+        let parsed = parse_daemon_identity(&identity).unwrap();
+        assert_eq!(
+            parsed,
+            EngineDaemonIdentity {
+                id: "bc9058a0-c807-412b-a088-6c1d96ddd462".into(),
+                server_version: "29.4.0".into(),
+                kernel_version: "7.0.14-orbstack".into(),
+                cgroup_driver: "cgroupfs".into(),
+                cgroup_version: "2".into(),
+            }
+        );
+        assert_eq!(
+            parsed.token(),
+            "bc9058a0-c807-412b-a088-6c1d96ddd462.29.4.0.7.0.14-orbstack.cgroupfs.2"
+        );
+        assert!(parse_daemon_identity(&info).is_err(), "ID is required");
         let version: serde_json::Value =
             serde_json::from_str(r#"{"Version":"29.4.0","ApiVersion":"1.52"}"#).unwrap();
         assert_eq!(
