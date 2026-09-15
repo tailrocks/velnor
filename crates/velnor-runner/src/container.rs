@@ -53,7 +53,7 @@ const AUTHORITATIVE_RUNNER_ENV: [&str; 3] = [
 
 fn is_reserved_mbx_env(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    upper.starts_with("MBX_") && upper != "MBX_DISABLE"
+    (upper.starts_with("MBX_") && upper != "MBX_DISABLE") || upper == "CARGO_TARGET_DIR"
 }
 
 fn is_docker_control_env(name: &str) -> bool {
@@ -460,6 +460,7 @@ impl JobContainerSpec {
             command.envs([
                 ("MBX_CACHE_DIR", cache_dir.as_str()),
                 ("MBX_TARGET_ROOT", target_root.as_str()),
+                ("CARGO_TARGET_DIR", target_root.as_str()),
                 ("MBX_GC_AUTO", "true"),
                 ("MBX_GC_MAX_SIZE", "20GiB"),
                 ("MBX_TARGET_MAX_SIZE", "30GiB"),
@@ -864,6 +865,7 @@ impl JobContainerSpec {
         }
         command.env("MBX_CACHE_DIR", self.mbx_cache_container_dir());
         command.env("MBX_TARGET_ROOT", self.mbx_target_container_dir());
+        command.env("CARGO_TARGET_DIR", self.mbx_target_container_dir());
     }
 
     /// Truthful base env for every exec'd process: the job home is the
@@ -2290,6 +2292,7 @@ mod tests {
         assert!(args.contains(&format!("{}:/var/cache/mbx", mbx_store.display())));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
+        assert!(args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-1".into()));
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
         assert!(!args.contains(&"MBX_DISABLE=1".into()));
@@ -2938,6 +2941,7 @@ mod tests {
         assert!(args.contains(&format!("{}:/var/cache/mbx", store.display())));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
+        assert!(args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-1".into()));
     }
 
     #[test]
@@ -2975,6 +2979,41 @@ mod tests {
                 .unwrap()
                 .join("targets/slots/slot-4")
         );
+        let first_cargo = first
+            .script_exec_env(&[])
+            .into_iter()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .map(|(_, value)| value);
+        let other_cargo = other
+            .script_exec_env(&[])
+            .into_iter()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .map(|(_, value)| value);
+        assert_eq!(
+            first_cargo.as_deref(),
+            Some(first.mbx_target_container_dir().as_str())
+        );
+        assert_eq!(
+            other_cargo.as_deref(),
+            Some(other.mbx_target_container_dir().as_str())
+        );
+        assert_ne!(first_cargo, other_cargo);
+        let mut first_run = spec();
+        first_run.temp_host = container_test_temp("concurrent-slots-a")
+            .join("slots")
+            .join("slot-3")
+            .join("job-a")
+            .join("temp");
+        let mut other_run = spec();
+        other_run.temp_host = container_test_temp("concurrent-slots-b")
+            .join("slots")
+            .join("slot-4")
+            .join("job-c")
+            .join("temp");
+        let first_args = rendered(&first_run.start_args().unwrap());
+        let other_args = rendered(&other_run.start_args().unwrap());
+        assert!(first_args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-3".into()));
+        assert!(other_args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-4".into()));
     }
 
     #[test]
@@ -2996,6 +3035,25 @@ mod tests {
             first.mbx_target_container_dir(),
             "/var/cache/mbx/targets/slots/slot-3"
         );
+        assert_eq!(
+            first
+                .script_exec_env(&[])
+                .into_iter()
+                .find(|(name, _)| name == "CARGO_TARGET_DIR"),
+            second
+                .script_exec_env(&[])
+                .into_iter()
+                .find(|(name, _)| name == "CARGO_TARGET_DIR")
+        );
+        assert_eq!(
+            first
+                .script_exec_env(&[])
+                .into_iter()
+                .find(|(name, _)| name == "CARGO_TARGET_DIR")
+                .map(|(_, value)| value)
+                .as_deref(),
+            Some(first.mbx_target_container_dir().as_str())
+        );
     }
 
     #[test]
@@ -3015,6 +3073,16 @@ mod tests {
             "/var/cache/mbx/targets/slots/velnor-job-2"
         );
         assert_ne!(first.mbx_target_container_dir(), "/var/cache/mbx/targets");
+        let first_cargo = first
+            .script_exec_env(&[])
+            .into_iter()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .map(|(_, value)| value);
+        assert_eq!(
+            first_cargo.as_deref(),
+            Some(first.mbx_target_container_dir().as_str())
+        );
+        assert_ne!(first_cargo.as_deref(), Some("/var/cache/mbx/targets"));
     }
 
     #[test]
@@ -3023,6 +3091,7 @@ mod tests {
         let env = vec![
             ("MBX_TARGET_ROOT".into(), "/var/cache/mbx/targets".into()),
             ("MBX_CACHE_DIR".into(), "/var/cache/mbx".into()),
+            ("CARGO_TARGET_DIR".into(), "/var/cache/mbx/targets".into()),
             ("MBX_DISABLE".into(), "1".into()),
         ];
         let recorded = job.script_exec_env(&env);
@@ -3031,6 +3100,9 @@ mod tests {
         }));
         assert!(recorded.iter().any(|(name, value)| {
             name == "MBX_CACHE_DIR" && value == "/var/cache/mbx/slots/slot-1"
+        }));
+        assert!(recorded.iter().any(|(name, value)| {
+            name == "CARGO_TARGET_DIR" && value == "/var/cache/mbx/targets/slots/slot-1"
         }));
         assert!(
             recorded
@@ -3042,6 +3114,13 @@ mod tests {
             recorded
                 .iter()
                 .filter(|(name, _)| name == "MBX_TARGET_ROOT")
+                .count(),
+            1
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|(name, _)| name == "CARGO_TARGET_DIR")
                 .count(),
             1
         );
@@ -3081,6 +3160,11 @@ mod tests {
         let args = rendered(&job.start_args().unwrap());
         assert!(!args.iter().any(|arg| arg.starts_with("MBX_CACHE_DIR=")));
         assert!(!args.iter().any(|arg| arg.starts_with("MBX_TARGET_ROOT=")));
+        assert!(!args.iter().any(|arg| arg.starts_with("CARGO_TARGET_DIR=")));
+        assert!(!job
+            .script_exec_env(&[])
+            .iter()
+            .any(|(name, _)| name == "CARGO_TARGET_DIR"));
         assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
     }
 
@@ -3208,6 +3292,7 @@ mod tests {
         );
         let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
         let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
+        let cargo_target_env = format!("CARGO_TARGET_DIR={}", spec.mbx_target_container_dir());
 
         assert_eq!(
             rendered(&prepared),
@@ -3225,6 +3310,7 @@ mod tests {
                 "GITHUB_OUTPUT=/__t/out",
                 mbx_cache_env.as_str(),
                 mbx_target_env.as_str(),
+                cargo_target_env.as_str(),
                 "--",
                 "velnor-job-1",
                 "bash",
@@ -3256,6 +3342,7 @@ mod tests {
         );
         let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
         let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
+        let cargo_target_env = format!("CARGO_TARGET_DIR={}", spec.mbx_target_container_dir());
 
         assert_eq!(
             rendered(&prepared),
@@ -3273,6 +3360,7 @@ mod tests {
                 "INPUT_NAME=value",
                 mbx_cache_env.as_str(),
                 mbx_target_env.as_str(),
+                cargo_target_env.as_str(),
                 "--",
                 "velnor-job-1",
                 "node",
@@ -4567,7 +4655,7 @@ mod tests {
             .any(|entry| entry == "VELNOR_EXECUTION_BACKEND=velnor"));
         assert_eq!(
             engine.last().unwrap(),
-            &format!("MBX_TARGET_ROOT={}", job.mbx_target_container_dir())
+            &format!("CARGO_TARGET_DIR={}", job.mbx_target_container_dir())
         );
         assert!(engine.contains(&"MULTILINE=a\nb".to_string()));
         // The CLI leg can only carry that value via the client process env;

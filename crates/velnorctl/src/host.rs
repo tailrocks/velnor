@@ -167,8 +167,9 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
 /// Reconnect an explicitly restarted on-demand host to its durable state.
 /// `host start` is the operator's ownership boundary: after the PID guard is
 /// installed, a previous graceful drain marker may be cleared and a durable
-/// `draining` intent is changed to `ready` with OCC. Active jobs block the
-/// restart so a new controller cannot race a surviving worker.
+/// `draining` intent is changed to `ready` with OCC. Live workers still block
+/// the restart so a new controller cannot race a surviving process. Dead
+/// persisted jobs are left for controller orphan recovery.
 fn resume_host_state(
     config_dir: &Path,
     state_db: &Path,
@@ -198,15 +199,38 @@ fn resume_host_state(
             ),
         )
     })?;
-    if journal_state
+    let mut live_jobs = Vec::new();
+    let mut ambiguous_jobs = Vec::new();
+    for job in journal_state
         .jobs
         .iter()
-        .any(|job| job.phase.occupies_slot())
+        .filter(|job| job.phase.occupies_slot())
     {
+        match reconnect_ownership(config_dir, job) {
+            ReconnectOwnership::Live => live_jobs.push(job.job_id.0.clone()),
+            ReconnectOwnership::Ambiguous => ambiguous_jobs.push(job.job_id.0.clone()),
+            ReconnectOwnership::Dead => {}
+        }
+    }
+    if !live_jobs.is_empty() {
         return Err(CommandError::new(
             ExitClass::Conflict,
             "host.active_jobs",
-            "cannot reconnect while a previous host still owns an active job; wait for completion and retry",
+            format!(
+                "cannot reconnect while a previous host still owns an active job ({}); wait for completion and retry",
+                live_jobs.join(", ")
+            ),
+        ));
+    }
+    if !ambiguous_jobs.is_empty() {
+        return Err(CommandError::new(
+            ExitClass::Conflict,
+            "host.ownership_ambiguous",
+            format!(
+                "cannot reconnect safely while active job ownership is ambiguous ({}) \
+                 ; require a persisted worker marker with a dead pid before recovery",
+                ambiguous_jobs.join(", ")
+            ),
         ));
     }
 
@@ -304,6 +328,86 @@ fn resume_host_state(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnershipMarkerState {
+    Missing,
+    Live,
+    Dead,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconnectOwnership {
+    Live,
+    Dead,
+    Ambiguous,
+}
+
+fn ownership_marker_state(
+    state_dir: &Path,
+    isolation_id: &str,
+    generation: u64,
+) -> OwnershipMarkerState {
+    let path = velnor_runner::node::cleanup::owned_path(state_dir, isolation_id, generation);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return OwnershipMarkerState::Missing;
+        }
+        Err(_) => return OwnershipMarkerState::Ambiguous,
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return OwnershipMarkerState::Ambiguous;
+    }
+    let Some(pid) =
+        velnor_runner::node::cleanup::read_owned_pid(state_dir, isolation_id, generation)
+    else {
+        return OwnershipMarkerState::Ambiguous;
+    };
+    if pid == 0 {
+        return OwnershipMarkerState::Ambiguous;
+    }
+    if velnor_runner::node::prove::pid_is_alive(pid) {
+        OwnershipMarkerState::Live
+    } else {
+        OwnershipMarkerState::Dead
+    }
+}
+
+fn reconnect_ownership(
+    state_dir: &Path,
+    job: &velnor_control::journal::JobRecord,
+) -> ReconnectOwnership {
+    let worker = ownership_marker_state(state_dir, &job.job_id.0, job.generation.0);
+    let waiter_id = format!("wait-{}", job.slot_id.0);
+    let waiter = ownership_marker_state(state_dir, &waiter_id, job.generation.0);
+
+    if matches!(worker, OwnershipMarkerState::Live) || matches!(waiter, OwnershipMarkerState::Live)
+    {
+        return ReconnectOwnership::Live;
+    }
+
+    // Completing is a durable remote-acknowledgement phase. Its worker may
+    // already have removed its marker, so completion replay remains allowed
+    // when no active actor is proven. Assigned/Running, in contrast, require
+    // a persisted dead worker proof before controller orphan recovery may
+    // release the slot.
+    if job.phase == velnor_model::JobPhase2::Completing {
+        return ReconnectOwnership::Dead;
+    }
+
+    if matches!(worker, OwnershipMarkerState::Dead)
+        && matches!(
+            waiter,
+            OwnershipMarkerState::Missing | OwnershipMarkerState::Dead
+        )
+    {
+        ReconnectOwnership::Dead
+    } else {
+        ReconnectOwnership::Ambiguous
+    }
 }
 
 async fn status(globals: &GlobalArgs) -> Result<(), CommandError> {
@@ -1488,6 +1592,329 @@ mod tests {
         assert!(!journal.materialized_state().expect("state").drain_active);
         let state = lifecycle.desired_fresh("primary").expect("fresh lifecycle");
         assert_eq!(state.desired, "ready");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn host_resume_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "velnor-host-{label}-{}-{}",
+            std::process::id(),
+            velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ))
+    }
+
+    fn seed_draining_lifecycle(state_db: &Path, idempotency_key: &str) {
+        use velnor_control::ports::{MutationKind, MutationPort, MutationRequest};
+
+        let store = Arc::new(Store::open(state_db).expect("store"));
+        let store_instance = velnor_runner::scaffold::operational_instance_slug();
+        let lifecycle = LifecycleService::with_store_and_api_instance(
+            Arc::clone(&store),
+            &store_instance,
+            "primary",
+        )
+        .expect("lifecycle");
+        lifecycle
+            .mutate(MutationRequest {
+                kind: MutationKind::Drain,
+                target: "primary".to_owned(),
+                reason: "test drain".to_owned(),
+                idempotency_key: idempotency_key.to_owned(),
+                expected_version: None,
+                scale_to: None,
+            })
+            .expect("drain");
+    }
+
+    fn seed_job_phase(
+        journal: &mut Journal,
+        slot_id: &str,
+        job_id: &str,
+        phase: velnor_model::JobPhase2,
+    ) {
+        use velnor_control::journal::Event;
+        use velnor_model::{Generation, JobId, JobPhase2, SlotId};
+
+        let slot = SlotId(slot_id.to_owned());
+        let job = JobId(job_id.to_owned());
+        let generation = Generation::INITIAL;
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::JobAcquisitionIntended {
+                slot_id: slot.clone(),
+                job_id: job.clone(),
+                generation,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
+            },
+            Event::JobOwned {
+                job_id: job.clone(),
+                slot_id: slot,
+                attempt: 1,
+                generation,
+                worker: "worker-1".into(),
+                accepted_unix: 1,
+            },
+        ] {
+            assert!(!journal.apply(event).expect("seed").rejected);
+        }
+        match phase {
+            JobPhase2::Assigned => {}
+            JobPhase2::Running => {
+                assert!(!journal
+                    .apply(Event::JobStarted {
+                        job_id: job,
+                        generation,
+                    })
+                    .expect("start")
+                    .rejected);
+            }
+            JobPhase2::Completing => {
+                assert!(!journal
+                    .apply(Event::JobStarted {
+                        job_id: job.clone(),
+                        generation,
+                    })
+                    .expect("start")
+                    .rejected);
+                assert!(!journal
+                    .apply(Event::JobTerminalResult {
+                        job_id: job,
+                        generation,
+                        conclusion: "success".into(),
+                    })
+                    .expect("terminal")
+                    .rejected);
+            }
+        }
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    #[test]
+    fn reconnect_allows_completing_job_without_owned_pid() {
+        use velnor_model::JobPhase2;
+
+        let root = host_resume_root("completing");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        let state_db = root.join("state.db");
+        seed_draining_lifecycle(&state_db, "host-drain-completing");
+        let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+        seed_job_phase(&mut journal, "slot-6", "654cacd8", JobPhase2::Completing);
+        journal.set_drain(2).expect("drain marker");
+        drop(journal);
+
+        resume_host_state(&config_dir, &state_db, "primary").expect("resume");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reconnect_refuses_completing_job_with_live_waiter() {
+        use velnor_model::JobPhase2;
+
+        let root = host_resume_root("completing-waiter");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+        seed_job_phase(
+            &mut journal,
+            "slot-6",
+            "job-complete-wait",
+            JobPhase2::Completing,
+        );
+        drop(journal);
+        velnor_runner::node::cleanup::write_owned_pid(
+            &config_dir,
+            "wait-slot-6",
+            velnor_model::Generation::INITIAL.0,
+            std::process::id(),
+        )
+        .expect("waiter pid");
+
+        let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
+            .expect_err("live waiter");
+        assert_eq!(error.reason, "host.active_jobs");
+        assert!(
+            error.message.contains("job-complete-wait"),
+            "{}",
+            error.message
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reconnect_refuses_running_job_with_live_worker() {
+        use velnor_model::JobPhase2;
+
+        let root = host_resume_root("live-worker");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+        seed_job_phase(&mut journal, "slot-6", "job-live", JobPhase2::Running);
+        drop(journal);
+        velnor_runner::node::cleanup::write_owned_pid(
+            &config_dir,
+            "job-live",
+            velnor_model::Generation::INITIAL.0,
+            std::process::id(),
+        )
+        .expect("owned pid");
+
+        let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
+            .expect_err("live worker");
+        assert_eq!(error.reason, "host.active_jobs");
+        assert!(error.message.contains("job-live"), "{}", error.message);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reconnect_refuses_running_job_with_live_waiter() {
+        use velnor_model::JobPhase2;
+
+        let root = host_resume_root("live-waiter");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+        seed_job_phase(&mut journal, "slot-6", "job-wait", JobPhase2::Running);
+        drop(journal);
+        velnor_runner::node::cleanup::write_owned_pid(
+            &config_dir,
+            "job-wait",
+            velnor_model::Generation::INITIAL.0,
+            dead_pid(),
+        )
+        .expect("dead job pid");
+        velnor_runner::node::cleanup::write_owned_pid(
+            &config_dir,
+            "wait-slot-6",
+            velnor_model::Generation::INITIAL.0,
+            std::process::id(),
+        )
+        .expect("waiter pid");
+
+        let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
+            .expect_err("live waiter");
+        assert_eq!(error.reason, "host.active_jobs");
+        assert!(error.message.contains("job-wait"), "{}", error.message);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reconnect_allows_dead_assigned_and_running_workers_to_controller_recovery() {
+        use velnor_model::JobPhase2;
+
+        for (label, job_id, phase) in [
+            (
+                "assigned-dead-worker",
+                "job-assigned-dead",
+                JobPhase2::Assigned,
+            ),
+            (
+                "running-dead-worker",
+                "job-running-dead",
+                JobPhase2::Running,
+            ),
+        ] {
+            let root = host_resume_root(label);
+            let config_dir = root.join("config");
+            std::fs::create_dir_all(&config_dir).expect("config directory");
+            let state_db = root.join("state.db");
+            seed_draining_lifecycle(&state_db, label);
+            let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+            seed_job_phase(&mut journal, "slot-6", job_id, phase);
+            journal.set_drain(2).expect("drain marker");
+            velnor_runner::node::cleanup::write_owned_pid(
+                &config_dir,
+                job_id,
+                velnor_model::Generation::INITIAL.0,
+                dead_pid(),
+            )
+            .expect("dead worker pid");
+            drop(journal);
+
+            resume_host_state(&config_dir, &state_db, "primary")
+                .expect("dead worker must reach controller recovery");
+
+            assert!(
+                velnor_runner::node::cleanup::owned_path(
+                    &config_dir,
+                    job_id,
+                    velnor_model::Generation::INITIAL.0
+                )
+                .is_file(),
+                "host reconnect must preserve the dead ownership proof for controller recovery"
+            );
+            let journal = Journal::open(config_dir.join("journal.db")).expect("reopen journal");
+            assert!(
+                !journal.materialized_state().expect("state").drain_active,
+                "reconnect must clear the durable drain marker"
+            );
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn reconnect_refuses_running_job_without_owned_pid_as_ambiguous() {
+        use velnor_model::JobPhase2;
+
+        let root = host_resume_root("missing-pid");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+        seed_job_phase(&mut journal, "slot-6", "job-gap", JobPhase2::Running);
+        drop(journal);
+
+        let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
+            .expect_err("missing pid");
+        assert_eq!(error.reason, "host.ownership_ambiguous");
+        assert!(error.message.contains("job-gap"), "{}", error.message);
         std::fs::remove_dir_all(root).ok();
     }
 }
