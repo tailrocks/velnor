@@ -79,6 +79,8 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     }
     let work_dir = preflight_work_dir(args.work_dir)?;
     let docker_host_work_dir = args.docker_host_work_dir;
+    let docker_endpoint = crate::docker::engine::resolve_docker_endpoint()
+        .map_err(|error| anyhow::anyhow!("Docker endpoint resolution failed: {error:#}"))?;
     let temp_dir = work_dir.join("preflight").join("temp");
     let workspace_dir = work_dir.join("preflight").join("workspace");
     for path in [&temp_dir, &workspace_dir] {
@@ -86,8 +88,11 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     }
 
     run_required(runner, "git", &["--version".to_string()], "Host git")?;
-    crate::execution::verify_docker_job_cgroup_boundary(runner)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    crate::execution::verify_docker_job_cgroup_boundary_with_image(
+        runner,
+        Some(&args.docker_image),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if args.require_buildx {
         run_required(
             runner,
@@ -97,10 +102,18 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
         )?;
     }
     if args.require_docker_socket {
-        if !Path::new("/var/run/docker.sock").exists() {
-            bail!("{}", missing_docker_socket_error());
+        if !docker_endpoint.socket.exists() {
+            bail!(
+                "{}",
+                missing_docker_socket_error(&docker_endpoint.socket, &docker_endpoint.host)
+            );
         }
-        verify_container_docker_client(runner, &args.docker_image, args.require_buildx)?;
+        verify_container_docker_client(
+            runner,
+            &args.docker_image,
+            args.require_buildx,
+            &docker_endpoint.socket,
+        )?;
     }
 
     verify_job_image_tools(runner, &args.docker_image)?;
@@ -120,7 +133,10 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
         &args.docker_image,
     )?;
 
-    println!("Docker preflight passed.");
+    println!(
+        "Docker preflight passed ({}).",
+        crate::execution::DOCKER_RESOURCE_BOUNDARY_CHECK
+    );
     println!("Work dir: {}", work_dir.display());
     if let Some(path) = &docker_host_work_dir {
         println!("Docker host work dir: {}", path.display());
@@ -215,8 +231,9 @@ fn verify_container_docker_client(
     runner: &mut dyn CommandRunner,
     docker_image: &str,
     require_buildx: bool,
+    host_socket: &Path,
 ) -> Result<()> {
-    let args = container_docker_client_args(docker_image, require_buildx);
+    let args = container_docker_client_args(docker_image, require_buildx, host_socket);
     let result = runner.run("docker", &args)?;
     if result.code != 0 {
         bail!(
@@ -228,14 +245,18 @@ fn verify_container_docker_client(
     Ok(())
 }
 
-fn container_docker_client_args(docker_image: &str, require_buildx: bool) -> Vec<String> {
+fn container_docker_client_args(
+    docker_image: &str,
+    require_buildx: bool,
+    host_socket: &Path,
+) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
         "--name".to_string(),
         preflight_container_name("docker-client"),
         "-v".to_string(),
-        "/var/run/docker.sock:/var/run/docker.sock".to_string(),
+        format!("{}:/var/run/docker.sock", host_socket.display()),
     ];
     args.extend([
         docker_image.to_string(),
@@ -323,6 +344,18 @@ fn docker_mount_path(
     let Some(host_work_dir) = docker_host_work_dir else {
         return Ok(path.to_path_buf());
     };
+    if !work_dir.is_absolute() {
+        bail!(
+            "Docker path mapping requires an absolute runner work directory; got '{}'",
+            work_dir.display()
+        );
+    }
+    if !host_work_dir.is_absolute() {
+        bail!(
+            "Docker host work directory must be absolute for a VM-backed daemon; got '{}'",
+            host_work_dir.display()
+        );
+    }
     let relative = path.strip_prefix(work_dir).with_context(|| {
         format!(
             "path '{}' is not under work dir '{}'",
@@ -355,20 +388,25 @@ fn bind_mount_error_detail(path: &str, stderr: &str) -> String {
     format!("{remote_hint} stderr: {stderr}")
 }
 
-fn missing_docker_socket_error() -> String {
+fn missing_docker_socket_error(path: &Path, endpoint: &str) -> String {
     let docker_host = std::env::var("DOCKER_HOST").unwrap_or_default();
     if docker_host.starts_with("tcp://") || docker_host.starts_with("ssh://") {
         format!(
-            "required Docker socket /var/run/docker.sock does not exist on this host. Detected DOCKER_HOST={docker_host}; Phase 0 target Docker/Buildx jobs need a local Docker socket mounted into Velnor job containers. Use a Linux host with /var/run/docker.sock for target proof, or set VELNOR_REQUIRE_DOCKER_SOCKET=false only for fixture checks that do not need Docker from inside the job container."
+            "resolved Docker endpoint {endpoint} uses socket {}, which does not exist on this host. Detected DOCKER_HOST={docker_host}; target Docker/Buildx jobs need a local Docker socket mounted into Velnor job containers. Use a local Docker context or set VELNOR_REQUIRE_DOCKER_SOCKET=false only for fixture checks that do not need Docker from inside the job container.",
+            path.display(),
         )
     } else {
-        "required Docker socket /var/run/docker.sock does not exist on this host".to_string()
+        format!(
+            "resolved Docker endpoint {endpoint} uses socket {}, which does not exist on this host; select a local Docker context or configure a shared work directory",
+            path.display(),
+        )
     }
 }
 
 fn preflight_work_dir(work_dir: Option<PathBuf>) -> Result<PathBuf> {
     match work_dir {
-        Some(path) => Ok(path),
+        Some(path) if path.is_absolute() => Ok(path),
+        Some(path) => Ok(std::env::current_dir()?.join(path)),
         None => Ok(std::env::current_dir()?.join(".velnor-work")),
     }
 }
@@ -390,16 +428,43 @@ mod tests {
 
     static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
+    #[derive(Clone, Copy)]
+    enum FailureTarget {
+        ImageTools,
+        Script,
+        BindMount,
+    }
+
+    impl FailureTarget {
+        fn matches(self, args: &[String]) -> bool {
+            let Some(name) = args
+                .windows(2)
+                .find_map(|pair| (pair[0] == "--name").then_some(pair[1].as_str()))
+            else {
+                return false;
+            };
+            match self {
+                Self::ImageTools => name.starts_with("velnor-preflight-image-tools-"),
+                Self::Script => name.starts_with("velnor-preflight-script-"),
+                Self::BindMount => name.starts_with("velnor-preflight-bind-mount-"),
+            }
+        }
+    }
+
     #[derive(Default)]
     struct RecordingRunner {
         calls: Vec<(String, Vec<String>)>,
         codes: Vec<i32>,
+        fail_target: Option<FailureTarget>,
     }
 
     impl CommandRunner for RecordingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
-            let code = if self.codes.is_empty() {
+            let code = if self.fail_target.is_some_and(|target| target.matches(args)) {
+                self.fail_target = None;
+                1
+            } else if self.codes.is_empty() {
                 0
             } else {
                 self.codes.remove(0)
@@ -471,12 +536,13 @@ mod tests {
 
     #[test]
     fn docker_client_args_require_cli_inside_job_image() {
-        let args = container_docker_client_args("ubuntu:24.04", true);
+        let args =
+            container_docker_client_args("ubuntu:24.04", true, Path::new("/run/docker.sock"));
 
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--name" && pair[1].starts_with("velnor-preflight-docker-client-")
         }));
-        assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".to_string()));
+        assert!(args.contains(&"/run/docker.sock:/var/run/docker.sock".to_string()));
         assert!(!args.iter().any(|arg| arg.contains("/usr/local/bin/docker")));
         assert!(!args.iter().any(|arg| arg.contains("cli-plugins")));
         assert!(args.contains(&"docker version && docker buildx version".to_string()));
@@ -513,14 +579,23 @@ mod tests {
                 ]
             )
         );
-        assert_eq!(
-            runner.calls[5],
-            (
-                "docker".to_string(),
-                vec!["buildx".to_string(), "version".to_string()]
-            )
-        );
-        let image_tools_call = &runner.calls[6];
+        let buildx_call = runner
+            .calls
+            .iter()
+            .find(|(program, args)| {
+                program == "docker" && args == &["buildx".to_string(), "version".to_string()]
+            })
+            .expect("buildx preflight call");
+        assert_eq!(buildx_call.0, "docker");
+        let image_tools_call = runner
+            .calls
+            .iter()
+            .find(|(_, args)| {
+                args.windows(2).any(|pair| {
+                    pair[0] == "--name" && pair[1].starts_with("velnor-preflight-image-tools-")
+                })
+            })
+            .expect("image tools preflight call");
         assert_eq!(image_tools_call.0, "docker");
         assert_eq!(image_tools_call.1[0], "run");
         assert!(image_tools_call.1.windows(2).any(|pair| {
@@ -549,7 +624,11 @@ mod tests {
             .1
             .iter()
             .any(|value| value.contains("sha256sum --check --strict --status")));
-        let script_call = &runner.calls[7];
+        let script_call = runner
+            .calls
+            .iter()
+            .find(|(_, args)| args.contains(&"/__t/velnor-preflight.sh".to_string()))
+            .expect("script preflight call");
         assert_eq!(script_call.0, "docker");
         assert!(script_call.1.windows(2).any(|pair| {
             pair[0] == "--name" && pair[1].starts_with("velnor-preflight-script-")
@@ -561,7 +640,15 @@ mod tests {
             "{}:/__w",
             temp.join("preflight").join("workspace").display()
         )));
-        let bind_mount_call = &runner.calls[8];
+        let bind_mount_call = runner
+            .calls
+            .iter()
+            .find(|(_, args)| {
+                args.windows(2).any(|pair| {
+                    pair[0] == "--name" && pair[1].starts_with("velnor-preflight-bind-mount-")
+                })
+            })
+            .expect("bind mount preflight call");
         assert_eq!(bind_mount_call.0, "docker");
         assert_eq!(bind_mount_call.1[0], "run");
         assert!(bind_mount_call.1.windows(2).any(|pair| {
@@ -611,7 +698,8 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 0, 0, 0, 0, 0, 0, 1],
+            codes: Vec::new(),
+            fail_target: Some(FailureTarget::BindMount),
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();
@@ -639,7 +727,8 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 0, 0, 0, 0, 0, 1],
+            codes: Vec::new(),
+            fail_target: Some(FailureTarget::Script),
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();
@@ -669,7 +758,8 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 0, 0, 0, 0, 1],
+            codes: Vec::new(),
+            fail_target: Some(FailureTarget::ImageTools),
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();
@@ -754,7 +844,10 @@ mod tests {
         // of the synchronous probe and restores it before returning.
         unsafe { std::env::set_var("DOCKER_HOST", "tcp://docker.example:2376") };
 
-        let error = missing_docker_socket_error();
+        let error = missing_docker_socket_error(
+            Path::new("/run/user/501/docker.sock"),
+            "unix:///run/user/501/docker.sock",
+        );
 
         assert!(error.contains("Detected DOCKER_HOST=tcp://docker.example:2376"));
         assert!(error.contains("target Docker/Buildx jobs need a local Docker socket"));

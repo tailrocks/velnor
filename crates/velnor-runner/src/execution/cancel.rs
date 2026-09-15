@@ -423,9 +423,9 @@ fn signal_process_group(pgid: u32, signal: TerminationSignal) -> Result<(), Stri
 /// unbounded call against a wedged daemon voids cancellation while GitHub has
 /// already been told the job is cancelled. Every call here is classified and
 /// bounded by [`crate::docker::deadline_for`].
-fn docker_bounded(args: &[String]) -> Result<String, String> {
+fn docker_bounded(args: &[String]) -> anyhow::Result<String> {
     let (_, deadline) = crate::docker::deadline_for(args, CONTAINER_FALLBACK_DEADLINE);
-    crate::docker::client::host_call_bounded(args, deadline).map_err(|error| format!("{error:#}"))
+    crate::docker::client::host_call_bounded(args, deadline)
 }
 
 /// Only reachable if a future `docker` subcommand classifies as `Payload`,
@@ -454,13 +454,13 @@ fn signal_container(name: &str, signal: TerminationSignal) -> Result<(), String>
     ];
     match docker_bounded(&args) {
         Ok(_) => Ok(()),
-        Err(detail)
-            if crate::docker::client::daemon_reports_missing(&detail)
-                || detail.contains("is not running") =>
+        Err(error)
+            if crate::docker::client::is_not_found(&error)
+                || crate::docker::client::is_not_running(&error) =>
         {
             Ok(())
         }
-        Err(detail) => Err(detail),
+        Err(error) => Err(format!("{error:#}")),
     }
 }
 

@@ -133,9 +133,9 @@ impl HostBudget {
             });
         }
 
-        if let Some(total) = read_mem_total_bytes(root) {
+        if let Some((total, source)) = read_host_memory_bytes(root) {
             constraints.push(Constraint {
-                source: "/proc/meminfo MemTotal".to_owned(),
+                source: source.to_owned(),
                 cpu_milli: None,
                 memory_bytes: Some(total),
             });
@@ -169,8 +169,7 @@ impl HostBudget {
             .map_or_else(
                 || {
                     Observation::Unobservable(
-                        "no memory capacity source could be read (/proc/meminfo, cgroup memory.max)"
-                            .to_owned(),
+                        "no memory capacity source could be read (/proc/meminfo, sysctl hw.memsize, cgroup memory.max)".to_owned(),
                     )
                 },
                 Observation::Observed,
@@ -769,11 +768,56 @@ fn parse_cpu_list(value: &str) -> Option<u32> {
     (count > 0).then_some(count)
 }
 
+fn read_host_memory_bytes(root: &Path) -> Option<(u64, &'static str)> {
+    if let Some(total) = read_mem_total_bytes(root) {
+        return Some((total, "/proc/meminfo MemTotal"));
+    }
+    if let Some(total) = read_sysctl_memsize_file(root) {
+        return Some((total, "sysctl hw.memsize"));
+    }
+    #[cfg(target_os = "macos")]
+    if root == Path::new("/")
+        && let Some(total) = read_macos_memsize()
+    {
+        return Some((total, "sysctl hw.memsize"));
+    }
+    None
+}
+
 fn read_mem_total_bytes(root: &Path) -> Option<u64> {
     let content = std::fs::read_to_string(root.join("proc/meminfo")).ok()?;
     let line = content.lines().find(|line| line.starts_with("MemTotal:"))?;
     let kib = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
     kib.checked_mul(1024)
+}
+
+/// Synthetic-root equivalent of `sysctl -n hw.memsize`. Keeping the probe as
+/// a file makes the platform branch testable without replacing the process's
+/// environment or executing a host command from budget derivation.
+fn read_sysctl_memsize_file(root: &Path) -> Option<u64> {
+    read_trimmed(&root.join("sysctl/hw.memsize"))?
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_memsize() -> Option<u64> {
+    let mut value = 0_u64;
+    let mut length = std::mem::size_of::<u64>();
+    let name = b"hw.memsize\0";
+    // SAFETY: `name` is a nul-terminated sysctl name, `value` and `length`
+    // are valid writable buffers of the advertised size, and no new value is
+    // supplied.
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr().cast(),
+            (&mut value as *mut u64).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && length == std::mem::size_of::<u64>() && value > 0).then_some(value)
 }
 
 #[cfg(test)]
@@ -914,6 +958,21 @@ mod tests {
             budget.memory_bytes,
             Observation::Observed(4 * 1024 * 1024 * 1024)
         );
+    }
+
+    #[test]
+    fn macos_sysctl_memory_source_fills_the_host_budget_without_proc() {
+        let root = SyntheticRoot::new("macos_sysctl_memory_source");
+        write(root.path(), "sysctl/hw.memsize", "17179869184\n");
+        let budget = HostBudget::observe(root.path(), Some(8));
+        assert_eq!(
+            budget.memory_bytes,
+            Observation::Observed(16 * 1024 * 1024 * 1024)
+        );
+        assert!(budget
+            .constraints
+            .iter()
+            .any(|constraint| constraint.source == "sysctl hw.memsize"));
     }
 
     #[test]

@@ -108,10 +108,10 @@ pub fn host(witness: &Path) -> Option<FactKey> {
 /// cannot be observed has no invalidation signal, so its facts are not cached.
 #[must_use]
 pub fn daemon() -> Option<FactKey> {
-    daemon_from(
-        Path::new(DOCKER_PIDFILE),
-        Path::new(crate::docker_lease::HOST_DOCKER_SOCKET),
-    )
+    let socket = crate::docker::engine::resolve_docker_endpoint()
+        .ok()?
+        .socket;
+    daemon_from(Path::new(DOCKER_PIDFILE), &socket)
 }
 
 const DOCKER_PIDFILE: &str = "/var/run/docker.pid";

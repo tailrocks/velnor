@@ -6,12 +6,63 @@
 
 use crate::ProjectConfig;
 
+/// Optional org-group isolation. Omitting it is the labels-only contract:
+/// repository-scoped hosts can claim the same jobs as group members.
+pub(crate) const APPROVED_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
+pub(crate) const APPROVED_VELNOR_RUNNER_LABELS: &[&str] = &["self-hosted", "velnor-target-mvp"];
+
+pub(crate) fn approved_velnor_runner_group() -> &'static str {
+    APPROVED_VELNOR_RUNNER_GROUP
+}
+
+pub(crate) fn approved_velnor_runner_labels() -> &'static [&'static str] {
+    APPROVED_VELNOR_RUNNER_LABELS
+}
+
+pub(crate) fn approved_velnor_runner_contract_matches(
+    labels: &[&str],
+    group: Option<&str>,
+) -> bool {
+    if labels != APPROVED_VELNOR_RUNNER_LABELS {
+        return false;
+    }
+    match group {
+        None => true,
+        Some(name) => name == APPROVED_VELNOR_RUNNER_GROUP,
+    }
+}
+
 /// The runner selector the generator's earliest generated surfaces embedded
 /// before the group and the labels moved into each repository's generation
 /// config. Static-template adoption replaces it with the declaring
 /// repository's own selector.
 pub(crate) const LEGACY_VELNOR_RUNNER_SELECTOR: &str =
     "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
+
+/// The owners that mirror the `velnor-actions` fleet. A reusable workflow
+/// from a fleet mirror, pinned by full commit SHA, is content-addressed
+/// exactly like a SHA-pinned external action; anything else reusable stays
+/// rejected. The mirrors are deployment facts of the adopting estate, so
+/// they live at this admitted boundary instead of the generic engine.
+pub(crate) const FLEET_VELNOR_ACTION_OWNERS: &[&str] =
+    &["jackin-project", "tailrocks", "ChainArgos"];
+
+/// Adopted lane-selection `runs-on` shapes, whitespace-normalized for
+/// comparison. Every shape resolves to either the hosted `ubuntu-26.04`
+/// label or the adopting estate's declared self-hosted labels; the lane
+/// shapes additionally map every `pull_request` evaluation to the hosted
+/// label, so untrusted pull requests never resolve to the persistent pool.
+/// Selectors reference only the event name and the manual `lanes` input,
+/// and matrix shapes reference only the job matrix the repository's own
+/// producer jobs compute from the same trusted inputs. Anything else
+/// dynamic stays rejected.
+pub(crate) const APPROVED_DYNAMIC_RUNNERS: &[&str] = &[
+    "((github.event_name=='workflow_dispatch'&&inputs.lanes=='github')||github.event_name=='pull_request'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
+    "((github.event_name=='workflow_dispatch'&&inputs.lanes!='velnor')||github.event_name=='pull_request'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
+    "((github.event_name=='workflow_dispatch'&&inputs.lanes=='github')||github.event_name=='pull_request'||github.event_name=='merge_group'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
+    "matrix.config.runner",
+    "fromJSON(matrix.config.runner)",
+];
 
 pub(crate) fn render_apt_package_updater_template(
     template: &str,
@@ -337,4 +388,32 @@ fn apt_velnor_trusted_gate(default_branch: &str) -> String {
     format!(
         "github.ref == 'refs/heads/{default_branch}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        approved_velnor_runner_contract_matches, APPROVED_VELNOR_RUNNER_GROUP,
+        APPROVED_VELNOR_RUNNER_LABELS,
+    };
+
+    #[test]
+    fn approved_contract_accepts_labels_only_and_exact_group() {
+        assert!(approved_velnor_runner_contract_matches(
+            APPROVED_VELNOR_RUNNER_LABELS,
+            None
+        ));
+        assert!(approved_velnor_runner_contract_matches(
+            APPROVED_VELNOR_RUNNER_LABELS,
+            Some(APPROVED_VELNOR_RUNNER_GROUP)
+        ));
+        assert!(!approved_velnor_runner_contract_matches(
+            APPROVED_VELNOR_RUNNER_LABELS,
+            Some("other-group")
+        ));
+        assert!(!approved_velnor_runner_contract_matches(
+            &["self-hosted", "other-label"],
+            None
+        ));
+    }
 }

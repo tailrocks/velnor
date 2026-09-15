@@ -117,6 +117,8 @@ pub struct DaemonArgs {
 /// cleanup on normal exit, cancellation, and partial startup failure.
 pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     enforce_admission()?;
+    crate::ensure_native_github_http_transport();
+    velnor_client::ensure_socket_root()?;
     crate::http::validate_socket_groups()?;
     let instance = args.name.as_deref().unwrap_or("default");
     // `--name` is the GitHub runner/socket identity. Durable runner rows use
@@ -137,7 +139,8 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let _instance_lock = InstanceLock::acquire(&control_path)?;
     crate::http::remove_stale_socket(&control_path)?;
     crate::http::remove_stale_socket(&admin_path)?;
-    let state_path = resolve_state_db_path(args.state_db.as_deref());
+    let state_path = resolve_state_db_path(args.state_db.as_deref(), args.config_dir.as_deref());
+    ensure_state_db_parent(&state_path)?;
     // Carry the resolved path in the typed daemon context. This keeps daemon
     // initialization deterministic without mutating process-global state.
     let mut legacy_args: rt::DaemonArgs = args.clone().into();
@@ -145,9 +148,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let command = rt::Command::Daemon(Box::new(legacy_args));
     init_telemetry(telemetry_dir(&command).as_deref());
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
-    let services = velnor_control::application::ApplicationServices::with_store(
-        Arc::clone(&store),
+    let services = velnor_control::application::ApplicationServices::with_store_and_api_instance(
+        &store,
         &operational_instance,
+        instance,
     )?;
     let api_state = crate::http::ApiState::from_services_for_instance(&services, instance);
     let control_listener = OwnedUnixListener::new(
@@ -197,10 +201,29 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     result
 }
 
-fn resolve_state_db_path(explicit: Option<&Path>) -> PathBuf {
-    explicit
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH))
+fn resolve_state_db_path(explicit: Option<&Path>, config_dir: Option<&Path>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path.to_path_buf();
+    }
+    if let Some(env) = std::env::var_os("VELNOR_STATE_DB").filter(|v| !v.is_empty()) {
+        return PathBuf::from(env);
+    }
+    if let Some(dir) = config_dir {
+        return dir.join("state.db");
+    }
+    if !velnor_client::is_package_socket_mode()
+        && let Ok(dir) = velnor_runner::config_dir(None)
+    {
+        return dir.join("state.db");
+    }
+    PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH)
+}
+
+fn ensure_state_db_parent(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 /// Owns a bound Unix listener and the pathname that must disappear with it.
@@ -265,7 +288,10 @@ impl InstanceLock {
 impl OwnedUnixListener {
     fn new(listener: tokio::net::UnixListener, path: PathBuf) -> std::io::Result<Self> {
         Ok(Self {
-            identity: SocketIdentity::from_listener(&listener)?,
+            // Path metadata, not fstat(fd): Darwin reports st_dev=-1 and a
+            // different inode on the socket fd, so fd identity never matches
+            // the pathname used for cleanup.
+            identity: SocketIdentity::from_path(&path)?,
             listener: Some(listener),
             path,
         })
@@ -294,24 +320,16 @@ struct SocketIdentity {
 }
 
 impl SocketIdentity {
-    fn from_listener(listener: &tokio::net::UnixListener) -> std::io::Result<Self> {
-        use std::os::fd::AsRawFd;
+    fn from_path(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: `stat` is writable storage and the descriptor is borrowed
-        // from the live listener.
-        if unsafe { libc::fstat(listener.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error());
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(std::io::Error::other("bound path is not a Unix socket"));
         }
-        // SAFETY: fstat initialized the structure on success.
-        let stat = unsafe { stat.assume_init() };
-        // `st_dev` is `i32` on macOS and `u64` on Linux: the widening cast
-        // is load-bearing off Linux, so the same-type cast lint does not
-        // apply cross-platform.
-        #[allow(clippy::unnecessary_cast)]
         Ok(Self {
-            device: stat.st_dev as u64,
-            inode: stat.st_ino,
+            device: metadata.dev(),
+            inode: metadata.ino(),
         })
     }
 }
@@ -568,6 +586,7 @@ impl From<ConfigureArgs> for rt::ConfigureArgs {
             pool_id_pre_resolved: false,
             dry_run: args.dry_run,
             config_dir: args.config_dir,
+            trust_scope: None,
         }
     }
 }
@@ -729,7 +748,7 @@ impl From<RemoveArgs> for rt::RemoveArgs {
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct StatusArgs {
     /// Store configuration under this directory.
     #[arg(long)]
@@ -849,7 +868,7 @@ mod tests {
     #[test]
     fn explicit_state_db_path_is_carried_without_environment_mutation() {
         let explicit = Path::new("/tmp/velnor-test/state.db");
-        assert_eq!(resolve_state_db_path(Some(explicit)), explicit);
+        assert_eq!(resolve_state_db_path(Some(explicit), None), explicit);
     }
 
     #[test]

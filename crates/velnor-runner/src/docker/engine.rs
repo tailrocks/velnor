@@ -69,15 +69,84 @@
 //! category.
 
 use super::deadline::DockerOp;
-use std::path::PathBuf;
+use anyhow::{bail, Context, Result};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
+use std::{env, fs};
 
-/// Daemon all transports agree on: both CLI seams force
-/// `DOCKER_HOST=unix:///var/run/docker.sock` (`executor.rs`
-/// `configure_host_docker_command`), so this socket is the same daemon the
-/// CLI fallback talks to on both the job and the host path.
-pub(crate) fn socket_path() -> PathBuf {
+/// How the host Docker endpoint was selected. This is diagnostic data, not a
+/// trust decision: every accepted endpoint is still required to be a local
+/// Unix socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DockerEndpointSource {
+    Explicit,
+    DockerHost,
+    Context,
+    Default,
+}
+
+impl DockerEndpointSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit Velnor configuration",
+            Self::DockerHost => "DOCKER_HOST",
+            Self::Context => "Docker context",
+            Self::Default => "portable local default",
+        }
+    }
+}
+
+/// One resolved local Docker daemon. The CLI and Engine API both consume this
+/// value so they cannot silently select different daemons on macOS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockerEndpoint {
+    pub(crate) host: String,
+    pub(crate) socket: PathBuf,
+    pub(crate) source: DockerEndpointSource,
+}
+
+impl DockerEndpoint {
+    fn from_host(host: &str, source: DockerEndpointSource) -> Result<Self> {
+        let host = host.trim();
+        let socket = if let Some(path) = host.strip_prefix("unix://") {
+            PathBuf::from(path)
+        } else if host.starts_with('/') {
+            PathBuf::from(host)
+        } else {
+            bail!(
+                "refusing remote Docker endpoint {host:?} from {}; TCP, SSH, and named-pipe endpoints are not supported by Velnor's host isolation",
+                source.label()
+            );
+        };
+        if !socket.is_absolute() {
+            bail!(
+                "refusing unresolved Docker endpoint {host:?} from {}; it must name an absolute Unix socket path",
+                source.label()
+            );
+        }
+        if socket.as_os_str().is_empty() || socket.to_string_lossy().contains('\0') {
+            bail!(
+                "Docker endpoint from {} has an invalid socket path",
+                source.label()
+            );
+        }
+        Ok(Self {
+            host: format!("unix://{}", socket.display()),
+            socket,
+            source,
+        })
+    }
+}
+
+/// Resolve the endpoint used by every host-side Docker call.
+///
+/// Precedence adds one explicit Velnor setting to Docker's model:
+/// `VELNOR_DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_HOST`, the selected context
+/// in `config.json`, then portable local defaults. A named context is read
+/// from Docker metadata rather than executing `docker context`, avoiding
+/// recursion through this resolver.
+pub(crate) fn resolve_docker_endpoint() -> Result<DockerEndpoint> {
     #[cfg(test)]
     #[allow(
         clippy::unwrap_used,
@@ -89,9 +158,355 @@ pub(crate) fn socket_path() -> PathBuf {
         reason = "tests may panic"
     )]
     if let Some(override_path) = test_socket_override() {
-        return override_path;
+        return DockerEndpoint::from_host(
+            &format!("unix://{}", override_path.display()),
+            DockerEndpointSource::Explicit,
+        );
     }
-    PathBuf::from(crate::docker_lease::HOST_DOCKER_SOCKET)
+
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let config_dir = env::var_os("DOCKER_CONFIG")
+        .map(PathBuf::from)
+        .or_else(|| home.as_deref().map(|path| path.join(".docker")));
+    let explicit_host = nonempty_env("VELNOR_DOCKER_HOST");
+    let docker_host = nonempty_env("DOCKER_HOST");
+    let context = nonempty_env("VELNOR_DOCKER_CONTEXT").or_else(|| nonempty_env("DOCKER_CONTEXT"));
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    resolve_docker_endpoint_from(
+        explicit_host.as_deref(),
+        docker_host.as_deref(),
+        context.as_deref(),
+        config_dir.as_deref(),
+        home.as_deref(),
+        runtime_dir.as_deref(),
+    )
+}
+
+/// Resolver seam used by tests and command configuration. Values mirror the
+/// process environment without reading it again.
+pub(crate) fn resolve_docker_endpoint_from(
+    explicit_host: Option<&str>,
+    docker_host: Option<&str>,
+    context: Option<&str>,
+    config_dir: Option<&Path>,
+    home: Option<&Path>,
+    runtime_dir: Option<&Path>,
+) -> Result<DockerEndpoint> {
+    if let Some(host) = nonempty(explicit_host) {
+        return DockerEndpoint::from_host(host, DockerEndpointSource::Explicit);
+    }
+
+    if let Some(context) = nonempty(context) {
+        return resolve_context_endpoint(config_dir, home, runtime_dir, context);
+    }
+
+    if let Some(host) = nonempty(docker_host) {
+        return DockerEndpoint::from_host(host, DockerEndpointSource::DockerHost);
+    }
+
+    if let Some(context) = configured_context(config_dir)? {
+        return resolve_context_endpoint(config_dir, home, runtime_dir, &context);
+    }
+
+    Ok(default_endpoint(home, runtime_dir))
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .and_then(|value| nonempty(Some(&value)).map(str::to_owned))
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn configured_context(config_dir: Option<&Path>) -> Result<Option<String>> {
+    let Some(config_dir) = config_dir else {
+        return Ok(None);
+    };
+    let path = config_dir.join("config.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes =
+        fs::read(&path).with_context(|| format!("read Docker config {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse Docker config {}", path.display()))?;
+    Ok(value
+        .get("currentContext")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|context| nonempty(Some(context)).map(str::to_owned)))
+}
+
+fn resolve_context_endpoint(
+    config_dir: Option<&Path>,
+    home: Option<&Path>,
+    runtime_dir: Option<&Path>,
+    context: &str,
+) -> Result<DockerEndpoint> {
+    let context = context.trim();
+    if context.is_empty() {
+        bail!("Docker context is empty; refusing an unresolved endpoint");
+    }
+    if context == "default" {
+        let mut endpoint = default_endpoint(home, runtime_dir);
+        endpoint.source = DockerEndpointSource::Context;
+        return Ok(endpoint);
+    }
+    let Some(config_dir) = config_dir else {
+        bail!(
+            "Docker context {context:?} has no readable Docker config directory; set DOCKER_CONFIG or choose a local context"
+        );
+    };
+    let metadata_root = config_dir.join("contexts/meta");
+    if !metadata_root.is_dir() {
+        bail!(
+            "Docker context {context:?} has no metadata under {}; refusing an unresolved endpoint",
+            metadata_root.display()
+        );
+    }
+    let direct = metadata_root.join(context).join("meta.json");
+    if direct.is_file() {
+        return context_endpoint_from_metadata(&direct, context);
+    }
+    let entries = fs::read_dir(&metadata_root)
+        .with_context(|| format!("read Docker context metadata {}", metadata_root.display()))?;
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("read Docker context metadata {}", metadata_root.display()))?;
+        let metadata = entry.path().join("meta.json");
+        if !metadata.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&metadata)
+            .with_context(|| format!("read Docker context metadata {}", metadata.display()))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse Docker context metadata {}", metadata.display()))?;
+        if json_string(&value, "Name") == Some(context) {
+            return context_endpoint_from_value(&value, context, &metadata);
+        }
+    }
+    bail!(
+        "Docker context {context:?} was not found in {}; refusing an unresolved endpoint",
+        metadata_root.display()
+    )
+}
+
+fn context_endpoint_from_metadata(path: &Path, context: &str) -> Result<DockerEndpoint> {
+    let bytes =
+        fs::read(path).with_context(|| format!("read Docker context {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse Docker context {}", path.display()))?;
+    context_endpoint_from_value(&value, context, path)
+}
+
+fn context_endpoint_from_value(
+    value: &serde_json::Value,
+    context: &str,
+    path: &Path,
+) -> Result<DockerEndpoint> {
+    let host = value
+        .get("Endpoints")
+        .and_then(|endpoints| endpoints.get("docker"))
+        .and_then(|docker| docker.get("Host"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Docker context {context:?} at {} has no docker Host endpoint",
+                path.display()
+            )
+        })?;
+    DockerEndpoint::from_host(host, DockerEndpointSource::Context)
+}
+
+fn json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .as_object()?
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .and_then(|(_, value)| value.as_str())
+}
+
+fn default_endpoint(home: Option<&Path>, _runtime_dir: Option<&Path>) -> DockerEndpoint {
+    let mut candidates = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = home {
+            candidates.push(home.join(".orbstack/run/docker.sock"));
+            candidates.push(home.join(".docker/run/docker.sock"));
+        }
+        candidates.push(PathBuf::from("/var/run/docker.sock"));
+        candidates.push(PathBuf::from("/run/docker.sock"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        candidates.push(PathBuf::from("/var/run/docker.sock"));
+        candidates.push(PathBuf::from("/run/docker.sock"));
+        if let Some(runtime_dir) = _runtime_dir {
+            candidates.push(runtime_dir.join("docker.sock"));
+        }
+        if let Some(home) = home {
+            candidates.push(home.join(".docker/run/docker.sock"));
+        }
+    }
+    let socket = candidates
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .or_else(|| candidates.first().cloned())
+        .unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"));
+    DockerEndpoint {
+        host: format!("unix://{}", socket.display()),
+        socket,
+        source: DockerEndpointSource::Default,
+    }
+}
+
+#[derive(Default)]
+struct DockerGlobalOptions {
+    host: Option<String>,
+    context: Option<String>,
+    config: Option<PathBuf>,
+}
+
+fn parse_global_options(args: &[String]) -> Result<DockerGlobalOptions> {
+    let mut options = DockerGlobalOptions::default();
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        if argument == "--" || !argument.starts_with('-') {
+            break;
+        }
+        if argument == "--host" || argument == "-H" {
+            options.host = Some(
+                args.get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("docker {argument} is missing its endpoint"))?
+                    .clone(),
+            );
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument
+            .strip_prefix("--host=")
+            .or_else(|| argument.strip_prefix("-H="))
+            .or_else(|| {
+                argument
+                    .strip_prefix("-H")
+                    .filter(|value| !value.is_empty())
+            })
+        {
+            options.host = Some(value.to_owned());
+            index += 1;
+            continue;
+        }
+        if argument == "--context" || argument == "-c" {
+            options.context = Some(
+                args.get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("docker {argument} is missing its context"))?
+                    .clone(),
+            );
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument
+            .strip_prefix("--context=")
+            .or_else(|| argument.strip_prefix("-c="))
+            .or_else(|| {
+                argument
+                    .strip_prefix("-c")
+                    .filter(|value| !value.is_empty())
+            })
+        {
+            options.context = Some(value.to_owned());
+            index += 1;
+            continue;
+        }
+        if argument == "--config" {
+            options.config =
+                Some(PathBuf::from(args.get(index + 1).ok_or_else(|| {
+                    anyhow::anyhow!("docker --config is missing its value")
+                })?));
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--config=") {
+            options.config = Some(PathBuf::from(value));
+            index += 1;
+            continue;
+        }
+        let value_option = matches!(
+            argument.as_str(),
+            "-l" | "--log-level" | "--tlscacert" | "--tlscert" | "--tlskey"
+        );
+        if value_option && args.get(index + 1).is_none() {
+            bail!("docker {argument} is missing its value");
+        }
+        index += if value_option { 2 } else { 1 };
+    }
+    Ok(options)
+}
+
+/// Apply the resolved endpoint to a host Docker CLI command. Explicit
+/// `--host`, `--context`, and `--config` flags are validated against the same
+/// local-only policy as ambient configuration.
+pub(crate) fn configure_host_docker_command(
+    command: &mut std::process::Command,
+    args: &[String],
+) -> Result<()> {
+    let options = parse_global_options(args)?;
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let config_dir = options.config.clone().or_else(|| {
+        env::var_os("DOCKER_CONFIG")
+            .map(PathBuf::from)
+            .or_else(|| home.as_deref().map(|path| path.join(".docker")))
+    });
+    let endpoint = if let Some(host) = options.host.as_deref() {
+        DockerEndpoint::from_host(host, DockerEndpointSource::Explicit)?
+    } else if let Some(context) = options.context.as_deref() {
+        resolve_context_endpoint(
+            config_dir.as_deref(),
+            home.as_deref(),
+            runtime_dir.as_deref(),
+            context,
+        )?
+    } else if options.config.is_none() {
+        // Preserve the test seam and keep command configuration on the exact
+        // same resolver path as Engine clients and lease proxies.
+        resolve_docker_endpoint()?
+    } else {
+        resolve_docker_endpoint_from(
+            nonempty_env("VELNOR_DOCKER_HOST").as_deref(),
+            nonempty_env("DOCKER_HOST").as_deref(),
+            nonempty_env("VELNOR_DOCKER_CONTEXT")
+                .or_else(|| nonempty_env("DOCKER_CONTEXT"))
+                .as_deref(),
+            config_dir.as_deref(),
+            home.as_deref(),
+            runtime_dir.as_deref(),
+        )?
+    };
+    command
+        .env("DOCKER_HOST", endpoint.host)
+        .env_remove("DOCKER_CONTEXT");
+    Ok(())
+}
+
+pub(crate) fn socket_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
+    if let Some(override_path) = test_socket_override() {
+        return Ok(override_path);
+    }
+    Ok(resolve_docker_endpoint()?.socket)
 }
 
 /// Cap on one API attempt. The class deadline still bounds the CLI fallback,
@@ -444,6 +859,11 @@ where
 /// Poll interval for the cancellation race: a cancelled job abandons the
 /// socket wait within this bound instead of riding the API budget.
 const CANCEL_POLL: Duration = Duration::from_millis(10);
+
+/// How long an unterminated exec line may sit before it is flushed live
+/// while the process is still running. Workflow-command prefixes wait for
+/// newline or finish instead, so `::group::` / `::error::` stay intact.
+const PARTIAL_FLUSH: Duration = Duration::from_millis(250);
 
 /// Drive `future` unless the active job cancels first: `None` is the
 /// cancelled leg winning, and the facade answers it with the CLI fallback —
@@ -966,7 +1386,8 @@ impl EngineClient {
     /// the live shape; anything else is an API error. No budget here: the
     /// caller wraps [`Self::exec_run`] in the step deadline, and the
     /// buffers are caller-owned so an abandoned stream keeps its partial
-    /// lines for the 124 synthesis.
+    /// lines for the 124 synthesis. A 250 ms tick flushes non-command
+    /// pending tails so `printf` progress is visible before newline.
     async fn exec_stream(
         &self,
         id: &str,
@@ -1004,14 +1425,24 @@ impl EngineClient {
         let mut demux = Demux::default();
         drain_frames(&mut demux, &first_bytes, op, output, on_line)?;
         let mut chunk = [0_u8; 8192];
+        let mut ticker =
+            tokio::time::interval_at(tokio::time::Instant::now() + PARTIAL_FLUSH, PARTIAL_FLUSH);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let read = stream.read(&mut chunk).await.map_err(|error| {
-                EngineError::fault(op, (EngineFaultKind::Read, error.to_string()))
-            })?;
-            if read == 0 {
-                break;
+            tokio::select! {
+                read = stream.read(&mut chunk) => {
+                    let read = read.map_err(|error| {
+                        EngineError::fault(op, (EngineFaultKind::Read, error.to_string()))
+                    })?;
+                    if read == 0 {
+                        break;
+                    }
+                    drain_frames(&mut demux, &chunk[..read], op, output, on_line)?;
+                }
+                _ = ticker.tick() => {
+                    output.flush_partial(on_line);
+                }
             }
-            drain_frames(&mut demux, &chunk[..read], op, output, on_line)?;
         }
         if !demux.is_drained() {
             return Err(EngineError::fault(
@@ -1213,9 +1644,13 @@ fn drain_frames(
 /// is stripped per line, lines decode lossy UTF-8, every emitted line is
 /// appended with a `\n` terminator whether the process printed one or
 /// not, and a nonempty tail without a trailing newline still emits. Live
-/// lines reach `on_line` per stream as they complete; only the
-/// cross-stream interleave differs from the CLI leg (daemon frame order
-/// instead of two racing pipe readers), which was already racy there.
+/// lines reach `on_line` per stream as they complete; an unterminated
+/// tail that is not a workflow command is also flushed within
+/// [`PARTIAL_FLUSH`] so progress is visible before newline or process
+/// end. Command-like tails (`::`, `##[`) wait for newline or
+/// [`ExecOutput::finish`]. Only the cross-stream interleave differs from
+/// the CLI leg (daemon frame order instead of two racing pipe readers),
+/// which was already racy there.
 #[derive(Debug, Default)]
 pub(crate) struct ExecOutput {
     pub stdout: String,
@@ -1261,6 +1696,36 @@ impl ExecOutput {
         pending.drain(..start);
     }
 
+    /// Emit each stream's unterminated tail now, unless it looks like a
+    /// workflow command. Taking the pending bytes is what prevents a later
+    /// newline or [`Self::finish`] from re-emitting the same prefix.
+    fn flush_partial(
+        &mut self,
+        on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send),
+    ) {
+        for (pending, sink, which) in [
+            (
+                &mut self.pending_stdout,
+                &mut self.stdout,
+                crate::executor::CommandStream::Stdout,
+            ),
+            (
+                &mut self.pending_stderr,
+                &mut self.stderr,
+                crate::executor::CommandStream::Stderr,
+            ),
+        ] {
+            if pending.is_empty() || holds_workflow_command(pending) {
+                continue;
+            }
+            let mut line: Vec<u8> = std::mem::take(pending);
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            emit_exec_line(&mut *sink, &mut *on_line, which, &line);
+        }
+    }
+
     /// Flush each stream's unterminated tail, if any: a final line without
     /// its newline, exactly as the CLI leg's reader emits it.
     fn finish(&mut self, on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send)) {
@@ -1300,6 +1765,19 @@ fn emit_exec_line(
     sink.push_str(&line);
     sink.push('\n');
     on_line(which, &line);
+}
+
+/// True when `pending` is a workflow-command prefix that must not be
+/// split mid-token: `::group::` / `::error::` / `##[group]` wait for
+/// newline or finish. Leading ASCII whitespace is skipped because the
+/// command parser trims it before the prefix test.
+fn holds_workflow_command(pending: &[u8]) -> bool {
+    let start = pending
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(pending.len());
+    let rest = &pending[start..];
+    rest.starts_with(b"::") || rest.starts_with(b"##[")
 }
 
 type EngineResult<T> = Result<T, EngineError>;
@@ -1875,6 +2353,24 @@ pub(crate) mod mock {
             handler: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static,
             max_connections: usize,
         ) -> Self {
+            Self::serve_inner(handler, max_connections, Duration::ZERO)
+        }
+
+        /// Like [`Self::serve`], but keep each connection open for `hold`
+        /// after writing so the client read loop can tick.
+        pub(crate) fn serve_held(
+            handler: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+            hold: Duration,
+            max_connections: usize,
+        ) -> Self {
+            Self::serve_inner(handler, max_connections, hold)
+        }
+
+        fn serve_inner(
+            handler: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+            max_connections: usize,
+            hold: Duration,
+        ) -> Self {
             let seq = MOCK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!("ve-{}-{seq}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -1908,7 +2404,7 @@ pub(crate) mod mock {
                     }
                     let mut stream = accepted;
                     served += 1;
-                    if Self::handle_one(&mut stream, &handler).is_err() {
+                    if Self::handle_one(&mut stream, &handler, hold).is_err() {
                         break;
                     }
                 }
@@ -1921,7 +2417,11 @@ pub(crate) mod mock {
             }
         }
 
-        fn handle_one(stream: &mut UnixStream, handler: &MockHandler) -> std::io::Result<()> {
+        fn handle_one(
+            stream: &mut UnixStream,
+            handler: &MockHandler,
+            hold: Duration,
+        ) -> std::io::Result<()> {
             stream.set_read_timeout(Some(Duration::from_secs(10)))?;
             let mut buffer = Vec::new();
             let mut chunk = [0_u8; 4096];
@@ -1959,6 +2459,11 @@ pub(crate) mod mock {
             let head = String::from_utf8_lossy(&buffer).into_owned();
             let response = handler(&head);
             stream.write_all(&response)?;
+            // Hold only the hijacked start stream: create/inspect stay
+            // prompt so a ticker test pays the delay once, not per call.
+            if !hold.is_zero() && head.contains("/start HTTP") {
+                std::thread::sleep(hold);
+            }
             stream.shutdown(std::net::Shutdown::Both).ok();
             Ok(())
         }
@@ -2065,6 +2570,88 @@ mod tests {
     use std::sync::Arc;
 
     const BUDGET: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn endpoint_resolution_accepts_explicit_local_socket_and_rejects_remote() {
+        let explicit = resolve_docker_endpoint_from(
+            Some("unix:///Users/test/.orbstack/run/docker.sock"),
+            Some("tcp://docker.example:2376"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(explicit.source, DockerEndpointSource::Explicit);
+        assert_eq!(
+            explicit.socket,
+            PathBuf::from("/Users/test/.orbstack/run/docker.sock")
+        );
+
+        let error = resolve_docker_endpoint_from(
+            None,
+            Some("ssh://docker.example"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("refusing remote Docker endpoint"));
+    }
+
+    #[test]
+    fn endpoint_resolution_reads_selected_docker_context_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-docker-context-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let metadata = root.join("contexts/meta/portable");
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::write(root.join("config.json"), r#"{"currentContext":"orbstack"}"#).unwrap();
+        std::fs::write(
+            metadata.join("meta.json"),
+            r#"{"Name":"orbstack","Endpoints":{"docker":{"Host":"unix:///Users/test/.orbstack/run/docker.sock"}}}"#,
+        )
+        .unwrap();
+
+        let endpoint = resolve_docker_endpoint_from(
+            None,
+            None,
+            None,
+            Some(&root),
+            Some(Path::new("/Users/test")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(endpoint.source, DockerEndpointSource::Context);
+        assert_eq!(
+            endpoint.socket,
+            PathBuf::from("/Users/test/.orbstack/run/docker.sock")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn endpoint_resolution_precedence_keeps_context_above_docker_host() {
+        let endpoint = resolve_docker_endpoint_from(
+            None,
+            Some("unix:///tmp/environment.sock"),
+            Some("default"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(endpoint.source, DockerEndpointSource::Context);
+        assert_ne!(endpoint.socket, PathBuf::from("/tmp/environment.sock"));
+    }
 
     fn inspect_body() -> &'static str {
         r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}],"9090/tcp":null}}}"#
@@ -2893,6 +3480,220 @@ mod tests {
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn exec_output_flush_partial_emits_pending_without_newline() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"part-one", &mut on_line);
+        }
+        assert!(lines.is_empty(), "unterminated tail waits for the tick");
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.flush_partial(&mut on_line);
+        }
+        assert_eq!(lines, vec![(CommandStream::Stdout, "part-one".to_string())]);
+        assert_eq!(output.stdout, "part-one\n");
+    }
+
+    #[test]
+    fn exec_output_flush_partial_does_not_duplicate_later_bytes() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"part-one", &mut on_line);
+            output.flush_partial(&mut on_line);
+            output.push_frame(1, b" part-two\n", &mut on_line);
+            output.finish(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stdout, "part-one".to_string()),
+                (CommandStream::Stdout, " part-two".to_string()),
+            ]
+        );
+        assert_eq!(output.stdout, "part-one\n part-two\n");
+    }
+
+    #[test]
+    fn exec_output_flush_partial_holds_workflow_command_prefixes() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"::group::foo", &mut on_line);
+            output.push_frame(2, b"##[error]x", &mut on_line);
+            output.flush_partial(&mut on_line);
+        }
+        assert!(lines.is_empty());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"\n", &mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stdout, "::group::foo".to_string())]
+        );
+    }
+
+    #[test]
+    fn exec_output_finish_emits_held_workflow_command_tails() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"::group::foo", &mut on_line);
+            output.flush_partial(&mut on_line);
+        }
+        assert!(lines.is_empty());
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.finish(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stdout, "::group::foo".to_string())]
+        );
+        assert_eq!(output.stdout, "::group::foo\n");
+    }
+
+    #[test]
+    fn exec_output_flush_partial_stdout_and_stderr_are_independent() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"part-one", &mut on_line);
+            output.push_frame(2, b"err\n", &mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stderr, "err".to_string())],
+            "a finished stderr line must not stall pending stdout"
+        );
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.flush_partial(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stderr, "err".to_string()),
+                (CommandStream::Stdout, "part-one".to_string()),
+            ]
+        );
+
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(1, b"out-part", &mut on_line);
+            output.push_frame(2, b"::group::held", &mut on_line);
+            output.flush_partial(&mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![(CommandStream::Stdout, "out-part".to_string())],
+            "command-like stderr stays pending while stdout flushes"
+        );
+        {
+            let mut on_line = |stream: CommandStream, line: &str| {
+                lines.push((stream, line.to_string()));
+            };
+            output.push_frame(2, b"\n", &mut on_line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stdout, "out-part".to_string()),
+                (CommandStream::Stderr, "::group::held".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_stream_ticker_flushes_pending_without_newline() {
+        use crate::executor::CommandStream;
+        let payload = exec_frame(1, b"part-one");
+        let mock = MockEngine::serve_held(
+            move |request| {
+                if request.contains("POST /containers/") {
+                    error_response("201 Created", r#"{"Id":"abc"}"#)
+                } else if request.contains("POST /exec/") && request.contains("/start") {
+                    start_response(&payload)
+                } else {
+                    json_response(r#"{"Running":false,"ExitCode":0}"#)
+                }
+            },
+            Duration::from_millis(800),
+            3,
+        );
+        let first_at = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let first_at_cb = Arc::clone(&first_at);
+        let mut lines = Vec::new();
+        let mut output = ExecOutput::default();
+        let started = std::time::Instant::now();
+        let code = EngineClient::new(mock.socket.clone())
+            .exec_run(
+                "velnor-job-1",
+                &test_exec_config(),
+                Duration::from_secs(30),
+                &mut output,
+                &mut |stream: CommandStream, line: &str| {
+                    let mut first = first_at_cb.lock().unwrap();
+                    if first.is_none() {
+                        *first = Some(std::time::Instant::now());
+                    }
+                    drop(first);
+                    lines.push((stream, line.to_string()));
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let elapsed = first_at
+            .lock()
+            .unwrap()
+            .expect("ticker must emit before the held stream closes")
+            .duration_since(started);
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "partial flush must land on the 250ms tick, not finish(): {elapsed:?}"
+        );
+        assert_eq!(lines, vec![(CommandStream::Stdout, "part-one".to_string())]);
+        assert_eq!(output.stdout, "part-one\n");
     }
 
     #[tokio::test]

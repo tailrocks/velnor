@@ -12,6 +12,7 @@
 //! Plan 079) a narrow public facade of `velnor-runner`. Domain crates never
 //! depend on `clap`; CLI-facing enums convert explicitly at this boundary.
 
+use std::env;
 use std::time::Duration;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -22,7 +23,10 @@ use velnor_render::{ColorPolicy, OutputFormat};
 
 pub mod commands;
 pub mod completion;
+pub mod host;
 pub mod http;
+#[cfg(target_os = "macos")]
+pub mod local_diagnostics;
 pub mod man;
 pub mod runtime;
 
@@ -247,12 +251,24 @@ pub enum Command {
     Doctor(Box<runtime::DoctorArgs>),
     /// Validate the selected execution backend before polling GitHub for jobs.
     Preflight(Box<runtime::PreflightArgs>),
+    /// Report the local Docker endpoint and Velnor-relevant capabilities.
+    Docker(commands::DockerArgs),
+    /// Start, inspect, drain, or stop on-demand host capacity.
+    Host(commands::HostArgs),
     /// Remove local runner configuration.
     Remove(Box<runtime::RemoveArgs>),
     /// Print local runner configuration status.
     Status(Box<runtime::StatusArgs>),
     /// Run the per-instance daemon lifecycle engine.
     Daemon(Box<runtime::DaemonArgs>),
+    /// Machine-invoked ready slot. Spawned by the daemon controller as
+    /// `current_exe slot`. Hidden because operators use `host start`.
+    #[command(hide = true)]
+    Slot(Box<velnor_runner::node::SlotArgs>),
+    /// Machine-invoked job worker. Spawned by the daemon controller as
+    /// `current_exe job`. Hidden because operators use `host start`.
+    #[command(hide = true)]
+    Job(velnor_runner::node::JobArgs),
     /// Inspect the canonical Velnor storage layout and catalog.
     Storage(Box<runtime::StorageArgs>),
     /// Workflow-run operations owned by the GitHub client service.
@@ -442,6 +458,22 @@ impl std::fmt::Display for CommandError {
     }
 }
 
+/// Packaged units set this in `velnor.env`. Interactive `host start` and
+/// controller-spawned `slot`/`job` children use native unless the operator
+/// explicitly selected another accepted transport, such as `curl` on macOS.
+pub(crate) fn ensure_native_github_http_transport() {
+    if env::var_os(velnor_runner::protocol::GITHUB_HTTP_TRANSPORT_ENV)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return;
+    }
+    // SAFETY: host/slot/job startup is single-threaded before Tokio work.
+    unsafe {
+        env::set_var(velnor_runner::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+    }
+}
+
 /// The single process exit-code mapping for any outcome class.
 #[must_use]
 pub fn exit_code_for(class: &ExitClass) -> u8 {
@@ -511,8 +543,31 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Doctor((*args).into())).await
         }
         Command::Preflight(args) => {
-            run_runtime(velnor_runner::args::Command::Preflight((*args).into())).await
+            #[cfg(target_os = "macos")]
+            {
+                local_diagnostics::preflight(&globals, &args)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                run_runtime(velnor_runner::args::Command::Preflight((*args).into())).await
+            }
         }
+        Command::Docker(args) => {
+            #[cfg(target_os = "macos")]
+            {
+                local_diagnostics::docker_report(&globals, &args)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = args;
+                Err(CommandError::new(
+                    ExitClass::Condition,
+                    "docker.report_platform_unsupported",
+                    "the local Docker report is implemented for macOS diagnostics; use the Linux runner preflight on a Linux host",
+                ))
+            }
+        }
+        Command::Host(args) => host::run(&globals, args.command).await,
         Command::Remove(args) => {
             validate_remove_target_selectors(&globals)?;
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
@@ -521,12 +576,35 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             if args.json || globals.output_format().is_machine() {
                 return status_health_json(&args);
             }
+            #[cfg(target_os = "macos")]
+            {
+                let runtime_args = velnor_runner::args::Command::Status((*args).clone().into());
+                let runner_result = run_status(runtime_args).await;
+                local_diagnostics::status(&globals, &args, runner_result)
+            }
+            #[cfg(not(target_os = "macos"))]
             run_status(velnor_runner::args::Command::Status((*args).into())).await
         }
         Command::Daemon(args) => runtime::run_daemon((*args).clone())
             .await
             .map_err(|_| CommandError::operation("daemon.start_failed: unable to start daemon")),
+        Command::Slot(args) => {
+            ensure_native_github_http_transport();
+            velnor_runner::node::run_slot(*args)
+                .await
+                .map_err(|error| CommandError::operation(error.to_string()))
+        }
+        Command::Job(args) => {
+            ensure_native_github_http_transport();
+            velnor_runner::node::run_job(args)
+                .await
+                .map_err(|error| CommandError::operation(error.to_string()))
+        }
         Command::Storage(args) => {
+            #[cfg(target_os = "macos")]
+            if matches!(&args.command, runtime::StorageCommand::Paths) {
+                return local_diagnostics::paths(&globals, &args);
+            }
             if matches!(
                 &args.command,
                 runtime::StorageCommand::Du
@@ -615,7 +693,8 @@ fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, 
             .or_else(|| std::env::var("VELNOR_INSTANCE").ok());
         (
             format!(
-                "unix:///run/velnor/{}",
+                "unix://{}/{}",
+                velnor_client::socket_root().display(),
                 instance.as_deref().unwrap_or("default")
             ),
             false,
@@ -1489,8 +1568,8 @@ mod tests {
 
     #[test]
     fn explicit_instance_rejects_a_different_context_endpoint() {
-        let endpoint = velnor_client::UnixEndpoint::parse("unix:///run/velnor/primary")
-            .expect("valid context endpoint");
+        let endpoint =
+            velnor_client::UnixEndpoint::from_instance("primary").expect("valid context endpoint");
 
         let error = validate_context_instance(&endpoint, Some("secondary"))
             .expect_err("different explicit instance must fail closed");

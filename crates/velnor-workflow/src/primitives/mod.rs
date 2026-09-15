@@ -34,9 +34,11 @@ use crate::{
 pub(crate) use ir::{
     checks_env, config_snapshot_identity, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note,
-    validate_nextest_tools_are_locked, WorkflowIr, WorkflowKind,
-    GITHUB_WORKFLOW_BYTE_LIMIT,
+    validate_nextest_tools_are_locked, WorkflowIr, WorkflowKind, GITHUB_WORKFLOW_BYTE_LIMIT,
 };
+
+#[cfg(test)]
+pub(crate) use ir::jq_read_plan_matrix;
 
 /// Default `timeout-minutes` for a unit verification job.
 pub(crate) const DEFAULT_UNIT_TIMEOUT_MINUTES: u32 = 45;

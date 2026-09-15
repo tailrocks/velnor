@@ -10,12 +10,14 @@
 pub const TRANSPORT_CONTRACT: &str = "velnor-client/v1";
 
 pub mod http;
+pub mod socket_root;
 pub mod unix;
 
 pub use http::{
     ClientError, Info, LogItem, MutationResponse, ResourcePage, ResourceQuery, UnixControlClient,
     WatchItem,
 };
+pub use socket_root::{ensure_socket_root, is_package_socket_mode, socket_root};
 pub use unix::{EndpointError, SocketKind, UnixEndpoint, API_VERSION};
 
 #[cfg(test)]

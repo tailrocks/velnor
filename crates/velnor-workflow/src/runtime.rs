@@ -10,11 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
@@ -25,7 +26,7 @@ use sha2::{Digest, Sha256};
 use super::primitives::snapshot::{
     plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
-use super::{runners_support_unit_kind, GeneratorError, RunnerMode, UnitKind};
+use super::{lanes_support_unit_kind, GeneratorError, RunnerMode, UnitKind};
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const TRUSTED_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
@@ -37,7 +38,7 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 )]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CiConfig {
+pub(crate) struct CiConfig {
     schema: u32,
     #[serde(default)]
     repository: String,
@@ -49,6 +50,8 @@ struct CiConfig {
     default_branch: String,
     #[serde(default)]
     runners: String,
+    #[serde(default)]
+    automatic: String,
     #[serde(default)]
     analysis: Analysis,
     #[serde(default)]
@@ -82,6 +85,51 @@ struct Workflow {
     notes: Vec<String>,
     #[serde(default)]
     version_bump_units: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct VelnorPolicyContract {
+    runners: String,
+    default_branch: String,
+    velnor_labels: Vec<String>,
+    velnor_runner_group: Option<String>,
+    pull_request_on_velnor: bool,
+}
+
+impl VelnorPolicyContract {
+    fn requires_approved_runner(&self) -> bool {
+        self.pull_request_on_velnor
+    }
+
+    fn approved_runner_configured(&self) -> bool {
+        let labels = self
+            .velnor_labels
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        super::estate::approved_velnor_runner_contract_matches(
+            &labels,
+            self.velnor_runner_group.as_deref(),
+        )
+    }
+
+    fn configured_runner(&self) -> String {
+        let labels = self
+            .velnor_labels
+            .iter()
+            .map(|label| super::yaml_scalar(label))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let labels = format!("[{labels}]");
+        self.velnor_runner_group
+            .as_deref()
+            .map_or(labels.clone(), |group| {
+                format!(
+                    "{{ group: {}, labels: {labels} }}",
+                    super::yaml_scalar(group)
+                )
+            })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -135,6 +183,11 @@ struct CiUnit {
     cache: Option<Cache>,
     #[serde(default)]
     workflow_file: Option<String>,
+    /// A workspace-wide Rust verification gate. Its watch paths may stay
+    /// narrow; affected Rust changes select it explicitly to preserve the
+    /// workspace coverage without broadening every topology match.
+    #[serde(default)]
+    workspace_check: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,6 +224,25 @@ impl CiUnit {
             (RunnerLane::Velnor, Scope::Affected) => &self.velnor_pr_commands,
             (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
         }
+    }
+
+    /// Whether affected Rust changes should also select this workspace gate.
+    /// The generator keeps the flag in generation config only; pinned Planning
+    /// runtimes infer the gate from the emitted `cargo check --workspace`
+    /// command contract.
+    fn is_workspace_check(&self) -> bool {
+        if self.workspace_check {
+            return true;
+        }
+        [
+            &self.github_pr_commands,
+            &self.github_full_commands,
+            &self.velnor_pr_commands,
+            &self.velnor_full_commands,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|command| command.contains("cargo check --workspace"))
     }
 }
 
@@ -440,7 +512,15 @@ fn resolve_config_path(config: Option<&String>) -> PathBuf {
     config.map_or_else(|| PathBuf::from(DEFAULT_CONFIG), PathBuf::from)
 }
 
-fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
+/// Parse a generated `project.toml` through the real runtime contract.
+/// Emitter tests use it to prove the generator never ships a field the
+/// runtime rejects.
+#[cfg(test)]
+pub(crate) fn read_config_for_test(path: &Path) -> Result<(), GeneratorError> {
+    read_config(path).map(|_| ())
+}
+
+pub(crate) fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
     let contents = fs::read_to_string(path)
         .map_err(|error| GeneratorError::io("read CI configuration", path, &error))?;
     let config: CiConfig = toml::from_str(&contents).map_err(|error| {
@@ -476,14 +556,15 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
                 unit.id
             )));
         }
-        if unit.watch.is_empty()
-            || unit.github_pr_commands.is_empty()
+        // An empty watch is valid: a unit with no sources never matches an
+        // affected diff but still runs in full scope.
+        if unit.github_pr_commands.is_empty()
             || unit.github_full_commands.is_empty()
             || unit.velnor_pr_commands.is_empty()
             || unit.velnor_full_commands.is_empty()
         {
             return Err(GeneratorError::usage(format!(
-                "CI unit must declare watch plus GitHub and Velnor PR/full commands: {}",
+                "CI unit must declare GitHub and Velnor PR/full commands: {}",
                 unit.id
             )));
         }
@@ -538,11 +619,11 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
     let base = env::var("BASE_SHA").unwrap_or_default();
     let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    let runners = plan_runner()?;
-    let selection = selection_for_runner(
+    let lanes = plan_lanes()?;
+    let selection = selection_for_lanes(
         &config,
         selection_for_diff(&root, &config, scope, &base, &head)?,
-        runners,
+        lanes,
     );
     let units = selection
         .units
@@ -574,6 +655,10 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .open(&output_path)
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
         writeln!(file, "scope={}", scope_name(scope))
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "base_sha={base}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "head_sha={head}")
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "units={units}")
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
@@ -616,8 +701,7 @@ fn write_kind_matrices(
         let matrix_output = workflow
             .strip_prefix("ci-unit-")
             .and_then(|value| value.strip_suffix(".yml"))
-            .map(|stem| format!("{stem}_matrix"))
-            .unwrap_or_else(|| format!("{kind}_matrix"));
+            .map_or_else(|| format!("{kind}_matrix"), |stem| format!("{stem}_matrix"));
         matrices
             .entry(matrix_output)
             .or_default()
@@ -681,35 +765,35 @@ fn scope_name(scope: Scope) -> &'static str {
     }
 }
 
-/// The runners selected for this plan, from the `VELNOR_RUNNER` environment
-/// the plan step sets to the dispatch `runner` input. Absent or empty means
-/// `both`: automatic events and local runs plan without runner filtering,
-/// exactly as before.
-fn plan_runner() -> Result<RunnerMode, GeneratorError> {
-    plan_runner_for_value(env::var("VELNOR_RUNNER").unwrap_or_default().as_str())
+/// The lanes admitted for this plan, from the `VELNOR_LANES` environment the
+/// Both-mode plan step sets to `needs.lane-admission.outputs.lanes`.
+/// Absent or empty means `both`: single-lane aggregates and local runs plan
+/// without lane filtering, exactly as before.
+fn plan_lanes() -> Result<RunnerMode, GeneratorError> {
+    plan_lanes_for_value(env::var("VELNOR_LANES").unwrap_or_default().as_str())
 }
 
-fn plan_runner_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
+fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
     match value.trim() {
         "" | "both" => Ok(RunnerMode::Both),
         "velnor" => Ok(RunnerMode::Velnor),
         "github" => Ok(RunnerMode::Github),
         other => Err(GeneratorError::usage(format!(
-            "unsupported CI runner `{other}`: use velnor, github, or both"
+            "unsupported CI lanes `{other}`: use velnor, github, or both"
         ))),
     }
 }
 
-/// Narrow a diff selection to the units the selected `runners` can execute.
+/// Narrow a diff selection to the units the admitted `lanes` can execute.
 /// A velnor-only dispatch drops whatever the Velnor lane cannot run (Swift
 /// units); the required gate already tolerates `skipped` for unselected
 /// units, so the excluded callers stay green instead of failing a selection
 /// they can never satisfy. Units of an unknown kind are kept: dropping a
 /// unit the planner does not recognize would silently skip verification.
-fn selection_for_runner<'a>(
+fn selection_for_lanes<'a>(
     config: &'a CiConfig,
     selection: UnitSelection<'a>,
-    runners: RunnerMode,
+    lanes: RunnerMode,
 ) -> UnitSelection<'a> {
     let kinds = config
         .unit
@@ -717,7 +801,7 @@ fn selection_for_runner<'a>(
         .map(|unit| (unit.id.as_str(), unit.kind.as_str()))
         .collect::<BTreeMap<_, _>>();
     let supported = |kind: &str| {
-        UnitKind::from_prefix(kind).is_none_or(|parsed| runners_support_unit_kind(runners, parsed))
+        UnitKind::from_prefix(kind).is_none_or(|parsed| lanes_support_unit_kind(lanes, parsed))
     };
     UnitSelection {
         units: selection
@@ -857,6 +941,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         assert_eq!(
             unit.commands(RunnerLane::Github, Scope::Affected),
@@ -893,6 +978,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "changed".to_owned(),
@@ -908,6 +994,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "sibling".to_owned(),
@@ -923,6 +1010,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "leaf".to_owned(),
@@ -938,6 +1026,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
         ];
         let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
@@ -1050,7 +1139,7 @@ struct PlannedSelection {
     full_units: BTreeSet<String>,
 }
 
-const SELECTION_FILE_VERSION: &str = "1";
+pub(crate) const SELECTION_FILE_VERSION: &str = "1";
 
 fn write_selection_file(
     path: &Path,
@@ -1141,7 +1230,12 @@ fn parse_selection_ids(value: &str) -> Result<BTreeSet<String>, GeneratorError> 
 fn validate_selection_sha(selection: &PlannedSelection) -> Result<(), GeneratorError> {
     let job_base = env::var("BASE_SHA").unwrap_or_default();
     let job_head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    if selection.base_sha != job_base || selection.head_sha != job_head {
+    // workflow_dispatch leaves BASE_SHA empty; plan already wrote the resolved
+    // base into the artifact. Unit jobs consume that plan and must not re-diff.
+    // A non-empty job BASE_SHA still has to match. HEAD always has to match.
+    let head_mismatch = selection.head_sha != job_head;
+    let base_mismatch = !job_base.is_empty() && selection.base_sha != job_base;
+    if head_mismatch || base_mismatch {
         println!(
             "::warning::CI selection artifact SHA mismatch: plan base SHA `{}` vs job base SHA `{}`; plan head SHA `{}` vs job head SHA `{}`",
             selection.base_sha, job_base, selection.head_sha, job_head
@@ -1202,9 +1296,23 @@ fn selection_for_diff<'a>(
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
+        let mut selected = allowlist.clone();
+        let directly_matched_rust = config
+            .unit
+            .iter()
+            .any(|unit| allowlist.contains(&unit.id) && unit.kind == "rust");
+        if directly_matched_rust {
+            let workspace_checks = config
+                .unit
+                .iter()
+                .filter(|unit| unit.is_workspace_check())
+                .map(|unit| unit.id.clone())
+                .collect::<Vec<_>>();
+            selected.extend(workspace_checks);
+        }
         return Ok(UnitSelection {
-            units: ordered_units(&config.unit, Some(&allowlist))?,
-            full_units: allowlist,
+            units: ordered_units(&config.unit, Some(&selected))?,
+            full_units: selected,
         });
     }
     let matchers = config
@@ -1236,6 +1344,21 @@ fn selection_for_diff<'a>(
         if !matched {
             return full_selection(config);
         }
+    }
+    let directly_matched_rust = selected.iter().any(|unit_id| {
+        config
+            .unit
+            .iter()
+            .any(|unit| unit.id == *unit_id && unit.kind == "rust")
+    });
+    if directly_matched_rust {
+        selected.extend(
+            config
+                .unit
+                .iter()
+                .filter(|unit| unit.is_workspace_check())
+                .map(|unit| unit.id.clone()),
+        );
     }
     let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
     Ok(UnitSelection {
@@ -1484,26 +1607,277 @@ fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<S
         .collect()
 }
 
-fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
-    for command in commands {
-        println!("::group::{}: {}", unit.id, command);
-        let status = Command::new("bash")
-            .args(["-euo", "pipefail", "-c", command])
-            .current_dir(root)
-            .stdin(Stdio::null())
-            .status()
-            .map_err(|error| {
-                GeneratorError::usage(format!("run CI command {}: {error}", unit.id))
-            })?;
-        println!("::endgroup::");
-        if !status.success() {
-            return Err(GeneratorError::usage(format!(
-                "CI command failed for unit {} with {status}",
-                unit.id
-            )));
+/// Default output-stall budget for one `run_unit` project command: kill the
+/// child when no stdout/stderr byte arrives for this long.
+///
+/// Ten minutes because healthy compile/test commands stream at least a line
+/// every ~2-5 minutes while measured Mac wedges sat 34+ minutes with zero
+/// stdout bytes at the first compile-path `mbx` call — the gap between ~5
+/// and 34 minutes leaves 10 far from both a slow healthy command and a real
+/// wedge. The guard is stall-based, never wall-clock: every output byte
+/// resets the timer, so a chatty 28-minute suite runs to completion.
+/// Override with `VELNOR_RUN_CMD_STALL_SECS`; a missing, unparsable, or
+/// zero value falls back to this default.
+const DEFAULT_RUN_CMD_STALL_SECS: u64 = 600;
+/// Environment override for [`DEFAULT_RUN_CMD_STALL_SECS`], in seconds.
+const RUN_CMD_STALL_ENV: &str = "VELNOR_RUN_CMD_STALL_SECS";
+/// Silence quantum between child-exit polls while waiting for output: a
+/// silent command that already exited (or whose pipes grandchildren hold
+/// open) is noticed within this long instead of at the stall deadline.
+const RUN_CMD_EXIT_POLL_QUANTUM: Duration = Duration::from_secs(1);
+/// Bounded grace to drain a piped tail after the child exits, so detached
+/// pumps forward every byte before completion. Grandchildren holding the
+/// pipes open must not hang this drain.
+const RUN_CMD_DRAIN_GRACE: Duration = Duration::from_secs(10);
+
+fn run_cmd_stall_limit() -> Duration {
+    parse_run_cmd_stall_limit(env::var(RUN_CMD_STALL_ENV).ok().as_deref())
+}
+
+fn parse_run_cmd_stall_limit(raw: Option<&str>) -> Duration {
+    let seconds = raw
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0);
+    Duration::from_secs(seconds.unwrap_or(DEFAULT_RUN_CMD_STALL_SECS))
+}
+
+/// One output chunk forwarded by a child-stream pump, or that stream's EOF.
+enum PumpEvent {
+    Output,
+    Eof,
+}
+
+/// Forward one child pipe to the matching process stream, reporting every
+/// chunk as [`PumpEvent::Output`] so the stall guard treats output bytes as
+/// heartbeats. Runs detached: it exits on pipe EOF (or when the guard drops
+/// the receiver), so a wedged grandchild holding the pipe cannot hang the
+/// stall kill.
+fn pump_child_stream<R, W>(mut reader: R, mut writer: W, sender: &mpsc::Sender<PumpEvent>)
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let _ = writer.write_all(&buffer[..read]);
+                let _ = writer.flush();
+                if sender.send(PumpEvent::Output).is_err() {
+                    break;
+                }
+            }
         }
     }
+    let _ = sender.send(PumpEvent::Eof);
+}
+
+/// The pre-guard failure contract, unchanged: exit status decides.
+fn check_unit_command_status(unit_id: &str, status: ExitStatus) -> Result<(), GeneratorError> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(GeneratorError::usage(format!(
+            "CI command failed for unit {unit_id} with {status}"
+        )))
+    }
+}
+
+/// Run one project command, killing it on output stall: no stdout/stderr
+/// byte for `stall_limit` while the child is still alive. Every output byte
+/// resets the timer; a silent exit inside the deadline race counts as
+/// completion, not a stall.
+fn run_command_with_stall_guard(
+    root: &Path,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+) -> Result<(), GeneratorError> {
+    let mut child = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", command])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    let (sender, receiver) = mpsc::channel();
+    let mut expected_eof = 0;
+    if let Some(stdout) = child.stdout.take() {
+        expected_eof += 1;
+        let sender = sender.clone();
+        thread::spawn(move || pump_child_stream(stdout, std::io::stdout(), &sender));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        expected_eof += 1;
+        let sender = sender.clone();
+        thread::spawn(move || pump_child_stream(stderr, std::io::stderr(), &sender));
+    }
+    drop(sender);
+    let pid = child.id();
+    let mut deadline = Instant::now() + stall_limit;
+    let mut eofs = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining.min(RUN_CMD_EXIT_POLL_QUANTUM)) {
+            Ok(PumpEvent::Output) => {
+                deadline = Instant::now() + stall_limit;
+            }
+            Ok(PumpEvent::Eof) => {
+                eofs += 1;
+                if eofs >= expected_eof {
+                    break;
+                }
+            }
+            Err(_) => {
+                // A silent exit (or grandchildren holding the pipes) is
+                // completion, noticed within one poll quantum.
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    // No pool.lock/inflight path constants exist in
+                    // velnor-workflow, so there is no scheduler state to dump
+                    // without hardcoding host paths; the error carries unit,
+                    // command, stall budget, pid, and child state instead.
+                    let state = match child.try_wait() {
+                        Ok(Some(status)) => {
+                            return check_unit_command_status(unit_id, status);
+                        }
+                        Ok(None) => String::from("running"),
+                        Err(error) => format!("unknown (try_wait failed: {error})"),
+                    };
+                    let _ = child.kill();
+                    let reaped = match child.wait() {
+                        Ok(status) => format!("reaped with {status}"),
+                        Err(error) => format!("reap failed: {error}"),
+                    };
+                    return Err(GeneratorError::usage(format!(
+                        "CI command stalled for unit {unit_id}: no stdout/stderr output for {}s; killed pid {pid} (was {state}, {reaped}); command: {command}",
+                        stall_limit.as_secs(),
+                    )));
+                }
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    let drain_deadline = Instant::now() + RUN_CMD_DRAIN_GRACE;
+    while eofs < expected_eof && Instant::now() < drain_deadline {
+        match receiver.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())) {
+            Ok(PumpEvent::Output) => {}
+            Ok(PumpEvent::Eof) => {
+                eofs += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    check_unit_command_status(unit_id, status)
+}
+
+fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
+    let stall_limit = run_cmd_stall_limit();
+    for command in commands {
+        println!("::group::{}: {}", unit.id, command);
+        let outcome = run_command_with_stall_guard(root, &unit.id, command, stall_limit);
+        println!("::endgroup::");
+        outcome?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod run_cmd_stall_tests {
+    use super::{
+        parse_run_cmd_stall_limit, run_command_with_stall_guard, DEFAULT_RUN_CMD_STALL_SECS,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn stall_limit_parses_override_and_falls_back() {
+        assert_eq!(
+            parse_run_cmd_stall_limit(None),
+            Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS)
+        );
+        assert_eq!(
+            parse_run_cmd_stall_limit(Some("30")),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_run_cmd_stall_limit(Some(" 120 ")),
+            Duration::from_secs(120)
+        );
+        for invalid in ["", "0", "-5", "ten", "1.5"] {
+            assert_eq!(
+                parse_run_cmd_stall_limit(Some(invalid)),
+                Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS),
+                "invalid override {invalid:?} must fall back to the default",
+            );
+        }
+    }
+
+    #[test]
+    fn silent_command_past_stall_limit_fails_naming_the_stall() {
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exec sleep 30",
+            Duration::from_millis(200),
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("stall"),
+            "silent sleeper must fail naming the stall, got: {message}"
+        );
+        assert!(
+            message.contains("test-unit") && message.contains("exec sleep 30"),
+            "stall error must name unit and command, got: {message}"
+        );
+    }
+
+    #[test]
+    fn chatty_slow_command_succeeds_past_wall_clock_limit() {
+        // ~1.2s of wall-clock against a 0.3s stall window: periodic output
+        // resets the timer, so this must succeed.
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo tick-$i; sleep 0.1; done",
+            Duration::from_millis(300),
+        );
+        let message = match &result {
+            Ok(()) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            result.is_ok(),
+            "chatty command must succeed, got: {message}"
+        );
+    }
+
+    #[test]
+    fn failing_command_keeps_original_error() {
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exit 3",
+            Duration::from_secs(60),
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("CI command failed for unit test-unit"),
+            "exit-status failure must keep its error, got: {message}"
+        );
+    }
 }
 
 pub(crate) fn test_crates(
@@ -1611,7 +1985,7 @@ pub(crate) fn enforce_policy_with_revision(
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
-    let velnor_labels = configured_velnor_labels(root);
+    let velnor_policy = configured_velnor_policy(root)?;
     let mut found_policy_entrypoint = false;
     let mut failures = PolicyFindings::default();
     // GitHub rejects a workflow whose YAML carries duplicate keys, so the
@@ -1648,7 +2022,7 @@ pub(crate) fn enforce_policy_with_revision(
             workflow,
             &path,
             trusted_revision,
-            &velnor_labels,
+            &velnor_policy,
             &mut failures,
         );
     }
@@ -1672,11 +2046,11 @@ fn inspect_workflow(
     workflow: &Mapping,
     path: &Path,
     trusted_revision: &str,
-    velnor_labels: &[String],
+    velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
     let approved_policy_entrypoint =
-        is_approved_policy_entrypoint(path, workflow, trusted_revision);
+        is_approved_policy_entrypoint(path, workflow, trusted_revision, velnor_policy);
     for (key, value) in workflow {
         let key = key.as_str();
         match key {
@@ -1687,13 +2061,26 @@ fn inspect_workflow(
                     failures.record(path, "pull_request_target is forbidden");
                 }
             }
-            "jobs" => inspect_jobs(value, path, trusted_revision, velnor_labels, failures),
-            _ => inspect_yaml_value(value, path, None, false, trusted_revision, failures),
+            "jobs" => inspect_jobs(value, path, trusted_revision, velnor_policy, failures),
+            _ => inspect_yaml_value(
+                value,
+                path,
+                None,
+                false,
+                trusted_revision,
+                velnor_policy.requires_approved_runner(),
+                failures,
+            ),
         }
     }
 }
 
-fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping, trusted_revision: &str) -> bool {
+fn is_approved_policy_entrypoint(
+    path: &Path,
+    workflow: &Mapping,
+    trusted_revision: &str,
+    velnor_policy: &VelnorPolicyContract,
+) -> bool {
     if !path.ends_with(Path::new(".github/workflows/ci-policy.yml"))
         || mapping_value(workflow, "name").and_then(Value::as_str) != Some("Velnor workflow policy")
     {
@@ -1726,7 +2113,7 @@ fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping, trusted_revisi
     let Some(policy) = mapping_value(jobs, "policy").and_then(Value::as_mapping) else {
         return false;
     };
-    jobs.len() == 1 && is_approved_inline_policy_job(policy, trusted_revision)
+    jobs.len() == 1 && is_approved_inline_policy_job(policy, trusted_revision, velnor_policy)
 }
 
 /// Whether a job is exactly the inline policy job the generator renders for
@@ -1734,7 +2121,11 @@ fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping, trusted_revisi
 /// steps, compared as parsed YAML against the generator's own rendering. Any
 /// drift — a changed pin, an extra step, a rewritten install command — fails
 /// the comparison, so a tree can only carry the audited transport.
-fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool {
+fn is_approved_inline_policy_job(
+    job: &Mapping,
+    trusted_revision: &str,
+    velnor_policy: &VelnorPolicyContract,
+) -> bool {
     let parser = serde_yaml::ParserConfig::default()
         .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     crate::POLICY_JOB_NAMES.iter().any(|name| {
@@ -1764,23 +2155,31 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
         // remaining job structure stays an exact generator comparison.
         if !mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job, &[]))
+            .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_policy))
         {
             return false;
         }
-        if !is_static_self_hosted_runner(job) {
+        if !is_static_self_hosted_runner(job, velnor_policy) {
             return false;
         }
 
-        let canonical_gate = "    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}\n";
+        let canonical_gate = format!(
+            "    if: ${{{{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}}}\n",
+            if velnor_policy.default_branch.is_empty() {
+                "main"
+            } else {
+                &velnor_policy.default_branch
+            }
+        );
+        let runner = velnor_policy.configured_runner();
         let velnor = format!(
             "jobs:\n{}",
             crate::inline_policy_job_for_lane(
                 name,
                 trusted_revision,
-                "[self-hosted, velnor]",
+                &runner,
                 "local",
-                Some(canonical_gate),
+                Some(&canonical_gate),
             )
         );
         let Ok(parsed) = serde_yaml::from_str_with_config::<Value>(&velnor, &parser) else {
@@ -1799,67 +2198,129 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
     })
 }
 
-fn is_static_self_hosted_runner(job: &Mapping) -> bool {
+fn is_static_self_hosted_runner(job: &Mapping, velnor_policy: &VelnorPolicyContract) -> bool {
     let Some(runs_on) = mapping_value(job, "runs-on") else {
         return false;
     };
     let mut resolving = BTreeSet::new();
     let analysis = analyze_runner(runs_on, None, &mut resolving);
-    analysis.self_hosted && !analysis.dynamic && !analysis.invalid
+    analysis.self_hosted
+        && !analysis.dynamic
+        && !analysis.invalid
+        && (!velnor_policy.requires_approved_runner() || is_approved_velnor_runner(runs_on))
 }
 
-fn has_safe_runner_gate(condition: &str, job: &Mapping, velnor_labels: &[String]) -> bool {
+fn has_safe_runner_gate(
+    condition: &str,
+    job: &Mapping,
+    velnor_policy: &VelnorPolicyContract,
+) -> bool {
     if has_trusted_runner_gate(condition) {
         return true;
     }
-    is_generated_velnor_pr_gate(condition)
-        && is_static_self_hosted_runner(job)
-        && job_runs_on_matches_labels(job, velnor_labels)
+    velnor_policy.pull_request_on_velnor
+        && is_generated_velnor_pr_gate(condition, &velnor_policy.default_branch)
+        && is_static_self_hosted_runner(job, velnor_policy)
 }
 
-fn configured_velnor_labels(root: &Path) -> Vec<String> {
+fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorError> {
+    let path = root.join(".github-gen/velnor-workflow.toml");
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "read generation workflow config",
+                &path,
+                &error,
+            ));
+        }
+    };
+    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
+        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
+    })?;
+    Ok(value.get("workflow").cloned())
+}
+
+fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
     let path = root.join(DEFAULT_CONFIG);
-    let Ok(content) = fs::read_to_string(&path) else {
-        return Vec::new();
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(VelnorPolicyContract::default());
+        }
+        Err(error) => return Err(GeneratorError::io("read workflow config", &path, &error)),
     };
-    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
-        return Vec::new();
-    };
-    value
-        .get("workflow")
-        .and_then(toml::Value::as_table)
+    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
+        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
+    })?;
+    let runtime_workflow = value.get("workflow").and_then(toml::Value::as_table);
+    let labels = runtime_workflow
         .and_then(|workflow| workflow.get("velnor_labels"))
-        .and_then(toml::Value::as_array)
         .map(|labels| {
             labels
+                .as_array()
+                .ok_or_else(|| GeneratorError::usage("[workflow] velnor_labels must be an array"))?
                 .iter()
-                .filter_map(toml::Value::as_str)
-                .map(str::to_owned)
-                .collect()
+                .map(|label| {
+                    label.as_str().map(str::to_owned).ok_or_else(|| {
+                        GeneratorError::usage("[workflow] velnor_labels must contain only strings")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
         })
-        .unwrap_or_default()
-}
-
-fn job_runs_on_matches_labels(job: &Mapping, expected: &[String]) -> bool {
-    if expected.is_empty() {
-        return false;
-    }
-    let Some(runs_on) = mapping_value(job, "runs-on") else {
-        return false;
+        .transpose()?
+        .unwrap_or_default();
+    let generation_workflow = generation_workflow(root)?;
+    let generation_workflow = generation_workflow.as_ref().and_then(toml::Value::as_table);
+    let group = generation_workflow
+        .and_then(|workflow| workflow.get("velnor_runner_group"))
+        .map(|group| {
+            group.as_str().map(str::to_owned).ok_or_else(|| {
+                GeneratorError::usage("[workflow] velnor_runner_group must be a string")
+            })
+        })
+        .transpose()?;
+    let pull_request_on_velnor = generation_workflow
+        .and_then(|workflow| workflow.get("pull_request_on_velnor"))
+        .map(|enabled| {
+            enabled.as_bool().ok_or_else(|| {
+                GeneratorError::usage("[workflow] pull_request_on_velnor must be a boolean")
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let policy = VelnorPolicyContract {
+        runners: value
+            .get("runners")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        default_branch: value
+            .get("default_branch")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("main")
+            .to_owned(),
+        velnor_labels: labels,
+        velnor_runner_group: group,
+        pull_request_on_velnor,
     };
-    let Some(labels) = runs_on.as_sequence() else {
-        return false;
-    };
-    if labels.len() != expected.len() {
-        return false;
+    if policy.pull_request_on_velnor
+        && (!matches!(policy.runners.as_str(), "velnor" | "both")
+            || !policy.approved_runner_configured())
+    {
+        return Err(GeneratorError::usage(
+            "workflow policy rejected pull_request_on_velnor: config must declare the approved Velnor runner labels, optionally with the approved runner group, and include the Velnor lane",
+        ));
     }
-    labels
-        .iter()
-        .zip(expected)
-        .all(|(label, expected)| label.as_str() == Some(expected.as_str()))
+    Ok(policy)
 }
 
 fn normalize_gate_expression(value: &str) -> String {
+    // Both-mode aggregates name the manual lane selector `lanes` while
+    // single-lane modes name it `runner`; the gate shape the policy matchers
+    // below recognize is identical, so canonicalize the spelling first.
+    let value = value.replace("github.event.inputs.lanes", "github.event.inputs.runner");
     let value = value.trim();
     let value = value
         .strip_prefix("${{")
@@ -1872,32 +2333,30 @@ fn normalize_gate_expression(value: &str) -> String {
         .and_then(|value| value.strip_suffix(')'))
     {
         inner.to_owned()
+    } else if let Some(inner) = value.strip_prefix("always()&&") {
+        inner.to_owned()
     } else {
         value
     }
 }
 
-fn is_generated_velnor_pr_gate(value: &str) -> bool {
+fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     let normalized = normalize_gate_expression(value);
     let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
-    let marker = "github.ref=='refs/heads/";
-    let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
-        return false;
-    };
-    let Some(end) = value[start..].find('\'').map(|end| start + end) else {
-        return false;
-    };
-    let branch = &value[start..end];
-    if !valid_branch(branch) {
+    if !valid_branch(default_branch) {
         return false;
     }
-    let control_plane = format!(
-        "github.event_name=='pull_request'||github.event_name=='workflow_dispatch'||(github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
+    let automatic = format!(
+        "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
     );
-    let velnor_lane = format!(
-        "github.event_name=='pull_request'||(github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'))||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))"
+    let explicit_dispatch = format!(
+        "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
-    value == control_plane || value == velnor_lane
+    let default_dispatch = format!(
+        "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
+    );
+    value == format!("{automatic}||{explicit_dispatch}")
+        || value == format!("{automatic}||{default_dispatch}")
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -1929,7 +2388,7 @@ fn inspect_jobs(
     value: &Value,
     path: &Path,
     trusted_revision: &str,
-    velnor_labels: &[String],
+    velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
     let Some(jobs) = value.as_mapping() else {
@@ -1943,7 +2402,7 @@ fn inspect_jobs(
             continue;
         };
         if claims_inline_policy_transport(job)
-            && !is_approved_inline_policy_job(job, trusted_revision)
+            && !is_approved_inline_policy_job(job, trusted_revision, velnor_policy)
         {
             failures.record(path, &format!(
                     "inline policy job must match the approved generated shape for revision {trusted_revision}"
@@ -1951,12 +2410,20 @@ fn inspect_jobs(
         }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_labels));
+            .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_policy));
         let matrix = mapping_value(job, "strategy")
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
             .and_then(Value::as_mapping);
-        inspect_mapping(job, path, matrix, trusted_gate, trusted_revision, failures);
+        inspect_mapping(
+            job,
+            path,
+            matrix,
+            trusted_gate,
+            trusted_revision,
+            velnor_policy.requires_approved_runner(),
+            failures,
+        );
     }
 }
 
@@ -1966,6 +2433,7 @@ fn inspect_yaml_value(
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     trusted_revision: &str,
+    require_approved_runner: bool,
     failures: &mut PolicyFindings,
 ) {
     match value {
@@ -1976,12 +2444,21 @@ fn inspect_yaml_value(
                 matrix,
                 trusted_gate,
                 trusted_revision,
+                require_approved_runner,
                 failures,
             );
         }
         Value::Sequence(sequence) => {
             for item in sequence {
-                inspect_yaml_value(item, path, matrix, trusted_gate, trusted_revision, failures);
+                inspect_yaml_value(
+                    item,
+                    path,
+                    matrix,
+                    trusted_gate,
+                    trusted_revision,
+                    require_approved_runner,
+                    failures,
+                );
             }
         }
         Value::Tagged(tagged) => {
@@ -1991,6 +2468,7 @@ fn inspect_yaml_value(
                 matrix,
                 trusted_gate,
                 trusted_revision,
+                require_approved_runner,
                 failures,
             );
         }
@@ -2004,6 +2482,7 @@ fn inspect_mapping(
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     trusted_revision: &str,
+    require_approved_runner: bool,
     failures: &mut PolicyFindings,
 ) {
     for (key, value) in mapping {
@@ -2013,13 +2492,21 @@ fn inspect_mapping(
                 failures.record(path, "pull_request_target is forbidden");
             }
             "uses" => inspect_uses(value, path, failures),
-            "runs-on" => inspect_runner(value, path, matrix, trusted_gate, failures),
+            "runs-on" => inspect_runner(
+                value,
+                path,
+                matrix,
+                trusted_gate,
+                require_approved_runner,
+                failures,
+            ),
             _ => inspect_yaml_value(
                 value,
                 path,
                 matrix,
                 trusted_gate,
                 trusted_revision,
+                require_approved_runner,
                 failures,
             ),
         }
@@ -2034,8 +2521,14 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut PolicyFindings) {
     if is_approved_local_reusable(action) {
         return;
     }
+    if is_approved_local_action(action) {
+        return;
+    }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
     if reference_path.contains("/.github/workflows/") {
+        if is_approved_fleet_reusable(action) {
+            return;
+        }
         if action.starts_with("./") && action.contains('@') {
             failures.record(
                 path,
@@ -2076,6 +2569,50 @@ fn is_full_sha_reference(value: &str) -> bool {
         .is_some_and(|(action, reference)| !action.is_empty() && is_full_sha(reference))
 }
 
+/// A repository-local composite action, pinned by the audited tree itself:
+/// the policy audits the pull-request head tree, so a tampered local action
+/// is reviewed code exactly like an inline `run:` step, and a tampered
+/// reference outside `.github/actions/` stays rejected below.
+fn is_approved_local_action(value: &str) -> bool {
+    let Some(path) = value.strip_prefix("./.github/actions/") else {
+        return false;
+    };
+    !path.is_empty()
+        && !path.contains('@')
+        && !path.contains('\\')
+        && !path.split('/').any(|segment| segment == "..")
+}
+
+fn is_approved_fleet_reusable(value: &str) -> bool {
+    let Some((path, reference)) = value.split_once('@') else {
+        return false;
+    };
+    if !is_full_sha(reference) {
+        return false;
+    }
+    let mut segments = path.split('/');
+    let (Some(owner), Some(repository), Some(dot_github), Some(workflows), Some(file)) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    segments.next().is_none()
+        && crate::estate::FLEET_VELNOR_ACTION_OWNERS.contains(&owner)
+        && repository == "velnor-actions"
+        && dot_github == ".github"
+        && workflows == "workflows"
+        && !file.is_empty()
+        && Path::new(file)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
+        && !file.contains('\\')
+        && !file.contains("..")
+}
+
 fn is_full_sha(value: &str) -> bool {
     value.len() == 40
         && value
@@ -2103,6 +2640,7 @@ fn inspect_runner(
     path: &Path,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
+    require_approved_runner: bool,
     failures: &mut PolicyFindings,
 ) {
     let mut resolving = BTreeSet::new();
@@ -2125,6 +2663,53 @@ fn inspect_runner(
             "self-hosted jobs require a default-branch trusted-event gate",
         );
     }
+    if require_approved_runner && analysis.self_hosted && !is_approved_velnor_runner(value) {
+        failures.record(
+            path,
+            "opt-in Velnor self-hosted jobs must use the approved Velnor runner labels, optionally with the approved runner group",
+        );
+    }
+}
+
+fn is_approved_velnor_runner(value: &Value) -> bool {
+    if let Some(labels) = value.as_sequence() {
+        let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        return super::estate::approved_velnor_runner_contract_matches(&labels, None);
+    }
+    let Some(runner) = value.as_mapping() else {
+        return false;
+    };
+    let Some(group) = mapping_value(runner, "group").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(labels) = mapping_value(runner, "labels").and_then(Value::as_sequence) else {
+        return false;
+    };
+    let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    runner.len() == 2
+        && super::estate::approved_velnor_runner_contract_matches(&labels, Some(group))
+}
+
+fn normalize_runner_expression(value: &str) -> String {
+    value
+        .trim()
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or_else(
+            || value.split_whitespace().collect(),
+            |inner| inner.split_whitespace().collect(),
+        )
+}
+
+fn is_approved_dynamic_runner(label: &str) -> bool {
+    let normalized = normalize_runner_expression(label);
+    crate::estate::APPROVED_DYNAMIC_RUNNERS
+        .iter()
+        .any(|shape| normalized == **shape)
 }
 
 fn analyze_runner(
@@ -2155,9 +2740,13 @@ fn analyze_runner(
                 resolving.remove(field);
                 result
             } else if label.contains("${{") {
-                RunnerAnalysis {
-                    dynamic: true,
-                    ..RunnerAnalysis::default()
+                if is_approved_dynamic_runner(label) {
+                    RunnerAnalysis::default()
+                } else {
+                    RunnerAnalysis {
+                        dynamic: true,
+                        ..RunnerAnalysis::default()
+                    }
                 }
             } else if contains_self_hosted_label(label) {
                 RunnerAnalysis {
@@ -2264,12 +2853,17 @@ fn contains_self_hosted_label(value: &str) -> bool {
 
 fn has_trusted_runner_gate(value: &str) -> bool {
     let value = value.trim();
+    // Both-mode aggregates name the manual lane selector `lanes` while
+    // single-lane modes name it `runner`; canonicalize first, exactly like
+    // `normalize_gate_expression`, so adopted-estate `lanes` gates match the
+    // same trusted shapes.
     let value = value
         .strip_prefix("${{")
         .and_then(|value| value.strip_suffix("}}"))
         .map_or(value, str::trim)
         .split_whitespace()
-        .collect::<String>();
+        .collect::<String>()
+        .replace("github.event.inputs.lanes", "github.event.inputs.runner");
     if value == "github.event_name=='pull_request_target'"
         || value == "always()&&github.event_name=='pull_request_target'"
     {
@@ -2304,10 +2898,15 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let velnor_lane_gate = format!(
         "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
+    let velnor_dispatch_only_gate = format!(
+        "github.ref=='refs/heads/{branch}'&&github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
+    );
     value == ci_gate
         || value == format!("always()&&{ci_gate}")
         || value == velnor_lane_gate
         || value == format!("always()&&{velnor_lane_gate}")
+        || value == velnor_dispatch_only_gate
+        || value == format!("always()&&{velnor_dispatch_only_gate}")
         || value == release_gate
         || value
             .strip_suffix(&format!("&&{ci_gate}"))
@@ -2324,6 +2923,10 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
+    strip_inputs_unit_selector(value).or_else(|| strip_selected_units_selector(value))
+}
+
+fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
     let value = value.strip_prefix("inputs.unit=='")?;
     let separator = value.find("'&&(")?;
     let unit = &value[..separator];
@@ -2331,6 +2934,19 @@ fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
         return None;
     }
     value[separator + "'&&(".len()..].strip_suffix(')')
+}
+
+fn strip_selected_units_selector(value: &str) -> Option<&str> {
+    // contains(format(',{0},',inputs.selected_units),',unit,')&&(gate)
+    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    let rest = value.strip_prefix(PREFIX)?;
+    let rest = rest.strip_prefix(',')?;
+    let separator = rest.find(",')&&(")?;
+    let unit = &rest[..separator];
+    if !is_unit_id(unit) {
+        return None;
+    }
+    rest[separator + ",')&&(".len()..].strip_suffix(')')
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -2355,12 +2971,16 @@ impl PolicyFindings {
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary ...",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed",
         ));
     };
     match command {
         "verify-tag" => verify_tag(&arguments[1..]),
         "package-binary" => package_binary(&arguments[1..]),
+        "package-deb" => package_deb(&arguments[1..]),
+        "package-guest" => package_guest(&arguments[1..]),
+        "verify-feed" => verify_feed(&arguments[1..]),
+        "update-feed" => update_feed(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -2464,7 +3084,15 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
         return Err(GeneratorError::usage("tar failed while packaging binary"));
     }
     let digest = sha256_file(&archive)?;
-    let checksum = archive.with_extension("tar.gz.sha256");
+    // Append, never `with_extension`: the sidecar sits next to its subject
+    // as `<subject>.sha256`, the name consumer lanes download it under.
+    let checksum = archive.with_file_name(format!(
+        "{}.sha256",
+        archive
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    ));
     fs::write(
         &checksum,
         format!(
@@ -2478,6 +3106,342 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     .map_err(|error| GeneratorError::io("write release checksum", &checksum, &error))?;
     println!("{}", archive.display());
     Ok(())
+}
+
+fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "package",
+            "version",
+            "guest",
+            "target",
+            "no-build",
+            "asset-name",
+        ],
+    )?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    if !valid_package(package) || !is_artifact_version(version) {
+        return Err(GeneratorError::usage("invalid package or version"));
+    }
+    // A release lane that builds its binaries itself (identity features the
+    // packager cannot pass through) tells the packager to skip cargo-deb's
+    // own default-feature rebuild.
+    let skip_build = match options.get("no-build").map(String::as_str) {
+        None => false,
+        Some("true") => true,
+        Some(other) => {
+            return Err(GeneratorError::usage(format!(
+                "invalid --no-build value: {other}"
+            )));
+        }
+    };
+    if let Some(name) = options.get("asset-name")
+        && !valid_deb_asset_name(name)
+    {
+        return Err(GeneratorError::usage("invalid deb asset name"));
+    }
+    if let Some(guest) = options.get("guest") {
+        let guest = Path::new(guest);
+        if !guest.is_dir() {
+            return Err(GeneratorError::usage(format!(
+                "guest payload directory is missing: {}",
+                guest.display()
+            )));
+        }
+        let dest = cargo_package_manifest_dir(package)?.join("release/microvm");
+        copy_dir_files(guest, &dest)?;
+    }
+    let mut command = Command::new("cargo");
+    command.args([
+        "deb",
+        "--no-strip",
+        "--package",
+        package,
+        "--deb-version",
+        version,
+    ]);
+    if skip_build {
+        command.arg("--no-build");
+    }
+    if let Some(target) = options.get("target") {
+        if !valid_target(target) {
+            return Err(GeneratorError::usage("invalid package target"));
+        }
+        command.args(["--target", target]);
+    }
+    let status = command
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("cargo deb failed"));
+    }
+    collect_debian_packages(
+        options.get("target").map(String::as_str),
+        options.get("asset-name").map(String::as_str),
+    )
+}
+
+fn cargo_package_manifest_dir(package: &str) -> Result<PathBuf, GeneratorError> {
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
+    if !metadata.status.success() {
+        return Err(GeneratorError::usage("cargo metadata failed"));
+    }
+    let document: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
+    document["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages.iter().find_map(|item| {
+                (item["name"].as_str() == Some(package)).then(|| {
+                    item["manifest_path"]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .and_then(|path| path.parent().map(Path::to_path_buf))
+                })
+            })
+        })
+        .flatten()
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))
+}
+
+fn copy_dir_files(src: &Path, dest: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(dest)
+        .map_err(|error| GeneratorError::io("create guest package directory", dest, &error))?;
+    let entries =
+        fs::read_dir(src).map_err(|error| GeneratorError::io("read guest payload", src, &error))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("read guest payload entry", src, &error))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| GeneratorError::io("stat guest payload entry", &from, &error))?;
+        if file_type.is_dir() {
+            copy_dir_files(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .map_err(|error| GeneratorError::io("copy guest payload file", &to, &error))?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_debian_packages(
+    target: Option<&str>,
+    asset_name: Option<&str>,
+) -> Result<(), GeneratorError> {
+    let dist = Path::new("dist");
+    fs::create_dir_all(dist)
+        .map_err(|error| GeneratorError::io("create release directory", dist, &error))?;
+    let mut sources = vec![PathBuf::from("target/debian")];
+    if let Some(target) = target {
+        sources.push(PathBuf::from("target").join(target).join("debian"));
+    }
+    let mut found = Vec::new();
+    for source in sources {
+        let Ok(entries) = fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| GeneratorError::io("read debian output", &source, &error))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("deb") {
+                continue;
+            }
+            if path.file_name().is_none() {
+                continue;
+            }
+            found.push(path);
+        }
+    }
+    if found.is_empty() {
+        return Err(GeneratorError::usage(
+            "cargo deb produced no .deb under target/debian",
+        ));
+    }
+    // A lane that names its consumer asset renames exactly one freshly built
+    // deb; anything else is a stale corpus and fails closed instead of
+    // publishing an ambiguous pick.
+    if let Some(asset_name) = asset_name {
+        if found.len() != 1 {
+            return Err(GeneratorError::usage(format!(
+                "expected exactly one .deb to rename, found {}",
+                found.len()
+            )));
+        }
+        let destination = dist.join(asset_name);
+        fs::copy(&found[0], &destination)
+            .map_err(|error| GeneratorError::io("copy debian package", &found[0], &error))?;
+        write_bare_digest_sidecar(&destination)?;
+        println!("{}", destination.display());
+        return Ok(());
+    }
+    for path in &found {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let destination = dist.join(name);
+        fs::copy(path, &destination)
+            .map_err(|error| GeneratorError::io("copy debian package", path, &error))?;
+        write_bare_digest_sidecar(&destination)?;
+        println!("{}", destination.display());
+    }
+    Ok(())
+}
+
+/// The bare-digest sidecar a consumer lane cross-checks against its own
+/// manifest: the digest alone, so both `sha256sum --check` corpora and
+/// first-token readers accept it.
+fn write_bare_digest_sidecar(artifact: &Path) -> Result<(), GeneratorError> {
+    let digest = sha256_file(artifact)?;
+    let Some(name) = artifact.file_name().and_then(|name| name.to_str()) else {
+        return Err(GeneratorError::usage("deb asset name is not portable"));
+    };
+    let sidecar = artifact.with_file_name(format!("{name}.sha256"));
+    fs::write(&sidecar, format!("{digest}\n"))
+        .map_err(|error| GeneratorError::io("write deb checksum", &sidecar, &error))?;
+    Ok(())
+}
+
+fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["arch", "package", "bin", "agent"])?;
+    let arch = required_option(&options, "arch")?;
+    if !matches!(arch, "x86_64" | "aarch64") {
+        return Err(GeneratorError::usage(
+            "guest arch must be x86_64 or aarch64",
+        ));
+    }
+    let pins = Path::new("microvm/pins.json");
+    if pins.is_file() {
+        let package = required_option(&options, "package")?;
+        let bin = required_option(&options, "bin")?;
+        let agent = required_option(&options, "agent")?;
+        if !valid_package(package) || !valid_binary(bin) || !valid_binary(agent) {
+            return Err(GeneratorError::usage(
+                "invalid guest package, bin, or agent",
+            ));
+        }
+        let status = Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"
+set -euo pipefail
+url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+curl --fail --show-error --silent --location --http1.1 \
+  --connect-timeout 30 --max-time 900 \
+  -o linux.tar.xz "$url"
+echo "$sha  linux.tar.xz" | sha256sum -c -
+"#,
+            )
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("download guest kernel: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest kernel download failed"));
+        }
+        fs::create_dir_all("dist/microvm").map_err(|error| {
+            GeneratorError::io("create guest output", Path::new("dist/microvm"), &error)
+        })?;
+        let status = Command::new("cargo")
+            .args([
+                "run",
+                "--locked",
+                "--release",
+                "--package",
+                package,
+                "--bin",
+                bin,
+                "--",
+                "build",
+                "--arch",
+                arch,
+                "--out",
+                "dist/microvm",
+                "--tarball",
+                "linux.tar.xz",
+                "--guest-agent",
+                agent,
+            ])
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest image build failed"));
+        }
+        return Ok(());
+    }
+    let script = Path::new("microvm/build.sh");
+    if !script.is_file() {
+        return Err(GeneratorError::usage(
+            "guest image requires microvm/pins.json or a repository-owned microvm/build.sh",
+        ));
+    }
+    let status = Command::new("bash")
+        .args(["microvm/build.sh", arch])
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("guest image build failed"));
+    }
+    Ok(())
+}
+
+fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
+    let kind = required_option(&options, "kind")?;
+    let package = required_option(&options, "package")?;
+    if !valid_package(package) {
+        return Err(GeneratorError::usage("invalid feed package"));
+    }
+    match kind {
+        "homebrew" => {
+            let formula = Path::new("Formula").join(format!("{package}.rb"));
+            if !formula.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "homebrew feed requires {}",
+                    formula.display()
+                )));
+            }
+        }
+        "apt" => {
+            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
+                return Err(GeneratorError::usage(
+                    "apt feed requires conf/distributions or debian/",
+                ));
+            }
+        }
+        other => {
+            return Err(GeneratorError::usage(format!(
+                "unsupported feed kind: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
+    verify_feed(arguments)?;
+    let kind = required_option(&options, "kind")?;
+    let channel = options.get("channel").map_or("stable", String::as_str);
+    if !matches!(channel, "stable" | "preview") {
+        return Err(GeneratorError::usage("channel must be stable or preview"));
+    }
+    match kind {
+        "homebrew" | "apt" => {
+            println!("feed {kind} channel {channel} verified; mutation is GitHub-writer only");
+            Ok(())
+        }
+        other => Err(GeneratorError::usage(format!(
+            "unsupported feed kind: {other}"
+        ))),
+    }
 }
 
 fn required_option<'a>(
@@ -2540,7 +3504,51 @@ fn is_semver(value: &str) -> bool {
 }
 
 fn is_artifact_version(value: &str) -> bool {
-    value == "preview" || is_semver(value)
+    value == "preview" || is_semver(value) || is_preview_version(value)
+}
+
+/// A rolling-preview Debian version: the crate version, a `~preview.N`
+/// Debian-sortable pre-release (older than the coming stable), and the
+/// 7-hex source the lane built. Strict: the consumer lane matches this
+/// exact shape before it binds a preview.
+fn is_preview_version(value: &str) -> bool {
+    let Some((core, preview)) = value.split_once('~') else {
+        return false;
+    };
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        || !parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return false;
+    }
+    let Some(number) = preview.strip_prefix("preview.") else {
+        return false;
+    };
+    let Some((run, commit)) = number.split_once('+') else {
+        return false;
+    };
+    !run.is_empty()
+        && run.bytes().all(|byte| byte.is_ascii_digit())
+        && commit.len() == 7
+        && commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// A consumer-facing deb file name: a bare file name (no directories, no
+/// traversal), ending in `.deb`, over the portable asset alphabet.
+fn valid_deb_asset_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('/')
+        && !value.contains("..")
+        && value.strip_suffix(".deb").is_some_and(|stem| {
+            !stem.is_empty()
+                && stem.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~' | b'+')
+                })
+        })
 }
 
 fn valid_branch(value: &str) -> bool {
@@ -2590,6 +3598,179 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
         }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> GeneratorError {
+        match result {
+            Ok(_) => panic!("{context}: expected a failure, got success"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn package_deb_rejects_bad_inputs_before_any_cargo_call() {
+        // Every case below fails on option validation, before package-deb
+        // shells out: no cargo, no filesystem writes, no network.
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            package_deb(&args(&["--version", "1.2.3"])),
+            "package-deb without --package",
+        );
+        assert!(
+            error.to_string().contains("--package needs a value"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "v1.2.3",
+            ])),
+            "package-deb with a v-prefixed version",
+        );
+        assert!(
+            error.to_string().contains("invalid package or version"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "1.2.3",
+                "--guest",
+                "/nonexistent-velnor-guest-payload",
+            ])),
+            "package-deb with a missing guest directory",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("guest payload directory is missing"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "1.2.3",
+                "--target",
+                "x86_64!",
+            ])),
+            "package-deb with an invalid target",
+        );
+        assert!(
+            error.to_string().contains("invalid package target"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn preview_versions_are_strictly_shaped() {
+        for version in [
+            "0.1.274~preview.145+d3e441f",
+            "1.0.0~preview.1+abcdef0",
+            "10.20.30~preview.9999999+0123456",
+        ] {
+            assert!(is_preview_version(version), "{version} must be accepted");
+            assert!(
+                is_artifact_version(version),
+                "{version} must package as an artifact version"
+            );
+        }
+        for version in [
+            "0.1.274",
+            "preview",
+            "v0.1.274",
+            "0.1.274~preview.145",
+            "0.1.274~preview.+d3e441f",
+            "0.1.274~preview145+d3e441f",
+            "0.1.274~preview.145+d3e441",
+            "0.1.274~preview.145+d3e441fg",
+            "0.1.274~preview.x+d3e441f",
+            "0.1~preview.145+d3e441f",
+            "0.1.274~stable.145+d3e441f",
+            "0.1.274~~preview.145+d3e441f",
+            "0.1.274~preview.145+D3E441F",
+        ] {
+            assert!(!is_preview_version(version), "{version} must be rejected");
+        }
+        // The tag gate stays strict semver: preview shapes never leak into it.
+        assert!(!is_semver("0.1.274~preview.145+d3e441f"));
+    }
+
+    #[test]
+    fn package_deb_validates_packaging_options_before_any_cargo_call() {
+        // Every case below fails on option validation, before package-deb
+        // shells out: no cargo, no filesystem writes, no network.
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "widget",
+                "--version",
+                "1.2.3",
+                "--no-build",
+                "yes",
+            ])),
+            "package-deb with a non-true --no-build",
+        );
+        assert!(
+            error.to_string().contains("invalid --no-build value"),
+            "unexpected error: {error}"
+        );
+        for name in [
+            "widget-1.2.3-amd64.deb/../escape.deb",
+            "../escape.deb",
+            "widget-1.2.3-amd64.tar.gz",
+            "widget 1.2.3.deb",
+            ".deb",
+        ] {
+            let error = must_fail(
+                package_deb(&args(&[
+                    "--package",
+                    "widget",
+                    "--version",
+                    "1.2.3",
+                    "--asset-name",
+                    name,
+                ])),
+                "package-deb with a hostile asset name",
+            );
+            assert!(
+                error.to_string().contains("invalid deb asset name"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+        // A preview version passes version validation: the failure below
+        // names the missing guest directory, never the version.
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "widget",
+                "--version",
+                "1.2.3~preview.7+abcdef0",
+                "--guest",
+                "/nonexistent-widget-guest-payload",
+                "--no-build",
+                "true",
+                "--asset-name",
+                "widget-preview-1.2.3~preview.7+abcdef0-amd64.deb",
+            ])),
+            "package-deb with a preview version and missing guest directory",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("guest payload directory is missing"),
+            "unexpected error: {error}"
+        );
     }
 
     fn policy_fixture(
@@ -2654,6 +3835,7 @@ mod tests {
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         CiConfig {
             schema: 2,
@@ -2662,6 +3844,7 @@ mod tests {
             verified: true,
             default_branch: "main".to_owned(),
             runners: "github".to_owned(),
+            automatic: "github".to_owned(),
             analysis: Analysis::default(),
             workflow: Workflow::default(),
             release: Release::default(),
@@ -2934,6 +4117,22 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
         base_contents: &str,
         head_contents: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        current_project_selection_git_fixture_with_config(
+            name,
+            changed,
+            base_contents,
+            head_contents,
+            SELECTION_PROJECT_CONFIG,
+        )
+    }
+
+    fn current_project_selection_git_fixture_with_config(
+        name: &str,
+        changed: &str,
+        base_contents: &str,
+        head_contents: &str,
+        config_text: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -2959,7 +4158,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
 
         let config = root.join(".github/ci/project.toml");
         std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
-        std::fs::write(&config, SELECTION_PROJECT_CONFIG)?;
+        std::fs::write(&config, config_text)?;
 
         let changed_path = root.join(changed);
         std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
@@ -2983,7 +4182,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
         selection.units.iter().map(|unit| unit.id.clone()).collect()
     }
 
-    fn runner_selection_config() -> CiConfig {
+    fn lanes_selection_config() -> CiConfig {
         let unit = |id: &str, kind: &str| CiUnit {
             id: id.to_owned(),
             label: id.to_owned(),
@@ -2998,6 +4197,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         CiConfig {
             schema: 2,
@@ -3006,6 +4206,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             verified: true,
             default_branch: "main".to_owned(),
             runners: "both".to_owned(),
+            automatic: "both".to_owned(),
             analysis: Analysis::default(),
             workflow: Workflow::default(),
             release: Release::default(),
@@ -3018,36 +4219,36 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
     }
 
     #[test]
-    fn plan_runner_defaults_to_both_and_rejects_unknown_runners() {
+    fn plan_lanes_default_to_both_and_reject_unknown_lanes() {
         assert_eq!(
-            must(plan_runner_for_value(""), "empty runner"),
+            must(plan_lanes_for_value(""), "empty lanes"),
             RunnerMode::Both
         );
         assert_eq!(
-            must(plan_runner_for_value("both"), "both runners"),
+            must(plan_lanes_for_value("both"), "both lanes"),
             RunnerMode::Both
         );
         assert_eq!(
-            must(plan_runner_for_value("velnor"), "velnor runner"),
+            must(plan_lanes_for_value("velnor"), "velnor lanes"),
             RunnerMode::Velnor
         );
         assert_eq!(
-            must(plan_runner_for_value("github"), "github runner"),
+            must(plan_lanes_for_value("github"), "github lanes"),
             RunnerMode::Github
         );
-        let result = plan_runner_for_value("self-hosted");
+        let result = plan_lanes_for_value("self-hosted");
         assert!(
             result.as_ref().is_err_and(|error| error
                 .to_string()
-                .contains("unsupported CI runner `self-hosted`")),
-            "unknown runners must fail closed: {result:?}"
+                .contains("unsupported CI lanes `self-hosted`")),
+            "unknown lanes must fail closed: {result:?}"
         );
     }
 
     #[test]
     fn velnor_only_selection_drops_swift_but_keeps_unknown_kinds() {
-        let config = runner_selection_config();
-        let narrowed = selection_for_runner(
+        let config = lanes_selection_config();
+        let narrowed = selection_for_lanes(
             &config,
             must(full_selection(&config), "full selection"),
             RunnerMode::Velnor,
@@ -3065,11 +4266,11 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
                 .map(str::to_owned)
                 .collect()
         );
-        for runners in [RunnerMode::Github, RunnerMode::Both] {
-            let narrowed = selection_for_runner(
+        for lanes in [RunnerMode::Github, RunnerMode::Both] {
+            let narrowed = selection_for_lanes(
                 &config,
                 must(full_selection(&config), "full selection"),
-                runners,
+                lanes,
             );
             let ids = narrowed
                 .units
@@ -3079,21 +4280,21 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             assert_eq!(
                 ids,
                 vec!["rust-app", "swift-app", "future-app"],
-                "{runners:?}"
+                "{lanes:?}"
             );
-            assert_eq!(narrowed.full_units.len(), 3, "{runners:?}");
+            assert_eq!(narrowed.full_units.len(), 3, "{lanes:?}");
         }
     }
 
     #[test]
     fn velnor_only_selection_prunes_full_marks_of_excluded_units() {
-        let config = runner_selection_config();
+        let config = lanes_selection_config();
         let units = config.unit.iter().collect::<Vec<_>>();
         let selection = UnitSelection {
             units,
             full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
         };
-        let narrowed = selection_for_runner(&config, selection, RunnerMode::Velnor);
+        let narrowed = selection_for_lanes(&config, selection, RunnerMode::Velnor);
         assert!(narrowed.full_units.is_empty());
         assert!(narrowed.units.iter().all(|unit| unit.id != "swift-app"));
     }
@@ -3107,8 +4308,8 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             "velnor-workflow-runner-matrices-{}-{id}",
             std::process::id()
         ));
-        let config = runner_selection_config();
-        let narrowed = selection_for_runner(
+        let config = lanes_selection_config();
+        let narrowed = selection_for_lanes(
             &config,
             full_selection(&config).map_err(|error| error.to_string())?,
             RunnerMode::Velnor,
@@ -3209,6 +4410,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         assert_eq!(
             prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
@@ -3326,6 +4528,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         let mut config = selection_config();
         config.workflow.version_bump_units = vec![
@@ -3404,6 +4607,74 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
     }
 
     #[test]
+    fn workspace_check_is_selected_for_leaf_rust_changes_but_not_docs() -> Result<(), Box<dyn Error>>
+    {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "docs"
+kind = "docs"
+root = "."
+watch = ["docs/**"]
+github_pr_commands = ["markdownlint docs"]
+github_full_commands = ["markdownlint docs"]
+velnor_pr_commands = ["markdownlint docs"]
+velnor_full_commands = ["markdownlint docs"]
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "leaf-source-workspace-check",
+            "crates/leaf/src/lib.rs",
+            "pub fn fixture() {}\n",
+            "pub fn fixture() { let _ = 1; }\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-base", "rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "docs-source-workspace-check",
+            "docs/index.md",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            BTreeSet::from(["docs".to_owned()])
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn policy_parsing_ignores_comments_and_literal_run_content() -> Result<(), Box<dyn Error>> {
         let workflow = r"
 name: Comments
@@ -3420,7 +4691,7 @@ jobs:
           echo 'pull_request_target:'
           echo 'uses: actions/checkout@v4'
           echo 'runs-on: [self-hosted, velnor]'
-";
+        ";
         let root = policy_fixture("comments", workflow, "github")?;
         assert!(run_policy(root)?);
         Ok(())
@@ -3482,7 +4753,7 @@ on:
 jobs:
   verify:
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
@@ -3495,7 +4766,7 @@ on: push
 jobs:
   verify:
     if: ${{ always() && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
@@ -3508,11 +4779,25 @@ on: workflow_call
 jobs:
   verify:
     if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
         let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
+        assert!(!run_policy(root)?);
+
+        let workflow = r"
+name: Generic self-hosted PR
+on:
+  pull_request:
+jobs:
+  verify:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: [self-hosted, example-runner]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("generic-self-hosted-pr", workflow, "velnor")?;
         assert!(!run_policy(root)?);
         Ok(())
     }
@@ -3520,59 +4805,87 @@ jobs:
     #[test]
     fn policy_accepts_generated_pr_gates_on_configured_velnor_labels() -> Result<(), Box<dyn Error>>
     {
+        let group = crate::estate::approved_velnor_runner_group();
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config_text = format!(
+            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\n"
+        );
+        let generation_config = format!(
+            "schema = 1\n\n[workflow]\nvelnor_runner_group = \"{group}\"\npull_request_on_velnor = true\n"
+        );
+        let runner = format!("{{ group: {group}, labels: [{yaml_labels}] }}");
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))";
         let root = policy_fixture(
             "velnor-pr-configured",
             "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
             "velnor",
         )?;
+        std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
         std::fs::write(
-            root.join(".github/ci/project.toml"),
-            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+            root.join(".github-gen/velnor-workflow.toml"),
+            &generation_config,
         )?;
         std::fs::write(
             root.join(".github/workflows/ci-pr.yml"),
-            r"
+            format!(
+                r"
 name: CI
 on:
   pull_request:
 jobs:
   plan:
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
-    runs-on: [self-hosted, example-velnor]
+    if: ${{{{ {gate} }}}}
+    runs-on: {runner}
     steps:
       - run: true
   ci-required:
-    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
-    runs-on: [self-hosted, example-velnor]
+    if: ${{{{ always() && ({gate}) }}}}
+    runs-on: {runner}
     steps:
       - run: true
 ",
+            ),
         )?;
         std::fs::write(
             root.join(".github/workflows/ci-unit-rust.yml"),
-            r"
+            format!(
+                r"
 name: rust
 on:
   workflow_call:
 jobs:
   verify:
-    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
-    runs-on: [self-hosted, example-velnor]
+    if: ${{{{ inputs.unit == 'rust-policy' && ({gate}) }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+  selected:
+    if: ${{{{ contains(format(',{{0}},', inputs.selected_units), ',rust-policy,') && ({gate}) }}}}
+    runs-on: {runner}
     steps:
       - run: true
 ",
+            ),
         )?;
-        assert!(run_policy(root)?);
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION);
+        assert!(
+            result.is_ok(),
+            "accepted opt-in fixture rejected: {result:?}"
+        );
+        std::fs::remove_dir_all(root)?;
 
         let mismatched = policy_fixture(
             "velnor-pr-mismatched",
             "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
             "velnor",
         )?;
-        std::fs::write(
-            mismatched.join(".github/ci/project.toml"),
-            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
-        )?;
+        std::fs::write(mismatched.join(".github/ci/project.toml"), &config_text)?;
         std::fs::write(
             mismatched.join(".github/workflows/ci-pr.yml"),
             r"
@@ -3588,6 +4901,96 @@ jobs:
 ",
         )?;
         assert!(!run_policy(mismatched)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_the_both_mode_lanes_dispatch_gate() -> Result<(), Box<dyn Error>> {
+        // Both-mode aggregates name the manual lane selector `lanes`; the
+        // gate shape is the generated one, only the input spelling differs.
+        // No pull_request arm: Velnor PR gates now require the opt-in plus a
+        // same-repository restriction, covered by the opt-in fixtures; this
+        // pins `lanes` spelling on the classic trusted shape instead.
+        let workflow = r"
+name: Velnor lanes reusable
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both')))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-reusable", workflow, "velnor")?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Velnor lanes dispatch
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both') }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-dispatch", workflow, "velnor")?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        // A dispatch-only gate stays rejected: manual dispatch must ride with
+        // the automatic arms, never alone on the self-hosted lane.
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_fork_pull_request_gate_even_with_approved_runner(
+    ) -> Result<(), Box<dyn Error>> {
+        let group = crate::estate::approved_velnor_runner_group();
+        let labels = crate::estate::approved_velnor_runner_labels();
+        let labels_toml = labels
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let labels_yaml = labels.join(", ");
+        let config = format!(
+            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{labels_toml}]\n"
+        );
+        let generation_config = format!(
+            "schema = 1\n\n[workflow]\nvelnor_runner_group = \"{group}\"\npull_request_on_velnor = true\n"
+        );
+        let runner = format!("{{ group: {group}, labels: [{labels_yaml}] }}");
+        let root = policy_fixture(
+            "velnor-pr-fork-gate",
+            &format!(
+                r"
+name: CI
+on:
+  pull_request:
+jobs:
+  verify:
+    if: ${{{{ github.event_name == 'pull_request' }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+",
+            ),
+            "velnor",
+        )?;
+        std::fs::write(root.join(".github/ci/project.toml"), config)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            generation_config,
+        )?;
+        assert!(!run_policy(root)?);
         Ok(())
     }
 
@@ -3771,8 +5174,8 @@ jobs:
             );
             assert_eq!(
                 job.matches(POLICY_REVISION).count(),
-                3,
-                "{name} must use the policy revision for the cache key, the install pin, and the audit env"
+                5,
+                "{name} must use the policy revision for the cache key, the install pin, the audit env, and the two rev-keyed cache-path uses"
             );
         }
     }
@@ -3835,6 +5238,81 @@ jobs:
 
         let invalid = "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n";
         let root = policy_fixture("uses-invalid", invalid, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_adopted_lane_selection_runners() -> Result<(), Box<dyn Error>> {
+        let lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: {lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("lane-valid", &valid, "both")?;
+        assert!(run_policy(root)?);
+
+        // A lane selector that routes pull requests anywhere but the hosted
+        // label stays rejected: untrusted pull requests must never resolve
+        // to the persistent pool.
+        let unsafe_lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: {unsafe_lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("lane-unsafe", &invalid, "both")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_matrix_lane_selection_runners() -> Result<(), Box<dyn Error>> {
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  build:\n    runs-on: ${{{{ fromJSON(matrix.config.runner) }}}}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("matrix-valid", &valid, "both")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_tree_pinned_local_actions() -> Result<(), Box<dyn Error>> {
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ./.github/actions/cache-cargo-registry\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("local-action-valid", &valid, "github")?;
+        assert!(run_policy(root)?);
+
+        let invalid = "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ./../actions/cache-cargo-registry\n";
+        let root = policy_fixture("local-action-escape", invalid, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_sha_pinned_fleet_reusables() -> Result<(), Box<dyn Error>> {
+        let sha = "851ef541d67f9cabebf2ddb2a2a02f51f6c54130";
+        let owner = crate::estate::FLEET_VELNOR_ACTION_OWNERS[0];
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
+        );
+        let root = policy_fixture("fleet-valid", &valid, "github")?;
+        assert!(run_policy(root)?);
+
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@2026.8.33\n"
+        );
+        let root = policy_fixture("fleet-unpinned", &invalid, "github")?;
+        assert!(!run_policy(root)?);
+
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: unknown-owner/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
+        );
+        let root = policy_fixture("fleet-owner", &invalid, "github")?;
         assert!(!run_policy(root)?);
         Ok(())
     }
@@ -3981,6 +5459,118 @@ jobs:
 ";
         let root = policy_fixture("runner-dynamic", workflow, "velnor")?;
         assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_labels_only_approved_velnor_runner() -> Result<(), Box<dyn Error>> {
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config_text = format!(
+            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\n"
+        );
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))";
+        let root = policy_fixture(
+            "velnor-pr-labels-only",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            "schema = 1\n\n[workflow]\npull_request_on_velnor = true\n",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            format!(
+                r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{{{ {gate} }}}}
+    runs-on: [{yaml_labels}]
+    steps:
+      - run: true
+  ci-required:
+    if: ${{{{ always() && ({gate}) }}}}
+    runs-on: [{yaml_labels}]
+    steps:
+      - run: true
+"
+            ),
+        )?;
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION);
+        assert!(
+            result.is_ok(),
+            "labels-only approved runner rejected: {result:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn policy_ignores_runner_group_lingering_in_the_runtime_contract() -> Result<(), Box<dyn Error>>
+    {
+        let group = crate::estate::approved_velnor_runner_group();
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // A hand-merged group lingers in the runtime contract while the
+        // generation input names a different group. The runner group is
+        // generation-only, so policy must not see the stale field.
+        let config_text = format!(
+            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\n"
+        );
+        let runner = format!("{{ group: {group}, labels: [{yaml_labels}] }}");
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
+        let root = policy_fixture(
+            "velnor-pr-stale-group",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            "schema = 1\n\n[workflow]\nvelnor_runner_group = \"other-trusted\"\npull_request_on_velnor = true\n",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            format!(
+                r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{{{ {gate} }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+  ci-required:
+    if: ${{{{ always() && ({gate}) }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+",
+            ),
+        )?;
+        let failures = policy_failures(&root);
+        assert!(
+            failures.contains("approved Velnor runner labels"),
+            "a stale runtime group must not satisfy the approved-runner policy: {failures}"
+        );
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

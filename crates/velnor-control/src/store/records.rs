@@ -236,6 +236,7 @@ pub struct LifecycleOperationRow {
     pub reason: String,
     pub desired_state: String,
     pub desired_slots: Option<u32>,
+    pub expected_version: Option<u64>,
     pub resource_version: u64,
     pub phase: String,
     pub created_at: Timestamp,
@@ -309,6 +310,48 @@ impl Store {
         Ok(())
     }
 
+    /// Read the durable current-state projection for one instance.
+    pub fn instance_row(&self, instance_slug: &str) -> StoreResult<Option<InstanceRow>> {
+        let conn = self.lock_conn()?;
+        let stored = conn
+            .query_row(
+                "SELECT instance_slug, host, daemon_version, slots_configured, slots_busy, updated_at
+                 FROM instances WHERE instance_slug = ?1",
+                [instance_slug],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((instance_slug, host, daemon_version, slots_configured, slots_busy, updated_at)) =
+            stored
+        else {
+            return Ok(None);
+        };
+        let slots_configured = u32::try_from(slots_configured)
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.instance.slots.range"))?;
+        let slots_busy = u32::try_from(slots_busy)
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.instance.busy.range"))?;
+        let updated_at = Timestamp::parse(&updated_at).map_err(|_| {
+            StoreError::new(ExitClass::Operation, "store.instance.timestamp.invalid")
+        })?;
+        Ok(Some(InstanceRow {
+            instance_slug,
+            host,
+            daemon_version,
+            slots_configured,
+            slots_busy,
+            updated_at,
+        }))
+    }
+
     /// Read the durable lifecycle projection for one instance.
     pub fn lifecycle_instance(
         &self,
@@ -323,6 +366,29 @@ impl Store {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Return whether the controller still owes an observation for the exact
+    /// desired-state version. Same-state mutations are real operations even
+    /// when the projection already has the requested observed value; without
+    /// this query they remain accepted forever.
+    pub fn lifecycle_operation_pending(
+        &self,
+        instance_slug: &str,
+        desired_state: &str,
+        resource_version: u64,
+    ) -> StoreResult<bool> {
+        let conn = self.lock_conn()?;
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM lifecycle_operations
+             WHERE instance_slug = ?1
+               AND desired_state = ?2
+               AND resource_version = ?3
+               AND phase COLLATE NOCASE = 'accepted'",
+            params![instance_slug, desired_state, resource_version as i64],
+            |row| row.get(0),
+        )?;
+        Ok(pending != 0)
     }
 
     /// Atomically persist lifecycle intent, desired state, and idempotency.
@@ -345,6 +411,7 @@ impl Store {
                 || existing.reason != request.reason
                 || existing.desired_state != request.desired_state
                 || existing.desired_slots != request.desired_slots
+                || existing.expected_version != request.expected_version
             {
                 return Err(StoreError::new(
                     ExitClass::Conflict,
@@ -403,6 +470,13 @@ impl Store {
                 "store.lifecycle.version_conflict",
             ));
         }
+        let expected_version = request
+            .expected_version
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+                StoreError::new(ExitClass::Usage, "store.lifecycle.expected_version.range")
+            })?;
         let next_version = current_version.saturating_add(1);
         transaction.execute(
             "INSERT INTO instances (instance_slug, host, daemon_version, slots_configured, slots_busy,
@@ -424,8 +498,8 @@ impl Store {
         transaction.execute(
             "INSERT INTO lifecycle_operations
              (instance_slug, idempotency_key, operation_id, kind, target, reason,
-              desired_state, desired_slots, resource_version, phase, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'accepted', ?10)",
+              desired_state, desired_slots, expected_version, resource_version, phase, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'accepted', ?11)",
             params![
                 request.instance_slug,
                 request.idempotency_key,
@@ -435,6 +509,7 @@ impl Store {
                 request.reason,
                 request.desired_state,
                 request.desired_slots.map(i64::from),
+                expected_version,
                 next_version as i64,
                 rfc3339(accepted_at),
             ],
@@ -450,6 +525,7 @@ impl Store {
                 reason: request.reason.clone(),
                 desired_state: request.desired_state.clone(),
                 desired_slots: request.desired_slots,
+                expected_version: request.expected_version,
                 resource_version: next_version,
                 phase: "accepted".to_owned(),
                 created_at: accepted_at,
@@ -504,6 +580,18 @@ impl Store {
                 rfc3339(Timestamp::now()),
                 instance_slug,
             ],
+        )?;
+        // An accepted intent is complete only after the controller has
+        // durably observed the requested state. Match the exact resource
+        // version and desired state: a newer intent must remain pending, and
+        // an old accepted row must not be completed by a later convergence.
+        transaction.execute(
+            "UPDATE lifecycle_operations SET phase = 'completed'
+             WHERE instance_slug = ?1
+               AND resource_version = ?2
+               AND desired_state = ?3
+               AND phase COLLATE NOCASE = 'accepted'",
+            params![instance_slug, expected_version as i64, observed_state],
         )?;
         transaction.commit()?;
         Ok((
@@ -705,6 +793,24 @@ impl Store {
         query_slot_state(&conn, instance_slug, slot_id)
     }
 
+    /// Read all durable slot projections for one instance in stable name order.
+    pub fn slot_rows(&self, instance_slug: &str) -> StoreResult<Vec<SlotRow>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn
+            .prepare_cached("SELECT name FROM slots WHERE instance_slug = ?1 ORDER BY name ASC")?;
+        let names = statement
+            .query_map([instance_slug], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        names
+            .into_iter()
+            .map(|name| {
+                let slot_id = SlotId(name);
+                query_slot_state(&conn, instance_slug, &slot_id)?
+                    .ok_or_else(|| StoreError::new(ExitClass::Operation, "store.slot.disappeared"))
+            })
+            .collect()
+    }
+
     /// Recover the newest caller intent for one slot generation.
     ///
     /// The request ledger survives a worker-process restart and is used by
@@ -783,6 +889,83 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Read all durable GitHub runner registrations for one instance.
+    pub fn runner_registration_rows(
+        &self,
+        instance_slug: &str,
+    ) -> StoreResult<Vec<RunnerRegistrationRow>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT instance_slug, runner_id, name, ephemeral, online, labels_json,
+                    registered_at, updated_at
+             FROM runner_registrations WHERE instance_slug = ?1 ORDER BY runner_id ASC",
+        )?;
+        let rows = statement.query_map([instance_slug], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    instance_slug,
+                    runner_id,
+                    name,
+                    ephemeral,
+                    online,
+                    labels_json,
+                    registered_at,
+                    updated_at,
+                )| {
+                    let ephemeral = match ephemeral {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(StoreError::new(
+                                ExitClass::Operation,
+                                "store.runner.ephemeral.invalid",
+                            ));
+                        }
+                    };
+                    let online = match online {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(StoreError::new(
+                                ExitClass::Operation,
+                                "store.runner.online.invalid",
+                            ));
+                        }
+                    };
+                    let registered_at = Timestamp::parse(&registered_at).map_err(|_| {
+                        StoreError::new(ExitClass::Operation, "store.runner.registered_at.invalid")
+                    })?;
+                    let updated_at = Timestamp::parse(&updated_at).map_err(|_| {
+                        StoreError::new(ExitClass::Operation, "store.runner.updated_at.invalid")
+                    })?;
+                    Ok(RunnerRegistrationRow {
+                        instance_slug,
+                        runner_id,
+                        name,
+                        ephemeral,
+                        online,
+                        labels_json,
+                        registered_at,
+                        updated_at,
+                    })
+                },
+            )
+            .collect()
     }
 
     /// Insert or refresh a sanitized job summary keyed by
@@ -1998,13 +2181,14 @@ fn lifecycle_operation_query(
     transaction
         .query_row(
             "SELECT instance_slug, idempotency_key, operation_id, kind, target, reason,
-                    desired_state, desired_slots, resource_version, phase, created_at
+                    desired_state, desired_slots, expected_version, resource_version,
+                    phase, created_at
              FROM lifecycle_operations
              WHERE instance_slug = ?1 AND idempotency_key = ?2",
             params![instance_slug, idempotency_key],
             |row| {
-                let version = row.get::<_, i64>(8)?;
-                let created_at = Timestamp::parse(&row.get::<_, String>(10)?)
+                let version = row.get::<_, i64>(9)?;
+                let created_at = Timestamp::parse(&row.get::<_, String>(11)?)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 Ok(LifecycleOperationRow {
                     instance_slug: row.get(0)?,
@@ -2019,10 +2203,15 @@ fn lifecycle_operation_query(
                         .map(|slots| slots.try_into())
                         .transpose()
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    expected_version: row
+                        .get::<_, Option<i64>>(8)?
+                        .map(|version| version.try_into())
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     resource_version: version
                         .try_into()
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(8, version))?,
-                    phase: row.get(9)?,
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(9, version))?,
+                    phase: row.get(10)?,
                     created_at,
                 })
             },
@@ -3176,6 +3365,90 @@ mod lifecycle_tests {
         assert!(fresh);
         assert_eq!(rewritten.observed_state, "ready");
         assert_eq!(rewritten.resource_version, 3);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn lifecycle_operation_pending_matches_only_the_exact_same_state_version() {
+        let (directory, store) = open_observed_store("same-state-pending");
+        seed_instance(&store, "primary");
+        let request = LifecycleOperationRequest {
+            instance_slug: "primary".to_owned(),
+            idempotency_key: "repeat-resume".to_owned(),
+            operation_id: "operation-repeat-resume".to_owned(),
+            kind: "resume".to_owned(),
+            target: "primary".to_owned(),
+            reason: "same state".to_owned(),
+            desired_state: "ready".to_owned(),
+            desired_slots: None,
+            expected_version: None,
+            created_at: Timestamp::now(),
+        };
+        let (accepted, fresh) = store
+            .record_lifecycle_operation(&request)
+            .expect("record same-state operation");
+        assert!(fresh);
+        assert!(store
+            .lifecycle_operation_pending("primary", "ready", accepted.resource_version)
+            .expect("read pending operation"));
+        assert!(!store
+            .lifecycle_operation_pending("primary", "cordoned", accepted.resource_version)
+            .expect("wrong desired state is not pending"));
+        assert!(!store
+            .lifecycle_operation_pending("primary", "ready", accepted.resource_version + 1)
+            .expect("wrong version is not pending"));
+        store
+            .record_lifecycle_observed("primary", "ready", accepted.resource_version)
+            .expect("observe same-state operation");
+        assert!(!store
+            .lifecycle_operation_pending("primary", "ready", accepted.resource_version)
+            .expect("completed operation is not pending"));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn observed_write_completes_only_the_exact_accepted_lifecycle_operation() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-observed-operation-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store = Store::open(directory.join("state.db")).expect("open store");
+        let request = LifecycleOperationRequest {
+            instance_slug: "primary".to_owned(),
+            kind: "cordon".to_owned(),
+            target: "primary".to_owned(),
+            reason: "test".to_owned(),
+            idempotency_key: "cordon-operation".to_owned(),
+            desired_state: "cordoned".to_owned(),
+            desired_slots: None,
+            expected_version: None,
+            operation_id: "operation-1".to_owned(),
+            created_at: Timestamp::now(),
+        };
+        let (accepted, fresh) = store
+            .record_lifecycle_operation(&request)
+            .expect("record operation");
+        assert!(fresh);
+        assert_eq!(accepted.phase, "accepted");
+        store
+            .record_lifecycle_observed("primary", "cordoned", accepted.resource_version)
+            .expect("record observation");
+        let conn = test_connection(&store);
+        let phase: String = conn
+            .query_row(
+                "SELECT phase FROM lifecycle_operations
+                 WHERE instance_slug = 'primary' AND idempotency_key = 'cordon-operation'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read operation phase");
+        assert_eq!(phase, "completed");
+        drop(conn);
         let _ = std::fs::remove_dir_all(directory);
     }
 

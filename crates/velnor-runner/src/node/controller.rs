@@ -483,28 +483,12 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut metrics = MetricsPublisher::start(&args.state_dir);
     let lifecycle = args.lifecycle.as_ref().and_then(ActiveLifecycle::bind);
     loop {
-        // Unified drain (flag-gated, default off): the signal latch, the
-        // durable journal marker, or a fresh lifecycle `draining` desired
-        // state all converge on the same child-drain exit. With the flag
-        // off the static path is behaviorally identical on marker-free
-        // journals; a latched marker still drains (fail-closed, below).
-        if crate::runner::journal_drain_enabled()
-            && should_drain(crate::runner::draining(), &journal, lifecycle.as_ref())
-        {
+        // Unified drain: the signal latch, durable journal marker, or fresh
+        // lifecycle `draining` desired state all converge on one child-drain
+        // exit. The lifecycle ledger is now the production path, not a
+        // separately enabled compatibility mode.
+        if should_drain(crate::runner::draining(), &journal, lifecycle.as_ref()) {
             drain_edge(&mut journal, lifecycle.as_ref());
-            drain_children(&journal, &mut slots, &mut jobs).await?;
-            metrics.update(&slots, &jobs, last_reconcile_duration_ms);
-            metrics.stop_and_publish().await?;
-            return Ok(());
-        }
-        // Fail-closed with the flag off: a marker latched by an earlier
-        // flag-on run is still a durable drain order, and the reducer
-        // already rejects new work against it unconditionally. The flag
-        // gates the new signal legs (fresh lifecycle desired, hint cache)
-        // and the edge write — never the marker itself.
-        if crate::runner::draining()
-            || (!crate::runner::journal_drain_enabled() && journal_marker_latched(&journal))
-        {
             drain_children(&journal, &mut slots, &mut jobs).await?;
             metrics.update(&slots, &jobs, last_reconcile_duration_ms);
             metrics.stop_and_publish().await?;
@@ -523,6 +507,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut last_outbox_reconcile,
             &mut pacing,
             &metrics,
+            lifecycle.as_ref(),
         )
         .await?;
         let reconcile_duration_ms = cycle_started.elapsed().as_millis().max(1) as u64;
@@ -626,10 +611,9 @@ fn job_process_counts<'a>(job_ids: impl Iterator<Item = &'a String>) -> (usize, 
     })
 }
 
-/// Durable marker leg of the drain signal, shared by the flag-on
-/// `should_drain` and the flag-off fail-closed arm. Unreadable is not a
-/// drain order here: a store or journal blip must not tear down
-/// supervision, while a marker any reader can see still does.
+/// Durable marker leg of the drain signal. Unreadable is not a drain order
+/// here: a store or journal blip must not tear down supervision, while a
+/// marker any reader can see still does.
 fn journal_marker_latched(journal: &Journal) -> bool {
     journal
         .materialized_state()
@@ -712,21 +696,128 @@ fn drain_edge(journal: &mut Journal, lifecycle: Option<&ActiveLifecycle>) {
             ),
         }
     }
-    if let (Some(lifecycle), Some(fresh)) = (lifecycle, fresh)
-        && fresh.observed != "draining"
-        && let Err(error) = lifecycle.store.record_lifecycle_observed(
-            &lifecycle.instance,
-            "draining",
-            fresh.version,
-        )
-    {
-        // A version conflict cannot surface here: it converges inside the
-        // store call. Only IO and missing-row failures land here.
-        eprintln!(
-            "forensics.lifecycle event=drain-observed-unrecorded instance={} error={error}",
-            lifecycle.instance
-        );
+    if let (Some(lifecycle), Some(fresh)) = (lifecycle, fresh) {
+        let observation_needed = if fresh.observed != "draining" {
+            true
+        } else {
+            match lifecycle_observation_needed(lifecycle, &fresh) {
+                Ok(needed) => needed,
+                Err(error) => {
+                    eprintln!(
+                        "forensics.lifecycle event=drain-observation-pending-unreadable instance={} error={error}",
+                        lifecycle.instance
+                    );
+                    false
+                }
+            }
+        };
+        if observation_needed
+            && let Err(error) = lifecycle.store.record_lifecycle_observed(
+                &lifecycle.instance,
+                "draining",
+                fresh.version,
+            )
+        {
+            // A version conflict cannot surface here: it converges inside the
+            // store call. Only IO and missing-row failures land here.
+            eprintln!(
+                "forensics.lifecycle event=drain-observed-unrecorded instance={} error={error}",
+                lifecycle.instance
+            );
+        }
     }
+}
+
+fn lifecycle_observation_needed(
+    lifecycle: &ActiveLifecycle,
+    fresh: &velnor_control::lifecycle::LifecycleState,
+) -> anyhow::Result<bool> {
+    if fresh.observed != fresh.desired {
+        return Ok(true);
+    }
+    lifecycle
+        .store
+        .lifecycle_operation_pending(&lifecycle.instance, &fresh.desired, fresh.version)
+        .map_err(|error| anyhow::anyhow!("read pending lifecycle observation: {error}"))
+}
+
+/// Reconcile lifecycle desired state into the local admission boundary before
+/// any permit or waiter decision. The durable store is the source of truth;
+/// the journal marker is the crash-safe actuator consumed by slot processes.
+/// Unknown desired states fail closed instead of being accepted as inert
+/// metadata.
+fn reconcile_lifecycle_admission(
+    journal: &mut Journal,
+    lifecycle: Option<&ActiveLifecycle>,
+) -> anyhow::Result<()> {
+    let Some(lifecycle) = lifecycle else {
+        return Ok(());
+    };
+    // Decode the complete journal before touching either durable marker. A
+    // malformed admission/drain value is a fail-closed state, not something
+    // a later `ready` observation may silently delete.
+    let state = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("read lifecycle admission state: {error}"))?;
+    let fresh = lifecycle
+        .service
+        .desired_fresh(&lifecycle.instance)
+        .map_err(|error| anyhow::anyhow!("read lifecycle desired state: {error}"))?;
+    let observation_needed = lifecycle_observation_needed(lifecycle, &fresh)?;
+    match fresh.desired.as_str() {
+        "ready" => {
+            journal
+                .clear_admission_blocked_if(
+                    state.admission_blocked.then_some(state.admission_version),
+                )
+                .map_err(|error| anyhow::anyhow!("clear lifecycle admission fence: {error}"))?;
+            if observation_needed
+                && let Err(error) = lifecycle.store.record_lifecycle_observed(
+                    &lifecycle.instance,
+                    "ready",
+                    fresh.version,
+                )
+            {
+                eprintln!(
+                    "forensics.lifecycle event=ready-observed-unrecorded instance={} error={error}",
+                    lifecycle.instance
+                );
+            }
+        }
+        "cordoned" => {
+            journal
+                .set_admission_blocked(fresh.version)
+                .map_err(|error| anyhow::anyhow!("set lifecycle admission fence: {error}"))?;
+            if observation_needed
+                && let Err(error) = lifecycle.store.record_lifecycle_observed(
+                    &lifecycle.instance,
+                    "cordoned",
+                    fresh.version,
+                )
+            {
+                eprintln!(
+                    "forensics.lifecycle event=cordon-observed-unrecorded instance={} error={error}",
+                    lifecycle.instance
+                );
+            }
+        }
+        "draining" => {
+            // `should_drain` normally catches this at the loop edge. This
+            // second check closes the race where a Drain arrives after that
+            // edge but before this cycle's permit reconciliation.
+            if !state.drain_active {
+                journal
+                    .set_drain(fresh.version)
+                    .map_err(|error| anyhow::anyhow!("latch lifecycle drain: {error}"))?;
+            }
+        }
+        other => {
+            anyhow::bail!(
+                "unsupported durable lifecycle desired state {other:?}; admission remains fenced"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Stop controller-owned slots, waiters, and stale job workers when the daemon
@@ -743,15 +834,19 @@ async fn drain_children(
     // Ready-slot broker waiters and real job workers share the `jobs` map.
     // Waiters have no durable job yet and must exit during a daemon drain;
     // active workers must survive so an upgrade cannot lose in-flight work.
-    let active_job_ids: HashSet<String> = journal
-        .materialized_state()?
-        .jobs
-        .into_iter()
+    let active_jobs = journal.materialized_state()?.jobs;
+    let active_job_ids: HashSet<String> = active_jobs
+        .iter()
         .filter(|job| job.phase.occupies_slot())
-        .map(|job| job.job_id.0)
+        .map(|job| job.job_id.0.clone())
+        .collect();
+    let active_slot_ids: HashSet<String> = active_jobs
+        .iter()
+        .filter(|job| job.phase.occupies_slot())
+        .map(|job| job.slot_id.0.clone())
         .collect();
     for (job_id, child) in jobs.iter() {
-        if is_drainable_job(job_id, &active_job_ids) {
+        if is_drainable_job(job_id, &active_job_ids, &active_slot_ids) {
             request_child_shutdown(child)?;
         }
     }
@@ -759,11 +854,11 @@ async fn drain_children(
     let mut escalated = false;
     loop {
         reap_draining(slots, "slot")?;
-        reap_draining_jobs(jobs, &active_job_ids)?;
+        reap_draining_jobs(jobs, &active_job_ids, &active_slot_ids)?;
         if slots.is_empty()
             && jobs
                 .keys()
-                .all(|job_id| !is_drainable_job(job_id, &active_job_ids))
+                .all(|job_id| !is_drainable_job(job_id, &active_job_ids, &active_slot_ids))
         {
             return Ok(());
         }
@@ -774,12 +869,14 @@ async fn drain_children(
                     slots.len()
                         + jobs
                             .keys()
-                            .filter(|job_id| is_drainable_job(job_id, &active_job_ids))
+                            .filter(|job_id| {
+                                is_drainable_job(job_id, &active_job_ids, &active_slot_ids)
+                            })
                             .count()
                 );
             }
             kill_draining(slots, "slot")?;
-            kill_draining_jobs(jobs, &active_job_ids)?;
+            kill_draining_jobs(jobs, &active_job_ids, &active_slot_ids)?;
             eprintln!("controller child drain escalated to SIGKILL");
             escalated = true;
             deadline = Instant::now() + CONTROLLER_CHILD_DRAIN_TIMEOUT;
@@ -788,8 +885,19 @@ async fn drain_children(
     }
 }
 
-fn is_drainable_job(job_id: &str, active_job_ids: &HashSet<String>) -> bool {
-    job_id.starts_with("wait-") || !active_job_ids.contains(job_id)
+fn is_drainable_job(
+    job_id: &str,
+    active_job_ids: &HashSet<String>,
+    active_slot_ids: &HashSet<String>,
+) -> bool {
+    // A waiter process keeps its `wait-<slot>` key after it promotes itself to
+    // a real job. Preserve that handle when its slot has durable in-flight
+    // work; killing every `wait-*` key was the drain-time duplicate/lost-job
+    // race.
+    if let Some(slot_id) = job_id.strip_prefix("wait-") {
+        return !active_slot_ids.contains(slot_id);
+    }
+    !active_job_ids.contains(job_id)
 }
 
 fn request_child_shutdown(child: &Child) -> anyhow::Result<()> {
@@ -832,6 +940,7 @@ async fn reconcile_once(
     last_outbox_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
     metrics: &MetricsPublisher,
+    lifecycle: Option<&ActiveLifecycle>,
 ) -> anyhow::Result<LocalCycle> {
     let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
     let total = args.desired_ready;
@@ -842,12 +951,12 @@ async fn reconcile_once(
     // needs repair. On controller restart the child handle is gone, so the
     // heartbeat is the only fresh local proof that prevents a double spawn.
     ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
+    reconcile_lifecycle_admission(journal, lifecycle)?;
     let state = journal.materialized_state()?;
-    // Unified drain (flag-gated, default off): the loop top already exits on
-    // drain, so this only closes the race where another process latches the
-    // marker after this cycle's check. No new permits while draining; the
-    // reducer would reject them anyway.
-    let permits_gated = crate::runner::journal_drain_enabled() && state.drain_active;
+    // The loop top exits on drain, so this closes the race where another
+    // process latches the marker after this cycle's check. No new permits
+    // while draining; the reducer rejects them too.
+    let permits_gated = state.drain_active || state.admission_blocked;
     for index in 1..=total {
         if permits_gated {
             continue;
@@ -865,14 +974,19 @@ async fn reconcile_once(
             generation,
             SLOT_HEARTBEAT_MAX_AGE,
         );
-        if heartbeat_fresh {
+        let acting = slot_is_acting(&args.state_dir, &state, jobs, &id, generation);
+        // A leftover deadline from before/during a job must not fire the
+        // instant the journal row is gone. The waiter is still the broker
+        // actor; fencing the supervisor while that waiter lives splits
+        // GitHub's view from the journal and then `child_owns_slot` blocks
+        // the only generation-recovery path.
+        if heartbeat_fresh || acting {
             startup_deadlines.remove(&id.0);
         } else if args.spawn_slots
             && !fenced
-            && !admission_blocked
             && stale_slot_deadline_reached(args, slot, &id, startup_deadlines, Instant::now())
         {
-            fence_stale_slot_actor(args, journal, slots, &id, generation).await?;
+            fence_stale_slot_actor(args, journal, slots, jobs, &id, generation).await?;
             startup_deadlines.remove(&id.0);
             continue;
         }
@@ -880,9 +994,11 @@ async fn reconcile_once(
             // Proof: `fenced` is `slot.is_some_and(...)`, so `slot` is `Some`
             // in this arm.
             #[allow(clippy::expect_used, reason = "fenced implies slot is Some")]
-            terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
+            terminate_fenced_slot_actor(args, slots, jobs, &state, &id, slot.expect("fenced slot"))
+                .await?;
         }
-        let fenced_generation = fenced_slot_recovery_generation(slot, &state, jobs);
+        let fenced_generation =
+            fenced_slot_recovery_generation(slot, &args.state_dir, &state, jobs);
         let generation = fenced_generation.unwrap_or(generation);
         let process_alive = heartbeat_fresh;
         if fenced && fenced_generation.is_none() {
@@ -890,7 +1006,7 @@ async fn reconcile_once(
         }
         if fenced_generation.is_none()
             && (admission_blocked
-                || child_owns_slot(&state, jobs, &id)
+                || child_owns_slot(&args.state_dir, &state, jobs, &id, generation)
                 || !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive))
         {
             continue;
@@ -1684,10 +1800,14 @@ fn spawn_ready_waiters(
     journal: &Journal,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
-    if load_exec_config(&args.state_dir).is_err() {
+    let Ok(exec) = load_exec_config(&args.state_dir) else {
+        return Ok(());
+    };
+    let state = journal.materialized_state()?;
+    if state.admission_blocked || state.drain_active {
+        stop_idle_waiters(jobs, &state)?;
         return Ok(());
     }
-    let state = journal.materialized_state()?;
     for slot in &state.slots {
         if slot.phase != SlotPhase2::Ready {
             continue;
@@ -1698,6 +1818,26 @@ fn spawn_ready_waiters(
             .any(|job| job.slot_id == slot.slot_id && job.phase.occupies_slot())
         {
             continue;
+        }
+        // Journal Ready is not physical idleness. A live waiter, a persisted
+        // waiter pid after controller restart, or an in-flight lease whose
+        // containers are still tearing down must keep this slot unspawnable.
+        if child_owns_slot(
+            &args.state_dir,
+            &state,
+            jobs,
+            &slot.slot_id,
+            slot.generation,
+        ) {
+            continue;
+        }
+        match recovery_slot_config_dir(&args.state_dir, &exec, &state, &slot.slot_id) {
+            Ok(slot_dir) => {
+                if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
+                    continue;
+                }
+            }
+            Err(_) => continue,
         }
         let waiter_id = format!("wait-{}", slot.slot_id.0);
         if jobs.contains_key(&waiter_id) {
@@ -1711,6 +1851,30 @@ fn spawn_ready_waiters(
             slot.generation.0,
             Some(&slot.slot_id),
         )?;
+    }
+    Ok(())
+}
+
+/// Stop only broker waiters that have not promoted into durable job work.
+/// Waiter processes retain their `wait-<slot>` key while executing a job, so
+/// the slot's active journal row is the authority for preserving that child.
+fn stop_idle_waiters(
+    jobs: &mut HashMap<String, Child>,
+    state: &velnor_control::journal::FleetState,
+) -> anyhow::Result<()> {
+    let active_slots: HashSet<&SlotId> = state
+        .jobs
+        .iter()
+        .filter(|job| job.phase.occupies_slot())
+        .map(|job| &job.slot_id)
+        .collect();
+    for (job_id, child) in jobs.iter() {
+        let Some(slot_id) = job_id.strip_prefix("wait-") else {
+            continue;
+        };
+        if !active_slots.iter().any(|active| active.0 == slot_id) {
+            request_child_shutdown(child)?;
+        }
     }
     Ok(())
 }
@@ -2406,12 +2570,13 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
 
 fn fenced_slot_recovery_generation(
     slot: Option<&SlotRecord>,
+    state_dir: &Path,
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
 ) -> Option<Generation> {
     let slot = slot.filter(|slot| slot.phase == SlotPhase2::Fenced)?;
     if slot_has_admission_block(state, &slot.slot_id, slot.generation)
-        || child_owns_slot(state, jobs, &slot.slot_id)
+        || child_owns_slot(state_dir, state, jobs, &slot.slot_id, slot.generation)
     {
         return None;
     }
@@ -2423,10 +2588,12 @@ fn slot_has_admission_block(
     slot_id: &SlotId,
     generation: Generation,
 ) -> bool {
-    state
-        .jobs
-        .iter()
-        .any(|job| job.slot_id == *slot_id && job.phase.occupies_slot())
+    state.admission_blocked
+        || state.drain_active
+        || state
+            .jobs
+            .iter()
+            .any(|job| job.slot_id == *slot_id && job.phase.occupies_slot())
         || state
             .outbox
             .iter()
@@ -2434,71 +2601,117 @@ fn slot_has_admission_block(
 }
 
 fn child_owns_slot(
+    state_dir: &Path,
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
+    generation: Generation,
 ) -> bool {
     let waiter_id = format!("wait-{}", slot_id.0);
-    jobs.contains_key(&waiter_id)
-        || state
-            .jobs
-            .iter()
-            .any(|job| job.slot_id == *slot_id && jobs.contains_key(&job.job_id.0))
+    if jobs.contains_key(&waiter_id) {
+        return true;
+    }
+    if state
+        .jobs
+        .iter()
+        .any(|job| job.slot_id == *slot_id && jobs.contains_key(&job.job_id.0))
+    {
+        return true;
+    }
+    // Persisted ownership survives controller restart while the process lives.
+    if cleanup::read_owned_pid(state_dir, &waiter_id, generation.0).is_some_and(prove::pid_is_alive)
+    {
+        return true;
+    }
+    state.jobs.iter().any(|job| {
+        job.slot_id == *slot_id
+            && job.generation == generation
+            && cleanup::read_owned_pid(state_dir, &job.job_id.0, generation.0)
+                .is_some_and(prove::pid_is_alive)
+    })
+}
+
+/// Journal work or a live waiter/worker means the slot is still acting.
+/// Supervisor-heartbeat stale must not fence through that window: the waiter
+/// is what GitHub talks to, and leaving it up after `SlotStale` deadlocks
+/// generation recovery.
+fn slot_is_acting(
+    state_dir: &Path,
+    state: &velnor_control::journal::FleetState,
+    jobs: &HashMap<String, Child>,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    slot_has_admission_block(state, slot_id, generation)
+        || child_owns_slot(state_dir, state, jobs, slot_id, generation)
+}
+
+async fn reap_supervised_child(
+    children: &mut HashMap<String, Child>,
+    key: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    if !children.contains_key(key) {
+        return Ok(());
+    }
+    // Proof: the `contains_key` guard above holds with no `await` between
+    // it and this lookup (shutdown is synchronous), so the entry is `Some`.
+    #[allow(clippy::expect_used, reason = "contains_key just proved presence")]
+    request_child_shutdown(children.get(key).expect("child still present"))?;
+    let mut deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+    let mut escalated = false;
+    loop {
+        // Proof: `children` is exclusively borrowed, so no other task can
+        // remove the entry; the loop's only `remove` returns immediately,
+        // so the entry is present on every iteration.
+        #[allow(clippy::expect_used, reason = "child retained until reap")]
+        if children
+            .get_mut(key)
+            .expect("child retained until reap")
+            .try_wait()?
+            .is_some()
+        {
+            children.remove(key);
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            if escalated {
+                anyhow::bail!("{label} failed to reap after SIGKILL; handle retained");
+            }
+            // Proof: same as above — exclusive borrow plus remove-then-return
+            // means the entry is present on every loop iteration.
+            #[allow(clippy::expect_used, reason = "child retained until escalation")]
+            children
+                .get_mut(key)
+                .expect("child retained until escalation")
+                .kill()
+                .map_err(|error| {
+                    anyhow::anyhow!("{label} SIGKILL escalation failed; handle retained: {error}")
+                })?;
+            eprintln!("{label} shutdown escalated to SIGKILL");
+            escalated = true;
+            deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn terminate_fenced_slot_actor(
     args: &ControllerArgs,
     slots: &mut HashMap<String, Child>,
+    jobs: &mut HashMap<String, Child>,
+    state: &velnor_control::journal::FleetState,
     slot_id: &SlotId,
     slot: &SlotRecord,
 ) -> anyhow::Result<()> {
-    if slots.contains_key(&slot_id.0) {
-        // Proof: the `contains_key` guard above holds with no `await` between
-        // it and this lookup (shutdown is synchronous), so the entry is `Some`.
-        #[allow(clippy::expect_used, reason = "contains_key just proved presence")]
-        request_child_shutdown(slots.get(&slot_id.0).expect("child still present"))?;
-        let mut deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
-        let mut escalated = false;
-        loop {
-            // Proof: `slots` is exclusively borrowed, so no other task can
-            // remove the entry; the loop's only `remove` returns immediately,
-            // so the entry is present on every iteration.
-            #[allow(clippy::expect_used, reason = "child retained until reap")]
-            if slots
-                .get_mut(&slot_id.0)
-                .expect("child retained until reap")
-                .try_wait()?
-                .is_some()
-            {
-                slots.remove(&slot_id.0);
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                if escalated {
-                    anyhow::bail!(
-                        "fenced slot {:?} child failed to reap after SIGKILL; handle retained",
-                        slot_id
-                    );
-                }
-                // Proof: same as above — exclusive borrow plus remove-then-return
-                // means the entry is present on every loop iteration.
-                #[allow(clippy::expect_used, reason = "child retained until escalation")]
-                slots
-                    .get_mut(&slot_id.0)
-                    .expect("child retained until escalation")
-                    .kill()
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "fenced slot {:?} SIGKILL escalation failed; handle retained: {error}",
-                            slot_id
-                        )
-                    })?;
-                eprintln!("fenced slot {:?} shutdown escalated to SIGKILL", slot_id);
-                escalated = true;
-                deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+    reap_supervised_child(slots, &slot_id.0, &format!("fenced slot {:?}", slot_id)).await?;
+    for key in job_child_keys_for_slot(jobs, state, slot_id) {
+        reap_supervised_child(
+            jobs,
+            &key,
+            &format!("fenced slot {:?} child {key}", slot_id),
+        )
+        .await?;
     }
 
     let Some(pid) = slot.pid else {
@@ -2575,6 +2788,7 @@ async fn fence_stale_slot_actor(
     args: &ControllerArgs,
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
+    jobs: &mut HashMap<String, Child>,
     id: &SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
@@ -2585,15 +2799,16 @@ async fn fence_stale_slot_actor(
     if outcome.rejected {
         return Ok(());
     }
-    let slot = journal
-        .materialized_state()?
+    let state = journal.materialized_state()?;
+    let slot = state
         .slots
-        .into_iter()
+        .iter()
         .find(|slot| {
             slot.slot_id == *id && slot.generation == generation && slot.phase == SlotPhase2::Fenced
         })
+        .cloned()
         .ok_or_else(|| anyhow::anyhow!("stale slot {id:?} was not fenced"))?;
-    terminate_fenced_slot_actor(args, slots, id, &slot).await
+    terminate_fenced_slot_actor(args, slots, jobs, &state, id, &slot).await
 }
 
 fn permit_needs_reconciliation(
@@ -2680,7 +2895,7 @@ fn maybe_spawn_slot(
     {
         return Ok(());
     }
-    let exe = std::env::current_exe()?;
+    let exe = crate::service::node_service_executable()?;
     let index = slot_index_from_id(slot_id);
     let child = Command::new(exe)
         .arg("slot")
@@ -2730,7 +2945,7 @@ fn maybe_spawn_job(
     {
         return Ok(());
     }
-    let exe = std::env::current_exe()?;
+    let exe = crate::service::node_service_executable()?;
     let slot_index = slot_index_from_id(&slot_id);
     let child = Command::new(exe)
         .arg("job")
@@ -2812,10 +3027,11 @@ fn kill_draining(children: &mut HashMap<String, Child>, kind: &str) -> anyhow::R
 fn reap_draining_jobs(
     jobs: &mut HashMap<String, Child>,
     active_job_ids: &HashSet<String>,
+    active_slot_ids: &HashSet<String>,
 ) -> anyhow::Result<()> {
     let mut dead = Vec::new();
     for (job_id, child) in jobs.iter_mut() {
-        if !is_drainable_job(job_id, active_job_ids) {
+        if !is_drainable_job(job_id, active_job_ids, active_slot_ids) {
             continue;
         }
         if child
@@ -2839,10 +3055,11 @@ fn reap_draining_jobs(
 fn kill_draining_jobs(
     jobs: &mut HashMap<String, Child>,
     active_job_ids: &HashSet<String>,
+    active_slot_ids: &HashSet<String>,
 ) -> anyhow::Result<()> {
     for (job_id, child) in jobs
         .iter_mut()
-        .filter(|(job_id, _)| is_drainable_job(job_id, active_job_ids))
+        .filter(|(job_id, _)| is_drainable_job(job_id, active_job_ids, active_slot_ids))
     {
         child.kill().map_err(|error| {
             anyhow::anyhow!(
@@ -2859,7 +3076,7 @@ fn kill_draining_jobs(
 /// `lifecycle` carries the operational-store handle plus the explicit
 /// lifecycle ledger slug. That slug is the hostname-derived daemon slug and
 /// differs from `scope` (the slot-id prefix); the daemon maps both at its
-/// call site. `None` (or flag off) drains on latch plus journal only.
+/// call site. `None` drains on the signal latch plus journal marker only.
 pub async fn supervise_from_daemon(
     state_dir: PathBuf,
     scope: String,
@@ -3266,9 +3483,11 @@ mod tests {
         ]);
         let state = journal.materialized_state().unwrap();
         assert!(child_owns_slot(
+            &dir,
             &state,
             &jobs,
-            &SlotId("velnor-1".to_owned())
+            &SlotId("velnor-1".to_owned()),
+            Generation::INITIAL,
         ));
         assert_eq!(
             job_child_keys_for_slot(&jobs, &state, &SlotId("velnor-1".to_owned())),
@@ -3280,7 +3499,14 @@ mod tests {
             .await
             .unwrap();
         let active_preserved = jobs.get_mut("job-1").unwrap().try_wait().unwrap().is_none();
-        let only_active_handle_remains = jobs.len() == 1 && jobs.contains_key("job-1");
+        let waiter_preserved = jobs
+            .get_mut("wait-velnor-1")
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none();
+        let active_handles_remain =
+            jobs.len() == 2 && jobs.contains_key("job-1") && jobs.contains_key("wait-velnor-1");
         for child in jobs.values_mut() {
             let _ = child.kill();
             let _ = child.wait();
@@ -3289,7 +3515,8 @@ mod tests {
         assert!(started.elapsed() < CONTROLLER_CHILD_DRAIN_TIMEOUT);
         assert!(slots.is_empty());
         assert!(active_preserved);
-        assert!(only_active_handle_remains);
+        assert!(waiter_preserved);
+        assert!(active_handles_remain);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3346,6 +3573,136 @@ mod tests {
         };
         assert!(!should_drain(false, &fresh_journal, Some(&missing)));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_cordon_and_resume_reconcile_the_durable_admission_fence() {
+        use velnor_control::ports::{MutationKind, MutationPort, MutationRequest};
+
+        let dir = metrics_test_dir("lifecycle-admission");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        prime_registered_slot(&mut journal);
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: SlotId("velnor-1".to_owned()),
+                    generation: Generation::INITIAL,
+                })
+                .unwrap()
+                .rejected
+        );
+        let lifecycle = drain_test_lifecycle(&dir, "primary", MutationKind::Cordon);
+
+        reconcile_lifecycle_admission(&mut journal, Some(&lifecycle)).unwrap();
+        let fenced = journal.materialized_state().unwrap();
+        assert!(fenced.admission_blocked);
+        assert_eq!(fenced.advertised_capacity(), 0);
+        let observed = lifecycle
+            .store
+            .lifecycle_instance("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.desired_state, "cordoned");
+        assert_eq!(observed.observed_state, "cordoned");
+
+        // A repeated Cordon is a new accepted operation even though the
+        // projection is already cordoned. Reconciliation must observe it so
+        // the operation cannot remain accepted forever.
+        let repeated = lifecycle
+            .service
+            .mutate(MutationRequest {
+                kind: MutationKind::Cordon,
+                target: "primary".to_owned(),
+                reason: "repeat cordon test".to_owned(),
+                idempotency_key: "repeat-cordon-admission-test".to_owned(),
+                expected_version: Some(observed.resource_version),
+                scale_to: None,
+            })
+            .unwrap();
+        reconcile_lifecycle_admission(&mut journal, Some(&lifecycle)).unwrap();
+        let repeated_phase: String = rusqlite::Connection::open(dir.join("state.db"))
+            .unwrap()
+            .query_row(
+                "SELECT phase FROM lifecycle_operations WHERE operation_id = ?1",
+                [repeated.operation_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repeated_phase, "completed");
+
+        let fresh = lifecycle.service.desired_fresh("primary").unwrap();
+        lifecycle
+            .service
+            .mutate(MutationRequest {
+                kind: MutationKind::Resume,
+                target: "primary".to_owned(),
+                reason: "resume test".to_owned(),
+                idempotency_key: "resume-admission-test".to_owned(),
+                expected_version: Some(fresh.version),
+                scale_to: None,
+            })
+            .unwrap();
+        reconcile_lifecycle_admission(&mut journal, Some(&lifecycle)).unwrap();
+        let resumed = journal.materialized_state().unwrap();
+        assert!(!resumed.admission_blocked);
+        assert_eq!(resumed.advertised_capacity(), 1);
+        let observed = lifecycle
+            .store
+            .lifecycle_instance("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.desired_state, "ready");
+        assert_eq!(observed.observed_state, "ready");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_reconcile_does_not_clear_a_corrupt_admission_marker() {
+        use velnor_control::ports::MutationKind;
+
+        let dir = metrics_test_dir("lifecycle-admission-corrupt");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        journal.set_admission_blocked(4).unwrap();
+        let lifecycle = drain_test_lifecycle(&dir, "primary", MutationKind::Uncordon);
+        rusqlite::Connection::open(dir.join("journal.db"))
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = 'corrupt' WHERE key = 'admission'",
+                [],
+            )
+            .unwrap();
+
+        let error = reconcile_lifecycle_admission(&mut journal, Some(&lifecycle))
+            .expect_err("corrupt admission marker must fail closed");
+        assert!(error.to_string().contains("read lifecycle admission state"));
+        let marker: String = rusqlite::Connection::open(dir.join("journal.db"))
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'admission'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "corrupt");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drain_preserves_waiter_handle_when_its_slot_owns_active_work() {
+        let active_jobs = HashSet::from(["job-1".to_owned()]);
+        let active_slots = HashSet::from(["velnor-1".to_owned()]);
+        assert!(!is_drainable_job(
+            "wait-velnor-1",
+            &active_jobs,
+            &active_slots
+        ));
+        assert!(is_drainable_job(
+            "wait-velnor-2",
+            &active_jobs,
+            &active_slots
+        ));
+        assert!(!is_drainable_job("job-1", &active_jobs, &active_slots));
+        assert!(is_drainable_job("job-2", &active_jobs, &active_slots));
     }
 
     #[test]
@@ -3484,6 +3841,7 @@ mod tests {
             &mut last_outbox_reconcile,
             &mut pacing,
             &metrics,
+            None,
         )
         .await
         .unwrap();
@@ -3618,23 +3976,135 @@ mod tests {
 
     #[test]
     fn fenced_slot_reconciliation_advances_generation() {
+        let dir = metrics_test_dir("fenced-recovery");
         let mut slot = reserved_slot();
         let state = FleetState::default();
         let children = HashMap::new();
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &state, &children),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &children),
             None
         );
 
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &state, &children),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &children),
             Some(Generation(slot.generation.0 + 1))
         );
         assert_eq!(
-            fenced_slot_recovery_generation(None, &state, &children),
+            fenced_slot_recovery_generation(None, &dir, &state, &children),
             None
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_live_waiter_is_an_acting_slot_and_blocks_fenced_recovery() {
+        let dir = metrics_test_dir("live-waiter-in-memory");
+        let mut slot = reserved_slot();
+        slot.phase = SlotPhase2::Ready;
+        let state = FleetState::default();
+        let waiter = Command::new("sleep").arg("5").spawn().unwrap();
+        let mut jobs = HashMap::from([(String::from("wait-velnor-1"), waiter)]);
+
+        assert!(slot_is_acting(
+            &dir,
+            &state,
+            &jobs,
+            &slot.slot_id,
+            slot.generation
+        ));
+        slot.phase = SlotPhase2::Fenced;
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            None,
+            "a live waiter must not be skipped: it is why generation recovery deadlocks"
+        );
+
+        let _ = jobs.get_mut("wait-velnor-1").unwrap().kill();
+        let _ = jobs.get_mut("wait-velnor-1").unwrap().wait();
+        jobs.remove("wait-velnor-1");
+        assert!(!slot_is_acting(
+            &dir,
+            &state,
+            &jobs,
+            &slot.slot_id,
+            slot.generation
+        ));
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            Some(Generation(slot.generation.0 + 1))
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn persisted_live_waiter_pid_blocks_acting_slot_after_controller_restart() {
+        let dir = metrics_test_dir("persisted-waiter-restart");
+        let mut slot = reserved_slot();
+        let state = FleetState::default();
+        let jobs = HashMap::<String, Child>::new();
+        let mut waiter = Command::new("sleep").arg("30").spawn().unwrap();
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", slot.generation.0, waiter.id()).unwrap();
+
+        assert!(
+            slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation),
+            "persisted waiter pid must count as acting with an empty jobs map"
+        );
+        slot.phase = SlotPhase2::Fenced;
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            None,
+            "fencing must stay blocked while the persisted waiter pid is live"
+        );
+
+        let _ = waiter.kill();
+        let _ = waiter.wait();
+        assert!(
+            !slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation),
+            "dead persisted waiter must no longer block acting"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fencing_terminates_the_waiter_so_generation_can_advance() {
+        let dir = metrics_test_dir("fence-waiter");
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut slot = reserved_slot();
+        slot.phase = SlotPhase2::Fenced;
+        let state = FleetState::default();
+        let mut slots = HashMap::new();
+        let mut jobs = HashMap::from([(
+            String::from("wait-velnor-1"),
+            Command::new("sleep").arg("30").spawn().unwrap(),
+        )]);
+        let waiter_pid = jobs.get("wait-velnor-1").unwrap().id();
+
+        terminate_fenced_slot_actor(&args, &mut slots, &mut jobs, &state, &slot.slot_id, &slot)
+            .await
+            .unwrap();
+
+        assert!(
+            !jobs.contains_key("wait-velnor-1"),
+            "fenced recovery must reap the waiter that would block the next generation"
+        );
+        assert!(
+            !prove::pid_is_alive(waiter_pid),
+            "the waiter process itself must be gone, not just dropped from the map"
+        );
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            Some(Generation(slot.generation.0 + 1))
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -3861,6 +4331,54 @@ mod tests {
         )
         .unwrap();
         (dir, journal, slot_dir)
+    }
+
+    #[test]
+    fn ready_waiters_are_not_spawned_while_an_in_flight_lease_exists() {
+        let (dir, journal, _slot_dir) = marker_only_recovery_fixture("ready-waiter-in-flight");
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut jobs = HashMap::new();
+        spawn_ready_waiters(&args, &journal, &mut jobs).unwrap();
+        assert!(
+            jobs.is_empty(),
+            "an in-flight lease is physical occupancy; Ready is not enough to spawn"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_waiters_are_not_spawned_while_a_persisted_waiter_pid_lives() {
+        let dir = metrics_test_dir("ready-waiter-live-pid");
+        let journal = ready_slot_journal(&dir);
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 1).unwrap();
+        let mut waiter = Command::new("sleep").arg("30").spawn().unwrap();
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, waiter.id())
+            .unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut jobs = HashMap::new();
+        spawn_ready_waiters(&args, &journal, &mut jobs).unwrap();
+        assert!(
+            jobs.is_empty(),
+            "a live waiter pid after controller restart must keep the slot unspawnable"
+        );
+        let _ = waiter.kill();
+        let _ = waiter.wait();
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn stale_pid() -> u32 {

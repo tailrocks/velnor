@@ -1,7 +1,4 @@
-//! Lifecycle drain unification with `VELNOR_JOURNAL_DRAIN=1`.
-//!
-//! Every test enables the flag explicitly (same value, so no races), which
-//! makes this binary robust whether the suite runs with the flag on or off.
+//! Lifecycle drain unification through the durable operational store.
 
 #![allow(
     clippy::unwrap_used,
@@ -20,10 +17,6 @@ use velnor_control::lifecycle::LifecycleService;
 use velnor_control::ports::{MutationKind, MutationPort, MutationRequest};
 use velnor_control::store::Store;
 use velnor_runner::node::{run_controller, ControllerArgs, ControllerLifecycle};
-
-fn enable_flag() {
-    unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
-}
 
 fn scratch(label: &str) -> std::path::PathBuf {
     let unique = std::time::SystemTime::now()
@@ -57,7 +50,6 @@ fn drain_mutation(store: &Arc<Store>, slug: &str) {
 /// exactly once, and exit without reserving permits.
 #[tokio::test]
 async fn controller_drains_on_fresh_desired_draining() {
-    enable_flag();
     let dir = scratch("desired");
     let store = Arc::new(Store::open(dir.join("state.db")).unwrap());
     drain_mutation(&store, "primary");
@@ -92,7 +84,6 @@ async fn controller_drains_on_fresh_desired_draining() {
 /// through the journal leg alone: no ledger, no rewrite, no permits.
 #[tokio::test]
 async fn controller_exits_on_latched_journal_marker_without_ledger() {
-    enable_flag();
     let dir = scratch("marker");
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     assert!(journal.set_drain(9).unwrap());

@@ -44,7 +44,8 @@ use crate::{
     execution::condition_is_statically_false,
     executor::{
         BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
-        ProcessCommandRunner, StepLog, StepStartEvent, STEP_PUBLISH_CHANNEL_CAPACITY,
+        ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
+        STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -146,7 +147,7 @@ const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
 /// admission's share of the control-plane blocking pool, so slow upstream
 /// fetches can never starve retention, teardown joins or Docker sweeps.
 /// Callers wait for a slot; they are never rejected for want of one.
-const ACTION_ADMISSION_CONCURRENCY: usize = 4;
+const ACTION_ADMISSION_CONCURRENCY: usize = 8;
 static ACTION_ADMISSION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// SQLite admission is already serialised by `Store`'s connection mutex, WAL
 /// and `busy_timeout`, and the control-plane blocking pool is explicitly
@@ -217,10 +218,22 @@ fn action_admission_limiter() -> Arc<Semaphore> {
 }
 
 /// Wait — never fail — for one of the bounded read-only admission slots.
+async fn wait_for_action_admission_slot() -> (tokio::sync::OwnedSemaphorePermit, Duration) {
+    let started = Instant::now();
+    #[allow(clippy::expect_used, reason = "static semaphore is never closed")]
+    let permit = action_admission_limiter()
+        .acquire_owned()
+        .await
+        .expect("the action admission limiter is never closed");
+    (permit, started.elapsed())
+}
+
+/// Bounded wait helper exercised by the action-admission limiter tests.
 ///
 /// Returns the permit and how long the caller waited. `Err` carries the wait
 /// that exhausted the budget, which is a bounded, explainable deadline rather
 /// than the old "a neighbour is busy, fail this job" rejection.
+#[cfg(test)]
 async fn acquire_action_admission_slot(
     budget: Duration,
 ) -> std::result::Result<(tokio::sync::OwnedSemaphorePermit, Duration), Duration> {
@@ -865,33 +878,38 @@ fn persist_in_flight_job(
         billing_owner_id: run_service_job.billing_owner_id.clone(),
     };
     let path = in_flight_job_path(config_dir);
-    let temporary = path.with_file_name(format!(
-        "in-flight-job.json.tmp-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
     let bytes = serde_json::to_vec_pretty(&record).context("serialize in-flight job")?;
-    let result = (|| -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        file.write_all(&bytes)
-            .with_context(|| format!("write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", temporary.display()))?;
-        fs::rename(&temporary, &path)
-            .with_context(|| format!("publish in-flight job lease {}", path.display()))?;
-        sync_directory(path.parent())?;
-        Ok(())
-    })();
-    if result.is_err() {
-        fs::remove_file(&temporary).ok();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    match options.open(&path) {
+        Ok(mut file) => {
+            file.write_all(&bytes)
+                .with_context(|| format!("write {}", path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync {}", path.display()))?;
+            sync_directory(path.parent())?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = load_in_flight_job(config_dir)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "in-flight job lease {} existed then became unreadable",
+                    path.display()
+                )
+            })?;
+            if existing.job_id == job.job_id {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "slot already owns in-flight job {}; refusing to admit {}",
+                existing.job_id,
+                job.job_id
+            );
+        }
+        Err(error) => Err(error).with_context(|| format!("create exclusive {}", path.display())),
     }
-    result
 }
 
 fn sync_directory(path: Option<&Path>) -> Result<()> {
@@ -1031,14 +1049,7 @@ fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
 }
 
 fn job_queue_time(job: &AgentJobRequestMessage) -> Option<&str> {
-    job.queue_time
-        .as_deref()
-        .or_else(|| {
-            job.variables
-                .get("system.queueTime")
-                .and_then(|value| value.value.as_deref())
-        })
-        .filter(|value| !value.trim().is_empty())
+    crate::runtime_env::protocol_job_queue_time(job)
 }
 
 fn job_queue_time_present(job: &AgentJobRequestMessage) -> bool {
@@ -1114,7 +1125,13 @@ pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
         return Ok(false);
     };
     let conclusion = parse_recorded_terminal_conclusion(terminal_conclusion)?;
-    let token = oauth_access_token(stored).await?;
+    let token = match oauth_access_token(stored).await {
+        Ok(token) => token,
+        Err(error) if release_in_flight_after_registration_gone(slot_dir, &error)? => {
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
     let client = RunServiceClient::new(token.token)?;
     let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
     let ctx = RunServiceJobContext {
@@ -1172,7 +1189,13 @@ async fn complete_recorded_in_flight_job_with_failure(
     let Some(record) = load_in_flight_job(slot_dir)? else {
         return Ok(false);
     };
-    let token = oauth_access_token(stored).await?;
+    let token = match oauth_access_token(stored).await {
+        Ok(token) => token,
+        Err(error) if release_in_flight_after_registration_gone(slot_dir, &error)? => {
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
     let client = RunServiceClient::new(token.token)?;
     let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
     let ctx = RunServiceJobContext {
@@ -1186,14 +1209,20 @@ async fn complete_recorded_in_flight_job_with_failure(
         plan_id: record.plan_id,
         job_id: record.job_id.clone(),
     };
-    complete_acquired_job_failure(
+    if let Err(error) = complete_acquired_job_failure(
         &ctx,
         &identity,
         None,
         infrastructure_failure_category,
         reason,
     )
-    .await?;
+    .await
+    {
+        if release_in_flight_after_registration_gone(slot_dir, &error)? {
+            return Ok(true);
+        }
+        return Err(error);
+    }
     cleanup_recorded_in_flight_job(slot_dir)?;
     Ok(true)
 }
@@ -1736,6 +1765,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         args.target_mvp_arm_label,
     );
     validate_linux_only_labels(&labels)?;
+    validate_trusted_label_requires_trusted_scope(&labels, args.trust_scope.as_deref())?;
     platform::validate_arm_label_matches_host(&labels, std::env::consts::ARCH)?;
 
     let pat = if args.dry_run {
@@ -2355,6 +2385,23 @@ fn registration_was_deleted(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<crate::protocol::OAuthRegistrationNotFound>())
 }
 
+/// GitHub already dropped the runner. Local completion cannot reach Run
+/// Service; the in-flight marker is the only leftover that can wedge restart.
+fn release_in_flight_after_registration_gone(
+    slot_dir: &Path,
+    error: &anyhow::Error,
+) -> Result<bool> {
+    if !registration_was_deleted(error) {
+        return Ok(false);
+    }
+    if crate::ops::global().is_some() {
+        cleanup_recorded_in_flight_job(slot_dir)?;
+    } else if recorded_in_flight_job_exists(slot_dir)? {
+        clear_in_flight_job(slot_dir)?;
+    }
+    Ok(true)
+}
+
 pub async fn run(args: RunArgs) -> Result<()> {
     run_with_jit_prewarmer(args, None, RunnerStorageMode::ExplicitLocal).await
 }
@@ -2368,7 +2415,12 @@ enum RunnerStorageMode {
 }
 
 fn daemon_storage_mode(args: &DaemonArgs) -> RunnerStorageMode {
-    if args.url.is_some() && !args.once && !args.dry_run_registration {
+    // Packaged Linux units set VELNOR_STORAGE_ROOT=/var. A long-running
+    // GitHub URL alone is not production: `velnorctl host start` on macOS
+    // is a repository-scoped recovery daemon and must use user-local storage.
+    let packaged_linux = std::env::var_os("VELNOR_STORAGE_ROOT")
+        .is_some_and(|value| Path::new(&value) == Path::new("/var"));
+    if packaged_linux && args.url.is_some() && !args.once && !args.dry_run_registration {
         RunnerStorageMode::SupervisedProduction
     } else {
         RunnerStorageMode::ExplicitLocal
@@ -2424,8 +2476,15 @@ async fn run_with_jit_prewarmer(
     }
 
     // Operational-store open/migration is mandatory before one-shot work.
-    crate::ops::init(instance_slug_for_store())
-        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
+    // On-demand hosts pass the config-dir store; do not fall through to
+    // `/var/lib/velnor/state.db` when that path is known.
+    if let Some(store_path) = args.state_db.clone() {
+        crate::ops::init_at(instance_slug_for_store(), Some(&store_path))
+    } else {
+        crate::ops::init(instance_slug_for_store())
+    }
+    .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
+    let dir = config::config_dir(args.config_dir.clone())?;
     if let Some(sink) = crate::ops::global() {
         sink.emit(
             velnor_model::EventReason::ReadinessReady,
@@ -2434,7 +2493,6 @@ async fn run_with_jit_prewarmer(
         );
     }
 
-    let dir = config::config_dir(args.config_dir.clone())?;
     let storage_layout = select_runner_storage_layout(&dir, storage_mode)?;
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
@@ -2597,16 +2655,6 @@ pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Lifecycle drain unification (steps 1-4), gated by `VELNOR_JOURNAL_DRAIN=1`
-/// and default off. With the flag off every reader below collapses to the
-/// static latch and the pre-unification path is behaviorally identical on
-/// marker-free journals. A latched marker still drains with the flag off
-/// (fail-closed): the flag gates the new signal legs and the edge write,
-/// never the durable marker itself.
-pub(crate) fn journal_drain_enabled() -> bool {
-    std::env::var("VELNOR_JOURNAL_DRAIN").is_ok_and(|value| value == "1")
-}
-
 /// Cached journal-drain reads: one zero-timeout `SELECT` per journal path at
 /// most this often. Poll boundaries tick every ~2s, so a 2s TTL bounds each
 /// boundary to one SQLite open without letting a drain order go stale.
@@ -2616,16 +2664,18 @@ const DRAIN_HINT_TTL: Duration = Duration::from_secs(2);
 /// a daemon owns one journal, and a path switch simply re-reads.
 static DRAIN_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> =
     std::sync::Mutex::new(None);
+/// Last soft-admission verdict. Keep this separate from the hard-drain cache:
+/// a cordon must stop new work without making the daemon exit.
+static ADMISSION_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> =
+    std::sync::Mutex::new(None);
 
 /// Non-blocking journal-drain hint for slot and daemon poll boundaries.
-/// False with the flag off, on any read failure, or when no marker is
-/// latched; never blocks on a writer's lock — or on the cache mutex: a
-/// contended cache degrades to a fresh zero-timeout read (and a skipped
-/// store), which is always safe because the cache is a pure TTL overlay.
+/// True when a drain marker is latched; false when the journal is absent or
+/// has no marker. An existing but unreadable journal fails closed (true),
+/// matching admission. Never blocks on a writer's lock — or on the cache
+/// mutex: a contended cache degrades to a fresh zero-timeout read (and a
+/// skipped store), which is always safe because the cache is a pure TTL overlay.
 pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
-    if !journal_drain_enabled() {
-        return false;
-    }
     let now = Instant::now();
     if let Ok(cache) = DRAIN_HINT_CACHE.try_lock()
         && let Some((path, hint, at)) = cache.as_ref()
@@ -2634,19 +2684,56 @@ pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
     {
         return *hint;
     }
-    let hint =
-        velnor_control::journal::read_drain_state(journal_path).is_some_and(|state| state.active);
+    let hint = match velnor_control::journal::read_drain_state(journal_path) {
+        Ok(state) => state.is_some_and(|state| state.active),
+        Err(_) => journal_path.exists(),
+    };
     if let Ok(mut cache) = DRAIN_HINT_CACHE.try_lock() {
         *cache = Some((journal_path.to_path_buf(), hint, now));
     }
     hint
 }
 
-/// Effective drain signal at a poll boundary: the static signal latch, or
-/// (flag-gated) the cached journal hint. `None` degrades to the latch for
-/// paths that cannot name their journal.
+/// Effective drain signal at a poll boundary: the static signal latch or the
+/// cached journal hint. `None` degrades to the latch for paths that cannot
+/// name their journal.
 pub(crate) fn effective_draining(journal_path: Option<&Path>) -> bool {
     draining() || journal_path.is_some_and(journal_drain_hint)
+}
+
+/// Non-blocking soft-admission hint. An existing but unreadable journal is a
+/// fail-closed fence; a missing journal is the explicit-local/one-shot mode,
+/// which has no lifecycle ledger to consult and therefore remains usable.
+pub(crate) fn journal_admission_blocked_hint(journal_path: &Path) -> bool {
+    let now = Instant::now();
+    if let Ok(cache) = ADMISSION_HINT_CACHE.try_lock()
+        && let Some((path, hint, at)) = cache.as_ref()
+        && path == journal_path
+        && now.duration_since(*at) < DRAIN_HINT_TTL
+    {
+        return *hint;
+    }
+    let hint = if !journal_path.exists() {
+        false
+    } else {
+        match velnor_control::journal::read_admission_state(journal_path) {
+            Ok(state) => state.is_some(),
+            Err(_) => true,
+        }
+    };
+    if let Ok(mut cache) = ADMISSION_HINT_CACHE.try_lock() {
+        *cache = Some((journal_path.to_path_buf(), hint, now));
+    }
+    hint
+}
+
+/// Effective admission fence at a poll boundary. Hard drain includes the
+/// process signal; soft cordon only stops idle admission and lets in-flight
+/// work finish.
+pub(crate) fn effective_capacity_blocked(journal_path: Option<&Path>) -> bool {
+    draining()
+        || journal_path
+            .is_some_and(|path| journal_drain_hint(path) || journal_admission_blocked_hint(path))
 }
 
 /// Best-effort journal path for gates that hold typed daemon args but no
@@ -2658,16 +2745,13 @@ fn daemon_drain_journal(args: &DaemonArgs) -> Option<PathBuf> {
 }
 
 /// Thread the operational store plus the explicit lifecycle ledger slug to
-/// the supervised controller. `None` with the flag off (or when the store
-/// cannot be reopened for supervision): the controller then drains on the
-/// signal latch plus the journal marker only.
+/// the supervised controller. `None` is used only when the store cannot be
+/// reopened for supervision; the controller still drains on the signal latch
+/// plus the journal marker.
 fn controller_lifecycle_for_daemon(
     args: &DaemonArgs,
     sink: &crate::ops::OpsSink,
 ) -> Option<crate::node::controller::ControllerLifecycle> {
-    if !journal_drain_enabled() {
-        return None;
-    }
     let path = args
         .state_db
         .clone()
@@ -2692,6 +2776,9 @@ pub(crate) fn reset_drain_hint_cache_for_tests() {
     // Test-only: a blocking lock is fine here (and must not silently skip
     // the reset). The production path above uses `try_lock` exclusively.
     if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
+        *cache = None;
+    }
+    if let Ok(mut cache) = ADMISSION_HINT_CACHE.lock() {
         *cache = None;
     }
 }
@@ -2779,11 +2866,12 @@ fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
     }
 }
 
-/// Cancel an in-flight acquire when the daemon drains. The journal leg is
+/// Cancel an in-flight acquire when capacity is cordoned or the daemon drains.
+/// The journal leg is
 /// TTL-cached, so this 100ms poll costs one zero-timeout `SELECT` per TTL
 /// window at most.
-async fn wait_for_drain_signal_in(journal_path: Option<&Path>) {
-    while !effective_draining(journal_path) {
+async fn wait_for_capacity_block_signal_in(journal_path: Option<&Path>) {
+    while !effective_capacity_blocked(journal_path) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -2845,7 +2933,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         start_drain_listener(config_base);
     }
 
-    // Journal path for the flag-gated drain leg of the daemon gates below.
+    // Journal path for the durable drain leg of the daemon gates below.
     // `None` (unresolvable config dir) degrades them to the static latch.
     let drain_journal = daemon_drain_journal(&args);
 
@@ -3013,7 +3101,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         let backend = crate::execution::load_execution_file(&config_base, None)
             .ok()
             .map(|file| file.backend());
-        maybe_startup_host_docker_reclaim(backend, &daemon_id);
+        maybe_startup_host_docker_reclaim(backend, &daemon_id, &config_base);
         if let Some(sink) = crate::ops::global() {
             sink.emit(
                 velnor_model::EventReason::GcCompleted,
@@ -3407,7 +3495,7 @@ pub(crate) async fn run_daemon_slot(
         crate::host_capacity::DiskPressure::new(crate::host_capacity::DiskPolicy::default());
     let drain_journal_path = config_base.join("journal.db");
     loop {
-        if slot_action_on_poll(effective_draining(Some(&drain_journal_path)), false)
+        if slot_action_on_poll(effective_capacity_blocked(Some(&drain_journal_path)), false)
             == SlotAction::DeregisterAndExit
         {
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
@@ -3672,11 +3760,10 @@ pub(crate) async fn run_daemon_slot(
         if args.once {
             return Ok(());
         }
-        if slot_action_on_poll(effective_draining(Some(&drain_journal_path)), true)
-            == SlotAction::FinishJobThenExit
-        {
-            let note =
-                format!("slot-{slot_index} cycle {cycle} finished during drain: deregistering");
+        if effective_capacity_blocked(Some(&drain_journal_path)) {
+            let note = format!(
+                "slot-{slot_index} cycle {cycle} finished during capacity fence: deregistering"
+            );
             println!("{note}");
             daemon_forensic_log(&config_base, &note);
             cleanup_failed_daemon_slot(
@@ -4413,13 +4500,12 @@ fn reserve_capacity_permits(config_base: &Path, args: &DaemonArgs, desired: u32)
     std::fs::create_dir_all(config_base)?;
     let mut journal = Journal::open(config_base.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
-    // Unified drain (flag-gated, default off): a draining daemon reserves no
-    // fresh capacity. The reducer would reject the permits anyway.
-    if journal_drain_enabled()
-        && journal
-            .materialized_state()
-            .map(|state| state.drain_active)
-            .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+    // A draining daemon reserves no fresh capacity. The reducer rejects the
+    // same event too, closing the race between this read and the apply.
+    if journal
+        .materialized_state()
+        .map(|state| state.drain_active)
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
     {
         return Ok(());
     }
@@ -4832,10 +4918,12 @@ fn validated_slot_count(slots: usize) -> Result<NonZeroU32> {
 fn maybe_startup_host_docker_reclaim(
     backend: Option<velnor_model::ExecutionBackendKind>,
     daemon_id: &str,
+    config_base: &Path,
 ) {
     maybe_startup_host_docker_reclaim_with(
         backend,
         daemon_id,
+        config_base,
         prune_stale_velnor_docker_resources,
         |id| crate::docker_lease::reclaim_daemon_orphan_jobs(id, crate::docker::client::host_call),
     );
@@ -4844,7 +4932,8 @@ fn maybe_startup_host_docker_reclaim(
 fn maybe_startup_host_docker_reclaim_with(
     backend: Option<velnor_model::ExecutionBackendKind>,
     daemon_id: &str,
-    mut prune: impl FnMut(&str),
+    config_base: &Path,
+    mut prune: impl FnMut(&str, &Path),
     mut reclaim: impl FnMut(&str) -> anyhow::Result<()>,
 ) {
     if let Some(reason) =
@@ -4853,7 +4942,7 @@ fn maybe_startup_host_docker_reclaim_with(
         eprintln!("startup host Docker reclaim skipped: {reason}");
         return;
     }
-    prune(daemon_id);
+    prune(daemon_id, config_base);
     // Reclaim job-id-labelled objects (precreated job environments and
     // their guest siblings) orphaned by the previous drain/restart. Runs
     // before any slot accepts a job, so nothing this boot created can be
@@ -4900,12 +4989,25 @@ fn maybe_startup_host_docker_reclaim_with(
 /// ("all predefined address pools have been fully subnetted"). Pruning on
 /// startup makes a crash self-healing. Best-effort — never fails startup.
 ///
-/// Force-remove. Startup runs before slots accept jobs, so any still-Up
-/// container labelled with this daemon is an orphan from a previous
-/// generation (cancelled run, 401 completion, crash). Non-force `docker rm`
-/// leaves those Up, their networks stay allocated, and the next job fails
-/// with the address-pool error above. Foreign daemons are not in `containers`.
-fn prune_stale_velnor_docker_resources(daemon_id: &str) {
+/// Force-remove orphaned containers. Running containers whose slot still
+/// records an in-flight job (a slot runner survived daemon restart) are
+/// skipped so startup reclaim cannot delete a live job's environment. Any
+/// other still-Up container labelled with this daemon is an orphan from a
+/// previous generation (cancelled run, 401 completion, crash). Non-force
+/// `docker rm` leaves those Up, their networks stay allocated, and the next
+/// job fails with the address-pool error above. Foreign daemons are not in
+/// `containers`.
+fn prune_stale_velnor_docker_resources(daemon_id: &str, config_base: &Path) {
+    let live_job_containers = match startup_live_job_container_names(config_base) {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!(
+                "Skipped startup Velnor Docker cleanup: in-flight marker scan failed: {}",
+                sanitized_retry_error(&error)
+            );
+            return;
+        }
+    };
     let docker = |args: &[&str]| {
         let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
         let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
@@ -4947,19 +5049,22 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     ]));
     container_ids.sort();
     container_ids.dedup();
+    const STARTUP_CONTAINER_INSPECT_FORMAT: &str = r#"{{ index .Config.Labels "velnor.daemon-id" }}{{ "\t" }}{{ index .Config.Labels "velnor.job-id" }}"#;
     let containers = container_ids
         .into_iter()
         .filter(|id| {
-            docker(&[
-                "inspect",
-                "--format",
-                "{{ index .Config.Labels \"velnor.daemon-id\" }}",
-                id,
-            ])
-            .filter(|output| output.status.success())
-            .is_some_and(|output| {
-                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
-            })
+            docker(&["inspect", "--format", STARTUP_CONTAINER_INSPECT_FORMAT, id])
+                .filter(|output| output.status.success())
+                .is_some_and(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let mut parts = text.trim().split('\t');
+                    let owner = parts.next().unwrap_or("");
+                    let job_container = parts.next().unwrap_or("");
+                    if !job_container.is_empty() && live_job_containers.contains(job_container) {
+                        return false;
+                    }
+                    daemon_owns_resource(owner, daemon_id)
+                })
         })
         .collect::<Vec<_>>();
     if !containers.is_empty() {
@@ -5010,6 +5115,46 @@ fn stale_job_container_remove_args(ids: &[String]) -> Vec<String> {
     let mut args = vec!["rm".to_string(), "--force".to_string()];
     args.extend(ids.iter().cloned());
     args
+}
+
+/// Container names (`velnor.job-id`) for jobs a slot runner may still be
+/// executing after daemon restart. The in-flight marker is written before any
+/// Docker environment is created and cleared only after terminal cleanup.
+fn startup_live_job_container_names(config_base: &Path) -> Result<BTreeSet<String>> {
+    let mut protected = BTreeSet::new();
+    let mut scan_slot = |dir: &Path| -> Result<()> {
+        if let Some(record) = load_in_flight_job(dir)? {
+            protected.insert(job_container_name_for_id(&record.job_id));
+        }
+        Ok(())
+    };
+    scan_slot(config_base)?;
+    let slots = config_base.join("slots");
+    match std::fs::read_dir(&slots) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry
+                    .with_context(|| format!("read startup slot entry in {}", slots.display()))?;
+                if entry
+                    .file_type()
+                    .with_context(|| format!("inspect startup slot {}", entry.path().display()))?
+                    .is_dir()
+                {
+                    scan_slot(&entry.path())?;
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("scan startup slots in {}", slots.display()));
+        }
+    }
+    Ok(protected)
+}
+
+fn job_container_name_for_id(job_id: &str) -> String {
+    format!("velnor-job-{}", sanitize_path_segment(job_id))
 }
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
@@ -5149,6 +5294,179 @@ fn maybe_prune_empty_velnor_networks(
     prune_empty_velnor_networks(daemon_id);
 }
 
+/// Reclaim this daemon's job containers that no slot still records as
+/// in-flight. Startup prune is not enough: a daemon that stays up for hours
+/// otherwise accumulates leftover job containers after cancel/crash.
+fn maybe_reclaim_orphan_job_containers(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    daemon_id: &str,
+    config_dir: Option<&Path>,
+) {
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("periodic orphan job-container reclaim skipped: {reason}");
+        return;
+    }
+    let Some(config_dir) = config_dir else {
+        eprintln!(
+            "periodic orphan job-container reclaim skipped: missing config dir; refusing to guess live jobs"
+        );
+        return;
+    };
+    let scan_root = in_flight_marker_scan_root(config_dir);
+    let live = match startup_live_job_container_names(scan_root) {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!(
+                "periodic orphan job-container reclaim skipped: in-flight marker scan failed: {}",
+                sanitized_retry_error(&error)
+            );
+            return;
+        }
+    };
+    let removed = reclaim_orphan_job_containers_refreshing(
+        daemon_id,
+        &live,
+        || startup_live_job_container_names(scan_root),
+        |args| {
+            let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
+            let deadline =
+                crate::docker::deadline_for(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT)
+                    .1
+                    .min(EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT);
+            crate::docker::client::host_call_bounded(&owned, deadline)
+                .ok()
+                .map(|stdout| std::process::Output {
+                    status: success_exit_status(),
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                })
+        },
+    );
+    if removed > 0 {
+        eprintln!("Reclaimed {removed} orphan Velnor job container(s).");
+    }
+}
+
+#[cfg(test)]
+fn reclaim_orphan_job_containers_with(
+    daemon_id: &str,
+    live_job_containers: &BTreeSet<String>,
+    docker: impl Fn(&[&str]) -> Option<std::process::Output>,
+) -> usize {
+    reclaim_orphan_job_containers_refreshing(
+        daemon_id,
+        live_job_containers,
+        || Ok(live_job_containers.clone()),
+        docker,
+    )
+}
+
+fn reclaim_orphan_job_containers_refreshing(
+    daemon_id: &str,
+    live_job_containers: &BTreeSet<String>,
+    refresh_live: impl Fn() -> Result<BTreeSet<String>>,
+    docker: impl Fn(&[&str]) -> Option<std::process::Output>,
+) -> usize {
+    let ids_from = |args: &[&str]| -> Vec<String> {
+        docker(args)
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut container_ids = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"]);
+    container_ids.extend(ids_from(&[
+        "ps",
+        "-aq",
+        "--filter",
+        "name=velnor-mise-seed",
+    ]));
+    container_ids.sort();
+    container_ids.dedup();
+    const INSPECT_FORMAT: &str = r#"{{ index .Config.Labels "velnor.daemon-id" }}{{ "\t" }}{{ index .Config.Labels "velnor.job-id" }}"#;
+    let owned: Vec<(String, String)> = container_ids
+        .into_iter()
+        .filter_map(|id| {
+            docker(&["inspect", "--format", INSPECT_FORMAT, &id])
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let mut parts = text.trim().split('\t');
+                    let owner = parts.next().unwrap_or("");
+                    let job_container = parts.next().unwrap_or("").to_string();
+                    if !job_container.is_empty() && live_job_containers.contains(&job_container) {
+                        return None;
+                    }
+                    daemon_owns_resource(owner, daemon_id).then_some((id, job_container))
+                })
+        })
+        .collect();
+    // A sibling slot can persist a marker and create a container after the
+    // first live-set snapshot. Re-read immediately before `rm --force`.
+    let live = match refresh_live() {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!(
+                "periodic orphan job-container reclaim skipped: live-set refresh failed: {}",
+                sanitized_retry_error(&error)
+            );
+            return 0;
+        }
+    };
+    let stale: Vec<String> = owned
+        .into_iter()
+        .filter(|(_, job_container)| job_container.is_empty() || !live.contains(job_container))
+        .map(|(id, _)| id)
+        .collect();
+    if stale.is_empty() {
+        return 0;
+    }
+    let args = stale_job_container_remove_args(&stale);
+    let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let _ = docker(&argv);
+    stale.len()
+}
+
+/// In-flight markers live under the daemon config root (`config_base` and
+/// `config_base/slots/slot-N`), never under the job work tree.
+fn in_flight_marker_scan_root(config_dir: &Path) -> &Path {
+    if !is_numeric_slot_dir(config_dir) {
+        return config_dir;
+    }
+    let Some(parent) = config_dir.parent() else {
+        return config_dir;
+    };
+    if parent.file_name().and_then(|name| name.to_str()) == Some("slots") {
+        return parent.parent().unwrap_or(parent);
+    }
+    parent
+}
+
+/// Slot work dirs are `work/slot-N`. Ownership labels and startup reclaim
+/// use the shared work root so one slot can collect a sibling's leftovers.
+fn daemon_ownership_root(path: &Path) -> &Path {
+    if is_numeric_slot_dir(path) {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    }
+}
+
+fn is_numeric_slot_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.strip_prefix("slot-")
+                .is_some_and(|slot| !slot.is_empty() && slot.chars().all(|c| c.is_ascii_digit()))
+        })
+}
+
 fn daemon_slot_configure_args(
     args: &DaemonArgs,
     config_base: &Path,
@@ -5176,6 +5494,7 @@ fn daemon_slot_configure_args(
         pool_id_pre_resolved: args.pool_id_pre_resolved,
         dry_run: args.dry_run_registration,
         config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
+        trust_scope: Some(args.trust_scope.clone()),
     })
 }
 
@@ -5194,6 +5513,11 @@ fn daemon_slot_run_args(
 
     Ok(RunArgs {
         slot_count: validated_slot_count,
+        state_db: Some(
+            args.state_db
+                .clone()
+                .unwrap_or_else(|| config_base.join("state.db")),
+        ),
         config_dir: Some(slot_dir),
         pat: args.pat.clone(),
         max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
@@ -5425,7 +5749,7 @@ async fn run_v2(
     let slot_daemon_id = args
         .work_dir
         .as_deref()
-        .map(|path| path.display().to_string())
+        .map(|path| daemon_ownership_root(path).display().to_string())
         .unwrap_or_else(|| "default".to_string());
     let slot_backend = crate::execution::load_execution_file(&config_dir, None)
         .ok()
@@ -5481,7 +5805,7 @@ async fn run_v2(
 
             let Some(message) = message else {
                 println!("No broker message received.");
-                if slot_action_on_poll(effective_draining(Some(&poll_drain_journal)), false)
+                if slot_action_on_poll(effective_capacity_blocked(Some(&poll_drain_journal)), false)
                     == SlotAction::DeregisterAndExit
                 {
                     // Daemon drain (SIGTERM): an idle slot exits at the poll
@@ -5549,8 +5873,14 @@ async fn run_v2(
                     // drain.
                     let sweep_backend = slot_backend;
                     let sweep_daemon_id = slot_daemon_id.clone();
+                    let sweep_config_dir = config_dir.clone();
                     tokio::task::spawn_blocking(move || {
                         maybe_prune_empty_velnor_networks(sweep_backend, &sweep_daemon_id);
+                        maybe_reclaim_orphan_job_containers(
+                            sweep_backend,
+                            &sweep_daemon_id,
+                            Some(sweep_config_dir.as_path()),
+                        );
                     });
                 }
 
@@ -6220,6 +6550,18 @@ async fn handle_v2_message(
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
+    let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
+    // A cordoned slot must leave the broker session before acknowledging or
+    // acquiring a request. The scheduler can then redeliver to another
+    // eligible runner; this slot never claims and discards unrelated work.
+    if effective_capacity_blocked(Some(&acquisition_drain_journal)) {
+        forensics.broker(&format!(
+            "acquire SKIPPED request={} admission fence active",
+            reference.runner_request_id
+        ));
+        return Ok(V2MessageAction::Shutdown);
+    }
     if reference.should_acknowledge
         && let Err(error) = broker
             .acknowledge_runner_request(
@@ -6254,17 +6596,15 @@ async fn handle_v2_message(
     // and the job lost until its lease expired. If the intent cannot be
     // recorded, do not make the request: an unrecorded acquisition is the exact
     // failure this write exists to prevent, and the broker redelivers.
-    let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
-    // Unified drain (flag-gated, default off): never start an acquisition
-    // while draining. The broker redelivers to a live runner; this slot
-    // exits at its next idle poll boundary.
-    let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
-    if journal_drain_hint(&acquisition_drain_journal) {
+    // Unified capacity fence: never start an acquisition while cordoned or
+    // draining. The broker redelivers to a live runner; this slot exits at
+    // its next idle poll boundary.
+    if effective_capacity_blocked(Some(&acquisition_drain_journal)) {
         forensics.broker(&format!(
-            "acquire SKIPPED request={} journal drain active",
+            "acquire SKIPPED request={} capacity fence active",
             reference.runner_request_id
         ));
-        return Ok(V2MessageAction::None);
+        return Ok(V2MessageAction::Shutdown);
     }
     if let Err(error) = intend_run_service_acquisition_in_journal(
         &acquisition_journal_dir,
@@ -6296,7 +6636,7 @@ async fn handle_v2_message(
             reference.billing_owner_id.as_deref(),
         )
         .instrument(pickup_span) => result,
-        _ = wait_for_drain_signal_in(Some(&acquisition_drain_journal)) => {
+        _ = wait_for_capacity_block_signal_in(Some(&acquisition_drain_journal)) => {
             forensics.lifecycle(&format!(
                 "acquire canceled by daemon drain request={}",
                 reference.runner_request_id
@@ -6521,6 +6861,7 @@ async fn handle_job_request(
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
     let queue_time_present = job_queue_time_present(&job);
+    crate::runtime_env::stamp_admitted_job_queue_time(&mut job);
     let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
     if let Err(persist_error) = persist_in_flight_job(config_dir, &run_service_job, &job) {
         return fail_closed_after_in_flight_persist_error(
@@ -7129,16 +7470,21 @@ async fn handle_job_request(
             config_dir,
             &job.job_id,
         );
+        let step_start_spill = StepPublishSpill::new();
         let (step_start_tx, step_start_receiver) =
             tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_start_sender = BoundedStepSender::new(step_start_tx);
+        let step_start_sender =
+            BoundedStepSender::with_spill(step_start_tx, Arc::clone(&step_start_spill));
         // Counter handles only: cloning the senders here would hold the
         // channels open past execution and the publishers would never drain.
         let step_start_drops = step_start_sender.drops_handle();
-        let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
+        let step_timeline =
+            start_step_timeline_publisher(job.clone(), step_start_receiver, step_start_spill);
+        let step_log_spill = StepPublishSpill::new();
         let (step_log_tx, step_log_receiver) =
             tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_log_sender = BoundedStepSender::new(step_log_tx);
+        let step_log_sender =
+            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill));
         let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
@@ -7156,6 +7502,7 @@ async fn handle_job_request(
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
+            step_log_spill,
             console_log_path,
             Arc::clone(&streamed_step_logs),
         );
@@ -7233,7 +7580,9 @@ async fn handle_job_request(
                 )
                 .await;
                 renewal.abort();
-                let teardown_result = if let Some(teardown) = take_teardown_owner(&teardown_slot) {
+                let teardown = take_teardown_owner(&teardown_slot);
+                let had_teardown = teardown.is_some();
+                let teardown_result = if let Some(teardown) = teardown {
                     start_failed_execution_teardown(
                         teardown_config_dir.clone(),
                         teardown,
@@ -7257,8 +7606,10 @@ async fn handle_job_request(
                     };
                 }
                 completion?;
-                clear_in_flight_job(&teardown_config_dir)
-                    .context("failed to clear acknowledged in-flight job")?;
+                if !had_teardown {
+                    clear_in_flight_job(&teardown_config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
+                }
                 return Err(join_error).context("join Docker job execution thread");
             }
         };
@@ -7313,18 +7664,19 @@ async fn handle_job_request(
                     )
                     .await;
                     renewal.abort();
-                    let teardown_result =
-                        if let Some(teardown) = take_teardown_owner(&teardown_slot) {
-                            start_failed_execution_teardown(
-                                teardown_config_dir.clone(),
-                                teardown,
-                                forensics.clone(),
-                                job_claim,
-                            )
-                            .await
-                        } else {
-                            Ok(())
-                        };
+                    let teardown = take_teardown_owner(&teardown_slot);
+                    let had_teardown = teardown.is_some();
+                    let teardown_result = if let Some(teardown) = teardown {
+                        start_failed_execution_teardown(
+                            teardown_config_dir.clone(),
+                            teardown,
+                            forensics.clone(),
+                            job_claim,
+                        )
+                        .await
+                    } else {
+                        Ok(())
+                    };
                     if let Err(teardown_error) = teardown_result {
                         let detail = format!(
                             "job execution failed and teardown handoff failed: {teardown_error:#}"
@@ -7338,8 +7690,10 @@ async fn handle_job_request(
                         };
                     }
                     completion?;
-                    clear_in_flight_job(&teardown_config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
+                    if !had_teardown {
+                        clear_in_flight_job(&teardown_config_dir)
+                            .context("failed to clear acknowledged in-flight job")?;
+                    }
                     return Err(error);
                 }
             }
@@ -7415,8 +7769,6 @@ async fn handle_job_request(
         let finalize_ms = duration_ms(finalize_started.elapsed());
         renewal.abort();
         completion?;
-        clear_in_flight_job(&teardown_config_dir)
-            .context("failed to clear acknowledged in-flight job")?;
         println!(
             "forensics.lifecycle event=completion-posted timestamp={}",
             unix_now_iso8601()
@@ -7453,6 +7805,8 @@ async fn handle_job_request(
             )
             .await?;
         } else {
+            clear_in_flight_job(&teardown_config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             record_job_timing(&teardown_config_dir, forensics, &timing_record);
         }
         println!(
@@ -8279,6 +8633,7 @@ fn step_log_mirror_bytes(log: &StepLog) -> u64 {
 fn start_step_timeline_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepStartEvent>,
+    spill: Arc<StepPublishSpill<StepStartEvent>>,
 ) -> JoinHandle<()> {
     // Build Twirp client for Results Service step status updates if available.
     let twirp_client = job
@@ -8299,7 +8654,7 @@ fn start_step_timeline_publisher(
 
     tokio::spawn(async move {
         let mut change_order: i64 = 1;
-        while let Some(event) = receiver.recv().await {
+        while let Some(event) = recv_published(&mut receiver, &spill).await {
             // Send step "in-progress" update via Twirp Results Service
             if let Some(client) = &twirp_client {
                 let step = crate::protocol::TwirpStep {
@@ -8349,6 +8704,7 @@ fn start_step_timeline_publisher(
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepLog>,
+    spill: Arc<StepPublishSpill<StepLog>>,
     console_log_path: Option<PathBuf>,
     streamed_step_logs: Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
 ) -> JoinHandle<()> {
@@ -8405,7 +8761,11 @@ fn start_step_log_publisher(
                 .truncate(true)
                 .open(path)
                 .ok()
-                .map(BufWriter::new)
+                .map(|file| {
+                    let mut writer = BufWriter::new(file);
+                    write_job_console_identity(&mut writer, &job, path);
+                    writer
+                })
         });
         let job_masks = MaskPatterns::new(job_secret_mask_values(&job));
 
@@ -8438,29 +8798,50 @@ fn start_step_log_publisher(
         // live console doesn't stutter on the next send.
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            let first_log = tokio::select! {
-                maybe = receiver.recv() => match maybe {
-                    Some(log) => log,
-                    None => break,
-                },
-                _ = ping_interval.tick() => {
-                    if let Some(ws) = ws_conn.as_mut()
-                        && let Err(e) = publish_with_timeout(
-                            crate::protocol::FeedStreamClient::send_ping(ws),
-                        )
-                        .await
-                    {
-                            eprintln!(
-                                "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
-                                sanitized_retry_error(&e)
-                            );
-                            ws_conn = None;
+        'publish: loop {
+            let first_log = loop {
+                match receiver.try_recv() {
+                    Ok(log) => break log,
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        if let Some(log) = spill.take_front() {
+                            break log;
                         }
-                    continue;
+                        break 'publish;
+                    }
+                }
+                if let Some(log) = spill.take_front() {
+                    break log;
+                }
+                tokio::select! {
+                    maybe = receiver.recv() => match maybe {
+                        Some(log) => break log,
+                        None => {
+                            if let Some(log) = spill.take_front() {
+                                break log;
+                            }
+                            break 'publish;
+                        }
+                    },
+                    _ = spill.notified() => continue,
+                    _ = ping_interval.tick() => {
+                        if let Some(ws) = ws_conn.as_mut()
+                            && let Err(e) = publish_with_timeout(
+                                crate::protocol::FeedStreamClient::send_ping(ws),
+                            )
+                            .await
+                        {
+                                eprintln!(
+                                    "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
+                                    sanitized_retry_error(&e)
+                                );
+                                ws_conn = None;
+                            }
+                        continue;
+                    }
                 }
             };
-            let logs = step_log_batch(first_log, &mut receiver);
+            let logs = step_log_batch(first_log, &mut receiver, &spill);
             let mut processed = Vec::with_capacity(logs.len());
             let mut live_batches = Vec::new();
             for log in logs {
@@ -8471,7 +8852,8 @@ fn start_step_log_publisher(
                 let size = step_log_mirror_bytes(&log);
                 streamed_step_logs.lock().await.push(Arc::clone(&log), size);
                 let masker = job_masks.with_extra(&log.masks);
-                let lines = mask_log_lines_with(&log.lines, &masker);
+                let lines =
+                    annotate_lock_wait_lines(&mask_log_lines_with(&log.lines, &masker), &job);
                 let line_count = lines.len() as i64;
                 let live_chunk = log.completed_at.is_empty() && !log.skipped;
                 if live_chunk {
@@ -8642,7 +9024,33 @@ struct LiveFeedBatch {
     start_line: i64,
 }
 
-fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepLog> {
+async fn recv_published<T>(receiver: &mut Receiver<T>, spill: &StepPublishSpill<T>) -> Option<T> {
+    loop {
+        match receiver.try_recv() {
+            Ok(value) => return Some(value),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => return spill.take_front(),
+        }
+        if let Some(value) = spill.take_front() {
+            return Some(value);
+        }
+        tokio::select! {
+            maybe = receiver.recv() => {
+                return match maybe {
+                    Some(value) => Some(value),
+                    None => spill.take_front(),
+                };
+            }
+            _ = spill.notified() => {}
+        }
+    }
+}
+
+fn step_log_batch(
+    first: StepLog,
+    receiver: &mut Receiver<StepLog>,
+    spill: &StepPublishSpill<StepLog>,
+) -> Vec<StepLog> {
     let mut logs = vec![first];
     loop {
         match receiver.try_recv() {
@@ -8650,6 +9058,9 @@ fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepL
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => break,
         }
+    }
+    while let Some(log) = spill.take_front() {
+        logs.push(log);
     }
     logs
 }
@@ -10596,6 +11007,17 @@ async fn start_teardown_task(
                         "forensics.lifecycle event=teardown-done timestamp={}",
                         unix_now_iso8601()
                     );
+                    // The lease is occupancy, not a GitHub-completion flag.
+                    // Clearing it here — after Docker and workspace cleanup —
+                    // is what makes persist_in_flight_job refuse a second job
+                    // while this slot's containers can still exist.
+                    if let Err(error) = clear_in_flight_job(&timing_config_dir) {
+                        let detail = format!("post-completion in-flight release failed: {error:#}");
+                        forensics.lifecycle(&detail);
+                        eprintln!("Warning: {detail}; retrying until the slot lease is released");
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
                     return Ok(());
                 }
                 Err(error) => {
@@ -10638,6 +11060,10 @@ fn register_slot_teardown_task(
 }
 
 async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
+    wait_for_prior_slot_teardown_within(config_dir, PRIOR_TEARDOWN_JOIN_DEADLINE).await
+}
+
+async fn wait_for_prior_slot_teardown_within(config_dir: &Path, deadline: Duration) -> Result<()> {
     let task = slot_teardown_tasks()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -10645,51 +11071,39 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
     let Some(task) = task else {
         return Ok(());
     };
-    // Bounded. The teardown thread retries on its own schedule, so an await
-    // with no deadline let a teardown that never succeeds pin the slot of a job
-    // GitHub had already been told was finished — the one place a *completed*
-    // job could hold a slot indefinitely.
-    //
-    // On expiry the thread is left running: it owns the containers and will
-    // keep trying, and abandoning its handle is strictly better than refusing
-    // to start the next job. What the operator must not get is silence, so the
-    // wait says which slot and how long it waited.
-    let joined = tokio::time::timeout(
-        PRIOR_TEARDOWN_JOIN_DEADLINE,
-        tokio::task::spawn_blocking(move || task.join()),
-    )
-    .await;
-    match joined {
-        Ok(joined) => {
-            joined
-                .context("join prior slot teardown task")?
-                .map_err(|panic| {
-                    anyhow::anyhow!("prior slot teardown task panicked: {panic:?}")
-                })??;
-        }
-        Err(_) => {
+    // Bounded so a wedged teardown is visible, but fail-closed: the next job
+    // must not start while this thread still owns the slot's containers.
+    // Put the handle back on timeout so a later cycle can join it instead of
+    // losing the thread and admitting overlapping work.
+    let started = Instant::now();
+    while !task.is_finished() {
+        if started.elapsed() >= deadline {
             let message = format!(
-                "prior slot teardown for {} did not finish within {}s; continuing without it, \
-                 its containers may still be present",
+                "prior slot teardown for {} did not finish within {}s; refusing the next job \
+                 until containers are gone",
                 config_dir.display(),
-                PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs()
+                deadline.as_secs()
             );
             eprintln!("{message}");
             tracing::warn!(
                 target: "velnor.teardown",
                 slot_dir = %config_dir.display(),
-                waited_s = PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs(),
+                waited_s = deadline.as_secs(),
                 "prior slot teardown exceeded its join deadline"
             );
+            register_slot_teardown_task(config_dir, task)?;
+            bail!("{message}");
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Ok(())
+    task.join()
+        .map_err(|panic| anyhow::anyhow!("prior slot teardown task panicked: {panic:?}"))?
 }
 
 /// How long a slot waits for the previous job's teardown before starting work.
 ///
-/// Generous, because a legitimate teardown of a large workspace takes time, and
-/// bounded, because a completed job must never hold a slot forever.
+/// Generous, because a legitimate teardown of a large workspace takes time.
+/// Expiry refuses the next job rather than overlapping containers on one slot.
 const PRIOR_TEARDOWN_JOIN_DEADLINE: Duration = Duration::from_secs(300);
 
 struct PrecreatedJobEnvironment {
@@ -10891,6 +11305,7 @@ fn hydrate_github_variables_from_context(
         "github.run_attempt",
         "github.run_id",
         "github.run_number",
+        "github.run_started_at",
         "github.server_url",
         "github.sha",
         "github.triggering_actor",
@@ -11063,8 +11478,7 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 ///
 /// Closure admission is read-only, so a job waits for a local admission slot
 /// instead of being failed for want of one. `ACTION_ADMISSION_TIMEOUT` bounds
-/// the whole stage — the wait for a slot plus the fetches — and an exhausted
-/// budget reports which of the two consumed it.
+/// only the Contents-API fetches; slot contention is never a rejection reason.
 async fn admit_job_closure(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
@@ -11072,27 +11486,8 @@ async fn admit_job_closure(
     telemetry_admission: Option<&crate::ops::JobAdmission>,
 ) -> Result<crate::admission::AdmissionGraph> {
     let stage_started_unix_ms = unix_millis_now();
-    let stage_started = Instant::now();
-    let permit = match acquire_action_admission_slot(ACTION_ADMISSION_TIMEOUT).await {
-        Ok((permit, _waited)) => permit,
-        Err(waited) => {
-            let waited_ms = duration_ms(waited);
-            emit_stage_wait_telemetry(
-                telemetry_admission,
-                JobStage::ActionAdmission,
-                WaitReason::LocalAdmissionLimiter,
-                waited_ms,
-                stage_started_unix_ms,
-            );
-            bail!(
-                "action admission waited {waited_ms}ms for one of {ACTION_ADMISSION_CONCURRENCY} \
-                 local admission slots and exhausted its {}s budget \
-                 (stage=action_admission wait_reason=local_admission_limiter)",
-                ACTION_ADMISSION_TIMEOUT.as_secs()
-            );
-        }
-    };
-    let limiter_wait_ms = duration_ms(stage_started.elapsed());
+    let (permit, limiter_wait) = wait_for_action_admission_slot().await;
+    let limiter_wait_ms = duration_ms(limiter_wait);
     emit_stage_wait_telemetry(
         telemetry_admission,
         JobStage::ActionAdmission,
@@ -11108,9 +11503,8 @@ async fn admit_job_closure(
         let _permit = permit;
         admit_job_closure_sync(&job, &context_data, &stored)
     });
-    // Whatever the limiter wait already spent is spent: the remaining budget
-    // belongs to the fetches, so the stage as a whole stays bounded.
-    let fetch_budget = ACTION_ADMISSION_TIMEOUT.saturating_sub(stage_started.elapsed());
+    // Slot wait is unbounded; only the Contents-API fetches are deadline-bounded.
+    let fetch_budget = ACTION_ADMISSION_TIMEOUT;
     let graph = tokio::time::timeout(fetch_budget, admission).await;
     emit_stage_wait_telemetry(
         telemetry_admission,
@@ -11991,6 +12385,47 @@ fn job_console_log_path(
         .join("temp")
         .join("_velnor")
         .join("console.log")
+}
+
+fn write_job_console_identity(
+    writer: &mut BufWriter<fs::File>,
+    job: &AgentJobRequestMessage,
+    console_path: &Path,
+) {
+    let slot = console_path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .rev()
+        .find(|name| name.starts_with("slot-"))
+        .unwrap_or("unknown");
+    let repo = crate::github_adapter::job_variable(job, "github.repository").unwrap_or("unknown");
+    let workflow = crate::github_adapter::job_variable(job, "github.workflow").unwrap_or("unknown");
+    let run_id = crate::github_adapter::job_variable(job, "github.run_id").unwrap_or("unknown");
+    let github_job = crate::github_adapter::job_variable(job, "github.job").unwrap_or("unknown");
+    let banner = format!(
+        "[velnor] job-container identity slot={slot} job={} name={} repo={repo} workflow={workflow} run={run_id} github_job={github_job}\n[velnor] docker logs is a live view of this job; the container exits when /__t/_velnor/job.done is written\n",
+        job.job_id,
+        job.job_display_name
+    );
+    let _ = writer.write_all(banner.as_bytes());
+    let _ = writer.flush();
+}
+
+fn annotate_lock_wait_lines(lines: &[String], job: &AgentJobRequestMessage) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        out.push(line.clone());
+        if line.contains("Blocking waiting for file lock on build directory")
+            && !line.contains("[velnor] waiting")
+        {
+            out.push(format!(
+                "[velnor] waiting for Cargo build lock; job={} repo={}",
+                job.job_id,
+                crate::github_adapter::job_variable(job, "github.repository").unwrap_or("unknown")
+            ));
+        }
+    }
+    out
 }
 
 /// Append one step's masked output to the live console file tailed by the job
@@ -14757,7 +15192,21 @@ fn target_mvp_required_x64_labels() -> &'static [&'static str] {
     ]
 }
 
-fn normalize_labels(
+/// The label trust-gated Velnor jobs append to `runs-on`
+/// (`[workflow] velnor_trusted_label` in the adopting repository's generation
+/// config). Only trusted pools may claim it: gated jobs need the host Docker
+/// lease socket, which untrusted pools never receive. An untrusted runner
+/// that claimed it would attract jobs it deterministically fails, so
+/// registration refuses the combination.
+pub const TRUST_GATED_RUNNER_LABEL: &str = "velnor-host-docker";
+
+pub use crate::github_adapter::github_trust_scope_allows_host_docker;
+
+/// The registration claim set: the configured labels plus the target packs
+/// the host's architecture opts into, sorted and deduplicated. Host-start
+/// tests pin their full normalized set through this computation so the
+/// pinned claims cannot drift from what registration actually sends.
+pub fn normalize_labels(
     mut labels: Vec<String>,
     target_mvp_labels: bool,
     target_mvp_arm_label: bool,
@@ -14797,6 +15246,29 @@ fn validate_linux_only_labels(labels: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to register the trust-gated label on a pool that is not trusted.
+/// The scope check is the same gate that withholds the host Docker socket
+/// from untrusted jobs, so the two cannot disagree. `None` is standalone
+/// registration without trust context, which carries no pool ceiling to
+/// check; daemon slots always pass their resolved scope.
+fn validate_trusted_label_requires_trusted_scope(
+    labels: &[String],
+    trust_scope: Option<&str>,
+) -> Result<()> {
+    let Some(scope) = trust_scope else {
+        return Ok(());
+    };
+    let gated = labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(TRUST_GATED_RUNNER_LABEL));
+    if gated && !crate::github_adapter::github_trust_scope_allows_host_docker(scope) {
+        bail!(
+            "runner claims trust-gated label '{TRUST_GATED_RUNNER_LABEL}' but trust scope is '{scope}'; trust-gated jobs need the host Docker socket, which only trusted pools receive"
+        );
+    }
+    Ok(())
+}
+
 fn is_macos_runner_label(label: &str) -> bool {
     let normalized = label.trim().to_ascii_lowercase();
     normalized == "macos" || normalized.starts_with("macos-") || normalized.contains("darwin")
@@ -14821,6 +15293,7 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
+    use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
 
@@ -14969,6 +15442,33 @@ mod tests {
     }
 
     #[test]
+    fn gone_registration_releases_in_flight_marker_without_remote_complete() {
+        let dir = unique_temp_dir("in-flight-registration-gone");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            in_flight_job_path(&dir),
+            r#"{"plan_id":"plan","job_id":"job","run_service_url":"https://example.test/","billing_owner_id":null}"#,
+        )
+        .unwrap();
+        let gone = anyhow::Error::new(crate::protocol::OAuthRegistrationNotFound(
+            "Registration ccd04c2f-e01f-4ba8-9c00-3edacdd60899 was not found.".to_string(),
+        ));
+        let other = anyhow::anyhow!("oauth unavailable");
+
+        assert!(release_in_flight_after_registration_gone(&dir, &gone).unwrap());
+        assert!(load_in_flight_job(&dir).unwrap().is_none());
+
+        fs::write(
+            in_flight_job_path(&dir),
+            r#"{"plan_id":"plan","job_id":"job","run_service_url":"https://example.test/","billing_owner_id":null}"#,
+        )
+        .unwrap();
+        assert!(!release_in_flight_after_registration_gone(&dir, &other).unwrap());
+        assert!(load_in_flight_job(&dir).unwrap().is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn persist_in_flight_job_does_not_touch_deterministic_temp_collision() {
         let dir = unique_temp_dir("in-flight-marker-temp-collision");
         fs::create_dir_all(&dir).unwrap();
@@ -14989,6 +15489,35 @@ mod tests {
         assert_eq!(
             load_in_flight_job(&dir).unwrap().unwrap().job_id,
             job.job_id
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persist_in_flight_job_refuses_a_second_distinct_job() {
+        let dir = unique_temp_dir("in-flight-exclusive-slot");
+        fs::create_dir_all(&dir).unwrap();
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        let mut first = minimal_job_with_variables(serde_json::json!({}));
+        first.job_id = "job-first".into();
+        let mut second = minimal_job_with_variables(serde_json::json!({}));
+        second.job_id = "job-second".into();
+        persist_in_flight_job(&dir, &context, &first).unwrap();
+        persist_in_flight_job(&dir, &context, &first).unwrap();
+        let error = persist_in_flight_job(&dir, &context, &second).unwrap_err();
+        assert!(
+            error.to_string().contains("job-first"),
+            "exclusive lease must name the occupant: {error}"
+        );
+        assert_eq!(
+            load_in_flight_job(&dir).unwrap().unwrap().job_id,
+            "job-first"
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -15087,6 +15616,21 @@ mod tests {
 
         assert!(error.to_string().contains("supervised production"));
         assert!(error.to_string().contains("VELNOR_STORAGE_ROOT"));
+    }
+
+    #[test]
+    fn on_demand_github_daemon_uses_explicit_local_storage() {
+        let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
+        // SAFETY: this test process owns the variable for the assertion.
+        unsafe { std::env::remove_var("VELNOR_STORAGE_ROOT") };
+        let mut args = daemon_args(1);
+        args.url = Some("https://github.com/tailrocks/velnor".into());
+        let mode = daemon_storage_mode(&args);
+        match previous {
+            Some(value) => unsafe { std::env::set_var("VELNOR_STORAGE_ROOT", value) },
+            None => unsafe { std::env::remove_var("VELNOR_STORAGE_ROOT") },
+        }
+        assert_eq!(mode, RunnerStorageMode::ExplicitLocal);
     }
 
     #[test]
@@ -15400,6 +15944,36 @@ mod tests {
     }
 
     #[test]
+    fn admission_fence_hint_round_trips_and_fails_closed_on_corruption() {
+        reset_drain_hint_cache_for_tests();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-admission-hint-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        let mut journal = velnor_control::journal::Journal::open(&path).unwrap();
+        assert!(!journal_admission_blocked_hint(&path));
+        journal.set_admission_blocked(7).unwrap();
+        reset_drain_hint_cache_for_tests();
+        assert!(journal_admission_blocked_hint(&path));
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = 'broken' WHERE key = 'admission'",
+                [],
+            )
+            .unwrap();
+        reset_drain_hint_cache_for_tests();
+        assert!(journal_admission_blocked_hint(&path));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn journal_drain_hint_caches_per_path_with_ttl() {
         // Flag on for this process. Never unset: sibling tests create no
         // drain markers, so the leaked flag cannot change their outcome.
@@ -15422,6 +15996,10 @@ mod tests {
         assert!(journal_drain_hint(&drained));
         assert!(!journal_drain_hint(&idle));
         assert!(!journal_drain_hint(&dir.join("missing.db")));
+
+        let corrupt = dir.join("corrupt.db");
+        std::fs::write(&corrupt, b"not a sqlite database").unwrap();
+        assert!(journal_drain_hint(&corrupt));
 
         // Within the TTL the cached verdict survives the file's removal:
         // the second read is served without touching SQLite.
@@ -15497,6 +16075,7 @@ mod tests {
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
             slot_count: NonZeroU32::MIN,
+            state_db: None,
             config_dir: None,
             pat: None,
             max_idle_slot_age_seconds: None,
@@ -16937,7 +17516,8 @@ jobs:
                     { "k": "workflow", "v": "compat" },
                     { "k": "workflow_ref", "v": "tailrocks/fixture/.github/workflows/compat.yml@refs/heads/main" },
                     { "k": "run_attempt", "v": "3" },
-                    { "k": "run_number", "v": "42" }
+                    { "k": "run_number", "v": "42" },
+                    { "k": "run_started_at", "v": "2026-09-15T01:01:00Z" }
                 ], "t": 2 }
             }
         }))
@@ -16957,6 +17537,10 @@ jobs:
         let env = crate::runtime_env::job_runtime_env(&job);
         assert!(env.contains(&("GITHUB_RUN_ATTEMPT".into(), "3".into())));
         assert!(env.contains(&("GITHUB_RUN_NUMBER".into(), "42".into())));
+        assert!(env.contains(&(
+            crate::runtime_env::RUN_STARTED_AT_ENV.into(),
+            "2026-09-15T01:01:00Z".into()
+        )));
     }
 
     #[test]
@@ -17021,10 +17605,12 @@ jobs:
         for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
             let mut pruned = false;
             let mut reclaimed = false;
+            let config_base = unique_temp_dir("startup-skip");
             maybe_startup_host_docker_reclaim_with(
                 backend,
                 "daemon-x",
-                |_| pruned = true,
+                &config_base,
+                |_, _| pruned = true,
                 |_| {
                     reclaimed = true;
                     Ok(())
@@ -17039,10 +17625,12 @@ jobs:
     fn startup_host_docker_reclaim_runs_when_docker_selected() {
         let mut pruned = None;
         let mut reclaimed = None;
+        let config_base = unique_temp_dir("startup-run");
         maybe_startup_host_docker_reclaim_with(
             Some(velnor_model::ExecutionBackendKind::Docker),
             "daemon-x",
-            |id| pruned = Some(id.to_string()),
+            &config_base,
+            |id, _| pruned = Some(id.to_string()),
             |id| {
                 reclaimed = Some(id.to_string());
                 Ok(())
@@ -17050,6 +17638,46 @@ jobs:
         );
         assert_eq!(pruned.as_deref(), Some("daemon-x"));
         assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn startup_live_job_container_names_collects_single_and_multislot_markers() {
+        let base = unique_temp_dir("startup-live-containers");
+        std::fs::create_dir_all(base.join("slots/slot-1")).unwrap();
+        let context = |journal_dir: PathBuf| RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir,
+            journal_state: RunServiceJobJournalState::Accepted,
+        };
+        let mut job_a = minimal_job_with_variables(serde_json::json!({}));
+        job_a.job_id = "job-a".into();
+        persist_in_flight_job(&base, &context(base.join("journal.db")), &job_a).unwrap();
+        let mut job_b = minimal_job_with_variables(serde_json::json!({}));
+        job_b.job_id = "job/b".into();
+        persist_in_flight_job(
+            &base.join("slots/slot-1"),
+            &context(base.join("journal.db")),
+            &job_b,
+        )
+        .unwrap();
+        let names = startup_live_job_container_names(&base).unwrap();
+        assert!(names.contains("velnor-job-job-a"));
+        assert!(names.contains("velnor-job-job_b"));
+        assert_eq!(names.len(), 2);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn startup_live_job_container_names_fails_closed_on_unreadable_marker() {
+        let base = unique_temp_dir("startup-live-containers-corrupt");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(in_flight_job_path(&base), b"corrupt").unwrap();
+        let error = startup_live_job_container_names(&base)
+            .expect_err("corrupt marker must block startup pruning");
+        assert!(error.to_string().contains("parse in-flight job"));
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
@@ -17099,6 +17727,147 @@ jobs:
                 "velnor-job-bbbb".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn reclaim_orphan_job_containers_keeps_in_flight_and_removes_stale() {
+        let live = BTreeSet::from(["velnor-job-live".to_owned()]);
+        let removed = reclaim_orphan_job_containers_with("/daemon/work", &live, |args| {
+            if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: b"id-live\nid-dead\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args == ["ps", "-aq", "--filter", "name=velnor-mise-seed"] {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args.first() == Some(&"inspect") && args.last() == Some(&"id-live") {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: b"/daemon/work/slot-1\tvelnor-job-live\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args.first() == Some(&"inspect") && args.last() == Some(&"id-dead") {
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: b"/daemon/work/slot-2\tvelnor-job-dead\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args.first() == Some(&"rm") {
+                let expected = stale_job_container_remove_args(&["id-dead".to_owned()]);
+                assert_eq!(
+                    args,
+                    expected.iter().map(String::as_str).collect::<Vec<_>>()
+                );
+                return Some(std::process::Output {
+                    status: success_exit_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            None
+        });
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn reclaim_rechecks_in_flight_markers_immediately_before_rm() {
+        let live = BTreeSet::new();
+        let removed = reclaim_orphan_job_containers_refreshing(
+            "/daemon/work",
+            &live,
+            || Ok(BTreeSet::from(["velnor-job-new".to_owned()])),
+            |args| {
+                if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"id-new\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args == ["ps", "-aq", "--filter", "name=velnor-mise-seed"] {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"inspect") && args.last() == Some(&"id-new") {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"/daemon/work/slot-2\tvelnor-job-new\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"rm") {
+                    panic!(
+                        "a container admitted after the first snapshot must not be force-removed"
+                    );
+                }
+                None
+            },
+        );
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn in_flight_marker_scan_root_walks_up_from_slot_config() {
+        assert_eq!(
+            in_flight_marker_scan_root(Path::new("/config/slots/slot-9")),
+            Path::new("/config")
+        );
+        assert_eq!(
+            in_flight_marker_scan_root(Path::new("/config")),
+            Path::new("/config")
+        );
+        assert_eq!(
+            in_flight_marker_scan_root(Path::new("/daemon/work/slot-2")),
+            Path::new("/daemon/work")
+        );
+    }
+
+    #[test]
+    fn daemon_ownership_root_is_the_shared_work_tree() {
+        assert_eq!(
+            daemon_ownership_root(Path::new("/daemon/work/slot-2")),
+            Path::new("/daemon/work")
+        );
+        assert_eq!(
+            daemon_ownership_root(Path::new("/daemon/work")),
+            Path::new("/daemon/work")
+        );
+        assert!(daemon_owns_resource("/daemon/work/slot-9", "/daemon/work"));
+    }
+
+    #[test]
+    fn annotate_lock_wait_lines_adds_actionable_owner_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "job-lock",
+            "JobDisplayName": "Check",
+            "RequestId": 1,
+            "Variables": {
+                "github.repository": { "Value": "tailrocks/velnor" }
+            }
+        }))
+        .unwrap();
+        let lines = annotate_lock_wait_lines(
+            &["    Blocking waiting for file lock on build directory".into()],
+            &job,
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("job=job-lock"));
+        assert!(lines[1].contains("tailrocks/velnor"));
     }
 
     #[test]
@@ -17416,6 +18185,7 @@ jobs:
             pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
+            trust_scope: None,
         })
         .await
         .unwrap_err()
@@ -17474,6 +18244,7 @@ jobs:
             pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
+            trust_scope: None,
         })
         .await
         .unwrap_err()
@@ -17505,6 +18276,7 @@ jobs:
             pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
+            trust_scope: None,
         })
         .await
         .unwrap_err()
@@ -17787,6 +18559,10 @@ jobs:
         assert_eq!(run_args.job_cpus, "4");
         assert_eq!(run_args.job_memory, "12g");
         assert_eq!(run_args.trust_scope, "public-forks");
+        assert_eq!(
+            run_args.state_db.as_deref(),
+            Some(Path::new("/config/state.db"))
+        );
     }
 
     #[test]
@@ -18269,6 +19045,24 @@ jobs:
         }))
         .unwrap();
         assert!(job_queue_time_present(&fallback));
+
+        let empty_explicit: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "empty-explicit",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "QueueTime": " ",
+            "Variables": {
+                "system.queueTime": { "Value": "2026-08-30T00:00:00Z" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            job_queue_time(&empty_explicit),
+            Some("2026-08-30T00:00:00Z")
+        );
 
         for (raw, present) in [
             ("", false),
@@ -21116,6 +21910,85 @@ jobs:
     }
 
     #[test]
+    fn trust_gated_label_requires_a_trusted_pool() {
+        let gated = vec![
+            "self-hosted".to_owned(),
+            "velnor-target-mvp".to_owned(),
+            TRUST_GATED_RUNNER_LABEL.to_owned(),
+        ];
+        let error = validate_trusted_label_requires_trusted_scope(&gated, Some("untrusted"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(TRUST_GATED_RUNNER_LABEL), "{error}");
+        assert!(error.contains("only trusted pools"), "{error}");
+
+        let mixed_case = vec![TRUST_GATED_RUNNER_LABEL.to_ascii_uppercase()];
+        validate_trusted_label_requires_trusted_scope(&mixed_case, Some("trusted")).unwrap();
+        validate_trusted_label_requires_trusted_scope(&mixed_case, Some("  Trusted  ")).unwrap();
+        assert!(
+            validate_trusted_label_requires_trusted_scope(&mixed_case, Some("public")).is_err()
+        );
+
+        let ungated = vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()];
+        validate_trusted_label_requires_trusted_scope(&ungated, Some("untrusted")).unwrap();
+        // Standalone registration carries no pool ceiling, so there is
+        // nothing to check the label against.
+        validate_trusted_label_requires_trusted_scope(&gated, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn configure_refuses_trust_gated_label_on_untrusted_pool() {
+        let dir = unique_temp_dir("configure-trust-gated-label");
+        let error = configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-untrusted".into()),
+            labels: vec!["velnor".into(), TRUST_GATED_RUNNER_LABEL.into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: false,
+            pool_id: None,
+            pool_name: None,
+            pool_id_pre_resolved: false,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+            trust_scope: Some("untrusted".into()),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(TRUST_GATED_RUNNER_LABEL), "{error}");
+        assert!(error.contains("trust scope is 'untrusted'"), "{error}");
+        fs::remove_dir_all(&dir).ok();
+
+        let dir = unique_temp_dir("configure-trust-gated-label-trusted");
+        configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-trusted".into()),
+            labels: vec!["velnor".into(), TRUST_GATED_RUNNER_LABEL.into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: false,
+            pool_id: None,
+            pool_name: None,
+            pool_id_pre_resolved: false,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+            trust_scope: Some("trusted".into()),
+        })
+        .await
+        .unwrap();
+        let stored = config::load(&dir).unwrap();
+        assert!(stored
+            .settings
+            .labels
+            .iter()
+            .any(|label| label == TRUST_GATED_RUNNER_LABEL));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn job_context_data_synthesizes_secrets_from_secret_variables() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -21757,18 +22630,53 @@ runs:
         }
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn local_composite_unknown_nested_action_fails_admission_read_only() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
+
+        // The Contents-API admission source honors the hard
+        // `VELNOR_GITHUB_HTTP_TRANSPORT` selector and errors before any TCP
+        // connect when it is unset. Hold the process-wide transport-env lock
+        // shared with the async guard holders (the threaded harness runs them
+        // concurrently in this binary); the guard restores the prior value.
+        let transport_runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _transport_guard =
+            transport_runtime.block_on(crate::test_support::github_http_transport_env());
+        // SAFETY: the test holds the process-wide environment guard.
+        unsafe { std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native") };
 
         // Exercises the production Contents-API admission source end-to-end: a
         // local composite whose nested remote action is unknown must be rejected
         // read-only, before any executor/cache/service/container exists.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            // Bounded accept: if admission ever fails before connecting again,
+            // fail fast here instead of hanging `join()` forever.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            panic!(
+                                "fake GitHub Contents server timed out after 30s waiting for \
+                                 admission to connect; admission failed before its HTTP request"
+                            );
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("fake GitHub Contents server accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .unwrap();
             let mut request = [0_u8; 4096];
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
@@ -22953,6 +23861,60 @@ runs:
     }
 
     #[tokio::test]
+    async fn prior_teardown_timeout_fails_closed_and_keeps_the_task() -> Result<()> {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        let (release_sender, release_receiver) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+        register_slot_teardown_task(
+            &key,
+            std::thread::spawn(move || -> Result<()> {
+                release_receiver.recv()??;
+                Ok(())
+            }),
+        )?;
+
+        let error = wait_for_prior_slot_teardown_within(&key, Duration::from_millis(80))
+            .await
+            .expect_err("overlapping admission must not beat unfinished teardown");
+        assert!(
+            error.to_string().contains("refusing the next job"),
+            "timeout must fail closed: {error}"
+        );
+
+        release_sender.send(Ok(()))?;
+        tokio::time::timeout(Duration::from_secs(1), wait_for_prior_slot_teardown(&key))
+            .await
+            .map_err(anyhow::Error::from)??;
+        Ok(())
+    }
+
+    #[test]
+    fn in_flight_lease_survives_github_completion_until_explicit_release() {
+        let dir = unique_temp_dir("in-flight-outlives-completion");
+        fs::create_dir_all(&dir).unwrap();
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        let mut first = minimal_job_with_variables(serde_json::json!({}));
+        first.job_id = "job-first".into();
+        let mut second = minimal_job_with_variables(serde_json::json!({}));
+        second.job_id = "job-second".into();
+        persist_in_flight_job(&dir, &context, &first).unwrap();
+        assert!(recorded_in_flight_job_exists(&dir).unwrap());
+        persist_in_flight_job(&dir, &context, &second).unwrap_err();
+        clear_in_flight_job(&dir).unwrap();
+        persist_in_flight_job(&dir, &context, &second).unwrap();
+        assert_eq!(
+            load_in_flight_job(&dir).unwrap().unwrap().job_id,
+            "job-second"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn stalled_step_publisher_is_aborted_after_deadline() {
         struct DropMarker(Arc<AtomicBool>);
 
@@ -23969,7 +24931,13 @@ runs:
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let held = mirror.lock().await;
-        let mut publisher = start_step_log_publisher(job, receiver, None, Arc::clone(&mirror));
+        let mut publisher = start_step_log_publisher(
+            job,
+            receiver,
+            StepPublishSpill::new(),
+            None,
+            Arc::clone(&mirror),
+        );
         sender
             .send(partial_step_log("contended", &["line"], ""))
             .await
@@ -24094,7 +25062,8 @@ runs:
         // the burst as counted drops and the mirror must hold the ceiling —
         // neither may grow with the number of emitted events.
         let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let sender = BoundedStepSender::new(tx);
+        let spill = StepPublishSpill::new();
+        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let started = Instant::now();
         let events: u64 = 100_000;
@@ -24116,10 +25085,8 @@ runs:
             mirror_guard.len(),
             mirror_guard.bytes(),
         );
-        assert_eq!(
-            sender.drops(),
-            events - STEP_PUBLISH_CHANNEL_CAPACITY as u64
-        );
+        let retained = STEP_PUBLISH_CHANNEL_CAPACITY as u64 + STEP_PUBLISH_OVERFLOW_CAPACITY as u64;
+        assert_eq!(sender.drops(), events - retained);
         assert!(mirror_guard.len() <= STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
         assert!(mirror_guard.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
         // The soak's overflow is fully accounted: every record past the
@@ -24134,13 +25101,15 @@ runs:
             elapsed < Duration::from_secs(60),
             "soak sender blocked: {elapsed:?}"
         );
-        // The stalled publisher still drains exactly one capacity once it
-        // makes progress — nothing was lost except the counted drops.
+        // The stalled publisher still drains the live channel plus the
+        // ordered overflow once it makes progress — nothing was lost except
+        // the counted drops past both buffers.
         let mut drained = 0u64;
         while rx.try_recv().is_ok() {
             drained += 1;
         }
-        assert_eq!(drained, STEP_PUBLISH_CHANNEL_CAPACITY as u64);
+        drained += spill.take_all().len() as u64;
+        assert_eq!(drained, retained);
     }
 
     #[test]

@@ -128,12 +128,25 @@ struct WorkflowSection {
     /// Generated runner lanes. Absent keeps the generator's current default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runners: Option<String>,
+    /// Lanes that run on `pull_request`/`push`/`schedule` without a dispatch choice.
+    /// Must be a subset of `runners`. Absent infers `github` when GitHub is
+    /// available, otherwise the sole configured backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic: Option<String>,
     /// Velnor runner labels for self-hosted lanes. A surface that renders
     /// self-hosted jobs without them is a configuration error, never an empty
     /// `runs-on`.
     velnor_labels: Option<Vec<String>>,
     /// Velnor runner group for self-hosted lanes.
     velnor_runner_group: Option<String>,
+    /// Extra Velnor runner label that trust-gated units append to their
+    /// self-hosted `runs-on`. Only runners that claim it receive those
+    /// jobs, so untrusted pools never attract work they must refuse.
+    /// Required when any unit sets `requires_trusted`. Absent from the
+    /// canonical form, so configs that do not use it keep their recorded
+    /// digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_trusted_label: Option<String>,
     /// The repository profile recorded in the generated `project.toml`. A free
     /// label: it describes the surface, it never selects one.
     profile: Option<String>,
@@ -173,6 +186,23 @@ struct WorkflowSection {
     /// generator default (`github`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_lanes: Option<String>,
+    /// How Velnor-lane Rust unit jobs relate through GitHub Actions `needs:`.
+    /// Absent keeps parallel starts; `dependency-closure` waits on direct
+    /// `depends_on` Rust unit jobs on the Velnor lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_rust_needs: Option<String>,
+    /// When set and `runners = "velnor"`, generated Velnor-lane aggregate
+    /// workflows share this concurrency group so a single recovery host admits
+    /// one verification run at a time across pull requests. The separate
+    /// read-only policy workflow derives a `-policy` suffix, so a queued policy
+    /// check cannot hold the verification workflow at the GitHub workflow-run
+    /// concurrency boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_concurrency_group: Option<String>,
+    /// When true and `runners = "velnor"`, aggregate stack-group callers chain
+    /// through `needs:` instead of fanning out from `plan` in parallel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_serial_stack_groups: Option<bool>,
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -196,6 +226,7 @@ pub(crate) struct ReleaseSection {
     consumer_repository: Option<String>,
     artifact_path: Option<String>,
     description: Option<String>,
+    manifest_schema: Option<String>,
 }
 
 /// One verification unit the repository adds to, or overrides in, the scanned
@@ -233,12 +264,25 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
+    /// Workspace-wide `cargo check`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_check: Option<bool>,
+    /// Named mise tasks that exist in `mise.toml`. Not a shell-command array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ci_tasks: Option<Vec<String>>,
     /// Additional mise tool ids the unit's jobs install when the scanner
     /// cannot observe a runtime-invoked tool. Each id renders verbatim into
     /// `install_args`, so it must equal a key the root `mise.lock` pins, bare
     /// or backend-qualified exactly as the lock spells it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mise_tools: Option<Vec<String>>,
+    /// Whether this unit's Velnor jobs require a trusted runner. A gated
+    /// unit appends `[workflow] velnor_trusted_label` to its self-hosted
+    /// `runs-on`, so runners that do not claim the label never receive it.
+    /// Absent from the canonical form, so configs that do not use it keep
+    /// their recorded digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requires_trusted: Option<bool>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -341,6 +385,10 @@ impl ReleaseSection {
     pub(crate) fn description(&self) -> Option<&str> {
         self.description.as_deref()
     }
+
+    pub(crate) fn manifest_schema(&self) -> Option<&str> {
+        self.manifest_schema.as_deref()
+    }
 }
 
 impl UnitSection {
@@ -404,8 +452,20 @@ impl UnitSection {
         self.tool_version.as_deref()
     }
 
+    pub(crate) fn workspace_check(&self) -> bool {
+        self.workspace_check == Some(true)
+    }
+
+    pub(crate) fn ci_tasks(&self) -> &[String] {
+        self.ci_tasks.as_deref().unwrap_or(&[])
+    }
+
     pub(crate) fn mise_tools(&self) -> Option<&[String]> {
         self.mise_tools.as_deref()
+    }
+
+    pub(crate) fn requires_trusted(&self) -> bool {
+        self.requires_trusted == Some(true)
     }
 }
 
@@ -512,6 +572,16 @@ impl RepoGenerationConfig {
         self.workflow.runners.as_deref()
     }
 
+    /// The declared automatic lanes, if any.
+    pub(crate) fn automatic(&self) -> Option<&str> {
+        self.workflow.automatic.as_deref()
+    }
+
+    /// When true, automatic `pull_request` runs on the Velnor lane.
+    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
+        self.workflow.pull_request_on_velnor
+    }
+
     /// The declared self-hosted runner labels.
     pub(crate) fn velnor_labels(&self) -> Option<&[String]> {
         self.workflow.velnor_labels.as_deref()
@@ -522,8 +592,9 @@ impl RepoGenerationConfig {
         self.workflow.velnor_runner_group.as_deref()
     }
 
-    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
-        self.workflow.pull_request_on_velnor
+    /// The declared trust-gated runner label.
+    pub(crate) fn velnor_trusted_label(&self) -> Option<&str> {
+        self.workflow.velnor_trusted_label.as_deref()
     }
 
     /// The declared default `workflow_dispatch` runner choice.
@@ -536,6 +607,20 @@ impl RepoGenerationConfig {
         self.workflow.automatic_lanes.as_deref()
     }
 
+    /// The declared Velnor-lane Rust unit `needs:` topology.
+    pub(crate) fn velnor_rust_needs(&self) -> Option<&str> {
+        self.workflow.velnor_rust_needs.as_deref()
+    }
+
+    /// The declared repository-scoped Velnor runner concurrency group.
+    pub(crate) fn velnor_concurrency_group(&self) -> Option<&str> {
+        self.workflow.velnor_concurrency_group.as_deref()
+    }
+
+    /// Whether aggregate stack groups serialize on the Velnor lane.
+    pub(crate) fn velnor_serial_stack_groups(&self) -> Option<bool> {
+        self.workflow.velnor_serial_stack_groups
+    }
     /// The declared profile label.
     pub(crate) fn profile(&self) -> Option<&str> {
         self.workflow.profile.as_deref()
@@ -628,6 +713,13 @@ impl RepoGenerationConfig {
         })?;
         validate_repository_slug(repository)?;
         validate_workflow(&self.workflow)?;
+        if self.units.iter().any(UnitSection::requires_trusted)
+            && self.workflow.velnor_trusted_label.is_none()
+        {
+            return Err(GeneratorError::usage(
+                "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_label is not declared",
+            ));
+        }
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
         }
@@ -764,6 +856,13 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+fn automatic_fits_runners(runners: &str, automatic: &str) -> bool {
+    match (runners, automatic) {
+        ("both", _) => true,
+        (runners, automatic) => runners == automatic,
+    }
+}
+
 fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     if workflow.github_runner.as_deref().is_some_and(str::is_empty) {
         return Err(GeneratorError::usage(
@@ -780,6 +879,21 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     {
         return Err(GeneratorError::usage(format!(
             "[workflow] runners must be one of: github, velnor, both; found `{runners}`"
+        )));
+    }
+    if let Some(automatic) = workflow.automatic.as_deref()
+        && !matches!(automatic, "github" | "velnor" | "both")
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] automatic must be one of: github, velnor, both; found `{automatic}`"
+        )));
+    }
+    if let (Some(runners), Some(automatic)) =
+        (workflow.runners.as_deref(), workflow.automatic.as_deref())
+        && !automatic_fits_runners(runners, automatic)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] automatic = `{automatic}` is not available when runners = `{runners}`"
         )));
     }
     if let Some(labels) = &workflow.velnor_labels {
@@ -803,6 +917,12 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             "[workflow] velnor_runner_group must not be empty",
         ));
     }
+    validate_trusted_label(workflow)?;
+    if workflow.templates.is_some() {
+        return Err(GeneratorError::usage(
+            "[workflow] templates is not supported; imported workflow bodies are not a generation input",
+        ));
+    }
     for (field, value) in [
         (
             "[workflow] default_dispatch_runner",
@@ -817,6 +937,12 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             crate::validate_lane_selection(value, field)?;
         }
     }
+    if let Some(value) = workflow.velnor_rust_needs.as_deref() {
+        crate::parse_velnor_rust_needs(value)?;
+    }
+    if let Some(value) = workflow.velnor_concurrency_group.as_deref() {
+        crate::validate_config_text(value, "[workflow] velnor_concurrency_group")?;
+    }
     if let (Some(runners), Some(default_dispatch_runner)) = (
         workflow.runners.as_deref(),
         workflow.default_dispatch_runner.as_deref(),
@@ -825,6 +951,35 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             crate::parse_runner_mode(runners)?,
             default_dispatch_runner,
         )?;
+    }
+    Ok(())
+}
+
+/// The trusted label trust-gated units append to their self-hosted `runs-on`
+/// must stand on its own: non-empty, distinct from the organization pool
+/// group it is too easily confused with, and not a repeat of a base label.
+fn validate_trusted_label(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
+    let Some(label) = workflow.velnor_trusted_label.as_deref() else {
+        return Ok(());
+    };
+    if label.is_empty() {
+        return Err(GeneratorError::usage(
+            "[workflow] velnor_trusted_label must not be empty",
+        ));
+    }
+    if Some(label) == workflow.velnor_runner_group.as_deref() {
+        return Err(GeneratorError::usage(
+            "[workflow] velnor_trusted_label must not equal velnor_runner_group; the label routes jobs to trusted runners, the group selects an organization pool",
+        ));
+    }
+    if workflow
+        .velnor_labels
+        .as_deref()
+        .is_some_and(|labels| labels.iter().any(|candidate| candidate == label))
+    {
+        return Err(GeneratorError::usage(
+            "[workflow] velnor_trusted_label must not repeat a velnor_labels entry; trust-gated units append it to those labels",
+        ));
     }
     Ok(())
 }
@@ -1023,6 +1178,17 @@ fn validate_units(
                     UNIT_KIND_PREFIXES.join(", ")
                 )));
         }
+        if row.pr_commands.is_some()
+            || row.full_commands.is_some()
+            || row.github_pr_commands.is_some()
+            || row.github_full_commands.is_some()
+            || row.velnor_pr_commands.is_some()
+            || row.velnor_full_commands.is_some()
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[unit]] {id} declares command arrays; generation config is not a workflow programming language. Detected work uses typed capabilities; remove pr_commands, full_commands, and lane-specific command overrides"
+            )));
+        }
         if let Some(cache) = &row.cache
             && (cache.key_files.as_ref().is_none_or(std::vec::Vec::is_empty)
                 || cache.paths.as_ref().is_none_or(std::vec::Vec::is_empty))
@@ -1152,7 +1318,14 @@ fn is_contained_repository_path(path: &str) -> bool {
 
 /// The publishers the renderer implements, and the contract fields each one
 /// renders from.
-const RELEASE_KINDS: &[&str] = &["crates", "rust-binary", "pages"];
+const RELEASE_KINDS: &[&str] = &[
+    "crates",
+    "rust-binary",
+    "native",
+    "pages",
+    "homebrew",
+    "apt",
+];
 
 /// A `kind` the renderer does not implement has no rendered `release.yml`: it
 /// is accepted only from a repository that renders its own publisher verbatim
@@ -1181,6 +1354,37 @@ impl RepoGenerationConfig {
                 .artifact_path
                 .as_deref()
                 .is_some_and(|value| !value.is_empty()),
+            "native" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .binary
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    && !release.targets.is_empty()
+            }
+            "homebrew" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .source_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
+            "apt" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .consumer_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
             _ => false,
         };
         if complete {
@@ -1480,6 +1684,39 @@ mod tests {
     }
 
     #[test]
+    fn workflow_automatic_must_be_a_subset_of_runners() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"github\"\n",
+        );
+        assert_eq!(config.automatic(), Some("github"));
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "both+github automatic is valid",
+        );
+
+        let both = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\n",
+        );
+        assert_eq!(both.automatic(), Some("both"));
+        must(
+            both.validate(&[], &[], &BTreeSet::new()),
+            "both+both automatic is valid",
+        );
+
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"github\"\nautomatic = \"velnor\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "github runners cannot enable velnor automatic",
+        );
+        assert!(
+            error.to_string().contains("[workflow] automatic"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn workflow_macos_runner_is_optional_without_changing_canonical_shape() {
         let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
         assert_eq!(config.macos_runner(), None);
@@ -1512,6 +1749,97 @@ mod tests {
                 .to_string()
                 .contains("[workflow] macos_runner must not be empty"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn workflow_trusted_label_is_optional_without_changing_canonical_shape() {
+        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(config.velnor_trusted_label(), None);
+        let canonical = must(
+            config.canonical_json(),
+            "canonicalize default workflow config",
+        );
+        assert!(
+            !canonical.contains("\"velnor_trusted_label\""),
+            "{canonical}"
+        );
+        assert!(!canonical.contains("\"requires_trusted\""), "{canonical}");
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\n",
+        );
+        assert_eq!(declared.velnor_trusted_label(), Some("example-trusted"));
+        must(
+            declared.validate(&[], &[], &BTreeSet::new()),
+            "validate declared trusted label",
+        );
+    }
+
+    #[test]
+    fn workflow_trusted_label_rejects_empty_confused_and_duplicate_labels() {
+        let empty = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"\"\n",
+        );
+        let error = must_fail(
+            empty.validate(&[], &[], &BTreeSet::new()),
+            "empty trusted label must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] velnor_trusted_label must not be empty"),
+            "{error}"
+        );
+        let confused = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_runner_group = \"example-group\"\nvelnor_trusted_label = \"example-group\"\n",
+        );
+        let error = must_fail(
+            confused.validate(&[], &[], &BTreeSet::new()),
+            "trusted label equal to the runner group must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] velnor_trusted_label must not equal velnor_runner_group"),
+            "{error}"
+        );
+        let duplicate = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-trusted\"]\nvelnor_trusted_label = \"example-trusted\"\n",
+        );
+        let error = must_fail(
+            duplicate.validate(&[], &[], &BTreeSet::new()),
+            "trusted label repeating a base label must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] velnor_trusted_label must not repeat"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unit_requiring_trust_without_a_label_is_a_usage_error() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
+        );
+        assert!(config.units().iter().any(UnitSection::requires_trusted));
+        let error = must_fail(
+            config.validate(&["example".to_owned()], &[], &BTreeSet::new()),
+            "requires_trusted without a trusted label must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("velnor_trusted_label is not declared"),
+            "{error}"
+        );
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
+        );
+        must(
+            declared.validate(&["example".to_owned()], &[], &BTreeSet::new()),
+            "requires_trusted with a trusted label validates",
         );
     }
 

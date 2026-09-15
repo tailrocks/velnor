@@ -12,6 +12,12 @@ use super::{Args, Primitive, RenderCtx, Rendered, WATCH_GRAPH};
 use crate::scan::file_walk::{has_extension, is_test_support_path};
 use crate::{GeneratorError, Unit, UnitKind};
 
+/// Whole-tree crate globs duplicate per-crate units; `workspace_check` gates
+/// validate topology on manifests, release infra, and explicit additions.
+fn is_broad_per_crate_source_watch(path: &str) -> bool {
+    matches!(path, "crates/**" | "tools/**")
+}
+
 /// Declare the repository's watch graph.
 pub(crate) struct WatchGraph;
 
@@ -21,11 +27,10 @@ impl Primitive for WatchGraph {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &["runtime_inputs", "watch", "docker_closure"]
+        &["watch", "docker_closure"]
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        let runtime_inputs = args.strings("runtime_inputs")?.unwrap_or_default();
         let additions = args.unit_strings(ctx, "watch")?.unwrap_or_default();
         let closure = args.strings("docker_closure")?.unwrap_or_default();
         let docker_watch = docker_watch_paths(
@@ -47,7 +52,14 @@ impl Primitive for WatchGraph {
             ) || (unit.kind == UnitKind::Docker && unit.root == ".");
             let mut watch = BTreeSet::new();
             if !derived {
-                watch.extend(unit.watch.iter().cloned());
+                watch.extend(
+                    unit.watch
+                        .iter()
+                        .filter(|path| {
+                            !(unit.workspace_check && is_broad_per_crate_source_watch(path))
+                        })
+                        .cloned(),
+                );
             }
             if unit.kind == UnitKind::Docker && unit.root == "." {
                 watch.extend(docker_watch.iter().cloned());
@@ -83,18 +95,7 @@ impl Primitive for WatchGraph {
                     );
                 }
                 UnitKind::OpenTofu => {
-                    watch.extend(
-                        ctx.shape
-                            .files()
-                            .iter()
-                            .filter(|file| {
-                                !is_test_support_path(file)
-                                    && (has_extension(file, "tf")
-                                        || has_extension(file, "tofu")
-                                        || file.rsplit('/').next() == Some(".terraform.lock.hcl"))
-                            })
-                            .cloned(),
-                    );
+                    watch.extend(opentofu_watch_paths(ctx.shape.files()));
                 }
                 UnitKind::Rust | UnitKind::Docker => {
                     watch.extend([
@@ -109,9 +110,15 @@ impl Primitive for WatchGraph {
                 }
                 UnitKind::Gradle | UnitKind::Node | UnitKind::Swift | UnitKind::Homebrew => {}
             }
-            watch.extend(runtime_inputs.iter().cloned());
             if let Some(paths) = additions.get(&unit.id) {
-                watch.extend(paths.iter().cloned());
+                watch.extend(
+                    paths
+                        .iter()
+                        .filter(|path| {
+                            !(unit.workspace_check && is_broad_per_crate_source_watch(path))
+                        })
+                        .cloned(),
+                );
             }
             unit.watch = watch.into_iter().collect();
             units.push(unit);
@@ -120,6 +127,32 @@ impl Primitive for WatchGraph {
             units,
             ..Rendered::default()
         })
+    }
+}
+
+fn opentofu_watch_paths(files: &[String]) -> Vec<String> {
+    let terraform_files = files
+        .iter()
+        .filter(|file| {
+            !is_test_support_path(file)
+                && (has_extension(file, "tf")
+                    || has_extension(file, "tofu")
+                    || file.rsplit('/').next() == Some(".terraform.lock.hcl"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if terraform_files.is_empty() {
+        // The pinned Planning runtime requires every unit to carry at least
+        // one watch. Keep an explicit OpenTofu declaration affected-only
+        // without borrowing an unrelated source such as workflow runtime
+        // code: these globs match a future IaC file, but no current diff.
+        vec![
+            "**/*.tf".to_owned(),
+            "**/*.tofu".to_owned(),
+            "**/.terraform.lock.hcl".to_owned(),
+        ]
+    } else {
+        terraform_files
     }
 }
 
@@ -269,4 +302,40 @@ pub(crate) fn validate_canonical_release_products(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_broad_per_crate_source_watch, opentofu_watch_paths};
+
+    #[test]
+    fn workspace_topology_gate_ignores_whole_crate_trees() {
+        assert!(is_broad_per_crate_source_watch("crates/**"));
+        assert!(is_broad_per_crate_source_watch("tools/**"));
+        assert!(!is_broad_per_crate_source_watch("crates/velnor-runner/**"));
+        assert!(!is_broad_per_crate_source_watch("docker/**"));
+    }
+
+    #[test]
+    fn opentofu_without_current_files_keeps_future_affected_selection() {
+        assert_eq!(
+            opentofu_watch_paths(&[]),
+            vec![
+                "**/*.tf".to_owned(),
+                "**/*.tofu".to_owned(),
+                "**/.terraform.lock.hcl".to_owned(),
+            ]
+        );
+        assert_eq!(
+            opentofu_watch_paths(&[
+                "tests/fixtures/infra.tf".to_owned(),
+                "infra/main.tf".to_owned(),
+                "infra/.terraform.lock.hcl".to_owned(),
+            ]),
+            vec![
+                "infra/main.tf".to_owned(),
+                "infra/.terraform.lock.hcl".to_owned(),
+            ]
+        );
+    }
 }

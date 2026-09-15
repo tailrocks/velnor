@@ -164,6 +164,8 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             toolchain: None,
             services: Vec::new(),
             workflow_file: None,
+            requires_trusted: false,
+            workspace_check: false,
         };
         unit.watch.sort();
         unit.watch.dedup();

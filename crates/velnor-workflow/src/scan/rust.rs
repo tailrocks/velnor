@@ -228,6 +228,7 @@ pub(crate) struct CargoManifestFacts {
     pub(crate) package_name: Option<String>,
     pub(crate) has_workspace: bool,
     pub(crate) workspace_members: Vec<String>,
+    pub(crate) workspace_excludes: Vec<String>,
     pub(crate) dependencies: Vec<CargoDependency>,
     pub(crate) build_script: Option<String>,
     pub(crate) binary_targets: Vec<String>,
@@ -240,6 +241,34 @@ struct RustAnalysis {
     units: Vec<Unit>,
     detected: Vec<String>,
     limitations: Vec<String>,
+}
+
+/// Whether a workspace `members`/`exclude` pattern selects a package. Both
+/// the pattern (workspace-relative) and the package root (repository-relative)
+/// are `/`-separated paths; `*` matches one segment and `**` crosses
+/// segments, cargo's manifest glob contract.
+fn workspace_pattern_matches(pattern: &str, workspace_root: &str, package_root: &str) -> bool {
+    fn segments(value: &str) -> Vec<&str> {
+        value
+            .split('/')
+            .filter(|segment| !segment.is_empty() && *segment != ".")
+            .collect()
+    }
+    fn matches(pattern: &[&str], path: &[&str]) -> bool {
+        match pattern.split_first() {
+            None => path.is_empty(),
+            Some((head, tail)) if *head == "**" => {
+                (0..=path.len()).any(|skip| matches(tail, &path[skip..]))
+            }
+            Some((head, tail)) => match path.split_first() {
+                Some((name, rest)) if *head == "*" || *head == *name => matches(tail, rest),
+                _ => false,
+            },
+        }
+    }
+    let mut absolute = segments(workspace_root);
+    absolute.extend(segments(pattern));
+    matches(&absolute, &segments(package_root))
 }
 
 #[expect(
@@ -317,11 +346,40 @@ fn analyze_rust_manifests(
     };
     let mut result = RustAnalysis::default();
 
+    let workspaces = facts
+        .iter()
+        .filter(|manifest| manifest.has_workspace)
+        .collect::<Vec<_>>();
+    // Units verify crates cargo can resolve from their own directory: without
+    // any workspace the scan keeps its single-crate behavior, but where
+    // workspaces exist, explicitly excluded crates and orphan crates no
+    // workspace claims (vendored sources without their own workspace table)
+    // resolve nowhere, so no unit may target them. Repositories that verify
+    // such crates with root-relative commands re-add them through [[units]].
+    let package_facts = facts
+        .iter()
+        .filter(|manifest| manifest.has_package)
+        .filter(|manifest| {
+            // Explicit exclusion wins even over a self-governing crate: the
+            // repository took it out of the workspace contract.
+            workspaces.is_empty()
+                || (!workspaces.iter().any(|workspace| {
+                    workspace.workspace_excludes.iter().any(|pattern| {
+                        workspace_pattern_matches(pattern, &workspace.root, &manifest.root)
+                    })
+                }) && (manifest.has_workspace
+                    || workspaces.iter().any(|workspace| {
+                        workspace.workspace_members.iter().any(|pattern| {
+                            workspace_pattern_matches(pattern, &workspace.root, &manifest.root)
+                        })
+                    })))
+        })
+        .collect::<Vec<_>>();
+
     if workspace_root.is_some() {
-        let member_count = facts.iter().filter(|manifest| manifest.has_package).count();
         result
             .detected
-            .push(format!("rust-workspace-members:{member_count}"));
+            .push(format!("rust-workspace-members:{}", package_facts.len()));
     } else if facts.iter().any(|manifest| manifest.has_package) {
         result.detected.push("rust-package".to_owned());
     }
@@ -343,10 +401,6 @@ fn analyze_rust_manifests(
         result.detected.push("mise-present".to_owned());
     }
 
-    let package_facts = facts
-        .iter()
-        .filter(|manifest| manifest.has_package)
-        .collect::<Vec<_>>();
     let mut package_ids = BTreeMap::new();
     let mut roots_by_manifest = BTreeMap::new();
     let mut rust_id_counts = BTreeMap::new();
@@ -409,15 +463,19 @@ fn analyze_rust_manifests(
                 "{command_prefix}cargo test {cargo_lock_flag} --all-features {package_selector}"
             )
         };
+        let clippy_command = format!(
+            "{command_prefix}cargo clippy {cargo_lock_flag} --profile test --no-deps --all-targets --all-features {package_selector} -- -D warnings"
+        );
+        // Nextest before clippy: rustc test-profile artifacts are reused by
+        // clippy, avoiding a separate dev-profile compile plus a clippy-driver
+        // rebuild that nextest would not share anyway.
         let commands = vec![
             format!(
                 "{command_prefix}cargo fmt --manifest-path {} -- --check",
                 shell_quote("Cargo.toml")
             ),
-            format!(
-                "{command_prefix}cargo clippy {cargo_lock_flag} --no-deps --all-targets --all-features {package_selector} -- -D warnings"
-            ),
             test_command,
+            clippy_command,
         ];
         let mut watch = vec![
             manifest_path.clone(),
@@ -448,11 +506,19 @@ fn analyze_rust_manifests(
             ));
         }
         if !manifest.binary_targets.is_empty() {
+            let package = manifest.package_name.as_deref().unwrap_or(&manifest.root);
             result.detected.push(format!(
-                "rust-binaries:{}:{}",
-                manifest.package_name.as_deref().unwrap_or(&manifest.root),
+                "rust-binaries:{package}:{}",
                 manifest.binary_targets.len()
             ));
+            for bin in &manifest.binary_targets {
+                if bin.ends_with("-guest-agent") {
+                    result.detected.push(format!("guest-agent:{package}:{bin}"));
+                }
+                if bin.ends_with("-guest-image") {
+                    result.detected.push(format!("guest-image:{package}:{bin}"));
+                }
+            }
         }
         if !manifest.test_targets.is_empty() || has_test_sources {
             result.detected.push(format!(
@@ -470,15 +536,34 @@ fn analyze_rust_manifests(
                 manifest.package_name.as_deref().unwrap_or(&manifest.root),
                 manifest.features.len()
             ));
+            if manifest
+                .features
+                .iter()
+                .any(|feature| feature == "release-build")
+            {
+                result.detected.push(format!(
+                    "release-build:{}",
+                    manifest.package_name.as_deref().unwrap_or(&manifest.root)
+                ));
+            }
         }
         watch.extend(include_str_paths(root, files, file_set, &manifest.root)?);
+        let local_lock = join_repo_path(&manifest.root, "Cargo.lock");
+        if file_set.contains(&local_lock) {
+            watch.push(local_lock.clone());
+        }
         watch.sort();
         watch.dedup();
+        let lockfile_key = if file_set.contains(&local_lock) {
+            local_lock
+        } else {
+            "Cargo.lock".to_owned()
+        };
         let cache_key_files = vec![
             ".cargo/**".to_owned(),
             "Cargo.toml".to_owned(),
             manifest_path.clone(),
-            "Cargo.lock".to_owned(),
+            lockfile_key,
             "rust-toolchain.toml".to_owned(),
             "rust-toolchain".to_owned(),
         ];
@@ -514,6 +599,8 @@ fn analyze_rust_manifests(
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
             workflow_file: None,
+            requires_trusted: false,
+            workspace_check: false,
         });
     }
 
@@ -570,6 +657,8 @@ fn analyze_rust_manifests(
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
             workflow_file: None,
+            requires_trusted: false,
+            workspace_check: false,
         });
     }
 
@@ -884,6 +973,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         package_name: None,
         has_workspace: false,
         workspace_members: Vec::new(),
+        workspace_excludes: Vec::new(),
         dependencies: Vec::new(),
         build_script: None,
         binary_targets: Vec::new(),
@@ -929,6 +1019,9 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
             "package" if key == "build" => facts.build_script = toml_string_value(&value),
             "workspace" if key == "members" => {
                 facts.workspace_members = toml_array_values(&value);
+            }
+            "workspace" if key == "exclude" => {
+                facts.workspace_excludes = toml_array_values(&value);
             }
             "bin" if key == "name" => {
                 if let Some(name) = toml_string_value(&value) {
@@ -1167,6 +1260,62 @@ mod tests {
         );
 
         assert_eq!(targets, vec!["assets/manifest.yml"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn release_build_feature_is_detected_per_package() {
+        let root = scratch("release-build");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"widget\"\nversion = \"0.1.0\"\n\n[features]\nrelease-build = []\nplain = []\n",
+            ),
+            "write widget manifest",
+        );
+        must(
+            fs::create_dir_all(root.join("tool")),
+            "create tool directory",
+        );
+        must(
+            fs::write(
+                root.join("tool/Cargo.toml"),
+                "[package]\nname = \"tool\"\nversion = \"0.1.0\"\n\n[features]\nplain = []\n",
+            ),
+            "write tool manifest",
+        );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+            "write toolchain pin",
+        );
+        let files = vec![
+            "Cargo.toml".to_owned(),
+            "tool/Cargo.toml".to_owned(),
+            "rust-toolchain.toml".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let analysis = must(
+            super::analyze_rust_manifests(&root, &files, &file_set, &files[..2]),
+            "analyze manifests",
+        );
+        assert!(
+            analysis
+                .detected
+                .contains(&"release-build:widget".to_owned()),
+            "the release-build feature must be detected: {:?}",
+            analysis.detected
+        );
+        assert!(
+            !analysis
+                .detected
+                .iter()
+                .any(|item| item.starts_with("release-build:tool")),
+            "a package without the feature must stay undetected: {:?}",
+            analysis.detected
+        );
         let _ = fs::remove_dir_all(root);
     }
 

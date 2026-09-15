@@ -45,8 +45,12 @@ pub(crate) use command_output::{
     rewrite_command_file_env_for_action_container, skipped_step_log_lines, step_log_lines,
 };
 pub(crate) use composite_scopes::{CompositeConclusionScopes, StepOutcome};
-pub(crate) use docker::verify_docker_job_cgroup_boundary;
-pub use docker::DockerBackend;
+pub(crate) use docker::verify_docker_job_cgroup_boundary_with_image;
+pub use docker::{
+    validate_docker_isolation, validate_docker_resource_projection, DockerBackend,
+    DockerIsolationMode, DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
+    DOCKER_RESOURCE_BOUNDARY_CHECK, MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
+};
 pub use firecracker::{
     create_golden_snapshot, restore_or_cold_boot, FirecrackerApi, FirecrackerBackend,
     RecordingFirecracker, FIRECRACKER_GUEST_CID,

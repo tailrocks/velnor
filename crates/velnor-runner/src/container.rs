@@ -4,8 +4,11 @@ use std::{
     fmt::Write as _,
     fs, io,
     num::NonZeroU32,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use sha2::{Digest, Sha256};
 
@@ -23,6 +26,20 @@ const JOB_NOFILE_LIMIT: &str = "65536:65536";
 const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 const JOB_WORKFLOW_CLI: &str = "/usr/local/bin/velnor-workflow";
 const JOB_WORKFLOW_CLI_SHA256: &str = "/usr/local/share/velnor/velnor-workflow.sha256";
+const JOB_DONE_CONTAINER_DIR: &str = "/__velnor";
+
+/// PID 1: tail the live console so `docker logs` mirrors GitHub, then exit
+/// when Velnor writes the runner-owned done sentinel. `exec tail -F` alone made
+/// finished/cancelled jobs immortal — the tailer outlived every job process.
+/// A virtiofs hiccup can kill `tail`; respawn it until `job.done` rather
+/// than exiting PID 1 and tearing down in-flight `docker exec`s. The
+/// completion directory is a separate read-only mount, not part of the
+/// job-writable temp tree.
+pub(crate) const JOB_CONTAINER_PID1: &str = "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; while [ ! -f /__velnor/job.done ]; do if ! kill -0 \"$tail_pid\" 2>/dev/null; then echo '[velnor] console tail exited; restarting logger' >&2; tail -n +1 -F /__t/_velnor/console.log & tail_pid=$!; fi; sleep 1; done; kill \"$tail_pid\" 2>/dev/null; wait \"$tail_pid\" 2>/dev/null; exit 0";
+
+/// Name of the host-relative sentinel that ends PID 1. The host path is in a
+/// private sibling directory, never beneath the job's RW temp mount.
+pub(crate) const JOB_DONE_SENTINEL: &str = "job.done";
 
 /// Daemon-owned runner identity. Dropped from step env by exact match in
 /// `append_step_env` and re-asserted after it on every exec/run path, so a
@@ -34,10 +51,17 @@ const AUTHORITATIVE_RUNNER_ENV: [&str; 3] = [
     "VELNOR_MANIFEST_VERSION",
 ];
 
+fn is_reserved_mbx_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("MBX_") && upper != "MBX_DISABLE"
+}
+
 fn is_docker_control_env(name: &str) -> bool {
     name.eq_ignore_ascii_case("DOCKER_HOST")
         || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
+        || name.eq_ignore_ascii_case("VELNOR_DOCKER_HOST")
+        || name.eq_ignore_ascii_case("VELNOR_DOCKER_CONTEXT")
 }
 
 fn append_flags_without_limits(
@@ -179,7 +203,7 @@ pub struct JobContainerSpec {
     pub docker_cli_plugin_host_dir: Option<PathBuf>,
     /// Host path of the apt-packaged `velnor-workflow` CLI. Jobs bind-mount it
     /// over the image copy so `apt install velnor-runner` is enough to update
-    /// plan/run. `None` skips the mount (tests).
+    /// plan/run. `None` skips the mount (tests, macOS/dev hosts without apt).
     pub packaged_workflow_cli_host: Option<PathBuf>,
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
@@ -197,6 +221,18 @@ pub struct JobContainerSpec {
     pub mbx_store_host: Option<PathBuf>,
     /// Docker-only explicit sccache action store.
     pub sccache_store_host: Option<PathBuf>,
+}
+
+/// The two filesystem views of a job Docker lease.
+///
+/// The runner binds the proxy on `host_visible`; Docker receives
+/// `daemon_visible` as the bind-mount source. They are equal for a native
+/// Linux daemon and may differ when Docker Desktop/OrbStack maps a host work
+/// root into its Linux VM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockerLeasePaths {
+    pub(crate) host_visible: PathBuf,
+    pub(crate) daemon_visible: PathBuf,
 }
 
 /// Job environment that carries the daemon's resource budget. A workflow that
@@ -416,12 +452,14 @@ impl JobContainerSpec {
         );
     }
 
-    fn append_rust_acceleration(&self, command: &mut DockerCommand) {
+    fn append_rust_acceleration(&self, command: &mut DockerCommand) -> io::Result<()> {
         if let Some(host) = &self.mbx_store_host {
             command.pair("-v", self.mount_arg(host, "/var/cache/mbx"));
+            let cache_dir = self.mbx_cache_container_dir();
+            let target_root = self.mbx_target_container_dir();
             command.envs([
-                ("MBX_CACHE_DIR", "/var/cache/mbx"),
-                ("MBX_TARGET_ROOT", "/var/cache/mbx/targets"),
+                ("MBX_CACHE_DIR", cache_dir.as_str()),
+                ("MBX_TARGET_ROOT", target_root.as_str()),
                 ("MBX_GC_AUTO", "true"),
                 ("MBX_GC_MAX_SIZE", "20GiB"),
                 ("MBX_TARGET_MAX_SIZE", "30GiB"),
@@ -436,6 +474,7 @@ impl JobContainerSpec {
             );
             command.envs(crate::sccache_compat::container_env());
         }
+        Ok(())
     }
 
     /// Directory that holds the mode-0600 env files backing this job's Docker
@@ -469,7 +508,9 @@ impl JobContainerSpec {
     /// The job image is not a valid OCI reference, or an env file backing the
     /// job environment could not be created.
     pub fn start_args(&self) -> io::Result<PreparedDockerArgs> {
+        self.validate_docker_host_path_mapping()?;
         let image = self.image_reference()?;
+        self.prepare_job_done_mount()?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
         let args = &mut command;
         args.flags([
@@ -487,6 +528,11 @@ impl JobContainerSpec {
             self.mount_arg(&self.workspace_host, "/__w"),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/__t"),
+            "-v".into(),
+            format!(
+                "{}:ro",
+                self.mount_arg(&self.job_done_host_dir(), JOB_DONE_CONTAINER_DIR)
+            ),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
@@ -613,7 +659,7 @@ impl JobContainerSpec {
         // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
         args.flags(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]);
 
-        self.append_docker_socket_mount(args);
+        self.append_docker_socket_mount(args)?;
         self.append_docker_cli_mounts(args);
         self.append_packaged_workflow_cli_mounts(args)?;
 
@@ -626,24 +672,19 @@ impl JobContainerSpec {
         // workflow environment and expanded container options. A trusted job
         // may add options, but cannot redirect a persistent store or stack
         // sccache with the image's mbx shim.
-        self.append_rust_acceleration(args);
+        self.append_rust_acceleration(args)?;
 
         // The machine budget divided by the number of provisioned slots. Last,
         // so neither workflow environment nor workflow createOptions can widen
         // this job's share of a host it cannot see.
         self.append_resource_budget(args, &budget);
 
-        // PID 1 tails a live console file instead of /dev/null, so
-        // `docker logs <job-container>` mirrors the GitHub UI step output.
-        // Velnor appends each masked step's lines to this file (mounted at
-        // /__t). `tail -F` waits for the file if it does not exist yet.
+        // PID 1 supervises the live console tail. `tail -F` alone would
+        // keep the container alive after the job is terminal; the supervisor
+        // exits when Velnor writes the runner-owned `/__velnor/job.done`.
         command
             .image(&image)
-            .operands([
-                "sh",
-                "-c",
-                "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log",
-            ])
+            .operands(["sh", "-c", JOB_CONTAINER_PID1])
             .finish()
     }
 
@@ -657,6 +698,7 @@ impl JobContainerSpec {
     /// # Errors
     /// The job image is not a valid OCI reference.
     pub fn seed_mise_store_args(&self) -> io::Result<Vec<String>> {
+        self.validate_docker_host_path_mapping()?;
         let image = self.image_reference()?;
         let store = mise_store_host(&self.temp_host, self.store_trust_scope.as_str());
         let mut args = DockerArgv::new(["run"]);
@@ -791,6 +833,9 @@ impl JobContainerSpec {
             if AUTHORITATIVE_RUNNER_ENV.contains(&name.as_str()) {
                 continue;
             }
+            if is_reserved_mbx_env(name) {
+                continue;
+            }
             command.env(name.clone(), value.clone());
         }
     }
@@ -807,6 +852,18 @@ impl JobContainerSpec {
                 command.env(name, value.clone());
             }
         }
+        self.append_authoritative_mbx_env(command);
+    }
+
+    /// Authoritative mbx paths. `GITHUB_ENV` / step `env:` cannot replace the
+    /// daemon-owned cache or managed-target roots. Re-asserted after step env,
+    /// same last-wins rule as `VELNOR_*`.
+    fn append_authoritative_mbx_env(&self, command: &mut DockerCommand) {
+        if self.mbx_store_host.is_none() {
+            return;
+        }
+        command.env("MBX_CACHE_DIR", self.mbx_cache_container_dir());
+        command.env("MBX_TARGET_ROOT", self.mbx_target_container_dir());
     }
 
     /// Truthful base env for every exec'd process: the job home is the
@@ -865,6 +922,7 @@ impl JobContainerSpec {
         node_image: &str,
         entrypoint_container_path: &str,
     ) -> io::Result<PreparedDockerArgs> {
+        self.validate_docker_host_path_mapping()?;
         let image = ImageReference::parse(node_image)?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
         let args = &mut command;
@@ -901,9 +959,9 @@ impl JobContainerSpec {
         // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
         args.pair("--entrypoint", "node");
         self.append_ownership_labels(args);
-        self.append_docker_socket_mount(args);
+        self.append_docker_socket_mount(args)?;
         self.append_docker_cli_mounts(args);
-        self.append_rust_acceleration(args);
+        self.append_rust_acceleration(args)?;
         self.append_job_cgroup_parent(args);
         if !path_prepend.is_empty() {
             let path = path_prepend
@@ -1023,6 +1081,9 @@ impl JobContainerSpec {
         dockerfile_host: &Path,
         context_host: &Path,
     ) -> io::Result<Vec<String>> {
+        self.validate_docker_host_path_mapping()?;
+        let dockerfile_host = self.docker_host_path_checked(dockerfile_host, "Dockerfile")?;
+        let context_host = self.docker_host_path_checked(context_host, "Docker build context")?;
         let image = ImageReference::parse(image)?;
         let mut args = DockerArgv::new(["build"]);
         args.flags([
@@ -1031,11 +1092,11 @@ impl JobContainerSpec {
             "--tag".to_owned(),
             image.as_str().to_owned(),
             "--file".to_owned(),
-            self.docker_host_path(dockerfile_host).display().to_string(),
+            dockerfile_host.display().to_string(),
         ]);
         Ok(args
             .operands()
-            .operand(self.docker_host_path(context_host).display().to_string())
+            .operand(context_host.display().to_string())
             .into_argv())
     }
 
@@ -1057,6 +1118,7 @@ impl JobContainerSpec {
         entrypoint: Option<&str>,
         command_args: &[String],
     ) -> io::Result<PreparedDockerArgs> {
+        self.validate_docker_host_path_mapping()?;
         let image = ImageReference::parse(image)?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
         let args = &mut command;
@@ -1093,9 +1155,9 @@ impl JobContainerSpec {
         args.env("RUNNER_TOOL_CACHE", "/__tool");
         args.env("AGENT_TOOLSDIRECTORY", "/__tool");
         self.append_ownership_labels(args);
-        self.append_docker_socket_mount(args);
+        self.append_docker_socket_mount(args)?;
         self.append_docker_cli_mounts(args);
-        self.append_rust_acceleration(args);
+        self.append_rust_acceleration(args)?;
         self.append_job_cgroup_parent(args);
         if let Some(entrypoint) = entrypoint {
             args.pair("--entrypoint", entrypoint.to_owned());
@@ -1169,17 +1231,105 @@ impl JobContainerSpec {
         crate::docker_lease::guest_docker_socket_host(&self.name, &self.temp_host)
     }
 
-    fn append_docker_socket_mount(&self, args: &mut impl FlagSink) {
-        if !self.mount_docker_socket {
-            return;
+    /// Resolve both filesystem views of the job lease.
+    pub(crate) fn docker_lease_paths(&self) -> io::Result<DockerLeasePaths> {
+        let host_visible = self.guest_docker_socket_host();
+        let daemon_visible =
+            self.docker_host_path_checked(&host_visible, "job Docker lease socket")?;
+        Ok(DockerLeasePaths {
+            host_visible,
+            daemon_visible,
+        })
+    }
+
+    /// Validate every work-tree path that Docker mounts or passes to the
+    /// daemon when a VM path mapping is configured. A lexical fallback to the
+    /// runner path would make Docker Desktop/OrbStack mount a different file,
+    /// so mapping failures are fatal and explain which roots must agree.
+    pub(crate) fn validate_docker_host_path_mapping(&self) -> io::Result<()> {
+        if self.docker_host_work_dir.is_none() {
+            return Ok(());
         }
+
+        let paths = [
+            ("workspace", self.workspace_host.clone()),
+            ("temp", self.temp_host.clone()),
+            ("home", self.home_host.clone()),
+            ("actions", self.actions_host.clone()),
+            ("tools", self.tools_host.clone()),
+            ("workflow", workflow_host(&self.temp_host)),
+            ("Playwright store", self.playwright_browser_store_host()),
+            (
+                "Cargo registry cache",
+                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
+                    .join("registry/cache"),
+            ),
+            (
+                "Cargo registry index",
+                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
+                    .join("registry/index"),
+            ),
+            (
+                "Cargo git database",
+                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("git/db"),
+            ),
+            ("Cargo executable store", self.cargo_executable_store_host()),
+            ("mise executable store", self.mise_executable_store_host()),
+            ("mise binary store", self.mise_binary_store_host()),
+            (
+                "mise cache",
+                mise_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("cache"),
+            ),
+        ];
+        for (label, path) in paths {
+            self.docker_host_path_checked(&path, label)?;
+        }
+        if let Some(path) = &self.mbx_store_host {
+            self.docker_host_path_checked(path, "MBX store")?;
+        }
+        if let Some(path) = &self.sccache_store_host {
+            self.docker_host_path_checked(path, "sccache store")?;
+        }
+        // This also rejects a lease path shortened outside the mapped work
+        // root; the host listener and daemon mount must refer to one socket.
+        self.docker_lease_paths()?;
+        Ok(())
+    }
+
+    fn append_docker_socket_mount(&self, args: &mut impl FlagSink) -> io::Result<()> {
+        if !self.mount_docker_socket {
+            return Ok(());
+        }
+        let daemon_visible = self.guest_docker_socket_bind_source()?;
         args.pair(
             "-v",
-            format!(
-                "{}:/var/run/docker.sock",
-                self.guest_docker_socket_host().display()
-            ),
+            format!("{}:/var/run/docker.sock", daemon_visible.display()),
         );
+        Ok(())
+    }
+
+    /// Unix socket the Linux job container should see as `/var/run/docker.sock`.
+    ///
+    /// On a native Linux host that is the per-job lease proxy. On macOS the
+    /// runner binds that proxy on a host path the OrbStack/Docker Desktop VM
+    /// can *see* as a socket inode, but `connect()` is `ECONNREFUSED`
+    /// (virtiofs). The daemon's own socket is special-cased and connectable.
+    /// A TCP lease proxy is the root fix; until then trusted macOS jobs
+    /// mount the resolved host socket.
+    pub(crate) fn guest_can_connect_host_bound_unix_lease() -> bool {
+        !cfg!(target_os = "macos")
+    }
+
+    fn guest_docker_socket_bind_source(&self) -> io::Result<PathBuf> {
+        if Self::guest_can_connect_host_bound_unix_lease() {
+            return Ok(self.docker_lease_paths()?.daemon_visible);
+        }
+        let endpoint = crate::docker::engine::resolve_docker_endpoint().map_err(|error| {
+            io::Error::other(format!(
+                "resolve host Docker socket for macOS job mount: {error}"
+            ))
+        })?;
+        Ok(endpoint.socket.canonicalize().unwrap_or(endpoint.socket))
     }
 
     fn append_docker_cli_mounts(&self, args: &mut impl FlagSink) {
@@ -1282,6 +1432,130 @@ impl JobContainerSpec {
         }
     }
 
+    /// Container-side mbx cache dir: a per-slot subdir of the shared mount.
+    ///
+    /// Every job container mounts the same host store at `/var/cache/mbx`, and
+    /// mbx takes its registrar flock(EX) then a per-hash lease flock(EX) with
+    /// no timeouts. Every container runs mbx as the same pid, so all of them
+    /// serialize on one `registrar.lock` while the holder blocks on the shared
+    /// lease file — an observed cross-container ABBA deadlock (1 holder + N
+    /// waiters, 0% CPU, jobs hang to the GitHub timeout). Each slot therefore
+    /// gets a disjoint `slots/slot-N` subdir — the same `slots/<slot>`
+    /// precedent as the mise installs mount — which relocates mbx's registrar,
+    /// leases, and checkouts (`MBX_CACHE_DIR` → `cache_dir` →
+    /// `cache_dir/incremental`). The mount itself is unchanged, so the store
+    /// root stays shared and each slot's cache stays warm across its own jobs.
+    /// Without a slot identity (a non-production temp layout) the subdir
+    /// isolates per job name instead of falling back to the shared root.
+    pub(crate) fn mbx_cache_container_dir(&self) -> String {
+        format!("/var/cache/mbx/slots/{}", self.mbx_slot_key())
+    }
+
+    /// Host-side path of this job's mbx cache subdir, created before start.
+    /// `None` exactly when the mbx store is disabled (explicit sccache mode).
+    pub(crate) fn mbx_cache_store_host(&self) -> Option<PathBuf> {
+        self.mbx_store_host
+            .as_ref()
+            .map(|store| store.join("slots").join(self.mbx_slot_key()))
+    }
+
+    /// Container-side managed-target root: a per-slot subdir of the shared
+    /// mount. Cargo's `.cargo-lock` lives under `MBX_TARGET_ROOT`; a shared
+    /// root globally serializes concurrent Rust jobs. Sequential jobs on the
+    /// same slot keep one warm tree. Missing slot identity isolates per job
+    /// name, never the global `/var/cache/mbx/targets` root.
+    pub(crate) fn mbx_target_container_dir(&self) -> String {
+        format!("/var/cache/mbx/targets/slots/{}", self.mbx_slot_key())
+    }
+
+    pub(crate) fn mbx_target_store_host(&self) -> Option<PathBuf> {
+        self.mbx_store_host.as_ref().map(|store| {
+            store
+                .join("targets")
+                .join("slots")
+                .join(self.mbx_slot_key())
+        })
+    }
+
+    /// Host directory of the sentinel that ends the container's PID 1
+    /// supervisor. It is a sibling of the job temp directory, so the job's
+    /// RW `/__t` mount cannot create or replace it.
+    pub(crate) fn job_done_host_dir(&self) -> PathBuf {
+        let temp_name = self
+            .temp_host
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("temp");
+        self.temp_host
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(".{temp_name}-velnor-control"))
+    }
+
+    /// Ensure Docker receives an existing, private directory for the
+    /// read-only completion mount. Docker otherwise creates a missing `-v`
+    /// source as a directory with daemon-dependent semantics.
+    pub(crate) fn prepare_job_done_mount(&self) -> io::Result<()> {
+        if !self.temp_host.is_absolute() || has_parent_component(&self.temp_host) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "job temp path is not a normalized absolute path",
+            ));
+        }
+        if self.temp_host.parent().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "job temp path has no parent for private completion control",
+            ));
+        }
+        fs::create_dir_all(&self.temp_host)?;
+        let dir = self.job_done_host_dir();
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(&dir)?;
+        if !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "private completion control path is not a directory: {}",
+                    dir.display()
+                ),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            if metadata.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "private completion control directory is not runner-owned: {}",
+                        dir.display()
+                    ),
+                ));
+            }
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
+    /// Host path of the sentinel that ends the container's PID 1 supervisor.
+    pub(crate) fn job_done_host_path(&self) -> PathBuf {
+        self.job_done_host_dir().join(JOB_DONE_SENTINEL)
+    }
+
+    fn mbx_slot_key(&self) -> String {
+        slot_store_key(&self.temp_host).unwrap_or_else(|| {
+            eprintln!(
+                "forensics.lifecycle: mbx cache isolated per job: no runner slot identity under {}",
+                self.temp_host.display()
+            );
+            sanitize_store_key(&self.name)
+        })
+    }
+
     /// Persistent per-version mise binary store for this job's trust/repository
     /// scope. Without a repository identity the store stays job-ephemeral, so
     /// persistence is never granted to an unidentified job.
@@ -1329,6 +1603,52 @@ impl JobContainerSpec {
         docker_work_dir.join(relative)
     }
 
+    fn docker_host_path_checked(&self, host_path: &Path, label: &str) -> io::Result<PathBuf> {
+        let Some(docker_work_dir) = &self.docker_host_work_dir else {
+            return Ok(host_path.to_path_buf());
+        };
+        let local_work_dir = self.local_work_dir().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': derive the runner work root from an absolute job temp path",
+                    host_path.display()
+                ),
+            )
+        })?;
+        validate_docker_mapping_root(&local_work_dir, "runner work root")?;
+        validate_docker_mapping_root(docker_work_dir, "Docker daemon work root")?;
+        if !host_path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': host-visible paths must be absolute when docker_host_work_dir is set",
+                    host_path.display()
+                ),
+            ));
+        }
+        if has_parent_component(host_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': parent ('..') path components are unsafe; use normalized paths below the runner work root",
+                    host_path.display()
+                ),
+            ));
+        }
+        let relative = host_path.strip_prefix(&local_work_dir).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': it escapes host-visible runner work root '{}'; set docker_host_work_dir to the daemon-visible equivalent of that root",
+                    host_path.display(),
+                    local_work_dir.display()
+                ),
+            )
+        })?;
+        Ok(docker_work_dir.join(relative))
+    }
+
     fn local_work_dir(&self) -> Option<PathBuf> {
         let job_dir = self.temp_host.parent()?;
         Some(daemon_shared_root(job_dir.parent()?.to_path_buf()))
@@ -1346,6 +1666,33 @@ impl JobContainerSpec {
     fn append_job_cgroup_parent(&self, args: &mut impl FlagSink) {
         args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
     }
+}
+
+fn validate_docker_mapping_root(path: &Path, label: &str) -> io::Result<()> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Docker {label} must be absolute for a VM-backed daemon; got '{}'",
+                path.display()
+            ),
+        ));
+    }
+    if has_parent_component(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Docker {label} '{}' contains an unsafe parent ('..') component; use a normalized absolute path",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn has_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| component == Component::ParentDir)
 }
 
 /// Fail-closed audit: no finished Docker command line may contain a masked
@@ -1936,12 +2283,13 @@ mod tests {
 
     #[test]
     fn default_job_mounts_only_mbx_with_bounded_gc() {
-        let job = spec();
+        let job = slotted_spec("mbx-default-gc");
         let mbx_store = job.mbx_store_host.clone().unwrap();
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
         assert!(args.contains(&format!("{}:/var/cache/mbx", mbx_store.display())));
-        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
+        assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
         assert!(!args.contains(&"MBX_DISABLE=1".into()));
@@ -1955,7 +2303,7 @@ mod tests {
 
     #[test]
     fn daemon_acceleration_environment_follows_trusted_container_options() {
-        let mut job = spec();
+        let mut job = slotted_spec("mbx-policy-order");
         job.options = vec!["-e".into(), "MBX_CACHE_DIR=/untrusted-override".into()];
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
@@ -1965,7 +2313,7 @@ mod tests {
             .unwrap();
         let policy_index = args
             .iter()
-            .position(|arg| arg == "MBX_CACHE_DIR=/var/cache/mbx")
+            .position(|arg| arg == "MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1")
             .unwrap();
         assert!(policy_index > override_index);
     }
@@ -2330,7 +2678,7 @@ mod tests {
 
     #[test]
     fn builds_start_container_args_with_mounts() {
-        let job = spec();
+        let job = slotted_spec("start-container-mounts");
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
 
@@ -2407,11 +2755,15 @@ mod tests {
         assert!(has_read_only_mount(&args, &job.actions_host, "/__a"));
         assert!(!has_mount(&args, &job.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
-        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
-        assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
+        let expected_cpu = job
+            .slot_budget()
+            .docker_cpu_option()
+            .expect("the test host exposes a CPU budget");
+        assert!(args.windows(2).any(|pair| pair == expected_cpu.as_slice()));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
@@ -2429,24 +2781,54 @@ mod tests {
         } else {
             assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
         }
-        let lease_mount = format!(
-            "{}:/var/run/docker.sock",
-            job.guest_docker_socket_host().display()
+        if JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+            let lease_mount = format!(
+                "{}:/var/run/docker.sock",
+                job.guest_docker_socket_host().display()
+            );
+            assert!(
+                args.contains(&lease_mount),
+                "guest Docker must use the job lease socket {lease_mount}, got {args:?}"
+            );
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == "/var/run/docker.sock:/var/run/docker.sock"),
+                "host engine socket must not be mounted into the job"
+            );
+        } else {
+            assert!(
+                args.iter()
+                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
+                        && !arg.contains("vdl-")),
+                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+            );
+        }
+        // PID 1 supervises the console tail and exits only on the private
+        // read-only completion sentinel.
+        assert_eq!(args.last().map(String::as_str), Some(JOB_CONTAINER_PID1));
+        assert!(
+            JOB_CONTAINER_PID1.contains("/__velnor/job.done"),
+            "PID 1 must terminate when the runner-owned done sentinel appears"
+        );
+        assert!(!JOB_CONTAINER_PID1.contains("/__t/_velnor/job.done"));
+        assert!(has_read_only_mount(
+            &args,
+            &job.job_done_host_dir(),
+            "/__velnor"
+        ));
+        assert!(!job.job_done_host_path().starts_with(&job.temp_host));
+        assert!(
+            !JOB_CONTAINER_PID1.contains("exec tail"),
+            "exec tail -F as PID 1 keeps finished containers alive"
         );
         assert!(
-            args.contains(&lease_mount),
-            "guest Docker must use the job lease socket {lease_mount}, got {args:?}"
+            JOB_CONTAINER_PID1.contains("restarting logger"),
+            "a dead console tail must respawn until job.done, not exit PID 1"
         );
         assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "/var/run/docker.sock:/var/run/docker.sock"),
-            "host engine socket must not be mounted into the job"
-        );
-        // PID 1 tails the live console file (so `docker logs` mirrors the UI).
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log")
+            !JOB_CONTAINER_PID1.contains("exit 2"),
+            "tail death must not kill in-flight docker exec"
         );
     }
 
@@ -2510,6 +2892,199 @@ mod tests {
     }
 
     #[test]
+    fn mbx_cache_is_warm_per_slot_but_isolated_between_slots() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut same_slot = spec();
+        same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        let mut other_slot = spec();
+        other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+
+        // Same slot, successive jobs: one warm subdir. Different slots:
+        // disjoint subdirs, so mbx's registrar/lease flocks never cross.
+        assert_eq!(
+            first.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-3"
+        );
+        assert_eq!(
+            same_slot.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-3"
+        );
+        assert_eq!(
+            other_slot.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-4"
+        );
+
+        // Mount/env consistency: the shared mount is unchanged, and each env
+        // value names the mounted subdir the host pre-creates for that slot.
+        // (Each fixture owns its temp root, so expectations derive per spec.)
+        for (job, slot) in [
+            (&first, "slot-3"),
+            (&same_slot, "slot-3"),
+            (&other_slot, "slot-4"),
+        ] {
+            let store = job.mbx_store_host.clone().unwrap();
+            assert_eq!(
+                job.mbx_cache_store_host().unwrap(),
+                store.join("slots").join(slot)
+            );
+        }
+
+        // Materializing the command writes an env file, so root the argv half
+        // of the assertion in a real directory.
+        let job = slotted_spec("mbx-slot-argv");
+        let store = job.mbx_store_host.clone().unwrap();
+        let args = rendered(&job.start_args().unwrap());
+        assert!(args.contains(&format!("{}:/var/cache/mbx", store.display())));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
+        assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
+    }
+
+    #[test]
+    fn concurrent_slots_do_not_share_mbx_target_roots() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut other = spec();
+        other.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/slot-3"
+        );
+        assert_eq!(
+            other.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/slot-4"
+        );
+        assert_ne!(
+            first.mbx_target_container_dir(),
+            other.mbx_target_container_dir()
+        );
+        assert_eq!(
+            first.mbx_target_store_host().unwrap(),
+            first
+                .mbx_store_host
+                .as_ref()
+                .unwrap()
+                .join("targets/slots/slot-3")
+        );
+        assert_eq!(
+            other.mbx_target_store_host().unwrap(),
+            other
+                .mbx_store_host
+                .as_ref()
+                .unwrap()
+                .join("targets/slots/slot-4")
+        );
+    }
+
+    #[test]
+    fn sequential_same_slot_jobs_reuse_mbx_target_root() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut second = spec();
+        second.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            second.mbx_target_container_dir()
+        );
+        assert_eq!(
+            first.mbx_target_store_host().unwrap().file_name(),
+            second.mbx_target_store_host().unwrap().file_name()
+        );
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/slot-3"
+        );
+    }
+
+    #[test]
+    fn missing_slot_identity_never_falls_back_to_shared_mbx_target_root() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/job-a/temp".into();
+        let mut second = spec();
+        second.name = "velnor-job-2".into();
+        second.temp_host = "/var/lib/velnor/work/job-b/temp".into();
+
+        assert_eq!(
+            first.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/velnor-job-1"
+        );
+        assert_eq!(
+            second.mbx_target_container_dir(),
+            "/var/cache/mbx/targets/slots/velnor-job-2"
+        );
+        assert_ne!(first.mbx_target_container_dir(), "/var/cache/mbx/targets");
+    }
+
+    #[test]
+    fn step_env_cannot_override_authoritative_mbx_roots() {
+        let job = slotted_spec("mbx-target-spoof");
+        let env = vec![
+            ("MBX_TARGET_ROOT".into(), "/var/cache/mbx/targets".into()),
+            ("MBX_CACHE_DIR".into(), "/var/cache/mbx".into()),
+            ("MBX_DISABLE".into(), "1".into()),
+        ];
+        let recorded = job.script_exec_env(&env);
+        assert!(recorded.iter().any(|(name, value)| {
+            name == "MBX_TARGET_ROOT" && value == "/var/cache/mbx/targets/slots/slot-1"
+        }));
+        assert!(recorded.iter().any(|(name, value)| {
+            name == "MBX_CACHE_DIR" && value == "/var/cache/mbx/slots/slot-1"
+        }));
+        assert!(
+            recorded
+                .iter()
+                .any(|(name, value)| name == "MBX_DISABLE" && value == "1"),
+            "MBX_DISABLE is the one mbx name a job may set"
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|(name, _)| name == "MBX_TARGET_ROOT")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mbx_cache_without_slot_identity_isolates_per_job() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/job-a/temp".into();
+        let mut second = spec();
+        second.name = "velnor-job-2".into();
+        second.temp_host = "/var/lib/velnor/work/job-b/temp".into();
+
+        // No `slot-N` segment: isolate per job name, never share the root.
+        assert_eq!(
+            first.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/velnor-job-1"
+        );
+        assert_eq!(
+            second.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/velnor-job-2"
+        );
+        let store = first.mbx_store_host.clone().unwrap();
+        assert_eq!(
+            first.mbx_cache_store_host().unwrap(),
+            store.join("slots/velnor-job-1")
+        );
+    }
+
+    #[test]
+    fn mbx_cache_subdir_is_absent_when_the_store_is_disabled() {
+        let mut job = slotted_spec("mbx-slot-disabled");
+        job.mbx_store_host = None;
+        job.sccache_store_host = Some(PathBuf::from("/var/cache/sccache"));
+        assert_eq!(job.mbx_cache_store_host(), None);
+        assert_eq!(job.mbx_target_store_host(), None);
+        let args = rendered(&job.start_args().unwrap());
+        assert!(!args.iter().any(|arg| arg.starts_with("MBX_CACHE_DIR=")));
+        assert!(!args.iter().any(|arg| arg.starts_with("MBX_TARGET_ROOT=")));
+        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
+    }
+
+    #[test]
     fn maps_job_paths_to_docker_host_work_dir() {
         // The mapping only depends on the relative path below the work root,
         // so a real temp root keeps the expected daemon-side paths identical
@@ -2538,6 +3113,25 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
+        let lease_paths = spec.docker_lease_paths().unwrap();
+        assert_ne!(lease_paths.host_visible, lease_paths.daemon_visible);
+        if JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+            let lease_mount = format!(
+                "{}:/var/run/docker.sock",
+                lease_paths.daemon_visible.display()
+            );
+            assert!(
+                args.contains(&lease_mount),
+                "the lease listener must use the Docker-daemon-visible path {lease_mount}, got {args:?}"
+            );
+        } else {
+            assert!(
+                args.iter()
+                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
+                        && !arg.contains("vdl-")),
+                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+            );
+        }
     }
 
     #[test]
@@ -2557,6 +3151,42 @@ mod tests {
             spec.docker_host_path(spec.mbx_store_host.as_ref().unwrap()),
             PathBuf::from("/daemon/work/_velnor_mbx/trusted")
         );
+        assert_eq!(
+            spec.docker_lease_paths().unwrap().daemon_visible.parent(),
+            Some(Path::new("/daemon/work/slot-1/job-1/temp/_velnor"))
+        );
+    }
+
+    #[test]
+    fn rejects_docker_mapping_that_escapes_the_host_work_root() {
+        let root = container_test_temp("reject-escaping-host-path");
+        let mut spec = spec();
+        spec.temp_host = root.join("work/job-1/temp");
+        spec.workspace_host = root.join("outside/workspace");
+        spec.home_host = root.join("work/job-1/home");
+        spec.actions_host = root.join("work/job-1/actions");
+        spec.tools_host = root.join("work/job-1/tools");
+        spec.docker_host_work_dir = Some("/daemon/work".into());
+
+        let error = spec.validate_docker_host_path_mapping().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("workspace"), "{message}");
+        assert!(
+            message.contains("escapes host-visible runner work root"),
+            "{message}"
+        );
+        assert!(message.contains("docker_host_work_dir"), "{message}");
+    }
+
+    #[test]
+    fn rejects_parent_components_in_docker_mapping_roots() {
+        let mut spec = spec();
+        spec.docker_host_work_dir = Some("/daemon/work/../escape".into());
+
+        let error = spec.validate_docker_host_path_mapping().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Docker daemon work root"), "{message}");
+        assert!(message.contains("unsafe parent"), "{message}");
     }
 
     #[test]
@@ -2576,6 +3206,8 @@ mod tests {
             "VELNOR_DOCKER_HOST_WORKSPACE={}",
             spec.workspace_host.display()
         );
+        let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
+        let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
 
         assert_eq!(
             rendered(&prepared),
@@ -2591,6 +3223,8 @@ mod tests {
                 temp_env.as_str(),
                 workspace_env.as_str(),
                 "GITHUB_OUTPUT=/__t/out",
+                mbx_cache_env.as_str(),
+                mbx_target_env.as_str(),
                 "--",
                 "velnor-job-1",
                 "bash",
@@ -2620,6 +3254,8 @@ mod tests {
             "VELNOR_DOCKER_HOST_WORKSPACE={}",
             spec.workspace_host.display()
         );
+        let mbx_cache_env = format!("MBX_CACHE_DIR={}", spec.mbx_cache_container_dir());
+        let mbx_target_env = format!("MBX_TARGET_ROOT={}", spec.mbx_target_container_dir());
 
         assert_eq!(
             rendered(&prepared),
@@ -2635,6 +3271,8 @@ mod tests {
                 temp_env.as_str(),
                 workspace_env.as_str(),
                 "INPUT_NAME=value",
+                mbx_cache_env.as_str(),
+                mbx_target_env.as_str(),
                 "--",
                 "velnor-job-1",
                 "node",
@@ -3571,6 +4209,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_docker_action_paths_outside_mapped_work_root() {
+        let root = container_test_temp("reject-docker-action-path");
+        let mut spec = spec();
+        spec.docker_host_work_dir = Some("/daemon/work".into());
+        let dockerfile = root.join("outside/Dockerfile");
+        let context = root.join("outside");
+
+        let error = spec
+            .build_docker_action_args("alpine:3.20", &dockerfile, &context)
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Dockerfile"), "{message}");
+        assert!(
+            message.contains("escapes host-visible runner work root"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn builds_service_container_start_args() {
         let service = ServiceContainerSpec {
             name: "velnor-service-postgres".into(),
@@ -3905,7 +4562,13 @@ mod tests {
             .unwrap();
         assert!(base_path < step_path);
         assert!(!engine.iter().any(|entry| entry.ends_with("=spoof")));
-        assert_eq!(engine.last().unwrap(), "VELNOR_EXECUTION_BACKEND=velnor");
+        assert!(engine
+            .iter()
+            .any(|entry| entry == "VELNOR_EXECUTION_BACKEND=velnor"));
+        assert_eq!(
+            engine.last().unwrap(),
+            &format!("MBX_TARGET_ROOT={}", job.mbx_target_container_dir())
+        );
         assert!(engine.contains(&"MULTILINE=a\nb".to_string()));
         // The CLI leg can only carry that value via the client process env;
         // the engine leg carries it directly — same daemon value.

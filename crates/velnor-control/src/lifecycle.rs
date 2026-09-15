@@ -41,6 +41,7 @@ struct State {
 pub struct LifecycleService {
     state: Arc<Mutex<State>>,
     store: Option<Arc<Store>>,
+    store_instance: Option<String>,
     instance: Option<String>,
 }
 
@@ -51,6 +52,7 @@ impl LifecycleService {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             store: None,
+            store_instance: None,
             instance: None,
         }
     }
@@ -71,6 +73,7 @@ impl LifecycleService {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             store: Some(store),
+            store_instance: None,
             instance: None,
         }
     }
@@ -85,11 +88,24 @@ impl LifecycleService {
         instance: impl Into<String>,
     ) -> crate::store::StoreResult<Self> {
         let instance = instance.into();
-        validate_configured_instance(&instance)?;
+        Self::with_store_and_api_instance(store, &instance, &instance)
+    }
+
+    /// Create a durable lifecycle service with distinct durable and API
+    /// identities. The runner store uses the host slug while the local API
+    /// may expose an operator-selected instance name.
+    pub fn with_store_and_api_instance(
+        store: Arc<Store>,
+        store_instance: &str,
+        api_instance: &str,
+    ) -> crate::store::StoreResult<Self> {
+        validate_configured_instance(store_instance)?;
+        validate_configured_instance(api_instance)?;
         Ok(Self {
             state: Arc::new(Mutex::new(State::default())),
             store: Some(store),
-            instance: Some(instance),
+            store_instance: Some(store_instance.to_owned()),
+            instance: Some(api_instance.to_owned()),
         })
     }
 
@@ -122,11 +138,12 @@ impl LifecycleService {
         let Some(store) = &self.store else {
             return self.get(instance);
         };
+        let store_instance = self.store_instance.as_deref().unwrap_or(instance);
         let fresh = store
-            .lifecycle_instance(instance)
+            .lifecycle_instance(store_instance)
             .map_err(store_error)?
             .map(|row| LifecycleState {
-                instance: row.instance_slug,
+                instance: instance.to_owned(),
                 desired: row.desired_state,
                 observed: row.observed_state,
                 version: row.resource_version,
@@ -153,11 +170,12 @@ impl LifecycleService {
                 resource: format!("instance {instance}"),
             });
         };
+        let store_instance = self.store_instance.as_deref().unwrap_or(instance);
         store
-            .lifecycle_instance(instance)
+            .lifecycle_instance(store_instance)
             .map_err(store_error)?
             .map(|row| LifecycleState {
-                instance: row.instance_slug,
+                instance: instance.to_owned(),
                 desired: row.desired_state,
                 observed: row.observed_state,
                 version: row.resource_version,
@@ -176,10 +194,14 @@ impl MutationPort for LifecycleService {
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         let desired = desired_state(&request.kind).to_owned();
         if let Some(store) = &self.store {
+            let store_instance = self
+                .store_instance
+                .as_deref()
+                .unwrap_or(request.target.as_str());
             let operation_id = format!("op-{}", uuid::Uuid::new_v4());
             let created_at = velnor_model::Timestamp::now();
             let operation_request = crate::store::LifecycleOperationRequest {
-                instance_slug: request.target.clone(),
+                instance_slug: store_instance.to_owned(),
                 kind: kind_name(&request.kind).to_owned(),
                 target: request.target.clone(),
                 reason: request.reason.clone(),
@@ -349,6 +371,11 @@ const MAX_LIFECYCLE_TEXT_BYTES: usize = 512;
 const MAX_SCALE_SLOTS: u32 = 4_096;
 
 fn validate_request(request: &MutationRequest) -> Result<(), PortError> {
+    if !supports_mutation(&request.kind) {
+        return Err(PortError::Unsupported {
+            operation: kind_name(&request.kind).to_owned(),
+        });
+    }
     validate_bounded_text("reason", &request.reason, true)?;
     validate_bounded_text("idempotency_key", &request.idempotency_key, true)?;
     match (&request.kind, request.scale_to) {
@@ -367,6 +394,17 @@ fn validate_request(request: &MutationRequest) -> Result<(), PortError> {
         }),
         (_, None) => Ok(()),
     }
+}
+
+/// Only mutations with a live actuator may enter the durable ledger. The
+/// former implementation accepted recycle/scale/reconcile/restart and left
+/// those intents permanently in `accepted` with no controller that could
+/// perform them.
+fn supports_mutation(kind: &MutationKind) -> bool {
+    matches!(
+        kind,
+        MutationKind::Cordon | MutationKind::Uncordon | MutationKind::Drain | MutationKind::Resume
+    )
 }
 
 fn validate_bounded_text(
@@ -454,6 +492,37 @@ mod tests {
     }
 
     #[test]
+    fn durable_idempotency_key_binds_expected_version() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-version-{}-{}",
+            std::process::id(),
+            velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("state.db");
+        let store = Arc::new(crate::store::Store::open(&path).expect("store"));
+        let service = LifecycleService::with_store(store);
+        let request = MutationRequest {
+            kind: MutationKind::Drain,
+            target: "primary".to_owned(),
+            reason: "maintenance".to_owned(),
+            idempotency_key: "durable-version-bound".to_owned(),
+            expected_version: Some(1),
+            scale_to: None,
+        };
+        service.mutate(request.clone()).expect("first mutation");
+        let mut changed_precondition = request;
+        changed_precondition.expected_version = None;
+        assert!(matches!(
+            service.mutate(changed_precondition),
+            Err(PortError::Conflict { .. })
+        ));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn desired_fresh_reads_through_a_stale_cache_and_updates_it() {
         let directory = std::env::temp_dir().join(format!(
             "velnor-lifecycle-fresh-{}-{}",
@@ -536,6 +605,31 @@ mod tests {
         oversized_scale.kind = MutationKind::Scale;
         oversized_scale.scale_to = Some(MAX_SCALE_SLOTS + 1);
         assert!(service.mutate(oversized_scale).is_err());
+    }
+
+    #[test]
+    fn mutations_without_an_actuator_are_rejected_before_durable_acceptance() {
+        let service = LifecycleService::new();
+        service.register("primary").expect("register");
+        for kind in [
+            MutationKind::Restart,
+            MutationKind::Recycle,
+            MutationKind::Scale,
+            MutationKind::Reconcile,
+        ] {
+            let error = service
+                .mutate(MutationRequest {
+                    kind,
+                    target: "primary".to_owned(),
+                    reason: "test".to_owned(),
+                    idempotency_key: "unsupported-operation".to_owned(),
+                    expected_version: None,
+                    scale_to: Some(2),
+                })
+                .expect_err("unsupported mutation must fail closed");
+            assert!(matches!(error, PortError::Unsupported { .. }));
+        }
+        assert_eq!(service.get("primary").unwrap().desired, "ready");
     }
 
     #[test]

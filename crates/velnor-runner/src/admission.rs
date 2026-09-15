@@ -17,6 +17,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(test)]
 use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -47,7 +48,7 @@ const MAX_ADMISSION_STEP_VISITS: usize = 1_000_000;
 /// Hard ceiling on workflow steps inspected during one admission walk.
 const MAX_ADMISSION_ROOT_STEPS: usize = 4096;
 /// Hard ceiling on one action metadata response before parsing.
-const MAX_ACTION_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_ACTION_METADATA_BYTES: usize = 64 * 1024;
 /// Bound immutable metadata retained by one admission walk.
 const MAX_ADMISSION_METADATA_BYTES: usize = 8 * 1024 * 1024;
 /// Bound copied workflow context used by composite input rendering.
@@ -446,22 +447,23 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 }
             }
             url.query_pairs_mut().append_pair("ref", git_ref);
-            let response = self
-                .client
-                .get(url)
-                .bearer_auth(&self.token)
-                .header("Accept", "application/vnd.github.raw+json")
-                .header("X-GitHub-Api-Version", "2026-03-10")
-                .send()?;
-            last_status = Some(response.status());
-            if response.status().is_success() {
-                let content_length = response.content_length();
-                let contents = read_bounded_metadata_body(response, content_length)?;
+            let response = crate::protocol::github_contents_request(
+                &self.client,
+                url.as_str(),
+                &self.token,
+                MAX_ACTION_METADATA_BYTES,
+            )?;
+            last_status = Some(response.status);
+            if (200..300).contains(&response.status) {
+                let contents = response.body;
                 return crate::action::parse_action_metadata(&contents)
                     .map_err(|error| anyhow::anyhow!("parse {repository}@{git_ref}: {error:#}"));
             }
-            if response.status() != reqwest::StatusCode::NOT_FOUND {
-                response.error_for_status()?;
+            if response.status != reqwest::StatusCode::NOT_FOUND.as_u16() {
+                anyhow::bail!(
+                    "GitHub Contents request failed with status {}",
+                    response.status
+                );
             }
         }
         anyhow::bail!(
@@ -471,22 +473,9 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
     }
 }
 
+#[cfg(test)]
 fn read_bounded_metadata_body<R: Read>(reader: R, content_length: Option<u64>) -> Result<String> {
-    if content_length.is_some_and(|length| length > MAX_ACTION_METADATA_BYTES as u64) {
-        anyhow::bail!("action metadata response exceeds {MAX_ACTION_METADATA_BYTES} bytes");
-    }
-    let mut body = Vec::with_capacity(
-        content_length
-            .unwrap_or_default()
-            .min(MAX_ACTION_METADATA_BYTES as u64) as usize,
-    );
-    reader
-        .take((MAX_ACTION_METADATA_BYTES as u64).saturating_add(1))
-        .read_to_end(&mut body)?;
-    if body.len() > MAX_ACTION_METADATA_BYTES {
-        anyhow::bail!("action metadata response exceeds {MAX_ACTION_METADATA_BYTES} bytes");
-    }
-    String::from_utf8(body).map_err(Into::into)
+    crate::protocol::read_bounded_http_body(reader, content_length, MAX_ACTION_METADATA_BYTES)
 }
 
 /// Recursion state shared across the closure walk.

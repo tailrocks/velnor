@@ -57,6 +57,7 @@ const DENY_LIST: &[&str] = &[
     // Estate runner placement.
     "velnor-trusted",
     "velnor-target-mvp",
+    "velnor-host-docker",
     // Estate unit ids and template families.
     "rust-velnor",
     "bun-velnor",

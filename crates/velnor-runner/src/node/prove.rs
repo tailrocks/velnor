@@ -29,9 +29,6 @@ pub const ROUTING_POLICY_FILE: &str = "routing-policy.json";
 pub const ROUTING_EVIDENCE_FILE: &str = "routing-evidence.json";
 /// Host-local executor proof written by a real preflight, never by daemon startup.
 pub const EXECUTOR_OK: &str = "executor.ok";
-/// Host Docker socket. Executor proof for the docker backend only.
-pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RoutingFields {
     #[serde(default)]
@@ -94,7 +91,14 @@ pub fn observe_document(document: &RoutingDocument) -> RoutingObservation {
 /// socket as ready.
 #[must_use]
 pub fn observe_executor(state_dir: &Path, backend: ExecutionBackendKind) -> bool {
-    crate::execution::executor_is_proven(state_dir, backend, Path::new(HOST_DOCKER_SOCKET))
+    let host_socket = if backend == ExecutionBackendKind::Docker {
+        crate::docker::engine::resolve_docker_endpoint()
+            .map(|endpoint| endpoint.socket)
+            .unwrap_or_default()
+    } else {
+        PathBuf::from(crate::execution::MICROVM_NO_HOST_DOCKER_SOCKET)
+    };
+    crate::execution::executor_is_proven(state_dir, backend, &host_socket)
 }
 
 /// Legacy process-liveness helper. Slot proofs must use
@@ -169,7 +173,7 @@ pub fn slot_process_is_alive(
         else {
             return false;
         };
-        if executable != b"velnor-runner" {
+        if !slot_service_executable_name(&String::from_utf8_lossy(executable)) {
             return false;
         }
         let state_dir = state_dir.to_string_lossy();
@@ -191,50 +195,7 @@ pub fn slot_process_is_alive(
 
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
-            return false;
-        };
-        let Some(state_dir) = state_dir.to_str() else {
-            return false;
-        };
-        let generation = generation.0.to_string();
-        let pid = pid.to_string();
-        let Ok(output) = std::process::Command::new("ps")
-            .args(["-ww", "-p", &pid, "-o", "command="])
-            .output()
-        else {
-            return false;
-        };
-        if !output.status.success() {
-            return false;
-        }
-        let Ok(command_line) = std::str::from_utf8(&output.stdout) else {
-            return false;
-        };
-        let mut args = command_line.split_ascii_whitespace();
-        let Some(executable) = args.next() else {
-            return false;
-        };
-        if std::path::Path::new(executable)
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            != Some("velnor-runner")
-        {
-            return false;
-        }
-        let expected = [
-            "slot",
-            "--state-dir",
-            state_dir,
-            "--scope",
-            scope,
-            "--slot-index",
-            index,
-            "--generation",
-            generation.as_str(),
-        ];
-        let args: Vec<&str> = args.collect();
-        args.as_slice() == expected.as_slice()
+        unix_slot_process_matches_command_line(pid, state_dir, slot_id, generation)
     }
 
     #[cfg(not(unix))]
@@ -242,6 +203,62 @@ pub fn slot_process_is_alive(
         let _ = (state_dir, slot_id, generation);
         pid_is_alive(pid)
     }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unix_slot_process_matches_command_line(
+    pid: u32,
+    state_dir: &Path,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
+        return false;
+    };
+    let Some(state_dir) = state_dir.to_str() else {
+        return false;
+    };
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(command_line) = std::str::from_utf8(&output.stdout) else {
+        return false;
+    };
+    if !command_line_names_slot_service(command_line) || !command_line.contains(" slot ") {
+        return false;
+    }
+    // macOS `ps` preserves spaces inside `--state-dir` values; token splitting
+    // would reject the default Application Support layout.
+    command_line.contains(state_dir)
+        && command_line.contains(&format!("--scope {scope}"))
+        && command_line.contains(&format!("--slot-index {index}"))
+        && command_line.contains(&format!("--generation {}", generation.0))
+}
+
+/// Slot children may be `velnor-runner` or the `velnorctl`/`velnor-host`
+/// control-plane binary that implements the same `slot`/`job` surface.
+/// Restricting the liveness check to `velnor-runner` made every heartbeat
+/// look stale when launchd had to exec an allowed `velnor-host` identity.
+#[cfg(any(target_os = "linux", test))]
+fn slot_service_executable_name(name: &str) -> bool {
+    name == "velnor-runner"
+        || name == "velnorctl"
+        || name == "velnor-host"
+        || name.starts_with("velnor-runner-")
+        || name.starts_with("velnorctl-")
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn command_line_names_slot_service(command_line: &str) -> bool {
+    command_line.contains("velnor-runner")
+        || command_line.contains("velnorctl")
+        || command_line.contains("velnor-host")
 }
 
 /// Verify that a slot published recent progress for the expected generation
@@ -627,7 +644,7 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     .await
     {
         Ok(response) => response,
-        Err(error) => return GitHubProbe::failed(format!("request runners: {error}")),
+        Err(error) => return GitHubProbe::failed(format!("request runners: {error:#}")),
     };
     if !(200..300).contains(&status) {
         if rate_limit.is_limited(status) {
@@ -1333,6 +1350,22 @@ mod tests {
             selected_repositories: vec!["tailrocks/velnor".into()],
             labels: vec!["velnor".into()],
             trust_scope: "trusted".into(),
+        }
+    }
+
+    #[test]
+    fn slot_service_identity_accepts_host_and_ctl_aliases() {
+        assert!(slot_service_executable_name("velnor-runner"));
+        assert!(slot_service_executable_name("velnorctl"));
+        assert!(slot_service_executable_name("velnor-host"));
+        assert!(slot_service_executable_name("velnorctl-debug"));
+        assert!(!slot_service_executable_name("sleep"));
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            assert!(command_line_names_slot_service(
+                "/tmp/gh-nat-probe/target/release/velnor-host slot --state-dir /x"
+            ));
+            assert!(!command_line_names_slot_service("sleep 30"));
         }
     }
 

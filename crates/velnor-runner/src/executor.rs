@@ -7,7 +7,7 @@ use crate::{
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
-    container::{JobContainerSpec, Shell},
+    container::{JobContainerSpec, Shell, JOB_DONE_SENTINEL},
     docker::client::{
         classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
     },
@@ -34,12 +34,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::{
+    fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    io::{AsRawFd, FromRawFd},
+};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
-    fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -49,7 +52,10 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{
+    mpsc::{error::TrySendError, Sender},
+    Notify,
+};
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -670,8 +676,6 @@ fn register_process_group(
     )
 }
 
-const PACKAGE_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
-
 /// Deadline and operation class for one host process invocation.
 ///
 /// A non-`docker` program keeps the caller's deadline. A `docker` invocation
@@ -710,74 +714,9 @@ pub(crate) fn configure_host_docker_command(
     program: &str,
     args: &[String],
 ) -> Result<()> {
-    if program != "docker" {
-        return Ok(());
+    if program == "docker" {
+        crate::docker::engine::configure_host_docker_command(command, args)?;
     }
-    let mut index = 0;
-    while let Some(argument) = args.get(index) {
-        // Docker global options end at the first subcommand. A command passed
-        // to `docker run`, such as `sh -c ...`, is opaque payload and must not
-        // be mistaken for Docker's global `-c` context option.
-        if argument == "--" || !argument.starts_with('-') {
-            break;
-        }
-        if argument == "--host" || argument == "-H" {
-            let host = args
-                .get(index + 1)
-                .ok_or_else(|| anyhow::anyhow!("docker {argument} is missing its endpoint"))?;
-            if host != PACKAGE_DOCKER_HOST {
-                bail!("refusing remote Docker endpoint {host:?}; only {PACKAGE_DOCKER_HOST} is package-owned");
-            }
-            index += 2;
-            continue;
-        }
-        if argument == "--context"
-            || argument.starts_with("--context=")
-            || argument == "-c"
-            || argument.starts_with("-c=")
-            || (argument.starts_with("-c") && argument.len() > 2)
-        {
-            bail!("refusing explicit Docker context; only the package-owned local socket is supported");
-        }
-        if let Some(host) = argument
-            .strip_prefix("--host=")
-            .or_else(|| argument.strip_prefix("-H="))
-            .or_else(|| argument.strip_prefix("-H").filter(|host| !host.is_empty()))
-        {
-            if host != PACKAGE_DOCKER_HOST {
-                bail!("refusing remote Docker endpoint {host:?}; only {PACKAGE_DOCKER_HOST} is package-owned");
-            }
-            index += 1;
-            continue;
-        }
-        let value_option = argument == "--config"
-            || argument == "-l"
-            || argument == "--log-level"
-            || argument == "--tlscacert"
-            || argument == "--tlscert"
-            || argument == "--tlskey";
-        let attached_value_option = argument.starts_with("--config=")
-            || argument.starts_with("--log-level=")
-            || argument.starts_with("--tlscacert=")
-            || argument.starts_with("--tlscert=")
-            || argument.starts_with("--tlskey=")
-            || argument.starts_with("-l=")
-            || (argument.starts_with("-l") && argument.len() > 2);
-        if value_option {
-            if args.get(index + 1).is_none() {
-                bail!("docker {argument} is missing its value");
-            }
-            index += 2;
-        } else {
-            index += 1;
-        }
-        if attached_value_option {
-            continue;
-        }
-    }
-    command
-        .env("DOCKER_HOST", PACKAGE_DOCKER_HOST)
-        .env_remove("DOCKER_CONTEXT");
     Ok(())
 }
 
@@ -1137,31 +1076,189 @@ impl CommandRunner for ProcessCommandRunner {
     }
 }
 
+/// Pending bytes without a newline become visible within this bound so
+/// `printf` / progress spinners are not invisible until the process exits.
+/// Workflow-command prefixes are held until newline or stream end.
+const PARTIAL_LINE_FLUSH: Duration = Duration::from_millis(250);
+
 fn stream_reader<R: std::io::Read + Send + 'static>(
-    reader: R,
+    mut reader: R,
     stream: CommandStream,
     sender: mpsc::Sender<(CommandStream, String)>,
 ) {
-    let mut reader = BufReader::new(reader);
-    let mut buf = Vec::new();
+    let (chunk_tx, chunk_rx) = mpsc::sync_channel::<Vec<u8>>(16);
+    thread::spawn(move || {
+        let mut buf = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if chunk_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let mut pending = Vec::new();
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,
-            Ok(_) => {
-                if buf.last() == Some(&b'\n') {
-                    buf.pop();
-                }
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-                let line = String::from_utf8_lossy(&buf).into_owned();
-                if sender.send((stream, line)).is_err() {
+        match chunk_rx.recv_timeout(PARTIAL_LINE_FLUSH) {
+            Ok(chunk) => {
+                pending.extend_from_slice(&chunk);
+                if !emit_complete_stream_lines(&mut pending, stream, &sender) {
                     break;
                 }
             }
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !flush_partial_stream_line(&mut pending, stream, &sender) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = emit_complete_stream_lines(&mut pending, stream, &sender);
+                if !pending.is_empty() {
+                    let _ = emit_stream_line(&mut pending, stream, &sender);
+                }
+                break;
+            }
         }
+    }
+}
+
+fn emit_complete_stream_lines(
+    pending: &mut Vec<u8>,
+    stream: CommandStream,
+    sender: &mpsc::Sender<(CommandStream, String)>,
+) -> bool {
+    let mut start = 0;
+    while let Some(relative) = pending[start..].iter().position(|byte| *byte == b'\n') {
+        let end = start + relative;
+        let mut line = pending[start..end].to_vec();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let text = String::from_utf8_lossy(&line).into_owned();
+        if sender.send((stream, text)).is_err() {
+            pending.clear();
+            return false;
+        }
+        start = end + 1;
+    }
+    pending.drain(..start);
+    true
+}
+
+fn flush_partial_stream_line(
+    pending: &mut Vec<u8>,
+    stream: CommandStream,
+    sender: &mpsc::Sender<(CommandStream, String)>,
+) -> bool {
+    if pending.is_empty() || pending_looks_like_workflow_command(pending) {
+        return true;
+    }
+    emit_stream_line(pending, stream, sender)
+}
+
+fn emit_stream_line(
+    pending: &mut Vec<u8>,
+    stream: CommandStream,
+    sender: &mpsc::Sender<(CommandStream, String)>,
+) -> bool {
+    let mut line = std::mem::take(pending);
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    let text = String::from_utf8_lossy(&line).into_owned();
+    sender.send((stream, text)).is_ok()
+}
+
+fn pending_looks_like_workflow_command(pending: &[u8]) -> bool {
+    let start = pending
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(pending.len());
+    let rest = &pending[start..];
+    rest.starts_with(b"::") || rest.starts_with(b"##[")
+}
+
+/// Tell the container PID 1 supervisor the job is terminal so `tail -F`
+/// cannot keep an otherwise finished container alive. The marker is created
+/// exclusively through a verified directory fd: a job-controlled symlink or
+/// replacement path can never redirect this write.
+fn mark_job_container_done(container: &JobContainerSpec) -> bool {
+    if let Err(error) = container.prepare_job_done_mount() {
+        eprintln!(
+            "forensics.lifecycle: refusing unsafe completion control directory {}: {error}",
+            container.job_done_host_dir().display()
+        );
+        return false;
+    }
+    let path = container.job_done_host_path();
+    let result = write_job_done_marker(&path);
+    if let Err(error) = result {
+        eprintln!(
+            "forensics.lifecycle: refusing unsafe job.done sentinel {}: {error}",
+            path.display()
+        );
+        return false;
+    }
+    true
+}
+
+fn write_job_done_marker(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "job.done path has no parent")
+    })?;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "job.done path is not a normalized absolute path",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)?;
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "job.done parent is not a private runner-owned directory",
+            ));
+        }
+        let marker_name = std::ffi::CString::new(JOB_DONE_SENTINEL).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "job.done name contains NUL")
+        })?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                marker_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut marker = unsafe { File::from_raw_fd(fd) };
+        marker.write_all(b"done\n")?;
+        marker.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let mut marker = OpenOptions::new().write(true).create_new(true).open(path)?;
+        marker.write_all(b"done\n")?;
+        marker.sync_all()
     }
 }
 
@@ -1324,19 +1421,78 @@ pub struct StepStartEvent {
 /// never as executor backpressure or unbounded queue memory.
 pub const STEP_PUBLISH_CHANNEL_CAPACITY: usize = 1024;
 
-/// Best-effort step-publish sender over a bounded channel.
+/// Ordered overflow after the live channel fills. GitHub upload slowness
+/// must not erase step output: events spill here, still in send order, and
+/// drop only when this buffer is also full. The publisher drains the channel
+/// first, then this queue.
+pub const STEP_PUBLISH_OVERFLOW_CAPACITY: usize = 8192;
+
+/// Mutex-ordered overflow paired with a `Notify` so the publisher wakes
+/// when the live channel is empty but spilled events remain.
+#[derive(Debug)]
+pub struct StepPublishSpill<T> {
+    overflow: Mutex<VecDeque<T>>,
+    notify: Notify,
+}
+
+impl<T> StepPublishSpill<T> {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            overflow: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+        })
+    }
+
+    /// Store `value` at the tail. Returns false only when the overflow is
+    /// already at `STEP_PUBLISH_OVERFLOW_CAPACITY`.
+    pub fn push(&self, value: T) -> bool {
+        let mut overflow = self
+            .overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if overflow.len() >= STEP_PUBLISH_OVERFLOW_CAPACITY {
+            return false;
+        }
+        overflow.push_back(value);
+        self.notify.notify_one();
+        true
+    }
+
+    pub fn take_front(&self) -> Option<T> {
+        self.overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
+
+    pub fn take_all(&self) -> Vec<T> {
+        self.overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect()
+    }
+
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+/// Best-effort step-publish sender over a bounded channel plus optional
+/// ordered overflow.
 ///
 /// Publishing is advisory — the authoritative step records travel in
-/// `ScriptJobResult` — so a full channel (stalled publisher) drops the event
-/// and bumps the counter instead of blocking the execution thread. The runner
-/// reads the counter at drain time for the forensics line. Exception: on the
-/// cancel path the executor never returns `ScriptJobResult`, so the streamed
-/// mirror (fed through this channel) is the persisted log's only source —
-/// drops there surface in the cancel-path truncation marker.
+/// `ScriptJobResult` — so a full channel+overflow (stalled publisher) drops
+/// the event and bumps the counter instead of blocking the execution thread.
+/// The runner reads the counter at drain time for the forensics line.
+/// Exception: on the cancel path the executor never returns `ScriptJobResult`,
+/// so the streamed mirror (fed through this channel) is the persisted log's
+/// only source — drops there surface in the cancel-path truncation marker.
 #[derive(Debug, Clone)]
 pub struct BoundedStepSender<T> {
     sender: Sender<T>,
     drops: Arc<AtomicU64>,
+    spill: Option<Arc<StepPublishSpill<T>>>,
 }
 
 impl<T> BoundedStepSender<T> {
@@ -1344,6 +1500,15 @@ impl<T> BoundedStepSender<T> {
         Self {
             sender,
             drops: Arc::new(AtomicU64::new(0)),
+            spill: None,
+        }
+    }
+
+    pub fn with_spill(sender: Sender<T>, spill: Arc<StepPublishSpill<T>>) -> Self {
+        Self {
+            sender,
+            drops: Arc::new(AtomicU64::new(0)),
+            spill: Some(spill),
         }
     }
 
@@ -1357,13 +1522,25 @@ impl<T> BoundedStepSender<T> {
         self.drops.load(Ordering::Relaxed)
     }
 
-    /// Non-blocking best-effort send. A full channel (stalled publisher) or
-    /// a gone publisher drops the event and counts it; both are fine because
-    /// the authoritative records travel in `ScriptJobResult` — except on the
-    /// cancel path, where the count feeds the truncation marker instead.
+    /// Non-blocking best-effort send. A full channel spills into the ordered
+    /// overflow when one is attached. Drop (and count) only when the overflow
+    /// is also full, or when the publisher is gone. Authoritative records
+    /// travel in `ScriptJobResult` — except on the cancel path, where the
+    /// count feeds the truncation marker instead.
     pub fn send_best_effort(&self, value: T) {
-        if self.sender.try_send(value).is_err() {
-            self.drops.fetch_add(1, Ordering::Relaxed);
+        match self.sender.try_send(value) {
+            Ok(()) => {}
+            Err(TrySendError::Full(value)) => {
+                if let Some(spill) = &self.spill
+                    && spill.push(value)
+                {
+                    return;
+                }
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Closed(_)) => {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -5408,6 +5585,7 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard("cleanup")?;
+        mark_job_container_done(container);
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
         // and `docker network rm` fails while an endpoint is still attached.
@@ -5448,6 +5626,7 @@ where
     }
 
     fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
+        mark_job_container_done(container);
         // Services first: their endpoints block the network removal inside
         // reclaim (see `cleanup`).
         let service_result = self.cleanup_services_unlocked(container);
@@ -5488,6 +5667,7 @@ where
     }
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
+        mark_job_container_done(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
@@ -5515,6 +5695,7 @@ where
         &mut self,
         container: &JobContainerSpec,
     ) -> Result<()> {
+        mark_job_container_done(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
@@ -5686,6 +5867,27 @@ where
                     container.temp_host.display()
                 )
             })?;
+            // The store root is shared across slots, but MBX_CACHE_DIR points
+            // at a per-slot subdir so mbx's registrar/lease flocks never cross
+            // containers. Pre-create it daemon-side like the root: mbx runs as
+            // root in the container and would otherwise create it root-owned
+            // on first use, locking the daemon user out of host-side repair.
+            if let Some(slot_cache) = container.mbx_cache_store_host() {
+                fs::create_dir_all(&slot_cache).with_context(|| {
+                    format!(
+                        "create per-slot Mr Boxington cache for {}",
+                        container.temp_host.display()
+                    )
+                })?;
+            }
+            if let Some(slot_target) = container.mbx_target_store_host() {
+                fs::create_dir_all(&slot_target).with_context(|| {
+                    format!(
+                        "create per-slot Mr Boxington target root for {}",
+                        container.temp_host.display()
+                    )
+                })?;
+            }
         }
         if let Some(cache_host) = &container.sccache_store_host {
             fs::create_dir_all(cache_host).with_context(|| {
@@ -5709,9 +5911,16 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
-        if container.mount_docker_socket {
+        if container.mount_docker_socket
+            && crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease()
+        {
+            container.validate_docker_host_path_mapping()?;
+            let lease_paths = container.docker_lease_paths()?;
             self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
-                container.guest_docker_socket_host(),
+                // The runner owns the listener on its host-visible path.
+                // Docker gets the separately mapped daemon-visible source in
+                // the job container's -v argument.
+                lease_paths.host_visible,
                 container.name.clone(),
                 container.daemon_id.clone(),
             )?);
@@ -5903,7 +6112,7 @@ where
                     std::slice::from_ref(&container.network),
                 )) {
                     Ok(_) => true,
-                    Err(error) => error.to_string().contains("not found"),
+                    Err(error) => crate::docker::client::is_not_found(&error),
                 };
             if removed {
                 self.defuse_job_network_guard();
@@ -7548,44 +7757,42 @@ fn restore_cache_glob_path(
 
 /// True for cache paths whose container locations are backed by Velnor's
 fn path_or_child(path: &str, root: &str) -> bool {
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|rest| rest.starts_with('/'))
+    cache_path_is_lexically_valid(path)
+        && (path == root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('/')))
 }
 
-/// Host-persistent or image-provided stores (mounted into every job container):
-/// the cargo registry/git stores, the mise tool store, the image-baked rustup
-/// toolchain store, and the shared sccache dir. These are always warm; the
-/// actions/cache adapter neither tars them into the store nor copies store bytes
-/// back over them.
+fn cache_path_is_lexically_valid(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains("//")
+        && !path.contains('\\')
+        && !path
+            .chars()
+            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+        && path
+            .split('/')
+            .skip(if path.starts_with('/') { 1 } else { 0 })
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+/// Host-persistent stores mounted into every Velnor job container.
+///
+/// The accepted aliases are limited to the documented Cargo forms. Rustup is
+/// intentionally excluded because its toolchain is image-baked, not a
+/// host-persistent cache mount.
 fn velnor_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
-    // These are the relative aliases emitted by the canonical fleet cache
-    // declarations. They resolve to Velnor's mounted Cargo/mise stores even
-    // though Actions treats them as workspace-relative paths on GitHub.
-    if path_or_child(path, ".cargo/registry")
+    path_or_child(path, "/github/home/.cargo/registry")
+        || path_or_child(path, "/github/home/.cargo/git")
+        || path_or_child(path, "/opt/mise/installs")
+        || path_or_child(path, "/opt/mise/cache")
+        || path_or_child(path, "/var/cache/sccache")
+        || path_or_child(path, "~/.cargo/registry")
+        || path_or_child(path, "~/.cargo/git")
+        || path_or_child(path, ".cargo/registry")
         || path_or_child(path, ".cargo/git")
-        || path_or_child(path, ".cache/mise")
-        || path_or_child(path, ".local/share/mise/installs")
-    {
-        return true;
-    }
-    let home_relative = path
-        .strip_prefix("~/")
-        .or_else(|| path.strip_prefix("/github/home/"));
-    if let Some(rest) = home_relative {
-        return path_or_child(rest, ".cargo/registry")
-            || path_or_child(rest, ".cargo/git")
-            // Workflows usually cache ~/.rustup on GitHub-hosted runners. Velnor
-            // points RUSTUP_HOME at the image-baked /root/.rustup store instead,
-            // so a ~/.rustup cache restore is pure hosted-runner compatibility
-            // noise on the Velnor lane.
-            || path_or_child(rest, ".rustup");
-    }
-    path_or_child(path, "/opt/mise")
-        || path_or_child(path, "/root/.rustup")
-        || path_or_child(path, crate::sccache_compat::CONTAINER_DIR)
 }
 
 fn rust_cache_covered_by_persistent_storage(cache_directories: &str) -> bool {
@@ -14207,7 +14414,11 @@ mod tests {
     }
 
     #[test]
-    fn host_docker_commands_are_pinned_to_the_package_socket() {
+    fn host_docker_commands_use_the_resolved_local_socket() {
+        let _guard = crate::docker::engine::EngineTestGuard::serve(
+            PathBuf::from("/tmp/velnor-test-docker.sock"),
+            None,
+        );
         let mut command = Command::new("sh");
         command.env("DOCKER_HOST", "tcp://docker.example:2376");
         configure_host_docker_command(&mut command, "docker", &[]).unwrap();
@@ -14215,7 +14426,10 @@ mod tests {
             .args(["-c", "printf %s \"$DOCKER_HOST\""])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout), PACKAGE_DOCKER_HOST);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "unix:///tmp/velnor-test-docker.sock"
+        );
     }
 
     #[test]
@@ -14248,7 +14462,11 @@ mod tests {
             let mut command = Command::new("true");
             let error = configure_host_docker_command(&mut command, "docker", &args)
                 .expect_err("remote Docker target must fail closed");
-            assert!(error.to_string().contains("refusing"), "{error}");
+            assert!(
+                error.to_string().contains("refusing")
+                    || error.to_string().contains("Docker context"),
+                "{error}"
+            );
         }
     }
 
@@ -15649,6 +15867,112 @@ mod tests {
         assert_eq!(lines[0].1, "first");
         assert!(lines[1].1.contains('\u{fffd}'));
         assert_eq!(lines[2].1, "after");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_reader_flushes_partial_lines_without_duplicating() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        writer.write_all(b"part-one").unwrap();
+        writer.flush().unwrap();
+        let first = receiver
+            .recv_timeout(Duration::from_millis(800))
+            .expect("partial line must become visible within the flush bound");
+        assert_eq!(first, (CommandStream::Stdout, "part-one".into()));
+        writer.write_all(b" part-two\n").unwrap();
+        writer.flush().unwrap();
+        let second = receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect("remainder after a partial flush must not stall");
+        assert_eq!(second, (CommandStream::Stdout, " part-two".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_reader_holds_partial_workflow_commands_until_newline() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        writer.write_all(b"::group::hidden").unwrap();
+        writer.flush().unwrap();
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(400)).is_err(),
+            "partial workflow commands must not flush as live lines"
+        );
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+        let line = receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect("complete workflow command must stream");
+        assert_eq!(line, (CommandStream::Stdout, "::group::hidden".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_reader_holds_indented_workflow_commands_until_newline() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        writer.write_all(b" ::group::hidden").unwrap();
+        writer.flush().unwrap();
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(400)).is_err(),
+            "leading whitespace must not split a workflow command mid-token"
+        );
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+        let line = receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect("complete indented workflow command must stream");
+        assert_eq!(line, (CommandStream::Stdout, " ::group::hidden".into()));
+    }
+
+    #[test]
+    fn mark_job_container_done_writes_sentinel() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        assert!(mark_job_container_done(&spec));
+        let path = spec.job_done_host_path();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "done\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_job_container_done_rejects_symlink_sentinel() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        spec.prepare_job_done_mount().unwrap();
+        let target = temp.join("must-not-change");
+        fs::write(&target, "unchanged\n").unwrap();
+        std::os::unix::fs::symlink(&target, spec.job_done_host_path()).unwrap();
+
+        assert!(!mark_job_container_done(&spec));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "unchanged\n");
+        assert!(fs::symlink_metadata(spec.job_done_host_path())
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_job_container_done_rejects_symlink_control_directory() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let redirected = temp.join("redirected-control");
+        fs::create_dir(&redirected).unwrap();
+        std::os::unix::fs::symlink(&redirected, spec.job_done_host_dir()).unwrap();
+
+        assert!(!mark_job_container_done(&spec));
+        assert!(!redirected.join(JOB_DONE_SENTINEL).exists());
     }
 
     fn assert_uuid(value: &str) {
@@ -17332,61 +17656,19 @@ esac
     }
 
     #[test]
-    fn native_cache_treats_rustup_paths_as_velnor_provided() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::Native {
-            step_id: "cache".into(),
-            display_name: String::new(),
-            invocation: NativeActionInvocation {
-                git_ref: String::new(),
-                adapter: NativeActionAdapter::Cache,
-                cache_kind: None,
-                source_path: None,
-                inputs: [
-                    (
-                        "path".into(),
-                        "~/.rustup/toolchains\n~/.rustup/update-hashes\n".into(),
-                    ),
-                    ("key".into(), "rustup-Linux-X64-lock".into()),
-                    ("restore-keys".into(), "rustup-Linux-X64-\n".into()),
-                ]
-                .into(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        }];
-
-        let results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
-        assert!(results[0]
-            .stdout
-            .contains("Cache paths live on Velnor host-persistent storage (always warm)"));
-        assert!(!results[0].stdout.contains("Cache not found"));
-        assert!(results[0]
-            .state
-            .summary
-            .contains("host-persistent store — restore/save skipped"));
-        assert!(results[1].stdout.contains("nothing to save"));
-        assert!(results[1]
-            .state
-            .summary
-            .contains("host-persistent store — restore/save skipped"));
-        assert!(results[1].stderr.is_empty());
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn native_cache_treats_root_rustup_path_as_velnor_provided() {
-        assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
-        assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
+    fn native_cache_excludes_image_baked_rustup_paths() {
+        for path in [
+            "~/.rustup/toolchains",
+            "~/.rustup/update-hashes",
+            "/root/.rustup/toolchains",
+            "/root/.rustup/update-hashes",
+            "/github/home/.rustup/toolchains",
+        ] {
+            assert!(
+                !velnor_persistent_cache_path(path),
+                "image-baked rustup path was classified as host-persistent: {path}"
+            );
+        }
     }
 
     #[test]
@@ -17842,12 +18124,22 @@ esac
     }
 
     #[test]
-    fn canonical_fleet_cache_aliases_are_host_persistent() {
+    fn canonical_velnor_cache_mounts_and_aliases_are_host_persistent() {
         for path in [
-            ".cache/mise",
-            ".cache/mise/downloads",
-            ".local/share/mise/installs",
-            ".local/share/mise/installs/rust/1.85.0",
+            "/github/home/.cargo/registry",
+            "/github/home/.cargo/registry/cache",
+            "/github/home/.cargo/git",
+            "/github/home/.cargo/git/db",
+            "/opt/mise/installs",
+            "/opt/mise/installs/rust/1.85.0",
+            "/opt/mise/cache",
+            "/opt/mise/cache/downloads",
+            "/var/cache/sccache",
+            "/var/cache/sccache/objects",
+            "~/.cargo/registry",
+            "~/.cargo/registry/cache",
+            "~/.cargo/git",
+            "~/.cargo/git/db",
             ".cargo/registry",
             ".cargo/registry/cache",
             ".cargo/git",
@@ -17858,16 +18150,33 @@ esac
                 "canonical cache alias was not recognized: {path}"
             );
         }
-        // Matching is component-aware: similarly named workspace paths must
-        // remain eligible for ordinary keyed cache storage.
+        // Matching is component-aware and strictly lexical: unsupported,
+        // normalized, or glob-like aliases remain ordinary keyed paths.
         for path in [
+            "/github/home/.cargo",
+            "/opt/mise",
+            "/var/cache",
             ".cargo/registry-old",
-            ".cache/mise-old",
+            ".cache/mise",
+            ".local/share/mise/installs",
             ".cargo/config.toml",
+            "~/.rustup/toolchains",
+            "/root/.rustup/toolchains",
+            "./.cargo/registry",
+            ".cargo/./registry",
+            ".cargo/../.cargo/registry",
+            "/github/home/.cargo/registry/../git",
+            ".cargo//registry",
+            "/github/home//.cargo/registry",
+            "/github/home/.cargo/registry//cache",
+            "~//.cargo/registry",
+            ".cargo/registry/**",
+            ".cargo/registry/[cache]",
+            ".cargo/registry/{cache}",
         ] {
             assert!(
                 !velnor_persistent_cache_path(path),
-                "non-canonical path was incorrectly treated as persistent: {path}"
+                "unsupported or unsafe path was incorrectly treated as persistent: {path}"
             );
         }
     }
@@ -18182,7 +18491,7 @@ esac
     }
 
     #[test]
-    fn native_rust_cache_treats_static_persistent_cache_directories_as_warm() {
+    fn native_rust_cache_treats_mounted_persistent_directories_as_warm() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
@@ -18197,7 +18506,7 @@ esac
                     ("shared-key".into(), "ci-custom-dir".into()),
                     (
                         "cache-directories".into(),
-                        "/var/cache/sccache\n/root/.rustup\n".into(),
+                        "/var/cache/sccache\n/opt/mise/cache\n".into(),
                     ),
                 ]
                 .into(),
@@ -22953,6 +23262,49 @@ fi"#
     }
 
     #[test]
+    fn bounded_step_sender_overflow_preserves_order_when_channel_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let spill = StepPublishSpill::new();
+        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
+        for order in 0..5 {
+            sender.send_best_effort(StepStartEvent {
+                step_id: format!("step-{order}"),
+                display_name: String::new(),
+                order,
+            });
+        }
+        assert_eq!(sender.drops(), 0);
+        let mut received = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            received.push(event.order);
+        }
+        assert_eq!(received, vec![0, 1]);
+        let spilled: Vec<i32> = spill
+            .take_all()
+            .into_iter()
+            .map(|event| event.order)
+            .collect();
+        assert_eq!(spilled, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn bounded_step_sender_drops_only_after_overflow_is_full() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let spill = StepPublishSpill::new();
+        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
+        let total = 1 + STEP_PUBLISH_OVERFLOW_CAPACITY + 3;
+        for order in 0..total {
+            sender.send_best_effort(StepStartEvent {
+                step_id: format!("step-{order}"),
+                display_name: String::new(),
+                order: order as i32,
+            });
+        }
+        assert_eq!(sender.drops(), 3);
+        assert_eq!(spill.take_all().len(), STEP_PUBLISH_OVERFLOW_CAPACITY);
+    }
+
+    #[test]
     fn bounded_step_sender_counts_drops_after_publisher_exit() {
         let (tx, rx) = tokio::sync::mpsc::channel::<StepLog>(STEP_PUBLISH_CHANNEL_CAPACITY);
         let sender = BoundedStepSender::new(tx);
@@ -24896,64 +25248,6 @@ fi"#
         );
     }
 
-    /// Requests job cancellation on the Nth `docker exec`, then optionally
-    /// throws on later execs — the production shape where the termination
-    /// ladder kills the running step's process group mid-step and every
-    /// remaining condition is re-evaluated against the cancelled status.
-    struct CancelDuringExecRunner {
-        calls: Vec<(String, Vec<String>)>,
-        token: crate::execution::cancel::JobCancellation,
-        cancel_on_exec: usize,
-        fail_after_cancel: usize,
-        execs: usize,
-    }
-
-    impl CommandRunner for CancelDuringExecRunner {
-        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
-            let args: &[String] = &crate::execution::expand_env_file_args(args);
-            if is_seed_probe(args) {
-                return Ok(CommandResult {
-                    code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
-            self.calls.push((program.to_string(), args.to_vec()));
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-
-        fn run_streaming_timeout_with_env(
-            &mut self,
-            program: &str,
-            args: &[String],
-            _env: &[(String, String)],
-            _timeout: Duration,
-            _on_output: &mut dyn FnMut(CommandStream, &str),
-        ) -> Result<CommandResult> {
-            self.calls.push((program.to_string(), args.to_vec()));
-            if args.first().is_some_and(|arg| arg == "exec") {
-                self.execs += 1;
-                if self.execs == self.cancel_on_exec {
-                    self.token
-                        .request(crate::execution::cancel::CancelReason::ServerRequested);
-                }
-                if self.token.is_cancelled() && self.fail_after_cancel > 0 {
-                    self.fail_after_cancel -= 1;
-                    anyhow::bail!("process terminated by signal");
-                }
-            }
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-    }
-
     fn script_step(id: &str, script: &str, condition: Option<&str>) -> ExecutableStep {
         ExecutableStep::Script(ScriptStep {
             id: id.into(),
@@ -25664,6 +25958,64 @@ fi"#
         assert_eq!(summary.step_results[1].exit_code, 0);
         assert_eq!(summary.step_results[2].exit_code, 0);
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Requests job cancellation on the Nth `docker exec`, then optionally
+    /// throws on later execs — the production shape where the termination
+    /// ladder kills the running step's process group mid-step and every
+    /// remaining condition is re-evaluated against the cancelled status.
+    struct CancelDuringExecRunner {
+        calls: Vec<(String, Vec<String>)>,
+        token: crate::execution::cancel::JobCancellation,
+        cancel_on_exec: usize,
+        fail_after_cancel: usize,
+        execs: usize,
+    }
+
+    impl CommandRunner for CancelDuringExecRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.first().is_some_and(|arg| arg == "exec") {
+                self.execs += 1;
+                if self.execs == self.cancel_on_exec {
+                    self.token
+                        .request(crate::execution::cancel::CancelReason::ServerRequested);
+                }
+                if self.token.is_cancelled() && self.fail_after_cancel > 0 {
+                    self.fail_after_cancel -= 1;
+                    anyhow::bail!("process terminated by signal");
+                }
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
     }
 
     #[test]
@@ -26812,6 +27164,16 @@ fi"#
         fs::create_dir_all(&temp).unwrap();
         let filename = std::ffi::OsString::from_vec(b"bad-\xff.txt".to_vec());
         if fs::write(temp.join(&filename), "content").is_err() {
+            fs::remove_dir_all(temp).unwrap();
+            return;
+        }
+        // virtiofs/APFS (macOS Docker Desktop/OrbStack job mounts) may persist
+        // a UTF-8 replacement instead of the raw 0xff byte. The production
+        // check is `OsStr::to_str()` on the name the filesystem returns.
+        let persisted_non_utf8 = fs::read_dir(&temp)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name().to_str().is_none());
+        if !persisted_non_utf8 {
             fs::remove_dir_all(temp).unwrap();
             return;
         }
@@ -28086,6 +28448,20 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    fn guest_docker_socket_mount_is_expected(args: &[String]) -> bool {
+        if crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+            args.iter().any(|arg| {
+                arg.contains("vdl-")
+                    && arg.contains(".sock:/var/run/docker.sock")
+                    && !arg.starts_with("/tmp/vdl-")
+                    && !arg.starts_with("/var/run/docker.sock:")
+            })
+        } else {
+            args.iter()
+                .any(|arg| arg.ends_with(".sock:/var/run/docker.sock") && !arg.contains("vdl-"))
+        }
+    }
+
     #[test]
     fn target_docker_javascript_actions_receive_socket_and_cli_mounts() {
         let temp = temp_dir();
@@ -28234,12 +28610,7 @@ fi"#
         assert_eq!(node_calls.len(), 6);
         for call in &node_calls {
             assert!(
-                call.iter().any(|arg| {
-                    arg.contains("vdl-")
-                        && arg.contains(".sock:/var/run/docker.sock")
-                        && !arg.starts_with("/tmp/vdl-")
-                        && !arg.starts_with("/var/run/docker.sock:")
-                }),
+                guest_docker_socket_mount_is_expected(call),
                 "guest Docker must use the job lease socket, got {call:?}"
             );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
@@ -28621,12 +28992,7 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
         assert_eq!(node_calls.len(), 5);
         for call in &node_calls {
             assert!(
-                call.iter().any(|arg| {
-                    arg.contains("vdl-")
-                        && arg.contains(".sock:/var/run/docker.sock")
-                        && !arg.starts_with("/tmp/vdl-")
-                        && !arg.starts_with("/var/run/docker.sock:")
-                }),
+                guest_docker_socket_mount_is_expected(call),
                 "guest Docker must use the job lease socket, got {call:?}"
             );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
@@ -28734,12 +29100,7 @@ bitcoin-processor-app.push=true")
             .map(|(_, args)| args)
             .unwrap();
         assert!(
-            node_call.iter().any(|arg| {
-                arg.contains("vdl-")
-                    && arg.contains(".sock:/var/run/docker.sock")
-                    && !arg.starts_with("/tmp/vdl-")
-                    && !arg.starts_with("/var/run/docker.sock:")
-            }),
+            guest_docker_socket_mount_is_expected(node_call),
             "guest Docker must use the job lease socket, got {node_call:?}"
         );
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));

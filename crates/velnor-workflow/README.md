@@ -8,8 +8,8 @@ on GitHub-hosted or Velnor runners. Runtime commands replace the former large
 generated `run.sh`, `policy.sh`, and `release.sh` helpers:
 
 ```sh
+velnor-workflow REPOSITORY --plain
 velnor-workflow REPOSITORY --runners both --plain
-velnor-workflow REPOSITORY --adopt --runners both --plain
 velnor-workflow plan --config .github/ci/project.toml
 velnor-workflow run --config .github/ci/project.toml --scope affected
 velnor-workflow test-crates --config .github/ci/project.toml
@@ -18,16 +18,13 @@ velnor-workflow policy --workflow-root . \
 velnor-workflow release verify-tag
 ```
 
-Project commands remain explicit shell command strings in the checked-in TOML;
-each unit declares separate GitHub and Velnor PR/full command arrays. Runtime
-defaults to GitHub and selects Velnor commands from the Velnor-owned
-`VELNOR_EXECUTION_BACKEND` marker. The binary owns selection, dependency
-ordering, policy, release validation, and every `.github/workflows/*.{yml,yaml}`
-file it emits. `--adopt` is the
-reviewed migration switch for an existing workflow surface: it snapshots each
-reviewed body under `.github/ci/workflow-templates/`, then renders the workflow
-from that generator-owned template. The ownership sidecar keeps the historical path
-`.github/ci/.github-actions-generator-state` for safe adoption of older trees.
+Runtime commands are derived from scanned capabilities, not from config-supplied
+shell arrays. GitHub-hosted execution is the automatic and omitted-dispatch
+default; Velnor runs only when dispatch selects `velnor` or `both`. The binary
+owns selection, dependency ordering, policy, release validation, and every
+`.github/workflows/*.{yml,yaml}` file it emits. Foreign workflow bodies are
+never imported. The ownership sidecar stays at
+`.github/ci/.github-actions-generator-state`.
 
 Repositories may pin their generation inputs in an optional
 `.github-gen/velnor-workflow.toml` (`schema = 1`): the repository slug, runner

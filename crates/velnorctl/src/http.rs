@@ -188,6 +188,9 @@ pub fn prepare_instance_dir(path: &FsPath) -> Result<(), std::io::Error> {
 
 /// Verify that package-owned socket groups exist before daemon readiness.
 pub fn validate_socket_groups() -> Result<(), std::io::Error> {
+    if !velnor_client::is_package_socket_mode() {
+        return Ok(());
+    }
     for name in [CONTROL_GROUP, ADMIN_GROUP] {
         if group_id(name).is_none() {
             return Err(std::io::Error::new(
@@ -199,9 +202,84 @@ pub fn validate_socket_groups() -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// Dev-host socket mode: owner-only access without package groups.
+pub const DEV_SOCKET_MODE: u32 = 0o600;
+
 /// Bind one exact Unix socket path without following or deleting foreign
 /// filesystem objects.
 pub fn bind_unix(
+    path: &FsPath,
+    mode: u32,
+    group_name: &str,
+) -> Result<tokio::net::UnixListener, std::io::Error> {
+    if velnor_client::is_package_socket_mode() {
+        bind_unix_package(path, mode, group_name)
+    } else {
+        bind_unix_dev(path)
+    }
+}
+
+fn bind_unix_dev(path: &FsPath) -> Result<tokio::net::UnixListener, std::io::Error> {
+    use std::os::unix::io::AsRawFd;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket must have a parent",
+        )
+    })?;
+    inspect_directory_chain(parent)?;
+    let listener = tokio::net::UnixListener::bind(path)?;
+    let bound_socket = match socket_identity(path) {
+        Some(identity) => identity,
+        None => {
+            drop(listener);
+            return Err(std::io::Error::other(
+                "bound control socket identity could not be verified",
+            ));
+        }
+    };
+    if let Err(error) = enforce_dev_socket_mode(path, listener.as_raw_fd()) {
+        cleanup_failed_bind(path, listener, bound_socket);
+        return Err(error);
+    }
+    Ok(listener)
+}
+
+fn enforce_dev_socket_mode(path: &FsPath, _fd: std::os::fd::RawFd) -> Result<(), std::io::Error> {
+    // Pathname ownership/mode is the contract callers observe. Darwin rejects
+    // fchmod/fchown on a live socket fd; Linux accepts fd fchmod but some
+    // engines (including OrbStack-backed job VMs) leave stale mode bits on the
+    // bound path until lchmod runs.
+    enforce_dev_socket_mode_path(path, current_uid(), current_gid())
+}
+
+fn enforce_dev_socket_mode_path(path: &FsPath, uid: u32, gid: u32) -> Result<(), std::io::Error> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // Darwin rejects fchmod/fchown on a Unix socket fd (EINVAL). The pathname
+    // we just bound is the identity we can actually chmod.
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path contains NUL")
+    })?;
+    if unsafe { libc::lchown(c_path.as_ptr(), uid, gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut permissions = std::fs::symlink_metadata(path)?.permissions();
+    permissions.set_mode(DEV_SOCKET_MODE);
+    std::fs::set_permissions(path, permissions)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.uid() != uid || metadata.gid() != gid || metadata.mode() & 0o777 != DEV_SOCKET_MODE
+    {
+        return Err(std::io::Error::other(
+            "bound control socket ownership or mode was not enforced",
+        ));
+    }
+    Ok(())
+}
+
+fn bind_unix_package(
     path: &FsPath,
     mode: u32,
     group_name: &str,
@@ -495,6 +573,11 @@ fn current_uid() -> u32 {
     unsafe { libc::geteuid() as u32 }
 }
 
+fn current_gid() -> u32 {
+    // SAFETY: getegid has no preconditions and cannot fail.
+    unsafe { libc::getegid() as u32 }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PeerPolicy {
     owner_uid: u32,
@@ -678,11 +761,7 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
-        // The durable ledger is not an actuator until a reconciler is wired
-        // into this daemon. Advertising write capability here would make the
-        // client claim that a lifecycle request can take effect when the
-        // handler correctly returns 501.
-        mutations: false,
+        mutations: true,
     })
 }
 
@@ -883,11 +962,18 @@ struct MutationBody {
     slots: Option<u32>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MutationResponseBody {
+    operation_id: String,
+    phase: String,
+}
+
 async fn mutate_instance(
     State(state): State<ApiState>,
     AxumPath((instance, operation)): AxumPath<(String, String)>,
     body: Result<Json<MutationBody>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<MutationResponseBody>), ApiError> {
     let Json(body) = body.map_err(|_| {
         ApiError::bad_request(
             "body",
@@ -907,21 +993,31 @@ async fn mutate_instance(
             "path instance does not match daemon instance",
         ));
     }
-    let _kind = parse_mutation(&operation)?;
+    let kind = parse_mutation(&operation)?;
     if body_operation != operation {
         return Err(ApiError::bad_request(
             "mutation.operation",
             "body operation does not match path",
         ));
     }
-    let _ = (reason, idempotency_key, expected_version, slots);
-    // The durable lifecycle ledger is not an actuator. Until the daemon
-    // reconciler consumes these intents, accepting them as HTTP 202 would
-    // claim an effect that the runtime cannot perform.
-    Err(ApiError::from(
-        velnor_control::ports::PortError::Unsupported {
-            operation: "lifecycle reconciler is not installed".to_owned(),
-        },
+    let mutation = Arc::clone(&state.mutation);
+    let result = run_application_call(state.blocking.clone(), move || {
+        mutation.mutate(velnor_control::ports::MutationRequest {
+            kind,
+            target: instance,
+            reason,
+            idempotency_key,
+            expected_version,
+            scale_to: slots,
+        })
+    })
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(MutationResponseBody {
+            operation_id: result.operation_id,
+            phase: result.phase,
+        }),
     ))
 }
 
@@ -1289,6 +1385,12 @@ mod tests {
         prepare_instance_dir(&instance).expect("prepare instance directory");
 
         assert!(instance.is_dir());
+        let socket = instance.join("control.sock");
+        let listener = bind_unix(&socket, DEV_SOCKET_MODE, CONTROL_GROUP).expect("bind dev socket");
+        let metadata = std::fs::symlink_metadata(&socket).expect("socket metadata");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(metadata.mode() & 0o777, DEV_SOCKET_MODE);
+        drop(listener);
         std::fs::remove_dir_all(parent).expect("remove test directory");
     }
 
@@ -1359,7 +1461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_control_socket_fails_closed_for_undurable_reads() {
+    async fn production_control_socket_reads_durable_resources_and_fails_closed_elsewhere() {
         let path = test_socket_path("production-control");
         let database = path.with_extension("db");
         let services = velnor_control::application::ApplicationServices::with_store(
@@ -1375,8 +1477,8 @@ mod tests {
         }));
 
         let query = socket_request(&path, "GET", "/v1/jobs", b"").await;
-        assert_eq!(response_status(&query), 501);
-        assert!(String::from_utf8_lossy(&query).contains("operation.unsupported"));
+        assert_eq!(response_status(&query), 200);
+        assert!(String::from_utf8_lossy(&query).contains("\"resources\":[]"));
 
         let logs = socket_request(&path, "GET", "/v1/logs/job-1", b"").await;
         assert_eq!(response_status(&logs), 501);
@@ -1390,7 +1492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_admin_socket_rejects_unimplemented_mutation_and_bad_json() {
+    async fn real_admin_socket_accepts_mutation_and_rejects_bad_json() {
         let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
         let mutation = Arc::new(RecordingMutation::default());
         let state = ApiState {
@@ -1416,8 +1518,11 @@ mod tests {
             br#"{"operation":"cordon","reason":"test","idempotencyKey":"test"}"#,
         )
         .await;
-        assert_eq!(response_status(&accepted), 501);
-        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(response_status(&accepted), 202);
+        let accepted_text = String::from_utf8_lossy(&accepted);
+        assert!(accepted_text.contains("operationId"));
+        assert!(accepted_text.contains("accepted"));
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
 
         let rejected = socket_request(
             &path,
@@ -1430,7 +1535,7 @@ mod tests {
         let rejected_text = String::from_utf8_lossy(&rejected);
         assert!(rejected_text.contains("body"));
         assert!(!rejected_text.contains("unknown"));
-        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
 
         shutdown.send(true).expect("signal admin shutdown");
         server.await.expect("join admin server").expect("serve");
