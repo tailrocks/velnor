@@ -5768,9 +5768,7 @@ fn strip_composed_instance(slug: &str, host: &str) -> String {
     let host_prefix = format!("velnor-{host}-");
     let rest = if let Some(rest) = slug.strip_prefix(&host_prefix) {
         rest
-    } else if slug == format!("velnor-{host}") {
-        return "local".to_owned();
-    } else if slug == format!("velnor-local-{host}") {
+    } else if slug == format!("velnor-{host}") || slug == format!("velnor-local-{host}") {
         return "local".to_owned();
     } else {
         return slug.to_owned();
