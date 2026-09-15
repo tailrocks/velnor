@@ -2995,10 +2995,12 @@ fn render_policy_entrypoint(config: &ProjectConfig) -> String {
 }
 
 fn policy_concurrency_block(config: &ProjectConfig) -> String {
-    let group = velnor_concurrency_group_expression(config).unwrap_or_else(|| {
-        "policy-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
-            .to_owned()
-    });
+    let group = velnor_concurrency_group_expression(config)
+        .map(|group| format!("{group}-policy"))
+        .unwrap_or_else(|| {
+            "policy-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
+                .to_owned()
+        });
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: true\n\n")
 }
 
@@ -11244,8 +11246,8 @@ channel = "stable"
         );
         let policy = render_policy_entrypoint(&config);
         assert!(
-            policy.contains("group: example-${{ github.repository }}"),
-            "policy must share the Velnor recovery concurrency group: {policy}"
+            policy.contains("group: example-${{ github.repository }}-policy"),
+            "policy must use a derived Velnor policy concurrency group: {policy}"
         );
     }
 

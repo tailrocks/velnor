@@ -191,9 +191,12 @@ struct WorkflowSection {
     /// `depends_on` Rust unit jobs on the Velnor lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     velnor_rust_needs: Option<String>,
-    /// When set and `runners = "velnor"`, every generated Velnor-lane aggregate
-    /// and policy workflow shares this concurrency group so a single recovery
-    /// host admits one run at a time across pull requests.
+    /// When set and `runners = "velnor"`, generated Velnor-lane aggregate
+    /// workflows share this concurrency group so a single recovery host admits
+    /// one verification run at a time across pull requests. The separate
+    /// read-only policy workflow derives a `-policy` suffix, so a queued policy
+    /// check cannot hold the verification workflow at the GitHub workflow-run
+    /// concurrency boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     velnor_concurrency_group: Option<String>,
     /// When true and `runners = "velnor"`, aggregate stack-group callers chain
