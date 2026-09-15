@@ -33,9 +33,9 @@ impl Generated {
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter(|path| {
-                path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-                    name.starts_with("ci-unit-rust") && name.ends_with(".yml")
-                })
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("ci-unit-rust") && name.ends_with(".yml"))
             })
             .map(|path| {
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -410,7 +410,7 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let main = generated.workflow("ci-main.yml");
     assert!(
-        main.contains("rev: 0cf84f0893805e727e4f199d882ce0b5b22b1ca8"),
+        main.contains("rev: 8e1ae640d525125316d7ce8064e739728988b8fe"),
         "foreign Planning installs the published pin: {main}"
     );
     assert!(

@@ -1775,11 +1775,8 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 String::new()
             };
             if lane == RunnerMode::Velnor {
-                dispatch_gate = workflow.append_trusted_runner_availability_gate(
-                    lane,
-                    unit,
-                    dispatch_gate,
-                );
+                dispatch_gate =
+                    workflow.append_trusted_runner_availability_gate(lane, unit, dispatch_gate);
             }
             if workflow.trust_gated_velnor_job_skipped(lane, unit)
                 && let Some(reason) = workflow.velnor_trusted_runner_skip_reason.as_deref()
@@ -3166,15 +3163,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "7720f3278912bb088db3cb0552098669a16bbbd21d60da97f85b4f209759bfd3",
+                "e2fe4298df5f5b1852ee827319d68e6836b407d6c00c0a80c228633c5b35fc71",
             ),
             (
                 "preview.yml",
-                "cb9281cde606bba6d78250d7014203c4738f5442ef407347e609a81e7f76902d",
+                "0029b2513e0d6f2c9c8de9b782232d5a85024477cf115ee56b69aeeb2b77106e",
             ),
             (
                 "maintenance.yml",
-                "8e6c54c1cf333e94849a6165bf97505e1383793b293d188f3d053b635448e861",
+                "196a7c3f24188cddd659378c5b4d9a14564e2a40b2d0bfc5feeba9e4c921fa41",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3242,11 +3239,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "e063930872340afa206b54df11c1173fd139b72dd50caef1a0ab7cdfae35069a",
+                "7c82f9d1ef214b6ca6a717d75a6330f4a2c0f9ec6e216bf9d06d54323747502b",
             ),
             (
                 "preview.yml",
-                "3534ccce5e9944d955ef3f5023a0ae65a98d2788879a86cea8887143fad86fa1",
+                "0d04653545d49d5394b613060df02dcf1fa61f5a59d489e3b3b6a6cf4b344c9e",
             ),
         ];
         let root = scanned_root("identity-pinned");

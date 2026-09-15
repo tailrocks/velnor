@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `a986f028` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `8e1ae640` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -767,7 +767,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | P0-3 ruleset contract `ci-required` | V | `ci-pr.yml:600-601`, `ci-main.yml:623-624`; `validate_ruleset_required_status_checks` (`lib.rs:3251`) |
 | P0-4 main/nightly `cancel-in-progress: false` | V | `ci-main.yml:36`, `nightly.yml:41` |
 | P0-5 pin coherence D19 | V | `VELNOR_*_REV = e6fabca` (`lib.rs:83,93`); `validate_pinned_revision_coherence` (`lib.rs:4534`) |
-| P0-6 docker skip when no online `velnor-host-docker` | V | `.github-gen/velnor-workflow.toml:32` `velnor_trusted_runner_available = false`; release skip job comment |
+| P0-6 docker skip when no online `velnor-host-docker` | V | `.github-gen/velnor-workflow.toml:32` `velnor_trusted_runner_available = false`; `ci-unit-docker.yml:271-274` `verify-velnor-trusted` `&& false`; release skip job comment |
 | P0-7 live account ≤ 8 GiB | U | live 10.54 GiB; sweep/classify code landed, not yet proven post-maintenance |
 | P0-8 nightly dispatches `ci-main@main` for mbx saves | V | `nightly.yml:48` `Control / Dispatch ci-main` |
 | Phase 0 gate: 3× green `ci-main` on `main` | U | blocked until merge; `origin/main` still red pre-merge |
@@ -881,3 +881,11 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | rust-velnor-workflow GitHub offline install | V | run 35027857785: fixed by online policy prefetch in Prepare Cargo (`ir.rs`); pins @ `0cf84f08` |
 | velnor-runner/tools fmt CI failures | V | `cargo fmt` on `container.rs`, `trust_class.rs`, `fleet_policy.rs` @ `0cf84f08` |
 | DCO after rebase | V | `git rebase origin/main --signoff`; pins rebumped @ `a986f028` |
+
+#### Rev 7 delta @ `8e1ae640` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| P0-6 collapsed docker Velnor skip (concurrency unblock) | V | `render_collapsed_lane_verify_job` applies `append_trusted_runner_availability_gate` (`ir.rs:2589-2604`); `ci-unit-docker.yml:271-274` `&& false` + skip comment |
+| `collapsed_trust_gated_docker_lane_skips_when_trusted_runner_is_unavailable` | V | `lib.rs:7098`; `cargo test -p velnor-workflow` 454 passed |
+| Pins @ `8e1ae640` (D19) | V | `lib.rs:83,93`; release golden digests updated |
