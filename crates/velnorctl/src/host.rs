@@ -4,8 +4,11 @@
 //! joins an organization runner group. GitHub remains the job scheduler.
 
 use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use velnor_model::ExitClass;
 
@@ -14,6 +17,7 @@ use crate::runtime::{self, DaemonArgs};
 use crate::{CommandError, GlobalArgs};
 
 const DEFAULT_REPO: &str = "tailrocks/velnor";
+const HOST_PID_FILE: &str = "host.pid";
 
 pub async fn run(globals: &GlobalArgs, command: HostCommand) -> Result<(), CommandError> {
     match command {
@@ -21,7 +25,7 @@ pub async fn run(globals: &GlobalArgs, command: HostCommand) -> Result<(), Comma
         HostCommand::BootstrapImage(args) => bootstrap_image(args),
         HostCommand::Status => status(globals).await,
         HostCommand::Drain => drain(globals).await,
-        HostCommand::Stop => stop(),
+        HostCommand::Stop => stop(globals).await,
     }
 }
 
@@ -39,10 +43,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         ));
     }
 
-    let name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("velnor-local-{}", hostname_slug()));
+    let name = effective_host_name(globals, &args)?;
     let slots = args.slots.max(1);
     let socket = velnor_client::socket_root();
     let docker = docker_endpoint_display();
@@ -89,12 +90,12 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     println!("  job_image        {docker_image}");
 
     let trust_scope = env::var("VELNOR_TRUST_SCOPE").unwrap_or_else(|_| "untrusted".into());
-    let mut daemon = DaemonArgs {
+    let daemon = DaemonArgs {
         state_db: Some(state_db),
         config_dir: Some(config_dir),
         url: Some(url),
         pat: github_pat(),
-        name: Some(name),
+        name: Some(name.clone()),
         labels: host_start_labels(&trust_scope),
         target_mvp_labels: arch_claims_x64_target_pack(std::env::consts::ARCH),
         target_mvp_arm_label: cfg!(target_arch = "aarch64"),
@@ -123,9 +124,16 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         skip_preflight: false,
         require_docker_socket: true,
     };
-    if globals.instance.is_some() {
-        daemon.name = globals.instance.clone();
-    }
+    let instance_dir = socket.join(&name);
+    crate::http::prepare_instance_dir(&instance_dir).map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.socket_dir_unavailable",
+            format!("cannot prepare {}: {error}", instance_dir.display()),
+        )
+    })?;
+    let _pid_guard = HostProcessGuard::install(&instance_dir, &name)?;
+    println!("  process_pid      {}", std::process::id());
 
     runtime::run_daemon(daemon).await.map_err(|error| {
         CommandError::new(
@@ -136,7 +144,8 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     })
 }
 
-async fn status(_globals: &GlobalArgs) -> Result<(), CommandError> {
+async fn status(globals: &GlobalArgs) -> Result<(), CommandError> {
+    ensure_dev_canonical_storage()?;
     println!(
         "control_socket_root {}",
         velnor_client::socket_root().display()
@@ -147,27 +156,380 @@ async fn status(_globals: &GlobalArgs) -> Result<(), CommandError> {
     );
     println!("docker_endpoint     {}", docker_endpoint_display());
     println!("execution           {}", execution_platform());
-    println!("follow              velnorctl status");
+    let hosts = discover_hosts(globals.instance.as_deref())?;
+    println!("active_hosts        {}", hosts.len());
+    for host in hosts {
+        println!("host                {}", host.name);
+        println!("  process_pid       {}", host.pid);
+        println!("  process           {}", host.command);
+        println!(
+            "  control_socket    {}",
+            host.instance_dir.join("control.sock").display()
+        );
+        let endpoint = velnor_client::UnixEndpoint::from_instance(&host.name).map_err(|error| {
+            CommandError::new(ExitClass::Usage, "host.instance_invalid", error.to_string())
+        })?;
+        let client =
+            velnor_client::UnixControlClient::new(endpoint).with_timeout(Duration::from_secs(2));
+        match client.info().await {
+            Ok(info) => println!(
+                "  control_api       {} schema={} mutations={}",
+                info.api_version, info.schema_version, info.mutations
+            ),
+            Err(error) => println!("  control_api       unavailable ({error})"),
+        }
+        if let Some(health) = read_host_health(&host.name) {
+            println!("  health            {health}");
+        }
+    }
+    println!("follow              velnorctl --instance <name> get slots");
     println!("docker_report       velnorctl docker report");
     Ok(())
 }
 
-async fn drain(_globals: &GlobalArgs) -> Result<(), CommandError> {
+async fn drain(globals: &GlobalArgs) -> Result<(), CommandError> {
+    ensure_dev_canonical_storage()?;
+    let host = resolve_single_host(globals.instance.as_deref())?;
+    signal_host(&host, libc::SIGTERM)?;
+    println!(
+        "drain requested for {} (pid {}); active jobs finish, waiters and idle slots exit",
+        host.name, host.pid
+    );
+    Ok(())
+}
+
+async fn stop(globals: &GlobalArgs) -> Result<(), CommandError> {
+    ensure_dev_canonical_storage()?;
+    let host = resolve_single_host(globals.instance.as_deref())?;
+    signal_host(&host, libc::SIGTERM)?;
+    let timeout = globals.timeout.unwrap_or(Duration::from_secs(30));
+    if wait_for_exit(host.pid, timeout).await {
+        println!("host stopped {} (pid {})", host.name, host.pid);
+        return Ok(());
+    }
     Err(CommandError::new(
-        ExitClass::Usage,
-        "host.drain_foreground",
-        "Foreground `velnorctl host start` drains on Ctrl-C. Wait for in-flight \
-         jobs to finish, then press Ctrl-C. `velnorctl drain` needs a live admin socket.",
+        ExitClass::Timeout,
+        "host.stop_timeout",
+        format!(
+            "host {} is still draining after {}; no force-kill was attempted; retry `velnorctl host stop --instance {}`",
+            host.name,
+            format_duration(timeout),
+            host.name
+        ),
     ))
 }
 
-fn stop() -> Result<(), CommandError> {
-    Err(CommandError::new(
-        ExitClass::Usage,
-        "host.stop_foreground",
-        "`velnorctl host start` runs in the foreground. Press Ctrl-C to disconnect. \
-         Drain first with `velnorctl host drain` if jobs are running.",
-    ))
+fn effective_host_name(globals: &GlobalArgs, args: &HostStartArgs) -> Result<String, CommandError> {
+    if let (Some(global), Some(local)) = (globals.instance.as_deref(), args.name.as_deref())
+        && global != local
+    {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "host.instance_conflict",
+            "--instance and --name must identify the same host",
+        ));
+    }
+    Ok(globals
+        .instance
+        .clone()
+        .or_else(|| args.name.clone())
+        .unwrap_or_else(|| format!("velnor-local-{}", hostname_slug())))
+}
+
+#[derive(Debug, Clone)]
+struct HostProcess {
+    name: String,
+    instance_dir: PathBuf,
+    pid: u32,
+    command: String,
+}
+
+struct HostProcessGuard {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl HostProcessGuard {
+    fn install(instance_dir: &Path, name: &str) -> Result<Self, CommandError> {
+        let path = instance_dir.join(HOST_PID_FILE);
+        let pid = std::process::id();
+        if let Some(existing) = read_pid_file(&path)
+            && process_alive(existing)
+        {
+            return Err(CommandError::new(
+                ExitClass::Conflict,
+                "host.already_running",
+                format!("host {name} is already running as pid {existing}"),
+            ));
+        }
+        if path.exists() {
+            fs::remove_file(&path).map_err(|error| {
+                CommandError::new(
+                    ExitClass::Operation,
+                    "host.pid_unwritable",
+                    format!("remove stale {}: {error}", path.display()),
+                )
+            })?;
+        }
+        let temporary = instance_dir.join(format!(".{HOST_PID_FILE}.{pid}.tmp"));
+        let _ = fs::remove_file(&temporary);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| {
+            CommandError::new(
+                ExitClass::Operation,
+                "host.pid_unwritable",
+                format!("create {}: {error}", temporary.display()),
+            )
+        })?;
+        writeln!(file, "{pid}").map_err(|error| {
+            CommandError::new(
+                ExitClass::Operation,
+                "host.pid_unwritable",
+                format!("write {}: {error}", temporary.display()),
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            CommandError::new(
+                ExitClass::Operation,
+                "host.pid_unwritable",
+                format!("sync {}: {error}", temporary.display()),
+            )
+        })?;
+        fs::rename(&temporary, &path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            CommandError::new(
+                ExitClass::Operation,
+                "host.pid_unwritable",
+                format!("install {}: {error}", path.display()),
+            )
+        })?;
+        Ok(Self { path, pid })
+    }
+}
+
+impl Drop for HostProcessGuard {
+    fn drop(&mut self) {
+        if read_pid_file(&self.path) == Some(self.pid) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn discover_hosts(requested: Option<&str>) -> Result<Vec<HostProcess>, CommandError> {
+    let root = velnor_client::socket_root();
+    if let Some(name) = requested {
+        validate_host_name(name)?;
+        let instance_dir = root.join(name);
+        if !instance_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let pid =
+            read_pid_file(&instance_dir.join(HOST_PID_FILE)).or_else(|| find_host_process(name));
+        return Ok(pid
+            .filter(|pid| process_alive(*pid))
+            .map(|pid| vec![host_process(name.to_owned(), instance_dir, pid)])
+            .unwrap_or_default());
+    }
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CommandError::new(
+                ExitClass::Operation,
+                "host.socket_root_unreadable",
+                format!("read {}: {error}", root.display()),
+            ));
+        }
+    };
+    let mut hosts = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            CommandError::new(
+                ExitClass::Operation,
+                "host.socket_root_unreadable",
+                format!("read host entry: {error}"),
+            )
+        })?;
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let instance_dir = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let pid =
+            read_pid_file(&instance_dir.join(HOST_PID_FILE)).or_else(|| find_host_process(&name));
+        if let Some(pid) = pid.filter(|pid| process_alive(*pid)) {
+            hosts.push(host_process(name, instance_dir, pid));
+        }
+    }
+    hosts.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(hosts)
+}
+
+fn resolve_single_host(requested: Option<&str>) -> Result<HostProcess, CommandError> {
+    let hosts = discover_hosts(requested)?;
+    match hosts.as_slice() {
+        [host] => Ok(host.clone()),
+        [] => Err(CommandError::new(
+            ExitClass::Unavailable,
+            "host.not_running",
+            requested.map_or_else(
+                || {
+                    "no on-demand host process is running; pass --instance NAME after starting one"
+                        .to_owned()
+                },
+                |name| format!("on-demand host {name} is not running"),
+            ),
+        )),
+        _ => Err(CommandError::new(
+            ExitClass::Usage,
+            "host.instance_required",
+            "multiple on-demand hosts are running; pass --instance NAME",
+        )),
+    }
+}
+
+fn host_process(name: String, instance_dir: PathBuf, pid: u32) -> HostProcess {
+    let command = process_command(pid).unwrap_or_else(|| "unavailable".to_owned());
+    HostProcess {
+        name,
+        instance_dir,
+        pid,
+        command,
+    }
+}
+
+fn validate_host_name(name: &str) -> Result<(), CommandError> {
+    velnor_client::UnixEndpoint::from_instance(name).map_err(|error| {
+        CommandError::new(ExitClass::Usage, "host.instance_invalid", error.to_string())
+    })?;
+    Ok(())
+}
+
+fn read_pid_file(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 1)
+}
+
+fn process_command(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    output.status.success().then(|| {
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .chars()
+            .take(512)
+            .collect()
+    })
+}
+
+fn find_host_process(name: &str) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .ok()?;
+    let name_arg = format!("--name {name}");
+    let instance_arg = format!("--instance {name}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("host start") && line.contains("velnorctl"))
+        .filter(|line| line.contains(&name_arg) || line.contains(&instance_arg))
+        .find_map(|line| line.split_whitespace().next()?.parse().ok())
+}
+
+fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 probes a process without changing its state.
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn signal_host(host: &HostProcess, signal: libc::c_int) -> Result<(), CommandError> {
+    if !host.command.contains("host start") || !host.command.contains("velnorctl") {
+        return Err(CommandError::new(
+            ExitClass::Conflict,
+            "host.pid_identity_failed",
+            format!("pid {} is not a Velnor host process", host.pid),
+        ));
+    }
+    // SAFETY: the process identity was read from the host-owned pid file or
+    // matched against the exact host-start command line immediately above.
+    let result = unsafe { libc::kill(host.pid as libc::pid_t, signal) };
+    if result != 0 {
+        return Err(CommandError::new(
+            ExitClass::Operation,
+            "host.signal_failed",
+            format!(
+                "signal pid {}: {}",
+                host.pid,
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while process_alive(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() > 0 {
+        format!("{}s", duration.as_secs())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
+}
+
+fn read_host_health(name: &str) -> Option<String> {
+    let config = velnor_runner::config_dir(None)
+        .ok()?
+        .join("hosts")
+        .join(name);
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(config.join("health.json")).ok()?).ok()?;
+    let object = value.as_object()?;
+    let fields = [
+        "state",
+        "desired_ready_slots",
+        "actual_ready_slots",
+        "registered_slots",
+        "job_processes",
+        "routing_valid",
+        "github_reachable",
+        "execution_backend",
+    ];
+    let pairs = fields
+        .iter()
+        .filter_map(|field| object.get(*field).map(|value| format!("{field}={value}")));
+    Some(pairs.collect::<Vec<_>>().join(" "))
 }
 
 fn resolve_repo_url(args: &HostStartArgs) -> Result<String, CommandError> {
