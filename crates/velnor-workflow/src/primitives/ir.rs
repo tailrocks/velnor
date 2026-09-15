@@ -944,14 +944,18 @@ pub(crate) fn render_cargo_source_preparation(
     runtime_unit_id: bool,
     skip_on_cache_hit: bool,
     skip_when_offline_ready: bool,
+    cache_step_id: Option<&str>,
 ) {
     if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
         return;
     }
     let cache_hit_gate = if skip_on_cache_hit {
-        "        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n"
+        let cache_step_id = cache_step_id.unwrap_or("cache");
+        format!(
+            "        if: ${{{{ steps.{cache_step_id}.outputs.cache-hit != 'true' }}}}\n"
+        )
     } else {
-        ""
+        String::new()
     };
     if !runtime_unit_id {
         let Some(active) = members.iter().find(|member| member.id == unit_id) else {
@@ -1671,14 +1675,9 @@ impl WorkflowIr {
             &self.default_dispatch_runner,
         );
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
-        let workflow_cache_mode = if kind == WorkflowKind::PullRequest {
-            "cache-mode: read\n\n"
-        } else {
-            ""
-        };
         let _ = writeln!(
             output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}{workflow_cache_mode}permissions:\n  actions: read\n  contents: read\n\n"
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\n"
         );
         if self.tools.contains(&ToolRequirement::Sccache)
             || self.tools.contains(&ToolRequirement::OpenTofu)
@@ -1789,14 +1788,9 @@ impl WorkflowIr {
             &self.default_dispatch_runner,
         );
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
-        let workflow_cache_mode = if kind == WorkflowKind::PullRequest {
-            "cache-mode: read\n\n"
-        } else {
-            ""
-        };
         let _ = writeln!(
             output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}{workflow_cache_mode}permissions:\n  actions: read\n  contents: read\n\njobs:"
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
         );
         // Planning follows config.runners. A Velnor-configured repository
         // keeps plan on the image runtime for every aggregate. GitHub-default
@@ -1991,9 +1985,12 @@ impl WorkflowIr {
             .iter()
             .find(|unit| unit.id == caller.unit_id)
             .expect("unit");
-        // PR aggregate sets workflow-level cache-mode: read; do not repeat it on
-        // reusable-workflow callers (GitHub rejects the key on some job shapes).
-        let cache_mode = "";
+        // PR callers grant read-only cache access to reusable unit workflows.
+        let cache_mode = if read_only_cache {
+            "\n    cache-mode: read"
+        } else {
+            ""
+        };
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
@@ -2951,6 +2948,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 runtime_unit_id,
                 skip_fetch_on_cache_hit,
                 skip_when_offline_ready,
+                skip_fetch_on_cache_hit.then(|| cache_step_id.as_str()),
             );
             render_ci_cargo_fetch_end_marker(write_target);
         }
@@ -3552,6 +3550,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 false,
                 cargo_cache_restored,
                 skip_when_offline_ready,
+                cargo_cache_restored.then_some("cache"),
             );
             render_ci_cargo_fetch_end_marker(output);
             let base_sha = self.base_sha_expression();
