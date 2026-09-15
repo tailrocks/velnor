@@ -476,6 +476,37 @@ mod tests {
     }
 
     #[test]
+    fn durable_idempotency_key_binds_expected_version() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-version-{}-{}",
+            std::process::id(),
+            velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("state.db");
+        let store = Arc::new(crate::store::Store::open(&path).expect("store"));
+        let service = LifecycleService::with_store(store);
+        let request = MutationRequest {
+            kind: MutationKind::Drain,
+            target: "primary".to_owned(),
+            reason: "maintenance".to_owned(),
+            idempotency_key: "durable-version-bound".to_owned(),
+            expected_version: Some(1),
+            scale_to: None,
+        };
+        service.mutate(request.clone()).expect("first mutation");
+        let mut changed_precondition = request;
+        changed_precondition.expected_version = None;
+        assert!(matches!(
+            service.mutate(changed_precondition),
+            Err(PortError::Conflict { .. })
+        ));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn desired_fresh_reads_through_a_stale_cache_and_updates_it() {
         let directory = std::env::temp_dir().join(format!(
             "velnor-lifecycle-fresh-{}-{}",
