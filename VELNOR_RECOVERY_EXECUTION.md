@@ -9,25 +9,26 @@ Operator contract (2026-09-15): finish only after this sequence is independently
 | # | Gate | Status |
 |---|---|---|
 | 1 | macOS-hosted Velnor executes real `tailrocks/velnor` GHA jobs (not GitHub-hosted substitution) | **PASS — historical evidence only** — run `34894567066`, job `104145226224`, `velnor-macos-recovery-slot-1`, source `363d727b`; Docker-backed Policy job succeeded and repeated-slot evidence exists. Current-source revalidation: **NOT PROVEN**. |
-| 2 | Merge **#809, #812, #814, #815** using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **NOT SATISFIED** — #809/#812/#814/#815/#816 are closed with `merged_at=null`; #819 (`24f05af9`) was merged but does not satisfy the individual-PR wording. |
-| 3 | `main` fully green after the merge stack | **NOT PROVEN** — current `main` is `8708f3aa`; its CI and Preview runs were canceled, and the exact required checks are not green/proven. |
+| 2 | Merge **#809, #812, #814, #815, #816** as applicable using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **NOT SATISFIED** — #809/#812/#814/#815/#816 are closed with `merged_at=null`; #819 (`24f05af9`) was merged but does not satisfy the individual-PR wording. |
+| 3 | `main` fully green after the merge stack | **NOT PROVEN** — current `main` is `4723780e`; exact-head CI/Preview runs are queued and no successful final gate is proven. |
 | 4 | New release: Debian apt (`tailrocks/velnor-apt`) **and** Homebrew; artifacts install and operate | **NOT PROVEN / BLOCKED** — public release is still `v0.1.274`; APT exists, but no Velnor Homebrew tap/formula was found. |
 | 5 | Deploy that verified release to Sentry (not a rescue build) | **NOT PROVEN** — no final merged/released artifact has been deployed; preserve rollback evidence before any change. |
 | 6 | Sentry executes real repository jobs; all PRs green, `main` green, release process proven | **NOT PROVEN** — Sentry is currently degraded and the final release/scenario evidence is absent. |
 
-## Live snapshot (refreshed 2026-09-15T14:17Z)
+## Live snapshot (refreshed 2026-09-15T14:36:54Z; local integration advanced afterward)
 
 Sources: `git fetch origin --prune`, GitHub REST/Actions read-only queries, and read-only Sentry SSH checks. Short SHAs below are unambiguous prefixes.
 
 | Item | Current evidence |
 |---|---|
-| **`origin/main`** | `8708f3aa18edf3e20f9f5b7cba4793ea8b87326a` (`#851`, merged 2026-09-15T14:01:57Z). |
+| **`origin/main`** | `4723780e67592c2197c2a9675057c3c98c2ebb59` (`#861`, latest fetched). |
+| **local recovery integration** | `9550ff3d` (`lead/recovery-integrate`); includes main `4723780e`, canonical Docker identity fix, compile fixes, and refreshed record. Not pushed yet. |
 | **`origin/velnor-macos-host`** | **Absent** from `git ls-remote` and GitHub branch API (404). The requested `045931f0` is a reachable historical object, not a live remote ref. |
 | **PR #816** | Closed 2026-09-15T10:14Z, head `c6865e86`, `merged_at=null`; GitHub's non-null `merge_commit_sha` field is not merge proof. |
 | **Main ruleset** | Active `protect-main`; required contexts are `DCO` and `ci-required`; strict required-status policy is false. Legacy branch-protection endpoint returns 404. |
-| **Main-head checks** | Commit `8708f3aa` has zero check-runs and combined status `pending`. Head-specific runs `34978901335` (CI) and `34978900973` (Preview) are `completed/cancelled`; no successful exact-head gate is proven. |
-| **Actions backlog** | Six runs were `in_progress` at refresh (`34979936959`, `34979278544`, `34978865825`, `34978595459`, `34977754044`, and stale main run `34976776297`); 29 runs were queued. No run for current main head was active. |
-| **macOS capacity** | Historical real-job evidence is retained above. Current runner/slot identity, repeated-job, reconnect, drain, and cleanup evidence at a final source SHA: **NOT PROVEN**. |
+| **Main-head checks** | Current main CI `34980467565` and Preview `34980467118` were queued at refresh; no successful exact-head gate is proven. Required contexts remain `DCO` and `ci-required`. |
+| **Actions backlog** | Audit observed 18 queued, 4 in progress, 1 pending, 77 completed; notable active runs included `34981059944`, `34981064733`, `34978935981`, `34977853029`, `34977603158`, `34981918893`, and `34981918507`. No capacity inference from queue state. |
+| **macOS capacity** | Existing old host PID `42112`, source binary from the dirty original checkout: status reports `desired=12`, `ready=4`, `registered=9`, routing/GitHub reachable, Docker Linux/arm64; control API unavailable. Historical real-job evidence is retained above. Current-source repeated-job, reconnect, drain, and cleanup proof: **NOT PROVEN**. |
 | **Sentry** | Debian 13 `x86_64`; `velnor-guardian` and `velnor-daemon@tailrocks` active. Installed `0.1.274~preview.158+7e59e1a`, source `7e59e1ae`, binary SHA `cf23935b…`; health **degraded**, `github_reachable=false`, `routing_valid=false`, `runner_group_valid=false`, 8/8 executor-ready, SQLite registrations `0`. Backend Docker. |
 | **Release channels** | Latest public tag `v0.1.274` at `120f2236`; APT repository HEAD `a2c52656`. No Velnor Homebrew tap/formula found; cross-platform release/install proof is **NOT PROVEN**. |
 
@@ -57,9 +58,9 @@ GitHub reports a `merge_commit_sha` field for closed #816, but `merged_at` is nu
 
 ## Current blockers and next actions
 
-1. **Recovery branch continuity.** `045931f0` contains the latest recorded branch work (guest-payload routing test `47b43bfd`, release pins `5047ef2c`, action allowlist `e4b742da`, man-page mode `c4d49af9`, and formatting `0ba8ef34`), but its remote ref and PR #816 are gone/closed. Restore the implementation stream through a normal, signed branch/PR operation; do not treat the closed PR or historical object as merged.
-2. **#844 lifecycle risk.** #844 is merged as `fdc7bce3`, but independent audit found a structural ownership-key mismatch: creation labels containers with `velnor.job-id=<container name>` (`velnor-job-<job-id>`), while recovery passes the raw job ID, making exact-label teardown a no-op. Marker-backed stale jobs can bypass teardown; missing/malformed PID markers are admitted as dead; and completion acknowledgement can precede durable cleanup. Port a canonical ownership ID, fail-closed `Live/Dead/Ambiguous` admission, durable cleanup obligation, and production-shaped regression tests before accepting this gate. Verifier: Faraday, isolated read-only lifecycle audit; Mencius verification pending.
-3. **Tests and generator.** Historical `045931f0` verification reported 376 `velnor-workflow` tests and repeated generator checks passing. A local integration test after adding `main@92f933fd` reported 374 passed plus two failures (release identity pin and stale Preview routing assertion); #856/#857 later landed, but current `main@8708f3aa` has no successful exact-head CI/generator evidence. Re-run the full configured test, format/lint, generator stability, actionlint, and Docker gates on the restored branch and current main; record the exact run/job IDs.
+1. **Recovery branch continuity.** The old remote `velnor-macos-host` ref and PR #816 head are gone/closed. Local `9550ff3d` is the cumulative integration stream. Recreate/push the named branch normally, open or restore the legitimate PR path, and never treat the closed PR or historical object as merged.
+2. **#844 lifecycle risk.** #844 is merged as `fdc7bce3`. Canonical ownership conversion is now integrated (`a529ad3c`), independently verified for normal orphan teardown and startup protection, and runner tests pass. Remaining required work: budget-spent abandon teardown, marker-only Docker cleanup, safe missing/malformed ownership handling, generic guest-runtime raw-label cleanup, and ordering regressions. Verifier: Arendt; Heisenberg implementation in progress.
+3. **Tests and generator.** Local current-source gates: `velnor-runner` lib 2107 passed, `velnorctl` 122 passed, `velnor-workflow` 382 passed, format passed, generator `--plain --check` passed. Clippy is currently blocked by controller argument growth and one collapsible startup conditional; disjoint fixes are in progress. Exact-head GitHub CI remains unproven.
 4. **Homebrew.** Release configuration currently targets Linux triples and the consumer path is `tailrocks/velnor-apt`; candidate Velnor taps returned 404 and no formula exists. Add/land the real supported macOS formula/tap and publish/install/operate proof, or leave Gate 4 blocked. Do not document a nonexistent channel. Verifier: Pascal, isolated release audit.
 5. **Sentry and final scenarios.** Do not deploy the current preview or a dirty/source-bootstrap build. Record active/previous release identities, prepare rollback, deploy only the verified merged release, then prove Sentry jobs, simultaneous Mac capacity, clean drain, Sentry-only continuation, and reconnect. All post-release fields remain **[PENDING EVIDENCE]**.
 
