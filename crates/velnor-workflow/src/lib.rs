@@ -7556,14 +7556,14 @@ mod tests {
         let docker_id = config.units[index].id.clone();
         let pr = generated_ci_pr(&WorkflowIr::from_config(&config));
         let marker = format!("result=\"$(result_for_job velnor-{docker_id})\"");
-        let start = pr
-            .find(&marker)
-            .unwrap_or_else(|| panic!("ci-required must validate velnor docker caller: {pr}"));
-        let block = &pr[start
-            ..pr[start..]
-                .find("else")
-                .map(|offset| start + offset)
-                .unwrap_or(pr.len())];
+        let start = must_some(
+            pr.find(&marker),
+            "ci-required must validate the velnor docker caller",
+        );
+        let end = pr[start..]
+            .find("else")
+            .map_or(pr.len(), |offset| start + offset);
+        let block = &pr[start..end];
         assert!(
             block.contains("success|skipped"),
             "trust-gated velnor docker skip must satisfy ci-required without a fork PR: {block}"
