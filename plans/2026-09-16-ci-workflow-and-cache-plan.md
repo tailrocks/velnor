@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `9c1211d7` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 5: collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `6c51eceb` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -805,7 +805,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Cargo key per lockfile + arch (RC-11) | V | `ci-unit-rust.yml:289` `ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles(...) }}` |
 | Docker seed consumed on hosted PR (RC-13) | V | `.github/ci/project.toml:55` `--build-context velnor-cache-seed=…` + GHA buildx cache |
 | Toolchain `velnor-cargo-bin-*` seeds (RC-18) | V | `ci-unit-rust.yml:206-215`; `lib.rs:3476` |
-| Shard budget after collapse | V | `ci-unit-rust.yml` 235211 B < 480000 B (`ir.rs:37`) |
+| Shard budget after collapse | V | `KIND_WORKFLOW_SHARD_BUDGET = 120_000` (`ir.rs:37`); `ci-unit-rust.yml` 114163 B + `ci-unit-rust-2.yml` 119717 B + `ci-unit-rust-3.yml` 27103 B (parsed object cap, not 500 KB byte limit) |
 
 #### Phase 4 — GitHub budget ops
 
@@ -866,3 +866,15 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Collapsed verify runtime bootstrap | V | `render_unit_runtime` in `render_collapsed_lane_verify_job`; actionlint clean on all `ci-unit-*.yml` |
 | Pins @ `8decfeeb` (D19) | V | `lib.rs:83,93`; generated runtime artifact names updated |
 | `cargo test -p velnor-workflow` | V | 453 passed @ `9c1211d7` |
+
+#### Rev 6 delta @ `6c51eceb` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| PR CI `startup_failure` (0 jobs) — parsed object cap | V | GitHub run 35026888820: `Maximum object size exceeded` on `ci-unit-rust.yml@630b264e`; single collapsed file ~256 KB / ~230 steps |
+| Kind reusable file sharding | V | `KIND_WORKFLOW_SHARD_BUDGET = 120_000` (`ir.rs:37`); emits `ci-unit-rust.yml`, `ci-unit-rust-2.yml`, `ci-unit-rust-3.yml` |
+| Per-shard `prepare-cargo` caller ids | V | `prepare_cargo_caller_job_id_for_file` (`lib.rs:2216`); `ci-pr.yml` has `prepare-cargo`, `prepare-cargo-2`, `prepare-cargo-3` (no duplicate YAML keys) |
+| Duplicate collapsed step ids (HTTP 422) | V | unit-prefixed step ids via `qualified_step_id`; reverted per-job verify sharding (`630b264e`) |
+| Invalid workflow-level / caller `cache-mode: read` | V | removed; PR triggers default to read-only cache |
+| Pins @ `6c51eceb` (D19) | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 453 passed |
+| PR CI jobs start (not `startup_failure`) | U | pending dispatch after push |
