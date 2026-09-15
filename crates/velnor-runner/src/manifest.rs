@@ -2419,10 +2419,6 @@ mod tests {
             !stage.contains("dist/microvm"),
             "guest staging must not use the retired dist/microvm layout: {stage}"
         );
-        let runs: Vec<&str> = steps
-            .iter()
-            .filter_map(|step| step.get("run").and_then(serde_yaml::Value::as_str))
-            .collect();
         assert!(
             !steps.iter().any(|step| {
                 step.get("name").and_then(serde_yaml::Value::as_str) == Some("Stage guest payload")
