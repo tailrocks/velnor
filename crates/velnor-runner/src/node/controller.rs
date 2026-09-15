@@ -4669,8 +4669,11 @@ mod tests {
             spawn_slots: false,
             lifecycle: None,
         };
-        let listing =
-            "job-cid\tjob-1\tjob-1\trunning\nguest-cid\tguest-sidecar\tjob-1\texited\n".to_string();
+        let job_container = crate::github_adapter::job_container_name_for_id("job-1");
+        let listing = format!(
+            "job-cid\t{job_container}\t{job_container}\trunning\n\
+             guest-cid\tguest-sidecar\t{job_container}\texited\n"
+        );
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
         reclaim_orphaned_jobs(
@@ -4693,7 +4696,7 @@ mod tests {
             let calls = calls.lock().unwrap();
             assert_eq!(
                 calls[0],
-                crate::docker_lease::list_owned_containers_state_args("job-1")
+                crate::docker_lease::list_owned_containers_state_args(&job_container)
             );
             assert_eq!(
                 calls[1],
