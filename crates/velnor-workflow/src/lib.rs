@@ -78,7 +78,7 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "92f933fdb7f84ef8d6e6eb3c1b5809d8231fbaea";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "4790f7cc326c5387a974bd9d1a1d77bd6779a733";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
@@ -5835,7 +5835,7 @@ mod tests {
         );
         assert_eq!(
             VELNOR_POLICY_WORKFLOW_REV,
-            "92f933fdb7f84ef8d6e6eb3c1b5809d8231fbaea"
+            "4790f7cc326c5387a974bd9d1a1d77bd6779a733"
         );
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
