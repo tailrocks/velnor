@@ -2974,7 +2974,7 @@ jobs:
 
   guest-payload:
     name: Guest payload ${{ matrix.arch }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -2985,7 +2985,7 @@ jobs:
             runner: ubuntu-24.04
           - arch: aarch64
             target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            runner: ubuntu-24.04-arm
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -3084,7 +3084,10 @@ jobs:
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
             mmdebstrap debootstrap arch-test
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or
+            # vendored openssl (sys/types.h / bits/libc-header-start.h).
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
           else
             sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
             sudo update-binfmts --enable qemu-aarch64 || true
@@ -3148,6 +3151,17 @@ jobs:
         if: steps.guest-seed-reuse.outputs.restored != 'true'
         run: |
           set -euo pipefail
+          # Hosted mold setup replaces /usr/bin/ld. Linux kconfig then fails
+          # closed with "ld: unknown linker" / "this linker is not supported".
+          if [ -x /usr/bin/ld.bfd ]; then
+            if [ "$(id -u)" -eq 0 ]; then
+              ln -sf /usr/bin/ld.bfd /usr/bin/ld
+            else
+              sudo ln -sf /usr/bin/ld.bfd /usr/bin/ld
+            fi
+          fi
+          ld --version | grep -Eiq 'GNU (ld|gold)|bfd' \
+            || { echo "::error::kernel build needs GNU ld; mold must not own /usr/bin/ld" >&2; exit 1; }
           mkdir -p dist/microvm
           agent="target/$TARGET/release/velnor-guest-agent"
           mbx run --locked --release --package velnor-runner --bin velnor-guest-image -- \
