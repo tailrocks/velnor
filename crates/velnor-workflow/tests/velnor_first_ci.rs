@@ -401,6 +401,69 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
 }
 
 #[test]
+fn dual_lane_automatic_velnor_units_pass_policy() {
+    let root = unique_dir("dual-lane-both-policy");
+    write_rust_fixture(&root, 1);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
+    )
+    .unwrap();
+    enable_approved_velnor_pull_requests(&root);
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"),
+        "dual-lane Velnor units must emit the same-repo PR gate: {unit}"
+    );
+    fs::create_dir_all(generated.output.join(".github-gen")).unwrap();
+    fs::copy(
+        root.join(".github-gen/velnor-workflow.toml"),
+        generated.output.join(".github-gen/velnor-workflow.toml"),
+    )
+    .unwrap();
+    let pin = generated
+        .workflow("ci-policy.yml")
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("VELNOR_WORKFLOW_POLICY_REVISION: ")
+                .map(str::to_owned)
+        })
+        .expect("generated policy job must pin VELNOR_WORKFLOW_POLICY_REVISION");
+    let run_policy = |message: &str| {
+        let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+            .args([
+                "policy",
+                "--workflow-root",
+                generated.output.to_str().unwrap(),
+                "--approved-policy-revision",
+                &pin,
+            ])
+            .output()
+            .expect("run velnor-workflow policy");
+        assert!(
+            outcome.status.success(),
+            "{message}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&outcome.stdout),
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&outcome.stdout),
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        assert!(
+            !combined.contains("self-hosted jobs require a default-branch trusted-event gate"),
+            "{message} reported trusted-event findings:\n{combined}"
+        );
+    };
+    run_policy("policy on rendered dual-lane tree");
+    fs::remove_dir_all(generated.output.join(".github/ci")).unwrap();
+    run_policy("policy on advisory sparse checkout without project.toml");
+}
+
+#[test]
 fn command_arrays_in_generation_config_are_rejected() {
     let root = unique_dir("command-arrays");
     write_rust_fixture(&root, 1);
