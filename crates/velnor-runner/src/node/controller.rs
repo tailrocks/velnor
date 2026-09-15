@@ -1898,7 +1898,14 @@ fn teardown_orphaned_job_containers(
     if !docker_backend {
         return;
     }
-    if let Err(error) = crate::docker_lease::force_remove_job_owned_containers(job_id, docker) {
+    // Docker ownership labels use the exact job-container identity emitted by
+    // the GitHub adapter (`velnor-job-<job_id>`), not the Run Service's raw
+    // job id. Keep this conversion at the orphan-teardown boundary so every
+    // controller recovery path uses the same key as normal execution.
+    let job_container = crate::github_adapter::job_container_name_for_id(job_id);
+    if let Err(error) =
+        crate::docker_lease::force_remove_job_owned_containers(&job_container, docker)
+    {
         eprintln!(
             "Warning: orphan recovery for job {job_id} could not remove its containers: {error:#}"
         );
@@ -4452,8 +4459,11 @@ mod tests {
             spawn_slots: false,
             lifecycle: None,
         };
-        let listing =
-            "job-cid\tjob-1\tjob-1\trunning\nguest-cid\tguest-sidecar\tjob-1\texited\n".to_string();
+        let job_container = crate::github_adapter::job_container_name_for_id("job-1");
+        let listing = format!(
+            "job-cid\t{job_container}\t{job_container}\trunning\n\
+             guest-cid\tguest-sidecar\t{job_container}\texited\n"
+        );
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
         reclaim_orphaned_jobs(
@@ -4475,7 +4485,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(
             calls[0],
-            crate::docker_lease::list_owned_containers_state_args("job-1")
+            crate::docker_lease::list_owned_containers_state_args(&job_container)
         );
         assert_eq!(
             calls[1],

@@ -5202,7 +5202,9 @@ fn startup_live_job_container_names(config_base: &Path) -> Result<BTreeSet<Strin
     let mut protected = BTreeSet::new();
     let mut scan_slot = |dir: &Path| -> Result<()> {
         if let Some(record) = load_in_flight_job(dir)? {
-            protected.insert(job_container_name_for_id(&record.job_id));
+            protected.insert(crate::github_adapter::job_container_name_for_id(
+                &record.job_id,
+            ));
         }
         Ok(())
     };
@@ -5229,10 +5231,6 @@ fn startup_live_job_container_names(config_base: &Path) -> Result<BTreeSet<Strin
         }
     }
     Ok(protected)
-}
-
-fn job_container_name_for_id(job_id: &str) -> String {
-    format!("velnor-job-{}", sanitize_path_segment(job_id))
 }
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {

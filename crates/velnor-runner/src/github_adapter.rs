@@ -397,8 +397,16 @@ pub(crate) fn job_variable<'a>(job: &'a AgentJobRequestMessage, name: &str) -> O
         .and_then(|value| value.value.as_deref())
 }
 
+pub(crate) fn job_container_name_for_id(job_id: &str) -> String {
+    format!(
+        "{}{sanitized}",
+        crate::docker_lease::JOB_CONTAINER_NAME_PREFIX,
+        sanitized = sanitize_path_segment(job_id)
+    )
+}
+
 pub fn job_container_name(job: &AgentJobRequestMessage) -> String {
-    format!("velnor-job-{}", sanitize_path_segment(&job.job_id))
+    job_container_name_for_id(&job.job_id)
 }
 
 fn job_network_name(job: &AgentJobRequestMessage) -> String {
