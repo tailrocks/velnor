@@ -75,13 +75,21 @@ ENV HOME=/root \
     # (observed: curl error 28 "<10 bytes/sec" aborting cargo metadata).
     # Retry harder and allow slow transfers instead of failing the job.
     CARGO_NET_RETRY=10 \
-    CARGO_HTTP_TIMEOUT=120
+    CARGO_HTTP_TIMEOUT=120 \
+    # Keep direct image use bounded. Velnor supplies narrower per-slot paths
+    # and the same limits at job launch; these defaults cover standalone use.
+    MBX_GC_AUTO=true \
+    MBX_GC_MAX_SIZE=20GiB \
+    MBX_GC_INCREMENTAL_MAX_SIZE=20GiB \
+    MBX_GC_INCREMENTAL_MAX_AGE=30d \
+    MBX_TARGET_MAX_SIZE=30GiB \
+    MBX_GC_MAX_TOTAL_SIZE=50GiB
 
 # Baked bootstrap of the mise binary at the fleet-pinned version. This is the
 # read-only /opt/mise/bin bootstrap; runtime never rewrites it. Its own layer,
 # so it is keyed on MISE_VERSION alone.
 RUN mkdir -p /opt/mise/bin \
-    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.1" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
+    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.9" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise --version
 
 # Plan 008: the whole job toolchain is a committed, locked mise config
@@ -148,7 +156,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     # Install upstream's stable Cargo launcher without activating an interactive
     # shell. XDG_DATA_HOME places it at /opt/mbx/bin, first on the image PATH.
     && XDG_DATA_HOME=/opt mise exec -- mbx setup --yes \
-    && mbx_real="$(mise which mbx)" \
+    && mbx_real="$(cat /opt/mbx/bin/mbx-target)" \
+    && test -x "$mbx_real" \
     && printf '#!/bin/sh\nXDG_DATA_HOME=/opt exec %s "$@"\n' "$mbx_real" > /opt/mbx/bin/mbx \
     && chmod 0755 /opt/mbx/bin/mbx \
     && test "$(command -v cargo)" = /opt/mbx/bin/cargo \
@@ -156,7 +165,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && test "$(cat /opt/mbx/bin/mbx-target)" = "$mbx_real" \
     && cargo --version \
     && MBX_DISABLE=1 cargo --version \
-    && mbx --version | grep -F '1.8.3' \
+    && mbx --version | grep -F '1.11.1' \
     && mbx doctor \
     && test -z "${RUSTC_WRAPPER:-}" \
     && ! command -v sccache \

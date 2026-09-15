@@ -967,11 +967,7 @@ mod tests {
         let policy = RetentionPolicy::from_config(&config);
         assert_eq!(policy.total_bytes, 4_294_967_296);
         assert_eq!(policy.producer_window_seconds, 3_600);
-        let compiler = policy
-            .classes
-            .iter()
-            .find(|class| class.id == "compiler-snapshots")
-            .expect("compiler-snapshots class");
+        let compiler = policy_class(&policy, "compiler-snapshots");
         assert_eq!(compiler.generation_bound, 3);
     }
 
@@ -1071,6 +1067,13 @@ mod tests {
         must_some(
             policy.classes.iter().find(|class| class.id == id),
             "retention class exists",
+        )
+    }
+
+    fn report_class<'a>(report: &'a BudgetReport, id: &str) -> &'a ClassBudgetTotal {
+        must_some(
+            report.classes.iter().find(|class| class.id == id),
+            "budget report class exists",
         )
     }
 
@@ -1262,22 +1265,11 @@ mod tests {
         let report = budget_report(&entries, &policy);
         assert_eq!(report.total_budget_bytes, policy.total_bytes);
         assert_eq!(report.total_held_bytes, 600);
-        assert_eq!(
-            report.headroom_bytes,
-            i64::try_from(policy.total_bytes).unwrap() - 600
-        );
-        let toolchain = report
-            .classes
-            .iter()
-            .find(|class| class.id == "toolchain-seeds")
-            .expect("toolchain class total");
+        assert_eq!(report.headroom_bytes, 8_589_933_992);
+        let toolchain = report_class(&report, "toolchain-seeds");
         assert_eq!(toolchain.held_bytes, 300);
         assert_eq!(toolchain.entry_count, 2);
-        let runtime = report
-            .classes
-            .iter()
-            .find(|class| class.id == "runtime-binary")
-            .expect("runtime class total");
+        let runtime = report_class(&report, "runtime-binary");
         assert_eq!(runtime.held_bytes, 300);
         assert_eq!(runtime.entry_count, 1);
     }

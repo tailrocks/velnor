@@ -465,7 +465,8 @@ fn both_allows_swift_with_explicit_github_jobs() {
         "runners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\n",
     );
     let mut config = fs::read_to_string(root.join(".github-gen/velnor-workflow.toml")).unwrap();
-    config.push_str(&format!(
+    let _ = write!(
+        config,
         r#"
 
 [[declare]]
@@ -475,7 +476,7 @@ units = ["{swift_id}"]
 [declare.args]
 jobs = ["github"]
 "#
-    ));
+    );
     fs::write(root.join(".github-gen/velnor-workflow.toml"), config).unwrap();
     let generated = generate(&root);
     let swift = parse_jobs(&generated.workflow("ci-unit-swift.yml"));

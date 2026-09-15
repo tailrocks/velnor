@@ -33,6 +33,10 @@ ENV MISE_DATA_DIR=/opt/mise \
     MBX_CACHE_DIR=/mbx \
     MBX_TARGET_ROOT=/mbx/targets \
     MBX_GC_AUTO=true \
+    MBX_GC_MAX_SIZE=20GiB \
+    MBX_GC_INCREMENTAL_MAX_SIZE=20GiB \
+    MBX_GC_INCREMENTAL_MAX_AGE=30d \
+    MBX_TARGET_MAX_SIZE=30GiB \
     MBX_GC_MAX_TOTAL_SIZE=50GiB
 
 COPY docker/build-mise.toml /opt/mise/config/mise.toml
@@ -42,13 +46,13 @@ RUN mkdir -p /opt/mise/bin \
     && : > /tmp/mise-empty.toml \
     && cd /opt/mise/config \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
-    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.1" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
+    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.9" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise trust /opt/mise/config/mise.toml \
     && mise install --locked --yes rust mr-boxington \
     && mise reshim \
     && mise exec -- rustc --version \
     && XDG_DATA_HOME=/opt mise exec -- mbx setup --yes \
-    && mise exec -- mbx --version | grep -F '1.8.3'
+    && mise exec -- mbx --version | grep -F '1.11.1'
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -116,7 +120,7 @@ COPY tools/unit-collector ./tools/unit-collector
 # the release binaries for every Rust source edit. Full/default builds below
 # remain the release-image guardrail used by trusted main and release flows.
 RUN cd /opt/mise/config \
-    && mise exec -- mbx --version | grep -F '1.8.3' \
+    && mise exec -- mbx --version | grep -F '1.11.1' \
     && test -f /src/Cargo.lock \
     && test -f /src/crates/velnor-workflow/src/lib.rs \
     && touch /tmp/velnor-ci-inputs-validated

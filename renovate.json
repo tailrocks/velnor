@@ -57,10 +57,9 @@
     },
     {
       "customType": "regex",
-      "description": "Rust stable toolchain channel: rust-toolchain.toml is the single source of truth, and every mise lockfile mirrors the resolved version. All four sites must move together or the built artifact diverges from the declared toolchain.",
+      "description": "Rust stable toolchain channel: rust-toolchain.toml is the single source of truth, and both image mise lockfiles mirror the resolved version. All four sites must move together or the built artifact diverges from the declared toolchain.",
       "managerFilePatterns": [
         "/^rust-toolchain\\.toml$/",
-        "/^mise\\.lock$/",
         "/^docker\\/build-mise\\.lock$/",
         "/^docker\\/job-mise\\.lock$/",
         "/^content\\/docs\\/guides\\/development\\.mdx$/"
