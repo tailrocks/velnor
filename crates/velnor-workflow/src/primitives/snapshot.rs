@@ -439,15 +439,14 @@ impl RetentionPolicy {
         if let Some(producer_window_seconds) = config.producer_window_seconds {
             policy.producer_window_seconds = producer_window_seconds;
         }
-        if let Some(bound) = config.mbx_generation_bound {
-            if let Some(class) = policy
+        if let Some(bound) = config.mbx_generation_bound
+            && let Some(class) = policy
                 .classes
                 .iter_mut()
                 .find(|class| class.id == "compiler-snapshots")
             {
                 class.generation_bound = bound;
             }
-        }
         policy
     }
 }

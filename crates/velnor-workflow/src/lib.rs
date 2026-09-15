@@ -1484,10 +1484,7 @@ pub(crate) fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorErro
 }
 
 pub(crate) fn inferred_automatic(runners: RunnerMode) -> RunnerMode {
-    match runners {
-        RunnerMode::Both => RunnerMode::Both,
-        other => other,
-    }
+    runners
 }
 
 fn automatic_fits_runners(runners: RunnerMode, automatic: RunnerMode) -> bool {
@@ -1540,6 +1537,10 @@ pub(crate) fn validate_dispatch_runner_for_runners(
     )))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "generation config application keeps repo scan overrides in one place"
+)]
 fn apply_generation_config(
     config: &mut ProjectConfig,
     generation: &config::RepoGenerationConfig,
@@ -4499,17 +4500,14 @@ fn repository_head_revision(root: &Path) -> Result<String, GeneratorError> {
 
 fn policy_install_root(revision: &str) -> PathBuf {
     env::var_os("RUNNER_TEMP")
-        .or_else(|| env::var_os("TMPDIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir)
+        .or_else(|| env::var_os("TMPDIR")).map_or_else(env::temp_dir, PathBuf::from)
         .join(format!("velnor-workflow-policy-{revision}"))
 }
 
 /// Online prefetch for D19 `--check` when verification runs with `CARGO_NET_OFFLINE`.
 pub(crate) fn render_pinned_policy_prefetch_bash(revision: &str) -> String {
     format!(
-        "          cd -- \"$GITHUB_WORKSPACE\"\n          install_root=\"${{RUNNER_TEMP:-${{TMPDIR:-/tmp}}}}/velnor-workflow-policy-{revision}\"\n          if [[ ! -x \"$install_root/bin/velnor-workflow\" ]]; then\n            cargo install --locked --git {url} --rev {revision} --root \"$install_root\" velnor-workflow --bin velnor-workflow\n          fi\n",
-        url = VELNOR_WORKFLOW_INSTALL_GIT_URL,
+        "          install_root=\"${{RUNNER_TEMP:-${{TMPDIR:-/tmp}}}}/velnor-workflow-policy-{revision}\"\n          if [[ ! -x \"$install_root/bin/velnor-workflow\" ]]; then\n            cargo install --locked --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} --rev {revision} --root \"$install_root\" velnor-workflow --bin velnor-workflow\n          fi\n",
     )
 }
 
@@ -12005,7 +12003,7 @@ channel = "stable"
             workspace_check: false,
         });
         let workflow = WorkflowIr::from_config(&config)
-            .render_nested_unit(&config.units.last().unwrap(), WorkflowKind::Main);
+            .render_nested_unit(config.units.last().unwrap(), WorkflowKind::Main);
         let github_lane = workflow
             .split_once("\n  velnor:")
             .map_or(workflow.as_str(), |(lane, _)| lane);
