@@ -865,7 +865,7 @@ async fn reconcile_once(
             generation,
             SLOT_HEARTBEAT_MAX_AGE,
         );
-        let acting = slot_is_acting(&state, jobs, &id, generation);
+        let acting = slot_is_acting(&args.state_dir, &state, jobs, &id, generation);
         // A leftover deadline from before/during a job must not fire the
         // instant the journal row is gone. The waiter is still the broker
         // actor; fencing the supervisor while that waiter lives splits
@@ -888,7 +888,8 @@ async fn reconcile_once(
             terminate_fenced_slot_actor(args, slots, jobs, &state, &id, slot.expect("fenced slot"))
                 .await?;
         }
-        let fenced_generation = fenced_slot_recovery_generation(slot, &state, jobs);
+        let fenced_generation =
+            fenced_slot_recovery_generation(slot, &args.state_dir, &state, jobs);
         let generation = fenced_generation.unwrap_or(generation);
         let process_alive = heartbeat_fresh;
         if fenced && fenced_generation.is_none() {
@@ -896,7 +897,7 @@ async fn reconcile_once(
         }
         if fenced_generation.is_none()
             && (admission_blocked
-                || child_owns_slot(&state, jobs, &id)
+                || child_owns_slot(&args.state_dir, &state, jobs, &id, generation)
                 || !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive))
         {
             continue;
@@ -2412,12 +2413,13 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
 
 fn fenced_slot_recovery_generation(
     slot: Option<&SlotRecord>,
+    state_dir: &Path,
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
 ) -> Option<Generation> {
     let slot = slot.filter(|slot| slot.phase == SlotPhase2::Fenced)?;
     if slot_has_admission_block(state, &slot.slot_id, slot.generation)
-        || child_owns_slot(state, jobs, &slot.slot_id)
+        || child_owns_slot(state_dir, state, jobs, &slot.slot_id, slot.generation)
     {
         return None;
     }
@@ -2440,16 +2442,34 @@ fn slot_has_admission_block(
 }
 
 fn child_owns_slot(
+    state_dir: &Path,
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
+    generation: Generation,
 ) -> bool {
     let waiter_id = format!("wait-{}", slot_id.0);
-    jobs.contains_key(&waiter_id)
-        || state
-            .jobs
-            .iter()
-            .any(|job| job.slot_id == *slot_id && jobs.contains_key(&job.job_id.0))
+    if jobs.contains_key(&waiter_id) {
+        return true;
+    }
+    if state
+        .jobs
+        .iter()
+        .any(|job| job.slot_id == *slot_id && jobs.contains_key(&job.job_id.0))
+    {
+        return true;
+    }
+    // Persisted ownership survives controller restart while the process lives.
+    if cleanup::read_owned_pid(state_dir, &waiter_id, generation.0).is_some_and(prove::pid_is_alive)
+    {
+        return true;
+    }
+    state.jobs.iter().any(|job| {
+        job.slot_id == *slot_id
+            && job.generation == generation
+            && cleanup::read_owned_pid(state_dir, &job.job_id.0, generation.0)
+                .is_some_and(prove::pid_is_alive)
+    })
 }
 
 /// Journal work or a live waiter/worker means the slot is still acting.
@@ -2457,12 +2477,14 @@ fn child_owns_slot(
 /// is what GitHub talks to, and leaving it up after `SlotStale` deadlocks
 /// generation recovery.
 fn slot_is_acting(
+    state_dir: &Path,
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
     generation: Generation,
 ) -> bool {
-    slot_has_admission_block(state, slot_id, generation) || child_owns_slot(state, jobs, slot_id)
+    slot_has_admission_block(state, slot_id, generation)
+        || child_owns_slot(state_dir, state, jobs, slot_id, generation)
 }
 
 async fn reap_supervised_child(
@@ -3300,9 +3322,11 @@ mod tests {
         ]);
         let state = journal.materialized_state().unwrap();
         assert!(child_owns_slot(
+            &dir,
             &state,
             &jobs,
-            &SlotId("velnor-1".to_owned())
+            &SlotId("velnor-1".to_owned()),
+            Generation::INITIAL,
         ));
         assert_eq!(
             job_child_keys_for_slot(&jobs, &state, &SlotId("velnor-1".to_owned())),
@@ -3652,27 +3676,30 @@ mod tests {
 
     #[test]
     fn fenced_slot_reconciliation_advances_generation() {
+        let dir = metrics_test_dir("fenced-recovery");
         let mut slot = reserved_slot();
         let state = FleetState::default();
         let children = HashMap::new();
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &state, &children),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &children),
             None
         );
 
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &state, &children),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &children),
             Some(Generation(slot.generation.0 + 1))
         );
         assert_eq!(
-            fenced_slot_recovery_generation(None, &state, &children),
+            fenced_slot_recovery_generation(None, &dir, &state, &children),
             None
         );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn a_live_waiter_is_an_acting_slot_and_blocks_fenced_recovery() {
+        let dir = metrics_test_dir("live-waiter-in-memory");
         let mut slot = reserved_slot();
         slot.phase = SlotPhase2::Ready;
         let state = FleetState::default();
@@ -3680,6 +3707,7 @@ mod tests {
         let mut jobs = HashMap::from([(String::from("wait-velnor-1"), waiter)]);
 
         assert!(slot_is_acting(
+            &dir,
             &state,
             &jobs,
             &slot.slot_id,
@@ -3687,7 +3715,7 @@ mod tests {
         ));
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &state, &jobs),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
             None,
             "a live waiter must not be skipped: it is why generation recovery deadlocks"
         );
@@ -3696,15 +3724,46 @@ mod tests {
         let _ = jobs.get_mut("wait-velnor-1").unwrap().wait();
         jobs.remove("wait-velnor-1");
         assert!(!slot_is_acting(
+            &dir,
             &state,
             &jobs,
             &slot.slot_id,
             slot.generation
         ));
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &state, &jobs),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
             Some(Generation(slot.generation.0 + 1))
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn persisted_live_waiter_pid_blocks_acting_slot_after_controller_restart() {
+        let dir = metrics_test_dir("persisted-waiter-restart");
+        let mut slot = reserved_slot();
+        let state = FleetState::default();
+        let jobs = HashMap::<String, Child>::new();
+        let mut waiter = Command::new("sleep").arg("30").spawn().unwrap();
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", slot.generation.0, waiter.id()).unwrap();
+
+        assert!(
+            slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation),
+            "persisted waiter pid must count as acting with an empty jobs map"
+        );
+        slot.phase = SlotPhase2::Fenced;
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            None,
+            "fencing must stay blocked while the persisted waiter pid is live"
+        );
+
+        let _ = waiter.kill();
+        let _ = waiter.wait();
+        assert!(
+            !slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation),
+            "dead persisted waiter must no longer block acting"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[cfg(unix)]
@@ -3742,7 +3801,7 @@ mod tests {
             "the waiter process itself must be gone, not just dropped from the map"
         );
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &state, &jobs),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
             Some(Generation(slot.generation.0 + 1))
         );
         std::fs::remove_dir_all(dir).ok();
