@@ -19,17 +19,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
     let manifest_dir =
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| ".".into()));
-    // Rebuild when HEAD moves so a workspace binary never reports a stale
-    // commit. `--absolute-git-dir` resolves cargo's checkout `.git` files too.
-    if let Some(git_dir) = git(&manifest_dir, &["rev-parse", "--absolute-git-dir"]) {
-        println!("cargo:rerun-if-changed={git_dir}/HEAD");
-        println!("cargo:rerun-if-changed={git_dir}/packed-refs");
-        if let Some(reference) = git(&manifest_dir, &["symbolic-ref", "-q", "HEAD"]) {
-            println!("cargo:rerun-if-changed={git_dir}/{reference}");
-        }
+    // Re-run on every build. Cargo only re-runs a build script when a file it
+    // named last time changed, and the fingerprint (and therefore that list of
+    // files) is keyed by package, not by checkout: a target directory shared by
+    // two checkouts would otherwise keep the first checkout's `HEAD` paths and
+    // hand the second checkout a binary stamped with the first one's commit —
+    // exactly the false proof the D19 guard must never be able to produce.
+    // Naming a path that never exists marks the script stale unconditionally;
+    // the cost is one `git rev-parse`, and the crate itself only recompiles
+    // when the stamped value actually changes.
+    if let Some(out_dir) = std::env::var_os("OUT_DIR") {
+        let sentinel = PathBuf::from(out_dir).join("velnor-workflow-source-sha.always-rerun");
+        println!("cargo:rerun-if-changed={}", sentinel.display());
     }
     let sha = git(&manifest_dir, &["rev-parse", "HEAD"])
         .filter(|value| is_full_sha(value))
