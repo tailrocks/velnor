@@ -79,7 +79,7 @@ use std::{env, fs};
 /// trust decision: every accepted endpoint is still required to be a local
 /// Unix socket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DockerEndpointSource {
+pub enum DockerEndpointSource {
     Explicit,
     DockerHost,
     Context,
@@ -87,7 +87,9 @@ pub(crate) enum DockerEndpointSource {
 }
 
 impl DockerEndpointSource {
-    fn label(self) -> &'static str {
+    /// Human label for diagnostics output.
+    #[must_use]
+    pub fn label(self) -> &'static str {
         match self {
             Self::Explicit => "explicit Velnor configuration",
             Self::DockerHost => "DOCKER_HOST",
@@ -100,10 +102,13 @@ impl DockerEndpointSource {
 /// One resolved local Docker daemon. The CLI and Engine API both consume this
 /// value so they cannot silently select different daemons on macOS.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DockerEndpoint {
-    pub(crate) host: String,
-    pub(crate) socket: PathBuf,
-    pub(crate) source: DockerEndpointSource,
+pub struct DockerEndpoint {
+    pub host: String,
+    pub socket: PathBuf,
+    pub source: DockerEndpointSource,
+    /// The Docker context the endpoint was read from, when
+    /// [`DockerEndpointSource::Context`] selected it (`default` included).
+    pub context: Option<String>,
 }
 
 impl DockerEndpoint {
@@ -135,6 +140,7 @@ impl DockerEndpoint {
             host: format!("unix://{}", socket.display()),
             socket,
             source,
+            context: None,
         })
     }
 }
@@ -146,7 +152,7 @@ impl DockerEndpoint {
 /// in `config.json`, then portable local defaults. A named context is read
 /// from Docker metadata rather than executing `docker context`, avoiding
 /// recursion through this resolver.
-pub(crate) fn resolve_docker_endpoint() -> Result<DockerEndpoint> {
+pub fn resolve_docker_endpoint() -> Result<DockerEndpoint> {
     #[cfg(test)]
     #[allow(
         clippy::unwrap_used,
@@ -252,6 +258,7 @@ fn resolve_context_endpoint(
     if context == "default" {
         let mut endpoint = default_endpoint(home, runtime_dir);
         endpoint.source = DockerEndpointSource::Context;
+        endpoint.context = Some(context.to_owned());
         return Ok(endpoint);
     }
     let Some(config_dir) = config_dir else {
@@ -317,7 +324,9 @@ fn context_endpoint_from_value(
                 path.display()
             )
         })?;
-    DockerEndpoint::from_host(host, DockerEndpointSource::Context)
+    let mut endpoint = DockerEndpoint::from_host(host, DockerEndpointSource::Context)?;
+    endpoint.context = Some(context.to_owned());
+    Ok(endpoint)
 }
 
 fn json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -360,6 +369,7 @@ fn default_endpoint(home: Option<&Path>, _runtime_dir: Option<&Path>) -> DockerE
         host: format!("unix://{}", socket.display()),
         socket,
         source: DockerEndpointSource::Default,
+        context: None,
     }
 }
 

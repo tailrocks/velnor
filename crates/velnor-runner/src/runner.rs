@@ -5720,6 +5720,33 @@ pub fn github_runner_host_slug() -> String {
     }
 }
 
+/// Operator name of an on-demand host started without `--name`:
+/// `velnor-local-{host}`, with the host slug this process registers under.
+///
+/// The one spelling shared by `velnorctl host start` (which uses it as the
+/// control-socket instance, the config directory and the daemon `--name`) and
+/// [`strip_composed_instance`] (which collapses it back to the `local`
+/// instance). Both sides must derive the host segment from
+/// [`github_runner_host_slug`] byte-for-byte, otherwise the collapse never
+/// matches and the GitHub runner name repeats the host twice and overflows
+/// the 64-character limit.
+#[must_use]
+pub fn default_local_operator_name() -> String {
+    default_local_operator_name_for(&github_runner_host_slug())
+}
+
+/// Operator names double as control-socket instance names, which
+/// `velnor_client` caps at 64 bytes. The host segment is cut to fit; the
+/// collapse in [`strip_composed_instance`] compares against this same
+/// function, so a cut host still collapses to `local`.
+const OPERATOR_NAME_MAX: usize = 64;
+const LOCAL_OPERATOR_PREFIX: &str = "velnor-local-";
+
+fn default_local_operator_name_for(host: &str) -> String {
+    let budget = OPERATOR_NAME_MAX - LOCAL_OPERATOR_PREFIX.len();
+    format!("{LOCAL_OPERATOR_PREFIX}{}", truncate_slug(host, budget))
+}
+
 /// Canonical GitHub registration name: `velnor-{host}-{instance}-{slot}`.
 ///
 /// `slot` is the 0-based store `Slot.index`. If `instance` is already a full
@@ -5766,7 +5793,7 @@ fn strip_composed_instance(slug: &str, host: &str) -> String {
     let host_prefix = format!("velnor-{host}-");
     let rest = if let Some(rest) = slug.strip_prefix(&host_prefix) {
         rest
-    } else if slug == format!("velnor-{host}") || slug == format!("velnor-local-{host}") {
+    } else if slug == format!("velnor-{host}") || slug == default_local_operator_name_for(host) {
         return "local".to_owned();
     } else {
         return slug.to_owned();
@@ -19108,6 +19135,58 @@ jobs:
             assert!(!name.contains("github_pat_"));
             assert!(!name.contains('@'));
         }
+    }
+
+    #[test]
+    fn default_local_operator_name_collapses_to_the_local_instance_without_truncation() {
+        // A 25-character macOS nodename: the shape that used to be truncated
+        // to 24 characters by velnorctl and left uncut by the runner, so the
+        // `velnor-local-{host}` collapse never matched.
+        let nodename = "Alexeys-MacBook-Pro.local";
+        assert!(nodename.len() >= 25);
+        let host = github_identity_slug(nodename);
+        assert_eq!(host, "alexeys-macbook-pro-local");
+        let operator_name = format!("velnor-local-{host}");
+
+        for slot in [0, 1, 7] {
+            let name = compose_github_runner_name(&host, &operator_name, slot);
+            assert_eq!(name, format!("velnor-{host}-local-{slot}"));
+            assert!(name.len() <= GITHUB_RUNNER_NAME_MAX, "{name}");
+            assert!(
+                name.contains(&format!("-{host}-")),
+                "host segment must not be truncated: {name}"
+            );
+            assert!(!name.contains("velnor-local"), "{name}");
+            let (instance, parsed_slot) = parse_instance_and_slot(&name, &host).unwrap();
+            assert_eq!(instance, "local");
+            assert_eq!(parsed_slot, slot.to_string());
+        }
+
+        // A nodename longer than the control-socket instance budget: the
+        // operator default is cut to 64 bytes and still collapses to `local`.
+        let long_host = "a".repeat(70);
+        let long_name = default_local_operator_name_for(&long_host);
+        assert_eq!(long_name.len(), OPERATOR_NAME_MAX);
+        assert_eq!(
+            instance_slug_from_operator_name(Some(&long_name), &long_host),
+            "local"
+        );
+
+        // Live process identity: the operator default and the registration
+        // path must agree on this machine's actual nodename too.
+        let live_host = github_runner_host_slug();
+        let default_name = default_local_operator_name();
+        assert_eq!(default_name, format!("velnor-local-{live_host}"));
+        let registered = daemon_slot_agent_name(Some(&default_name), 1, 1).unwrap();
+        assert_eq!(
+            registered,
+            compose_github_runner_name(&live_host, "local", 0)
+        );
+        assert!(!registered.contains("velnor-local"), "{registered}");
+        let identity = identity_from_agent_name(&registered);
+        assert_eq!(identity.host, live_host);
+        assert_eq!(identity.instance, "local");
+        assert_eq!(identity.slot, "0");
     }
 
     #[test]

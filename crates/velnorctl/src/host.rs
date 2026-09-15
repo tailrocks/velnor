@@ -961,8 +961,12 @@ pub(crate) fn host_config_dir_from_root(root: &Path, name: &str) -> PathBuf {
     root.join("hosts").join(name)
 }
 
+/// The on-demand host's operator name when `--name` is omitted. Owned by the
+/// runner: it is the same string the daemon collapses back to the `local`
+/// instance when it composes the GitHub runner name, so the registered
+/// identity is `velnor-<host>-local-<slot>` and never repeats the host.
 pub(crate) fn default_host_name() -> String {
-    format!("velnor-local-{}", hostname_slug())
+    velnor_runner::runner::default_local_operator_name()
 }
 
 fn ensure_docker_execution_file(config_dir: &Path, slots: usize) -> Result<(), CommandError> {
@@ -1282,43 +1286,29 @@ fn github_pat() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn hostname_slug() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| {
-            value
-                .chars()
-                .flat_map(|ch| ch.to_lowercase())
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .take(24)
-                .collect::<String>()
-                .trim_matches('-')
-                .to_owned()
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "host".into())
+/// The daemon this host will use, from the runner's one endpoint resolver, so
+/// what `host start` prints is exactly what the daemon and its Engine client
+/// connect to.
+fn docker_endpoint_display() -> String {
+    match velnor_runner::docker::resolve_docker_endpoint() {
+        Ok(endpoint) => docker_endpoint_line(&endpoint, endpoint.socket.exists()),
+        Err(error) => format!(
+            "unresolved ({error:#}); start Docker/OrbStack or fix the Docker context. \
+             host start will not switch backends"
+        ),
+    }
 }
 
-fn docker_endpoint_display() -> String {
-    for key in ["VELNOR_DOCKER_HOST", "DOCKER_HOST"] {
-        if let Ok(value) = env::var(key)
-            && !value.is_empty()
-        {
-            return format!("{value} (from {key})");
-        }
+fn docker_endpoint_line(endpoint: &velnor_runner::docker::DockerEndpoint, exists: bool) -> String {
+    let mut line = format!("{} (from {}", endpoint.host, endpoint.source.label());
+    if let Some(context) = &endpoint.context {
+        line.push_str(&format!(" {context}"));
     }
-    if PathBuf::from("/var/run/docker.sock").exists() {
-        return "unix:///var/run/docker.sock".into();
+    line.push(')');
+    if !exists {
+        line.push_str("; socket missing: start Docker/OrbStack before jobs are claimed");
     }
-    if let Some(home) = env::var_os("HOME") {
-        let orb = PathBuf::from(home).join(".orbstack/run/docker.sock");
-        if orb.exists() {
-            return format!("unix://{} (orbstack)", orb.display());
-        }
-    }
-    "unavailable (start Docker/OrbStack; host start will not switch backends)".into()
+    line
 }
 
 fn execution_platform() -> String {
@@ -1382,6 +1372,47 @@ mod tests {
         })
         .expect("named repo");
         assert_eq!(named, "https://github.com/tailrocks/velnor");
+    }
+
+    #[test]
+    fn default_host_name_composes_into_the_runner_identity_without_repeating_the_host() {
+        let host = velnor_runner::runner::github_runner_host_slug();
+        let name = default_host_name();
+        assert_eq!(name, format!("velnor-local-{host}"));
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "{name}"
+        );
+        validate_host_name(&name).expect("default host name is a valid control-socket instance");
+        for slot in [0, 1] {
+            let registered = velnor_runner::runner::compose_github_runner_name(&host, &name, slot);
+            assert_eq!(
+                registered,
+                velnor_runner::runner::compose_github_runner_name(&host, "local", slot)
+            );
+            assert!(registered.len() <= 64, "{registered}");
+            assert!(
+                !registered.contains("velnor-local"),
+                "the operator default must collapse to the local instance: {registered}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_endpoint_line_reports_the_runner_resolved_endpoint() {
+        use velnor_runner::docker::{DockerEndpoint, DockerEndpointSource};
+        let endpoint = DockerEndpoint {
+            host: "unix:///Users/me/.orbstack/run/docker.sock".into(),
+            socket: PathBuf::from("/Users/me/.orbstack/run/docker.sock"),
+            source: DockerEndpointSource::Context,
+            context: Some("orbstack".into()),
+        };
+        assert_eq!(
+            docker_endpoint_line(&endpoint, true),
+            "unix:///Users/me/.orbstack/run/docker.sock (from Docker context orbstack)"
+        );
+        let missing = docker_endpoint_line(&endpoint, false);
+        assert!(missing.contains("socket missing"), "{missing}");
     }
 
     #[test]
