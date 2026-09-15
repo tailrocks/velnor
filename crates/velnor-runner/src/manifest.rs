@@ -704,19 +704,10 @@ pub static ACTIONS: &[ActionCapability] = &[
             InputRule::Any("install-dir")
         ]
     ),
-    ActionCapability {
-        repository: "tailrocks/velnor",
-        adapter: ActionAdapter::Composite,
-        allowed_refs: &[
-            allowed(
-                "643f33123abe01adee09662a366cb9a5d2b3c3bf",
-                "hosted runtime source pin",
-            ),
-        ],
-        allowed_subpaths: &[".github/actions/setup-velnor-workflow"],
-        inputs: &[InputRule::Any("rev")],
-        notes: "first-party composite; release jobs install the pinned workflow runtime with a rev-only input surface",
-    },
+    // `setup-velnor-workflow` is deliberately absent: the owner's generated
+    // workflows run it as a local `./.github/actions/setup-velnor-workflow`
+    // step (admitted below without a capability), so no self-referential pin
+    // has to be re-listed here on every D19 bump.
     ActionCapability {
         repository: "oven-sh/setup-bun",
         adapter: ActionAdapter::JavaScript,
