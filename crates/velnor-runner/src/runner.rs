@@ -2991,10 +2991,8 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // Journal path for the durable drain leg of the daemon gates below.
     // `None` (unresolvable config dir) degrades them to the static latch.
     let drain_journal = daemon_drain_journal(&args);
-    if supervised {
-        if let Some(path) = drain_journal.as_deref() {
-            reclaim_stale_journal_drain_for_supervised_start(path);
-        }
+    if supervised && let Some(path) = drain_journal.as_deref() {
+        reclaim_stale_journal_drain_for_supervised_start(path);
     }
 
     // Reclaim credentials abandoned by a prior daemon before any slot can
