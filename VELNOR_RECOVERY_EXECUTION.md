@@ -9,25 +9,26 @@ Operator contract (2026-09-15): finish only after this sequence is independently
 | # | Gate | Status |
 |---|---|---|
 | 1 | macOS-hosted Velnor executes real `tailrocks/velnor` GHA jobs (not GitHub-hosted substitution) | **PASS** — run `34894567066` job `104145226224` on `velnor-macos-recovery-slot-1` @ `363d727b`; Docker precreate + Policy job **Succeeded**. Repeated jobs PASS (slot lifecycle evidence). |
-| 2 | Merge **#809, #812, #814, #815** using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **NOT YET** — #809 run `34930642603` completed **FAILURE** (29 success, 3 fail, 5 cancelled). Root cause: `trust_scope` missing in `velnorctl` ConfigureArgs @ `466de1a6` (compile E0063 in rust-production-topology). GitHub lane passed. Operator must rebase #809. Do not merge. |
+| 2 | Merge **#809, #812, #814, #815** using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **NOT YET** — #809 `466de1a6` remains blocked: Velnor job `104301473663` failed `builds_start_container_args_with_mounts`; `ci-required` also failed on jq syntax. #812/#814/#815 have Velnor admission failures and failing `ci-required`. #816 is closed unmerged; #819 currently carries the shared branch. Do not merge by bypass. |
 | 3 | `main` fully green after the merge stack | **NOT YET** |
 | 4 | New release: Debian apt (`tailrocks/velnor-apt`) **and** Homebrew; artifacts install and operate | **NOT YET** — today Linux debs only; no Homebrew channel |
 | 5 | Deploy that verified release to Sentry (not a rescue build) | **NOT YET** — Sentry JIT wedge unchanged; do not deploy until gate 4 |
 | 6 | Sentry executes real repository jobs; all PRs green, `main` green, release process proven | **NOT YET** |
 
-## Live snapshot (2026-09-15 ~07:40 UTC)
+## Live snapshot (2026-09-15; #819 identity)
 
 | Item | Value |
 |---|---|
 | **main** | `701fbdd1` (#817). Not `ad5fc59d`. |
-| **PR #809** | OPEN — run `34930642603` completed **FAILURE** (29 success, 3 fail, 5 cancelled). Root cause: `trust_scope` missing in `velnorctl` ConfigureArgs @ `466de1a6` (compile E0063 in rust-production-topology). GitHub lane passed. Operator must rebase #809. Do not merge. |
+| **PR #809** | OPEN @ `466de1a6` — run `34930642603` attempt 5 **FAILURE**; Velnor job `104301473663` failed `builds_start_container_args_with_mounts`; `ci-required` failed on jq syntax. |
 | **PR #812** | `4db23c0f` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
 | **PR #814** | `a67e4c28` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
 | **PR #815** | `e5049452` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
-| **PR #816** | run `34941825231` **in_progress** on recovery slots (`f8efe282` merge SHA); 1 fail workflow-contract on dogfood; 5 jobs still running |
-| **Focused branch** | `origin/velnor-macos-host` @ `acfd60b9` — pending CI run `34942276019`; prior: `4628e602` (slot PID fix), `e53bc60b` (project.toml fix), `94b02ab4` (trust_scope on host line), `9344ef3c` (host lifecycle controls), `ec96f089` (MBX cache isolation) |
-| **Host** | 7/12 ready, 5 executing; `github_reachable` true |
-| **Lifecycle** | Root cause documented: `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
+| **PR #816** | CLOSED unmerged. Not the integration PR. |
+| **PR #819** | OPEN — branch integration PR; live head was `e698be6b` at the 10:27:57Z refresh; current branch has since advanced to `0d0e98b1`. Policy run `34957693289` was in progress; CI run `34957302203` was on `b417128c`; run `34957694681` was pending. Refresh after current push. |
+| **Focused branch** | `origin/velnor-macos-host` @ `0d0e98b1`; commits include `e698be6b` generator timing/warm-store changes and `0d0e98b1` runner lifecycle hardening. |
+| **Host** | 15 online / 4 busy at 10:27:57Z; active jobs included slots 4, 5, 6, and 10; GitHub API reports OS `unknown`, labels prove Velnor-hosted capacity. |
+| **Lifecycle** | Verified local tests cover exclusive in-flight leases, persisted waiter ownership, teardown-before-release, fail-closed marker scans, orphan cleanup, output spill/reconnect, and repeated slot reuse. |
 | **Sentry** | JIT wedge unchanged; tailrocks fleet down. Do not deploy until gate 4. |
 
 ## Related PR stack
@@ -65,10 +66,11 @@ Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redund
 | mbx cross-container flock wedge | ROOT CAUSE PROVEN + FIXED+VERIFIED | All containers shared `/var/cache/mbx`; mbx takes registrar flock(EX)→lease flock(EX), no timeouts; lease names `{pid}-0.lease` collide (every container runs mbx as pid 63). Observed 1 holder + 11 waiters, 0% CPU, 30+ min (runs `34930408749` att.3, `34930642603` att.2). Fix `ec96f089`: per-slot `MBX_CACHE_DIR` (`/var/cache/mbx/slots/slot-N`), verified vs upstream `jdx/mr-boxington` (relocates registrar+leases). Host locks dir rotated; wedge evidence preserved at `.locks.wedged-20260915T0608Z`. |
 | Sentry hung test `local_composite_unknown_nested_action_fails_admission_read_only` | TEST-ONLY, FIXED+VERIFIED | `admit_job` errored pre-connect (unset `VELNOR_GITHUB_HTTP_TRANSPORT`); fake server parked in `accept()`, test in `join()` forever (job `104265844196`, 2176/2177 then hang). Fix `bf77c4fd`: env guard + 30s accept deadline + read timeout + test-support gate. Verifier: passes env-unset/set, CI `--all-features` keeps it running. |
 | #812 `4db23c0f` / #814 `a67e4c28` / #815 `e5049452` | DCO pass; `ci-required` fail | latest completed runs |
-| #816 run `34939230446` @ `e53bc60b` | Planning **PASS** | latest HEAD CI blocked by concurrency |
-| #816 run `34930408749` | completed failure | bootstrap/setup pattern (superseded) |
+| #816 run `34939230446` @ `e53bc60b` | historical (PR CLOSED unmerged) | Planning **PASS** then; not current integration |
+| #816 run `34930408749` | historical (PR CLOSED unmerged) | bootstrap/setup pattern (superseded) |
+| #819 ci-pr `34957694681` @ `e698be6b` | historical at 10:27:57Z | pending then; refresh current head `0d0e98b1` |
 | Host lifecycle | root cause documented | `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
-| `velnor-macos-host` | `4628e602` | `4628e602` slot PID fix; `e53bc60b` project.toml; `94b02ab4` trust_scope; `9344ef3c` lifecycle controls; `ec96f089` MBX cache isolation |
+| `velnor-macos-host` | `0d0e98b1` | `ed8a4864` admission fences; `dd1e024b` OCC lifecycle; `e144f4c3` drain-hint Result handling; `e698be6b` generated timing/warm-store probes; `0d0e98b1` container lifetime, lease, teardown, orphan-reclaim, output-stream hardening |
 | Sentry tailrocks | fleet down | JIT wedge, 0/8 registered after 15:11 restart |
 
 ## Decisions
@@ -127,7 +129,7 @@ repo-scoped runner that is not in `velnor-trusted`.
 
 ## Next
 
-1. Mac host relaunched on fixed binary (07:35Z) — 12/12 accountable, jobs flowing; re-run failed jobs on #809/#816 and watch to green. Next idle restart picks up drain/prune/OCC.
+1. Mac host relaunched on fixed binary (07:35Z) — 12/12 accountable, jobs flowing; re-run failed jobs on #809/#819 and watch to green. Next idle restart picks up drain/prune/OCC. Refresh #819 after `0d0e98b1` CI starts.
 2. Operator rebase #809 onto main/host fixes (agents cannot commit to #809); watch run `34930642603` to green.
-3. Gate 2 **NOT YET** until `ci-required` green + recovery Velnor-lane proof. Do not merge #809.
+3. Gate 2 **NOT YET** until `ci-required` green + recovery Velnor-lane proof. Do not merge #809. Integration PR is **#819** (#816 closed unmerged).
 4. Do not deploy Sentry (JIT wedge unchanged; gate 5 blocked).
