@@ -428,6 +428,7 @@ mod tests {
             acquired_at: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: None,
+            execution_backend: Some("docker".to_owned()),
             trust_scope: Some("trusted".to_owned()),
             trust_class: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),
@@ -695,6 +696,37 @@ mod tests {
             .expect_err("raw row must fail closed");
         assert_eq!(error.envelope.reason, "store.job.summary.invalid");
         assert!(store.job_summaries("raw").unwrap().is_empty());
+    }
+
+    #[test]
+    fn raw_job_row_rejects_non_closed_execution_backend() {
+        let temp = TempDb::new("raw-backend-closed");
+        let store = Store::open(&temp.path).expect("open store");
+        for spoofed in ["spoofed", "self-hosted"] {
+            let mut row = job("raw", "job-1", "org/repo");
+            row.execution_backend = Some(spoofed.to_owned());
+            let error = store
+                .record_job(&row)
+                .expect_err("non-closed backend must fail closed");
+            assert_eq!(error.envelope.reason, "store.job.summary.invalid");
+            assert!(
+                !error.to_string().contains(spoofed),
+                "rejected backend value must not be echoed"
+            );
+        }
+        assert!(store.job_summaries("raw").unwrap().is_empty());
+
+        let mut missing = job("raw", "job-1", "org/repo");
+        missing.execution_backend = None;
+        store
+            .record_job(&missing)
+            .expect("NULL backend is admitted");
+        assert_eq!(
+            store.job_summaries("raw").unwrap()[0]
+                .execution_backend
+                .as_deref(),
+            None
+        );
     }
 
     #[test]
@@ -1635,6 +1667,7 @@ mod tests {
             acquired_at: None,
             slot_name: None,
             runner_name: None,
+            execution_backend: Some("docker".to_owned()),
             trust_scope: Some("trusted".to_owned()),
             trust_class: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),

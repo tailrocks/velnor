@@ -62,6 +62,11 @@
   queuedMs: 4200
   durationMs: 96500
   conclusion: success
+  host: sentry
+  instance: primary
+  slot: slot-2
+  runner: velnor-sentry-2
+  executionBackend: docker
 - resourceKind: Run
   schemaVersion: 1
   name: run-32714994603

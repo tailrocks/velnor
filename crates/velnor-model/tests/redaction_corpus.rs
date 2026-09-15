@@ -109,6 +109,11 @@ fn job_from_raw(raw: &RawUpstream) -> AnyResource {
         queued_ms: None,
         duration_ms: None,
         conclusion: None,
+        host: Some("sentry".to_owned()),
+        instance: Some("primary".to_owned()),
+        slot: Some("slot-2".to_owned()),
+        runner: Some("velnor-sentry-2".to_owned()),
+        execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
     })
 }
 
@@ -181,6 +186,33 @@ fn sanitized_url_projection_drops_credentials_but_keeps_location() {
     assert_eq!(projected.as_str(), "https://github.example.com/endpoint");
     let json = serde_json::to_string(&projected).unwrap();
     assert!(!json.contains("sup3r"), "{json}");
+}
+
+#[test]
+fn job_placement_round_trips_without_secret_bearing_values() {
+    let raw = raw_upstream();
+    let AnyResource::Job(job) = job_from_raw(&raw) else {
+        panic!("expected Job");
+    };
+    assert_eq!(job.host.as_deref(), Some("sentry"));
+    assert_eq!(job.instance.as_deref(), Some("primary"));
+    assert_eq!(job.slot.as_deref(), Some("slot-2"));
+    assert_eq!(job.runner.as_deref(), Some("velnor-sentry-2"));
+    assert_eq!(
+        job.execution_backend,
+        Some(velnor_model::ExecutionBackendKind::Docker)
+    );
+    let json = serde_json::to_string(&job).unwrap();
+    let back: Job = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, job);
+    for marker in SECRET_MARKERS {
+        assert!(
+            !json.contains(marker),
+            "placement fields leaked marker {marker:?}: {json}"
+        );
+    }
+    assert!(!json.contains(&raw.secret_variable_value));
+    assert!(!json.contains(&raw.registration_token));
 }
 
 #[test]
