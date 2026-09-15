@@ -385,7 +385,7 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let main = generated.workflow("ci-main.yml");
     assert!(
-        main.contains("rev: e56289e61a11f8e4372bd0fbce3b1b82574b8bf9"),
+        main.contains("rev: 500ae3b986045766c238f2da4c9ccef459678f69"),
         "foreign Planning installs the published pin: {main}"
     );
     assert!(
