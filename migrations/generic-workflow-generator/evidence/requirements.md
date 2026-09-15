@@ -94,7 +94,7 @@ Local composites (product adapters, not generator output): `aggregate-needs`, `b
 ### Other current responsibilities
 
 | Workflow | Responsibilities |
-|---|---|
+| --- | --- |
 | `construct.yml` | Same construct-image product as historical (see above). Still required. |
 | `jackin-dev.yml` | Same jackin-dev version-bump / four-target signed archive / GitHub release product as historical, **without** mbx. Not generator-owned on current `main`. |
 | `preview.yml` | Publish Homebrew **preview** of jackin + jackin-capsule: detect source change vs live `Formula/jackin-preview.rb` `# source-sha`; build signed four-platform jackin archives + linux capsule archives; attest; single-writer publish GitHub preview release + tap formula. Dispatch `lanes`. Credential `GH_READONLY_TOKEN`. Concurrency `homebrew-tap-publish`. |
@@ -346,7 +346,7 @@ Skills plugin repo (not the jackin-dev **crate** published from `jackin-project/
 ## Credential / dispatch vocabulary (across estate)
 
 | Secret / token | Used for |
-|---|---|
+| --- | --- |
 | `github.token` | Default API, gh release view/create, artifact lookup |
 | `GH_READONLY_TOKEN` | Authenticated GH reads / mise / rate-limit (fork PRs omit) |
 | `RENOVATE_TOKEN` / `GH_RENOVATE_TOKEN` | Repository-local Renovate |

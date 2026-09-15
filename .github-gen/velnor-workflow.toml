@@ -8,14 +8,15 @@ exclude = ["migrations/**"]
 
 # Runner placement: `runners` is the available backends. `automatic` is the
 # lanes that run on PR/push/schedule without a dispatch choice.
-# This repository always compares GitHub and Velnor on trusted events.
+# This recovery branch runs CI on its repository-scoped Velnor host.
 [workflow]
-runners = "both"
-automatic = "both"
+runners = "velnor"
+automatic = "velnor"
 default_branch = "main"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
+default_dispatch_runner = "velnor"
 # Trust-gated routing: units with `requires_trusted` append this label to
 # their Velnor `runs-on`, so only trusted runners (which mount the Docker
 # lease socket) receive them. Untrusted hosts must never claim it.

@@ -3375,6 +3375,7 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
     let labels = config
         .velnor_labels
         .iter()
+        .chain(config.velnor_trusted_label.iter())
         .chain(std::iter::once(&config.github_runner))
         .chain(macos)
         .filter(|label| !label.is_empty())
@@ -9169,6 +9170,17 @@ channel = "stable"
         assert!(actionlint.contains("    - self-hosted\n"));
         assert!(actionlint.contains("    - ubuntu-24.04\n"));
         assert!(actionlint.contains("    - example-runner-label\n"));
+    }
+
+    #[test]
+    fn generated_actionlint_config_covers_trusted_runner_labels() {
+        let mut config = scanned_fixture(RunnerMode::Velnor);
+        config.velnor_trusted_label = Some("example-trusted".to_owned());
+        let actionlint = render_actionlint_config(&config);
+        assert!(
+            actionlint.contains("    - example-trusted\n"),
+            "{actionlint}"
+        );
     }
 
     #[test]

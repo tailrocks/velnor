@@ -15,7 +15,8 @@ permissions:
 jobs:
   policy:
     name: Policy
-    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -26,17 +27,13 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: policy-checkout
-          sparse-checkout: |
-            .github/workflows
-          sparse-checkout-cone-mode: true
           fetch-depth: 1
           persist-credentials: false
-          # Static policy validation only; fork head checkout is intentional.
-          allow-unsafe-pr-checkout: true
+          # Velnor's native checkout uses its supported full-repository fetch.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: github
+          backend: local
           version: 1.8.3
           cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
           restore-keys: |

@@ -9,8 +9,8 @@ on:
     inputs:
       runner:
         description: Execution backend
-        required: false
-        default: both
+        required: true
+        default: velnor
         type: choice
         options:
           - velnor
@@ -47,7 +47,8 @@ permissions:
 jobs:
   plan:
     name: Planning
-    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
+    runs-on: [self-hosted, velnor-target-mvp]
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       base_sha: ${{ steps.plan.outputs.base_sha }}
@@ -65,13 +66,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
-        with:
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || 'd3e441fb36dc0fee7502cc08fdc7bebf8c8bf754' }}
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -80,32 +74,11 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
           VELNOR_SELECTION_FILE: ${{ runner.temp }}/velnor-ci-selection
-          VELNOR_LANES: ${{ github.event.inputs.runner || 'both' }}
         run: |
           set -euo pipefail
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Prepare Velnor workflow runtime
-        shell: bash
-        env:
-          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
-        run: |
-          set -euo pipefail
-          stage="$RUNNER_TEMP/velnor-workflow-runtime"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          src="$(command -v velnor-workflow)"
-          install -m 0755 "$src" "$stage/velnor-workflow"
-          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
-          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' > "$stage/manifest.json"
-      - name: Publish Velnor workflow runtime
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/velnor-workflow-runtime
-          if-no-files-found: error
-          retention-days: 7
       - name: Publish Velnor CI selection
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -115,7 +88,8 @@ jobs:
           retention-days: 1
   policy:
     name: Advisory policy
-    runs-on: ubuntu-24.04
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -126,17 +100,13 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: policy-checkout
-          sparse-checkout: |
-            .github/workflows
-          sparse-checkout-cone-mode: true
           fetch-depth: 1
           persist-credentials: false
-          # Static policy validation only; fork head checkout is intentional.
-          allow-unsafe-pr-checkout: true
+          # Velnor's native checkout uses its supported full-repository fetch.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: github
+          backend: local
           version: 1.8.3
           cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
           restore-keys: |
@@ -224,9 +194,9 @@ jobs:
       head_sha: ${{ github.sha }}
   nightly-required:
     name: nightly-required
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
     needs: [plan, policy, group-bun, group-docker, group-docs, group-opentofu, group-rust]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 5
     steps:
       - name: Validate generated stack results
@@ -320,9 +290,9 @@ jobs:
           fi
   nightly-alert:
     name: Nightly red-to-signal
-    if: ${{ always() }}
+    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [nightly-required]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, velnor-target-mvp]
     permissions:
       contents: read
       issues: write

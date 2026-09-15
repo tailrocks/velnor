@@ -3,7 +3,7 @@
 Status: partial. `static-workflow` for velnor `release.yml` is still C.
 
 | Responsibility | Class | Notes |
-|---|---|---|
+| --- | --- | --- |
 | Rust fmt, clippy, test from Cargo metadata | A | Default features; no `--all-features` |
 | Workspace `cargo check` | B | `workspace_check` |
 | Named mise tasks | B | `ci_tasks` must exist in `mise.toml` |
