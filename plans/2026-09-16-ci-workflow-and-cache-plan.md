@@ -1,6 +1,6 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `c3917fb5` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `a986f028` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
 Date: 2026-09-16 (rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
@@ -877,4 +877,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Duplicate collapsed step ids (HTTP 422) | V | unit-prefixed step ids via `qualified_step_id`; reverted per-job verify sharding (`630b264e`) |
 | Invalid workflow-level / caller `cache-mode: read` | V | removed; PR triggers default to read-only cache |
 | Pins @ `6c51eceb` (D19) | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 453 passed |
-| PR CI jobs start (not `startup_failure`) | V | run 35027858205: 41 jobs scheduled (was 0 / `startup_failure`); no `Maximum object size exceeded` |
+| PR CI jobs start (not `startup_failure`) | V | run 35027858205 / 35028632413: 41–66 jobs scheduled; no `Maximum object size exceeded` |
+| rust-velnor-workflow GitHub offline install | V | run 35027857785: fixed by online policy prefetch in Prepare Cargo (`ir.rs`); pins @ `0cf84f08` |
+| velnor-runner/tools fmt CI failures | V | `cargo fmt` on `container.rs`, `trust_class.rs`, `fleet_policy.rs` @ `0cf84f08` |
+| DCO after rebase | V | `git rebase origin/main --signoff`; pins rebumped @ `a986f028` |
