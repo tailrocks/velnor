@@ -37,7 +37,7 @@ on:
 
 
 concurrency:
-  group: velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  group: velnor-${{ github.repository }}
   cancel-in-progress: true
 
 permissions:
