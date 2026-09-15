@@ -436,10 +436,12 @@ mod tests {
             None,
             Some("velnor-host-docker")
         ));
-        assert!(!super::approved_velnor_runner_contract_matches_with_trusted(
-            &["self-hosted", "velnor-target-mvp", "velnor-host-docker"],
-            None,
-            None
-        ));
+        assert!(
+            !super::approved_velnor_runner_contract_matches_with_trusted(
+                &["self-hosted", "velnor-target-mvp", "velnor-host-docker"],
+                None,
+                None
+            )
+        );
     }
 }
