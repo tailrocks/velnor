@@ -4,7 +4,7 @@ repository = "tailrocks/velnor"
 profile = "rust-workspace-release"
 verified = true
 default_branch = "main"
-runners = "velnor"
+runners = "both"
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"
@@ -15,7 +15,7 @@ limitations = ["Manifests nested under tests/ or benches/ directories are treate
 github_runner = "ubuntu-24.04"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
 files = ["ci-main.yml", "ci-policy.yml", "ci-pr.yml", "ci-release-package-signer.yml", "ci-unit-bun.yml", "ci-unit-docker.yml", "ci-unit-docs.yml", "ci-unit-opentofu.yml", "ci-unit-rust.yml", "maintenance.yml", "nightly.yml", "preview.yml", "release.yml"]
-notes = ["Rust verification uses Mr. Boxington 1.8.3 with an explicit local-backend setup step against the image/runner-provided local store."]
+notes = ["Rust verification uses Mr. Boxington 1.8.3 by default on both lanes. GitHub-hosted jobs use its GitHub cache backend with bounded snapshot keys (a key names the toolchain/image/linker compatibility class and the hashed source state, so a new source state saves a new snapshot and retention keeps generations bounded). Velnor jobs use an explicit local-backend setup step against the image/runner-provided local store."]
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 [release]
