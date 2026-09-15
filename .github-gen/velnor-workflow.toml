@@ -168,6 +168,7 @@ docker_closure = [
   "Dockerfile",
   "docker/build-mise.*",
   "crates/velnor-workflow/README.md",
+  "crates/velnor-workflow/src/runtime.rs",
   "crates/velnor-workflow/templates/**",
 ]
 "rust-velnor-runner" = [
