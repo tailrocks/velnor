@@ -35,6 +35,38 @@ pub mod runtime;
 /// Binary name used across generated surfaces.
 pub const BIN_NAME: &str = "velnorctl";
 
+/// The version line `velnorctl --version` and `velnorctl version` print.
+///
+/// `velnorctl`'s own crate version is a constant `0.1.0` that names every
+/// build ever made; the release version is `velnor-runner`'s (the version the
+/// `v*` tag names). The line therefore carries the identity
+/// `velnor-runner/build.rs` stamps at compile time — the same record
+/// `velnor-runner release export` prints and the deb ships as
+/// `/usr/share/velnor/build-identity.json` — because `velnorctl` is built in
+/// the same workspace build (its `release-build` feature forwards to the
+/// runner's). Shape: `<release version> <kind> <tag> <source sha>`, e.g.
+/// `0.1.274 release v0.1.274 3f2ceb67…` or `0.1.274 development`.
+static VERSION_LINE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| version_line(&velnor_runner::embedded_build_identity()));
+
+/// Render the version line from an embedded build identity.
+#[must_use]
+pub fn version_line(identity: &velnor_runner::EmbeddedIdentity) -> String {
+    if identity.source_sha == "development" {
+        return format!("{} development", identity.crate_version);
+    }
+    format!(
+        "{} {} {} {}",
+        identity.crate_version, identity.kind, identity.tag, identity.source_sha
+    )
+}
+
+/// The version line as a static string for clap's `--version`.
+#[must_use]
+pub fn cli_version() -> &'static str {
+    VERSION_LINE.as_str()
+}
+
 /// CLI-facing output-format choice converted explicitly into the domain
 /// renderer type so `velnor-render` stays framework-independent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -70,7 +102,7 @@ impl From<OutputArg> for OutputFormat {
 #[derive(Debug, Parser)]
 #[command(
     name = BIN_NAME,
-    version = velnor_model::CRATE_VERSION,
+    version = cli_version(),
     about = "Velnor operator CLI",
     long_about = "Velnor operator CLI.\n\n\
         Inspect and operate a Velnor runner fleet from the command line.\n\
@@ -505,7 +537,15 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Man(args) => man::run(&args),
         Command::Completion(args) => completion::run(&args),
         Command::Version => {
-            println!("{}", velnor_model::CRATE_VERSION);
+            if globals.output_format().is_machine() {
+                println!(
+                    "{}",
+                    serde_json::to_string(&velnor_runner::embedded_build_identity())
+                        .map_err(|error| CommandError::operation(error.to_string()))?
+                );
+            } else {
+                println!("{}", cli_version());
+            }
             Ok(())
         }
         Command::ApiResources => {
@@ -1634,6 +1674,38 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("create scratch dir");
         path
+    }
+
+    #[test]
+    fn version_line_carries_release_identity_not_only_the_crate_version() {
+        let release = velnor_runner::EmbeddedIdentity {
+            source_sha: "3f2ceb67".repeat(5),
+            tag: "v0.1.0".into(),
+            kind: "release".into(),
+            crate_version: "0.1.0".into(),
+        };
+        assert_eq!(
+            version_line(&release),
+            format!("0.1.0 release v0.1.0 {}", "3f2ceb67".repeat(5))
+        );
+        let development = velnor_runner::EmbeddedIdentity {
+            source_sha: "development".into(),
+            tag: "development".into(),
+            kind: "development".into(),
+            crate_version: "0.1.0".into(),
+        };
+        assert_eq!(version_line(&development), "0.1.0 development");
+        // `--version` and `version` print the identity this binary was built
+        // with: the *release* crate version (`velnor-runner`, the version the
+        // `v*` tag names), never velnorctl's own never-bumped `0.1.0`.
+        let embedded = velnor_runner::embedded_build_identity();
+        assert!(cli_version().starts_with(&embedded.crate_version));
+        assert!(cli_version().contains(&embedded.source_sha));
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(cli_version()),
+            "clap --version must use the stamped line"
+        );
     }
 
     #[test]

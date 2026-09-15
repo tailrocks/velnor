@@ -66,6 +66,9 @@ mod platform;
 mod preflight;
 pub mod protocol;
 mod release;
+/// The compile-time build identity, shared with `velnorctl --version` so the
+/// operator CLI reports the same release/source SHA as `release export`.
+pub use release::{embedded as embedded_build_identity, EmbeddedIdentity};
 pub mod runner;
 mod runtime_env;
 mod sccache_compat;
