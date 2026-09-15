@@ -123,7 +123,9 @@ fn probe_online_runner_label(repository: &str, label: &str) -> Result<bool, Stri
         } else {
             stderr
         };
-        return Err(format!("gh api repos/{repository}/actions/runners: {detail}"));
+        return Err(format!(
+            "gh api repos/{repository}/actions/runners: {detail}"
+        ));
     }
     Ok(!output.stdout.is_empty())
 }

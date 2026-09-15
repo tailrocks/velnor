@@ -335,9 +335,7 @@ pub(crate) fn validate_mutable_mount_seed(unit: &Unit) -> Result<(), GeneratorEr
                 unit.id
             )));
         }
-        if !allow_injection
-            && commands.iter().any(|command| command.contains(&injection))
-        {
+        if !allow_injection && commands.iter().any(|command| command.contains(&injection)) {
             return Err(GeneratorError::usage(format!(
                 "unit `{}` runs `{lane}` commands that reference the mutable mount seed context; \
                  the generator restores and injects the seed on the hosted lane only",
