@@ -1843,13 +1843,14 @@ mod run_cmd_stall_tests {
 
     #[test]
     fn chatty_slow_command_succeeds_past_wall_clock_limit() {
-        // ~1.2s of wall-clock against a 0.3s stall window: periodic output
-        // resets the timer, so this must succeed.
+        // ~3s of wall-clock against a 2s stall window: periodic output resets the timer,
+        // so this must succeed. The 1.9s per-gap slack (2s window minus 0.1s chat cadence)
+        // absorbs scheduler stalls under host load that flaked the old 0.2s slack.
         let result = run_command_with_stall_guard(
             &std::env::temp_dir(),
             "test-unit",
-            "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo tick-$i; sleep 0.1; done",
-            Duration::from_millis(300),
+            "for i in $(seq 1 30); do echo tick-$i; sleep 0.1; done",
+            Duration::from_secs(2),
         );
         let message = match &result {
             Ok(()) => String::new(),
