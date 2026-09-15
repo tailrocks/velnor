@@ -1556,26 +1556,12 @@ pub(crate) fn validate_dispatch_runner_for_runners(
     )))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "generation config application keeps repo scan overrides in one place"
-)]
-fn apply_generation_config(
+/// Lane selection and Velnor placement: `[workflow]` runner mode, automatic
+/// lane, labels, trust, dispatch defaults, concurrency, and rust needs.
+fn apply_lane_generation_config(
     config: &mut ProjectConfig,
     generation: &config::RepoGenerationConfig,
-    root: &Path,
 ) -> Result<(), GeneratorError> {
-    if let Some(repository) = generation.repository() {
-        repository.clone_into(&mut config.repository);
-    }
-    if let Some(runner) = generation.github_runner() {
-        validate_config_text(runner, "[workflow] github_runner")?;
-        runner.clone_into(&mut config.github_runner);
-    }
-    if let Some(runner) = generation.macos_runner() {
-        validate_config_text(runner, "[workflow] macos_runner")?;
-        runner.clone_into(&mut config.macos_runner);
-    }
     if let Some(runners) = generation.runners() {
         config.runners = parse_runner_mode(runners)?;
         if generation.automatic().is_none() {
@@ -1638,6 +1624,26 @@ fn apply_generation_config(
     if let Some(serial) = generation.velnor_serial_stack_groups() {
         config.velnor_serial_stack_groups = serial;
     }
+    Ok(())
+}
+
+fn apply_generation_config(
+    config: &mut ProjectConfig,
+    generation: &config::RepoGenerationConfig,
+    root: &Path,
+) -> Result<(), GeneratorError> {
+    if let Some(repository) = generation.repository() {
+        repository.clone_into(&mut config.repository);
+    }
+    if let Some(runner) = generation.github_runner() {
+        validate_config_text(runner, "[workflow] github_runner")?;
+        runner.clone_into(&mut config.github_runner);
+    }
+    if let Some(runner) = generation.macos_runner() {
+        validate_config_text(runner, "[workflow] macos_runner")?;
+        runner.clone_into(&mut config.macos_runner);
+    }
+    apply_lane_generation_config(config, generation)?;
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
     }

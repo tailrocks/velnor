@@ -1735,10 +1735,101 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "release unit jobs render every lane contract in one pass"
-)]
+/// One release unit job for `(lane, unit)`; returns its job id.
+fn render_release_unit_job(
+    output: &mut String,
+    config: &ProjectConfig,
+    workflow: &WorkflowIr,
+    lane: RunnerMode,
+    unit: &Unit,
+) -> String {
+    let id = format!("release-{}-{}", lane.as_str(), unit.id);
+    let mut needs = vec!["verify".to_owned()];
+    needs.extend(unit.depends_on.iter().filter_map(|dependency| {
+        config
+            .units
+            .iter()
+            .find(|unit| unit.id == *dependency)
+            .filter(|unit| lane_supports_unit(lane, unit))
+            .map(|_| format!("release-{}-{}", lane.as_str(), dependency))
+    }));
+    let runner = workflow.runner_for_unit(lane, unit);
+    let job_name = yaml_scalar(&workflow.trusted_unit_display_name(
+        lane,
+        unit,
+        crate::comparison_job_name(lane, unit),
+    ));
+    let verify_name = yaml_scalar(&unit.label);
+    let mut dispatch_gate = if lane == RunnerMode::Velnor {
+        trusted_release_runner_gate(&config.default_branch)
+    } else {
+        String::new()
+    };
+    if lane == RunnerMode::Velnor {
+        dispatch_gate = workflow.append_trusted_runner_availability_gate(lane, unit, dispatch_gate);
+    }
+    if workflow.trust_gated_velnor_job_skipped(lane, unit)
+        && let Some(reason) = workflow.velnor_trusted_runner_skip_reason.as_deref()
+    {
+        let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
+    }
+    let dispatch_gate = if dispatch_gate.is_empty() {
+        String::new()
+    } else {
+        format!("    if: ${{{{ {dispatch_gate} }}}}\n")
+    };
+    let _ = writeln!(
+        output,
+        "  {id}:\n    name: {job_name}\n{dispatch_gate}    needs: [{}]\n    runs-on: {runner}\n    timeout-minutes: 60\n    steps:",
+        needs.join(", ")
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
+        ActionPin::Checkout.reference()
+    );
+    if lane == crate::RunnerMode::Velnor {
+        super::render_velnor_runner_identity_step(output);
+    }
+    workflow.render_workflow_runtime_setup(output, lane);
+    workflow.render_tool_provisioning(output, lane, unit, false);
+    let cargo_cache_restored = CacheBackend::Detected
+        .lane_enables_actions_cache(lane, workflow, unit)
+        && unit.cache.is_some();
+    if cargo_cache_restored && let Some(cache) = &unit.cache {
+        render_retained_output_cache_note(output, workflow, unit, cache);
+        let (paths, key) = rendered_cache_values(cache);
+        let _ = writeln!(
+            output,
+            "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: ci-release-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+            verify_name,
+            ActionPin::CacheRestore.reference(),
+            unit.id
+        );
+    }
+    let skip_when_offline_ready = lane == RunnerMode::Velnor
+        && unit
+            .cache
+            .as_ref()
+            .is_some_and(super::cache::cache_is_velnor_host_persistent);
+    render_cargo_source_preparation(
+        output,
+        &[unit],
+        &unit.id,
+        false,
+        cargo_cache_restored,
+        skip_when_offline_ready,
+    );
+    let cargo_offline = checks_env(unit);
+    let _ = writeln!(
+        output,
+        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+        yaml_scalar(&unit.id),
+        yaml_scalar(&unit.id)
+    );
+    id
+}
+
 fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
     let workflow = WorkflowIr::from_config(config);
     let lanes = match config.runners {
@@ -1754,92 +1845,13 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
             .iter()
             .filter(|unit| lane_supports_unit(lane, unit))
         {
-            let id = format!("release-{}-{}", lane.as_str(), unit.id);
-            let mut needs = vec!["verify".to_owned()];
-            needs.extend(unit.depends_on.iter().filter_map(|dependency| {
-                config
-                    .units
-                    .iter()
-                    .find(|unit| unit.id == *dependency)
-                    .filter(|unit| lane_supports_unit(lane, unit))
-                    .map(|_| format!("release-{}-{}", lane.as_str(), dependency))
-            }));
-            let runner = workflow.runner_for_unit(lane, unit);
-            let job_name = yaml_scalar(&workflow.trusted_unit_display_name(
+            job_ids.push(render_release_unit_job(
+                &mut output,
+                config,
+                &workflow,
                 lane,
                 unit,
-                crate::comparison_job_name(lane, unit),
             ));
-            let verify_name = yaml_scalar(&unit.label);
-            let mut dispatch_gate = if lane == RunnerMode::Velnor {
-                trusted_release_runner_gate(&config.default_branch)
-            } else {
-                String::new()
-            };
-            if lane == RunnerMode::Velnor {
-                dispatch_gate =
-                    workflow.append_trusted_runner_availability_gate(lane, unit, dispatch_gate);
-            }
-            if workflow.trust_gated_velnor_job_skipped(lane, unit)
-                && let Some(reason) = workflow.velnor_trusted_runner_skip_reason.as_deref()
-            {
-                let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
-            }
-            let dispatch_gate = if dispatch_gate.is_empty() {
-                String::new()
-            } else {
-                format!("    if: ${{{{ {dispatch_gate} }}}}\n")
-            };
-            let _ = writeln!(
-                output,
-                "  {id}:\n    name: {job_name}\n{dispatch_gate}    needs: [{}]\n    runs-on: {runner}\n    timeout-minutes: 60\n    steps:",
-                needs.join(", ")
-            );
-            let _ = writeln!(
-                output,
-                "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
-                ActionPin::Checkout.reference()
-            );
-            if lane == crate::RunnerMode::Velnor {
-                super::render_velnor_runner_identity_step(&mut output);
-            }
-            workflow.render_workflow_runtime_setup(&mut output, lane);
-            workflow.render_tool_provisioning(&mut output, lane, unit, false);
-            let cargo_cache_restored = CacheBackend::Detected
-                .lane_enables_actions_cache(lane, &workflow, unit)
-                && unit.cache.is_some();
-            if cargo_cache_restored && let Some(cache) = &unit.cache {
-                render_retained_output_cache_note(&mut output, &workflow, unit, cache);
-                let (paths, key) = rendered_cache_values(cache);
-                let _ = writeln!(
-                    output,
-                    "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: ci-release-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                    verify_name,
-                    ActionPin::CacheRestore.reference(),
-                    unit.id
-                );
-            }
-            let skip_when_offline_ready = lane == RunnerMode::Velnor
-                && unit
-                    .cache
-                    .as_ref()
-                    .is_some_and(super::cache::cache_is_velnor_host_persistent);
-            render_cargo_source_preparation(
-                &mut output,
-                &[unit],
-                &unit.id,
-                false,
-                cargo_cache_restored,
-                skip_when_offline_ready,
-            );
-            let cargo_offline = checks_env(unit);
-            let _ = writeln!(
-                output,
-                "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-                yaml_scalar(&unit.id),
-                yaml_scalar(&unit.id)
-            );
-            job_ids.push(id);
         }
     }
     (output, job_ids)

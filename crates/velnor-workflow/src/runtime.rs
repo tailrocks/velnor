@@ -291,6 +291,42 @@ impl Scope {
     }
 }
 
+/// `velnor-workflow version [--json]`: the crate version and the source
+/// revision stamped at build time (the same value `--revision` prints), so a
+/// candidate binary can prove which commit it was built from.
+fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let json = match arguments {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        other => {
+            return Err(GeneratorError::usage(format!(
+                "version accepts only --json, got {}",
+                other
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )));
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "crate_version": env!("CARGO_PKG_VERSION"),
+                "revision": crate::SOURCE_REVISION,
+            })
+        );
+    } else {
+        println!(
+            "velnor-workflow {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            crate::SOURCE_REVISION
+        );
+    }
+    Ok(())
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
 pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
@@ -357,35 +393,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "version" => {
-            let json = match arguments.get(1..).unwrap_or_default() {
-                [] => false,
-                [flag] if flag == "--json" => true,
-                other => {
-                    return Err(GeneratorError::usage(format!(
-                        "version accepts only --json, got {}",
-                        other
-                            .iter()
-                            .map(|value| value.to_string_lossy().into_owned())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )));
-                }
-            };
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "crate_version": env!("CARGO_PKG_VERSION"),
-                        "revision": crate::SOURCE_REVISION,
-                    })
-                );
-            } else {
-                println!(
-                    "velnor-workflow {} ({})",
-                    env!("CARGO_PKG_VERSION"),
-                    crate::SOURCE_REVISION
-                );
-            }
+            print_version(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "cache-plan" => {

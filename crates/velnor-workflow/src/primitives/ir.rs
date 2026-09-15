@@ -1771,7 +1771,7 @@ struct UnitLaneCaller {
     job_id: String,
     unit_id: String,
     name: String,
-    lane: &'static str,
+    lane: RunnerMode,
     file: String,
     /// The per-unit `workflow_call` inputs this caller supplies to the kind
     /// reusable: every unit-specific literal the collapsed lane job reads
@@ -2039,6 +2039,52 @@ fn render_caller_inputs(inputs: &[(&str, String)]) -> String {
 /// every job in the reusable for every selected unit: N×N skipped jobs.
 fn reusable_selected_unit_selector(unit_id: &str) -> String {
     format!("contains(format(',{{0}},', inputs.selected_units), ',{unit_id},')")
+}
+
+/// The per-caller verdict block of the required check: selected callers must
+/// succeed (a Velnor lane job may skip on fork pull requests, and a
+/// trust-gated Velnor job skips outright while the trusted runner is
+/// offline), unselected callers may skip.
+fn render_required_caller_verdicts(
+    output: &mut String,
+    caller_jobs: &[(String, String)],
+    trust_gated_velnor_skip: impl Fn(&str) -> bool,
+) {
+    for (job_id, unit_id) in caller_jobs {
+        if job_id == prepare_cargo_caller_job_id() {
+            let _ = writeln!(
+                output,
+                "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$result\" != success ]]; then\n              echo \"selected CI prerequisite {job_id} did not pass: $result\" >&2\n              exit 1\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI prerequisite {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+            );
+            continue;
+        }
+        // A Velnor lane job legitimately skips on fork pull requests (the
+        // admission gate withholds self-hosted runners), so only that lane
+        // accepts `skipped` under `FORK_PR`. The hosted lane never has a
+        // legitimate skip for a selected unit, so it renders the strict
+        // branch alone: a shell conditional must not embed a rendered
+        // boolean literal (`[[ ... && false ]]` is a non-empty string test).
+        // A trust-gated Velnor job is skipped whenever the trusted runner is
+        // offline, so its selected verdict accepts `skipped` outright.
+        let velnor_job = job_id.starts_with("velnor-");
+        let selected_verdict = if velnor_job && trust_gated_velnor_skip(unit_id) {
+            format!(
+                "            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
+            )
+        } else if velnor_job {
+            format!(
+                "            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi"
+            )
+        } else {
+            format!(
+                "            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
+            )
+        };
+        let _ = writeln!(
+            output,
+            "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n{selected_verdict}\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+        );
+    }
 }
 
 #[allow(dead_code)]
@@ -2397,7 +2443,7 @@ impl WorkflowIr {
                 job_id: unit_job_id(job.lane, &unit.id),
                 unit_id: unit.id.clone(),
                 name: unit_job_display_name(unit, job.lane, self.runners),
-                lane: job.lane.as_str(),
+                lane: job.lane,
                 file: file.to_owned(),
                 inputs: self
                     .unit_lane_facts(unit, &contract, job.lane)
@@ -2450,23 +2496,12 @@ impl WorkflowIr {
     fn render_unit_lane_caller(
         &self,
         output: &mut String,
+        unit: &Unit,
         caller: &UnitLaneCaller,
         include_policy: bool,
         extra_needs: &[String],
     ) {
-        let lane = if caller.lane == "github" {
-            RunnerMode::Github
-        } else {
-            RunnerMode::Velnor
-        };
-        let Some(unit) = self.units.iter().find(|unit| unit.id == caller.unit_id) else {
-            return;
-        };
-        let unit = self
-            .units
-            .iter()
-            .find(|unit| unit.id == caller.unit_id)
-            .expect("unit");
+        let lane = caller.lane;
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
@@ -2517,7 +2552,7 @@ impl WorkflowIr {
             needs.join(", "),
             caller.file,
             yaml_scalar(&caller.unit_id),
-            caller.lane,
+            caller.lane.as_str(),
             render_caller_inputs(&caller.inputs),
         );
     }
@@ -2545,14 +2580,14 @@ impl WorkflowIr {
             for caller in self.unit_lane_callers(unit, file, contracts) {
                 let extra_needs = if self.runners == RunnerMode::Velnor
                     && self.velnor_serial_stack_groups
-                    && caller.lane == "velnor"
+                    && caller.lane == RunnerMode::Velnor
                 {
                     previous_velnor_caller.iter().cloned().collect::<Vec<_>>()
                 } else {
                     Vec::new()
                 };
-                self.render_unit_lane_caller(output, &caller, include_policy, &extra_needs);
-                if caller.lane == "velnor" {
+                self.render_unit_lane_caller(output, unit, &caller, include_policy, &extra_needs);
+                if caller.lane == RunnerMode::Velnor {
                     previous_velnor_caller = Some(caller.job_id.clone());
                 }
             }
@@ -2560,10 +2595,6 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "aggregate validation script is generated inline so fork and skip rules stay visible"
-    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -2651,49 +2682,12 @@ impl WorkflowIr {
             );
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
-        for (job_id, unit_id) in &caller_jobs {
-            if job_id == prepare_cargo_caller_job_id() {
-                let _ = writeln!(
-                    output,
-                    "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$result\" != success ]]; then\n              echo \"selected CI prerequisite {job_id} did not pass: $result\" >&2\n              exit 1\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI prerequisite {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-                );
-                continue;
-            }
-            // A Velnor lane job legitimately skips on fork pull requests (the
-            // admission gate withholds self-hosted runners), so only that lane
-            // accepts `skipped` under `FORK_PR`. The hosted lane never has a
-            // legitimate skip for a selected unit, so it renders the strict
-            // branch alone: a shell conditional must not embed a rendered
-            // boolean literal (`[[ ... && false ]]` is a non-empty string test).
-            // A trust-gated Velnor job is skipped whenever the trusted runner
-            // is offline, so its selected verdict accepts `skipped` outright.
-            let velnor_job = job_id.starts_with("velnor-");
-            let trust_gated_skip = velnor_job
-                && self
-                    .units
-                    .iter()
-                    .find(|unit| unit.id == *unit_id)
-                    .is_some_and(|unit| {
-                        self.trust_gated_velnor_job_skipped(RunnerMode::Velnor, unit)
-                    });
-            let selected_verdict = if trust_gated_skip {
-                format!(
-                    "            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
-                )
-            } else if velnor_job {
-                format!(
-                    "            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi"
-                )
-            } else {
-                format!(
-                    "            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
-                )
-            };
-            let _ = writeln!(
-                output,
-                "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n{selected_verdict}\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-            );
-        }
+        render_required_caller_verdicts(output, &caller_jobs, |unit_id| {
+            self.units
+                .iter()
+                .find(|unit| unit.id == unit_id)
+                .is_some_and(|unit| self.trust_gated_velnor_job_skipped(RunnerMode::Velnor, unit))
+        });
         if check_name == "ci-required" {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
                 format!("always() && ({})", self.velnor_control_plane_expression())
@@ -2715,16 +2709,19 @@ impl WorkflowIr {
         needs_job: &str,
         if_override: Option<&str>,
     ) {
-        let if_condition = if_override.map_or_else(|| {
-            if self.control_plane_lane() == RunnerMode::Velnor {
-                format!(
-                    "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-                    self.default_branch
-                )
-            } else {
-                "always()".to_owned()
-            }
-        }, str::to_owned);
+        let if_condition = if_override.map_or_else(
+            || {
+                if self.control_plane_lane() == RunnerMode::Velnor {
+                    format!(
+                        "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+                        self.default_branch
+                    )
+                } else {
+                    "always()".to_owned()
+                }
+            },
+            str::to_owned,
+        );
         let _ = writeln!(
             output,
             "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
@@ -2964,7 +2961,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Github,
                 "verify-github",
                 RunnerMode::Github.display_name(),
-                self.runner_for(RunnerMode::Github),
+                &runs_on,
             )?;
         }
         let velnor_plain =
@@ -2980,7 +2977,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Velnor,
                 "verify-velnor",
                 RunnerMode::Velnor.display_name(),
-                self.runner_for(RunnerMode::Velnor),
+                &runs_on,
             )?;
         }
         if !velnor_trusted.is_empty() {
@@ -2993,7 +2990,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Velnor,
                 "verify-velnor-trusted",
                 RunnerMode::Velnor.display_name(),
-                self.runner_for_unit(RunnerMode::Velnor, sample),
+                &runs_on,
             )?;
         }
         Ok(())
@@ -3014,7 +3011,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         lane: RunnerMode,
         job_id: &str,
         display_name: &str,
-        runs_on: String,
+        runs_on: &str,
     ) -> Result<(), GeneratorError> {
         let mut gate = self.collapsed_lane_gate(lane);
         let mut display_name = display_name.to_owned();
@@ -3625,7 +3622,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
     #[expect(
         clippy::too_many_lines,
-        clippy::too_many_arguments,
         reason = "each generated lane job keeps its complete setup and execution contract together"
     )]
     fn render_lane_job_for_input(
