@@ -917,6 +917,9 @@ impl ProjectConfig {
                 write_toml_array(&mut output, "key_files", &cache.key_files);
                 write_toml_array(&mut output, "paths", &cache.paths);
             }
+            if let Some(workflow_file) = &unit.workflow_file {
+                write_toml_string(&mut output, "workflow_file", workflow_file);
+            }
         }
         output
     }
