@@ -758,6 +758,7 @@ mod tests {
             pull_request_on_velnor: false,
             default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
+            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),

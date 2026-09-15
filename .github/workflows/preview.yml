@@ -103,6 +103,7 @@ on:
       - "crates/velnor-tools/src/**"
       - "crates/velnor-tools/tests/**"
       - "crates/velnor-workflow-contract/**/*.rs"
+      - "crates/velnor-workflow-contract/Cargo.lock"
       - "crates/velnor-workflow-contract/Cargo.toml"
       - "crates/velnor-workflow-contract/benches/**"
       - "crates/velnor-workflow-contract/examples/**"

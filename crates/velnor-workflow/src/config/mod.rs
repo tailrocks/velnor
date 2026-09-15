@@ -186,6 +186,11 @@ struct WorkflowSection {
     /// generator default (`github`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_lanes: Option<String>,
+    /// How Velnor-lane Rust unit jobs relate through GitHub Actions `needs:`.
+    /// Absent keeps parallel starts; `dependency-closure` waits on direct
+    /// `depends_on` Rust unit jobs on the Velnor lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_rust_needs: Option<String>,
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -589,6 +594,11 @@ impl RepoGenerationConfig {
     pub(crate) fn automatic_lanes(&self) -> Option<&str> {
         self.workflow.automatic_lanes.as_deref()
     }
+
+    /// The declared Velnor-lane Rust unit `needs:` topology.
+    pub(crate) fn velnor_rust_needs(&self) -> Option<&str> {
+        self.workflow.velnor_rust_needs.as_deref()
+    }
     /// The declared profile label.
     pub(crate) fn profile(&self) -> Option<&str> {
         self.workflow.profile.as_deref()
@@ -904,6 +914,9 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
         if let Some(value) = value {
             crate::validate_lane_selection(value, field)?;
         }
+    }
+    if let Some(value) = workflow.velnor_rust_needs.as_deref() {
+        crate::parse_velnor_rust_needs(value)?;
     }
     if let (Some(runners), Some(default_dispatch_runner)) = (
         workflow.runners.as_deref(),

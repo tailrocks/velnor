@@ -1108,7 +1108,7 @@ struct PlannedSelection {
     full_units: BTreeSet<String>,
 }
 
-const SELECTION_FILE_VERSION: &str = "1";
+pub(crate) const SELECTION_FILE_VERSION: &str = "1";
 
 fn write_selection_file(
     path: &Path,

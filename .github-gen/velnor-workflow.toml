@@ -26,6 +26,7 @@ velnor_trusted_label = "velnor-host-docker"
 # can claim Velnor-lane jobs without joining org pool velnor-trusted.
 # Restore velnor-trusted after Sentry org fleet is healthy.
 pull_request_on_velnor = true
+velnor_rust_needs = "dependency-closure"
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 # Release contract: typed native publisher + rolling preview. Guest-seed

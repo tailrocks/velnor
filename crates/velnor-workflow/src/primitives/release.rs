@@ -1769,9 +1769,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
             let cargo_cache_restored = CacheBackend::Detected
                 .lane_enables_actions_cache(lane, &workflow, unit)
                 && unit.cache.is_some();
-            if cargo_cache_restored
-                && let Some(cache) = &unit.cache
-            {
+            if cargo_cache_restored && let Some(cache) = &unit.cache {
                 render_retained_output_cache_note(&mut output, &workflow, unit, cache);
                 let (paths, key) = rendered_cache_values(cache);
                 let _ = writeln!(
@@ -1782,7 +1780,13 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     unit.id
                 );
             }
-            render_cargo_source_preparation(&mut output, &[unit], &unit.id, false, cargo_cache_restored);
+            render_cargo_source_preparation(
+                &mut output,
+                &[unit],
+                &unit.id,
+                false,
+                cargo_cache_restored,
+            );
             let cargo_offline = checks_env(unit);
             let _ = writeln!(
                 output,
@@ -2946,6 +2950,7 @@ mod tests {
             pull_request_on_velnor: false,
             default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
+            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -3008,7 +3013,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "eb49a016197916b73dd525862d4481032317de233b61427726f79586b29aa912",
+                "a66f1d3e5d50e7ccb4e8ce66771341d6c2013efb5b2dac951a4a9e9072d23d7d",
             ),
             (
                 "preview.yml",
@@ -3080,7 +3085,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "30d9ba3a9aec077f5a4e44633aaeb975cbacec60f37ddcc4cf497d19031afced",
+                "196eb3bf081be5f8e893a69464f3f65202aa2be1a66337b535a3c482f0110aa3",
             ),
             (
                 "preview.yml",

@@ -544,13 +544,22 @@ fn analyze_rust_manifests(
             }
         }
         watch.extend(include_str_paths(root, files, file_set, &manifest.root)?);
+        let local_lock = join_repo_path(&manifest.root, "Cargo.lock");
+        if file_set.contains(&local_lock) {
+            watch.push(local_lock.clone());
+        }
         watch.sort();
         watch.dedup();
+        let lockfile_key = if file_set.contains(&local_lock) {
+            local_lock
+        } else {
+            "Cargo.lock".to_owned()
+        };
         let cache_key_files = vec![
             ".cargo/**".to_owned(),
             "Cargo.toml".to_owned(),
             manifest_path.clone(),
-            "Cargo.lock".to_owned(),
+            lockfile_key,
             "rust-toolchain.toml".to_owned(),
             "rust-toolchain".to_owned(),
         ];

@@ -72,13 +72,6 @@ jobs:
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Publish Velnor CI selection
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: velnor-ci-selection
-          path: ${{ runner.temp }}/velnor-ci-selection
-          if-no-files-found: error
-          retention-days: 1
   policy:
     name: Advisory policy
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
@@ -138,9 +131,9 @@ jobs:
     with:
       selected_units: ${{ needs.plan.outputs.units }}
       scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-      base_sha: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-      head_sha: ${{ github.sha }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
   group-docker:
     name: "Docker / Images"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.docker_matrix != '[]' }}
@@ -149,9 +142,9 @@ jobs:
     with:
       selected_units: ${{ needs.plan.outputs.units }}
       scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-      base_sha: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-      head_sha: ${{ github.sha }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
   group-docs:
     name: Documentation
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.docs_matrix != '[]' }}
@@ -160,9 +153,9 @@ jobs:
     with:
       selected_units: ${{ needs.plan.outputs.units }}
       scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-      base_sha: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-      head_sha: ${{ github.sha }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
   group-opentofu:
     name: OpenTofu
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.opentofu_matrix != '[]' }}
@@ -171,9 +164,9 @@ jobs:
     with:
       selected_units: ${{ needs.plan.outputs.units }}
       scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-      base_sha: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-      head_sha: ${{ github.sha }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
   group-rust:
     name: Rust
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.rust_matrix != '[]' }}
@@ -182,9 +175,9 @@ jobs:
     with:
       selected_units: ${{ needs.plan.outputs.units }}
       scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-      base_sha: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-      head_sha: ${{ github.sha }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
   ci-required:
     name: ci-required
     if: ${{ always() && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
