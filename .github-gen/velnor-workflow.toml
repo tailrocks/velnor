@@ -16,7 +16,8 @@ default_branch = "main"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
-velnor_runner_group = "velnor-trusted"
+# Omit velnor_runner_group so repository-scoped hosts can claim Velnor-lane
+# jobs. Restore velnor-trusted after the Sentry org fleet is healthy.
 pull_request_on_velnor = true
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
