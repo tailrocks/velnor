@@ -15,7 +15,7 @@ limitations = ["Manifests nested under tests/ or benches/ directories are treate
 github_runner = "ubuntu-24.04"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
 files = ["ci-main.yml", "ci-policy.yml", "ci-pr.yml", "ci-release-package-signer.yml", "ci-unit-bun.yml", "ci-unit-docker.yml", "ci-unit-docs.yml", "ci-unit-opentofu.yml", "ci-unit-rust-2.yml", "ci-unit-rust-3.yml", "ci-unit-rust.yml", "maintenance.yml", "nightly.yml", "preview.yml", "release.yml"]
-notes = ["Rust verification uses Mr. Boxington 1.8.3 by default on both lanes. GitHub-hosted jobs use its GitHub cache backend with bounded snapshot keys (a key names the toolchain/image/linker compatibility class and the hashed source state, so a new source state saves a new snapshot and retention keeps generations bounded). Velnor jobs use an explicit local-backend setup step against the image/runner-provided local store."]
+notes = ["Rust verification uses Mr. Boxington 1.11.1 by default on both lanes. GitHub-hosted jobs use its GitHub cache backend with bounded snapshot keys (a key names the toolchain/image/linker compatibility class and the hashed source state, so a new source state saves a new snapshot and retention keeps generations bounded). Velnor jobs use an explicit local-backend setup step against the image/runner-provided local store."]
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 [release]
@@ -274,7 +274,7 @@ github_full_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Ca
 velnor_pr_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl' --no-tests pass", "cd -- 'crates/velnorctl' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnorctl' -- -D warnings"]
 velnor_full_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl' --no-tests pass", "cd -- 'crates/velnorctl' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnorctl' -- -D warnings"]
 depends_on = ["rust-velnor-client", "rust-velnor-control", "rust-velnor-model", "rust-velnor-render", "rust-velnor-runner"]
-workflow_file = "ci-unit-rust-2.yml"
+workflow_file = "ci-unit-rust-3.yml"
 [unit.cache]
 key_files = [".cargo/**", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]

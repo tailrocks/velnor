@@ -3042,8 +3042,8 @@ mod tests {
 
     #[test]
     fn generate_reproduces_committed_snapshot_bytes() {
-        let ledger =
-            ReleaseRefLedger::load(&repo_root().join("config/fleet/release-refs.toml")).expect("ledger");
+        let ledger = ReleaseRefLedger::load(&repo_root().join("config/fleet/release-refs.toml"))
+            .expect("ledger");
         let policies = generate_policies_from_ledger(&ledger).expect("policies");
         let mut seen = BTreeSet::new();
         for policy in &policies {
@@ -3073,8 +3073,8 @@ mod tests {
 
     #[test]
     fn generate_is_deterministic_across_runs() {
-        let ledger =
-            ReleaseRefLedger::load(&repo_root().join("config/fleet/release-refs.toml")).expect("ledger");
+        let ledger = ReleaseRefLedger::load(&repo_root().join("config/fleet/release-refs.toml"))
+            .expect("ledger");
         let first = generate_policies_from_ledger(&ledger).expect("first");
         let second = generate_policies_from_ledger(&ledger).expect("second");
         assert_eq!(first.len(), second.len());

@@ -187,8 +187,7 @@ impl AdmittedTrust {
     #[must_use]
     pub fn narrow(class: TrustClass, pool_scope: &str) -> Self {
         let pool = crate::trust_scope::normalize_scope(pool_scope);
-        let (effective_scope, read_through_scope) =
-            store_scopes_for_class(class, pool, None);
+        let (effective_scope, read_through_scope) = store_scopes_for_class(class, pool, None);
         Self {
             class,
             effective_scope,
@@ -206,8 +205,7 @@ impl AdmittedTrust {
         let class = TrustClass::derive(job);
         let pool = crate::trust_scope::normalize_scope(pool_scope);
         let event = event_name(job);
-        let (effective_scope, read_through_scope) =
-            store_scopes_for_class(class, pool, event);
+        let (effective_scope, read_through_scope) = store_scopes_for_class(class, pool, event);
         Self {
             class,
             effective_scope,
@@ -1261,7 +1259,10 @@ mod tests {
         );
         let admitted = AdmittedTrust::admit(&job, "trusted");
         assert_eq!(admitted.class(), TrustClass::Trusted);
-        assert_eq!(admitted.effective_scope(), crate::trust_scope::PR_STORE_SCOPE);
+        assert_eq!(
+            admitted.effective_scope(),
+            crate::trust_scope::PR_STORE_SCOPE
+        );
         assert_eq!(
             admitted.read_through_scope(),
             Some(crate::trust_scope::TRUSTED)
