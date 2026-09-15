@@ -93,6 +93,7 @@ struct VelnorPolicyContract {
     default_branch: String,
     velnor_labels: Vec<String>,
     velnor_runner_group: Option<String>,
+    velnor_trusted_label: Option<String>,
     pull_request_on_velnor: bool,
 }
 
@@ -2083,7 +2084,7 @@ fn inspect_workflow(
                 None,
                 false,
                 trusted_revision,
-                velnor_policy.requires_approved_runner(),
+                velnor_policy,
                 failures,
             ),
         }
@@ -2222,7 +2223,8 @@ fn is_static_self_hosted_runner(job: &Mapping, velnor_policy: &VelnorPolicyContr
     analysis.self_hosted
         && !analysis.dynamic
         && !analysis.invalid
-        && (!velnor_policy.requires_approved_runner() || is_approved_velnor_runner(runs_on))
+        && (!velnor_policy.requires_approved_runner()
+            || is_approved_velnor_runner(runs_on, velnor_policy))
 }
 
 fn has_safe_runner_gate(
@@ -2261,13 +2263,7 @@ fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
     crate::config::discover(root)
         .ok()
         .flatten()
-        .map(|config| {
-            config
-                .policy_exclude_workflows()
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
+        .map(|config| config.effective_policy_exclude_workflows())
         .unwrap_or_default()
 }
 
@@ -2319,6 +2315,14 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         })
         .transpose()?
         .unwrap_or(false);
+    let velnor_trusted_label = generation_workflow
+        .and_then(|workflow| workflow.get("velnor_trusted_label"))
+        .map(|label| {
+            label.as_str().map(str::to_owned).ok_or_else(|| {
+                GeneratorError::usage("[workflow] velnor_trusted_label must be a string")
+            })
+        })
+        .transpose()?;
     let policy = VelnorPolicyContract {
         runners: value
             .get("runners")
@@ -2332,6 +2336,7 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
             .to_owned(),
         velnor_labels: labels,
         velnor_runner_group: group,
+        velnor_trusted_label,
         pull_request_on_velnor,
     };
     if policy.pull_request_on_velnor
@@ -2450,7 +2455,7 @@ fn inspect_jobs(
             matrix,
             trusted_gate,
             trusted_revision,
-            velnor_policy.requires_approved_runner(),
+            velnor_policy,
             failures,
         );
     }
@@ -2462,7 +2467,7 @@ fn inspect_yaml_value(
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     trusted_revision: &str,
-    require_approved_runner: bool,
+    velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
     match value {
@@ -2473,7 +2478,7 @@ fn inspect_yaml_value(
                 matrix,
                 trusted_gate,
                 trusted_revision,
-                require_approved_runner,
+                velnor_policy,
                 failures,
             );
         }
@@ -2485,7 +2490,7 @@ fn inspect_yaml_value(
                     matrix,
                     trusted_gate,
                     trusted_revision,
-                    require_approved_runner,
+                    velnor_policy,
                     failures,
                 );
             }
@@ -2497,7 +2502,7 @@ fn inspect_yaml_value(
                 matrix,
                 trusted_gate,
                 trusted_revision,
-                require_approved_runner,
+                velnor_policy,
                 failures,
             );
         }
@@ -2511,7 +2516,7 @@ fn inspect_mapping(
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     trusted_revision: &str,
-    require_approved_runner: bool,
+    velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
     for (key, value) in mapping {
@@ -2526,7 +2531,7 @@ fn inspect_mapping(
                 path,
                 matrix,
                 trusted_gate,
-                require_approved_runner,
+                velnor_policy,
                 failures,
             ),
             _ => inspect_yaml_value(
@@ -2535,7 +2540,7 @@ fn inspect_mapping(
                 matrix,
                 trusted_gate,
                 trusted_revision,
-                require_approved_runner,
+                velnor_policy,
                 failures,
             ),
         }
@@ -2669,7 +2674,7 @@ fn inspect_runner(
     path: &Path,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
-    require_approved_runner: bool,
+    velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
     let mut resolving = BTreeSet::new();
@@ -2692,7 +2697,10 @@ fn inspect_runner(
             "self-hosted jobs require a default-branch trusted-event gate",
         );
     }
-    if require_approved_runner && analysis.self_hosted && !is_approved_velnor_runner(value) {
+    if velnor_policy.requires_approved_runner()
+        && analysis.self_hosted
+        && !is_approved_velnor_runner(value, velnor_policy)
+    {
         failures.record(
             path,
             "opt-in Velnor self-hosted jobs must use the approved Velnor runner labels, optionally with the approved runner group",
@@ -2700,12 +2708,12 @@ fn inspect_runner(
     }
 }
 
-fn is_approved_velnor_runner(value: &Value) -> bool {
+fn is_approved_velnor_runner(value: &Value, velnor_policy: &VelnorPolicyContract) -> bool {
     if let Some(labels) = value.as_sequence() {
         let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
             return false;
         };
-        return super::estate::approved_velnor_runner_contract_matches(&labels, None);
+        return configured_velnor_runner_labels_match(&labels, None, velnor_policy);
     }
     let Some(runner) = value.as_mapping() else {
         return false;
@@ -2719,8 +2727,31 @@ fn is_approved_velnor_runner(value: &Value) -> bool {
     let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
         return false;
     };
-    runner.len() == 2
-        && super::estate::approved_velnor_runner_contract_matches(&labels, Some(group))
+    runner.len() == 2 && configured_velnor_runner_labels_match(&labels, Some(group), velnor_policy)
+}
+
+fn configured_velnor_runner_labels_match(
+    labels: &[&str],
+    group: Option<&str>,
+    velnor_policy: &VelnorPolicyContract,
+) -> bool {
+    let configured: Vec<&str> = velnor_policy
+        .velnor_labels
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if !super::estate::approved_velnor_runner_contract_matches(&configured, group) {
+        return false;
+    }
+    if labels == configured {
+        return true;
+    }
+    let Some(trusted_label) = velnor_policy.velnor_trusted_label.as_deref() else {
+        return false;
+    };
+    labels.len() == configured.len() + 1
+        && labels[..configured.len()] == configured[..]
+        && labels[configured.len()] == trusted_label
 }
 
 fn normalize_runner_expression(value: &str) -> String {
@@ -2952,7 +2983,9 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
-    strip_inputs_unit_selector(value).or_else(|| strip_selected_units_selector(value))
+    strip_inputs_unit_selector(value)
+        .or_else(|| strip_selected_units_selector(value))
+        .or_else(|| strip_combined_selected_units_selector(value))
 }
 
 fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
@@ -2976,6 +3009,40 @@ fn strip_selected_units_selector(value: &str) -> Option<&str> {
         return None;
     }
     rest[separator + ",')&&(".len()..].strip_suffix(')')
+}
+
+fn is_selected_units_selector(value: &str) -> bool {
+    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    let rest = match value.strip_prefix(PREFIX) {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let rest = match rest.strip_prefix(',') {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let separator = match rest.find(",')") {
+        Some(separator) => separator,
+        None => return false,
+    };
+    is_unit_id(&rest[..separator])
+}
+
+fn strip_combined_selected_units_selector(value: &str) -> Option<&str> {
+    // (contains(...,unit-a,')||contains(...,unit-b,'))&&(gate)
+    let value = value.strip_prefix('(')?;
+    let split = value.rfind(")&&(")?;
+    let selectors = &value[..split];
+    let gate = value[split + 4..].strip_suffix(')')?;
+    if selectors.is_empty() || gate.is_empty() {
+        return None;
+    }
+    for selector in selectors.split("||") {
+        if !is_selected_units_selector(selector) {
+            return None;
+        }
+    }
+    Some(gate)
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -5541,6 +5608,65 @@ jobs:
             "labels-only approved runner rejected: {result:?}"
         );
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_trusted_label_suffix_and_combined_unit_selectors() -> Result<(), Box<dyn Error>>
+    {
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let trusted_label = "velnor-host-docker";
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config_text = format!(
+            "schema = 2\nrunners = \"both\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\n"
+        );
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
+        let combined_gate = format!(
+            "(contains(format(',{{0}},',inputs.selected_units),',rust-policy,')||contains(format(',{{0}},',inputs.selected_units),',rust-velnor-workflow,'))&&({gate})"
+        );
+        let root = policy_fixture(
+            "velnor-trusted-and-combined-gates",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "both",
+        )?;
+        std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            format!(
+                "schema = 1\n\n[workflow]\npull_request_on_velnor = true\nvelnor_trusted_label = \"{trusted_label}\"\n"
+            ),
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-unit-rust.yml"),
+            format!(
+                r"
+name: Rust units
+on:
+  workflow_call:
+    inputs:
+      selected_units:
+        required: true
+        type: string
+jobs:
+  velnor-prepare-cargo-sources:
+    if: ${{{{ {combined_gate} }}}}
+    runs-on: [{yaml_labels}, {trusted_label}]
+    steps:
+      - run: true
+  velnor-rust-policy:
+    if: ${{{{ contains(format(',{{0}},', inputs.selected_units), ',rust-policy,') && ({gate}) }}}}
+    runs-on: [{yaml_labels}]
+    steps:
+      - run: true
+"
+            ),
+        )?;
+        assert!(run_policy(root)?);
         Ok(())
     }
 
