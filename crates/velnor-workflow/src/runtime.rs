@@ -249,30 +249,6 @@ impl CiUnit {
                     || command.contains("mbx check --workspace"))
         })
     }
-
-    /// Return the Cargo lockfile root recorded by the generator metadata.
-    ///
-    /// Workspace members carry the repository-root `Cargo.lock` in their
-    /// watch/cache contract, while an independent manifest tree carries its
-    /// own `<root>/Cargo.lock`. Keep this derived from those serialized
-    /// paths rather than from package names so the runtime follows the
-    /// generator's lockfile discovery for every repository.
-    fn cargo_lockfile_root(&self) -> &str {
-        if self.root == "." {
-            return ".";
-        }
-        let local_lockfile = format!("{}/Cargo.lock", self.root);
-        let has_local_lockfile = self.watch.iter().any(|path| path == &local_lockfile)
-            || self
-                .cache
-                .as_ref()
-                .is_some_and(|cache| cache.key_files.iter().any(|path| path == &local_lockfile));
-        if has_local_lockfile {
-            &self.root
-        } else {
-            "."
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1333,7 +1309,19 @@ fn selection_for_diff<'a>(
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut selected = allowlist.clone();
-        extend_workspace_checks_for_cargo_roots(config, &mut selected);
+        let directly_matched_rust = config
+            .unit
+            .iter()
+            .any(|unit| allowlist.contains(&unit.id) && unit.kind == "rust");
+        if directly_matched_rust {
+            let workspace_checks = config
+                .unit
+                .iter()
+                .filter(|unit| unit.is_workspace_check())
+                .map(|unit| unit.id.clone())
+                .collect::<Vec<_>>();
+            selected.extend(workspace_checks);
+        }
         return Ok(UnitSelection {
             units: ordered_units(&config.unit, Some(&selected))?,
             full_units: selected,
@@ -1369,39 +1357,26 @@ fn selection_for_diff<'a>(
             return full_selection(config);
         }
     }
-    extend_workspace_checks_for_cargo_roots(config, &mut selected);
+    let directly_matched_rust = selected.iter().any(|unit_id| {
+        config
+            .unit
+            .iter()
+            .any(|unit| unit.id == *unit_id && unit.kind == "rust")
+    });
+    if directly_matched_rust {
+        selected.extend(
+            config
+                .unit
+                .iter()
+                .filter(|unit| unit.is_workspace_check())
+                .map(|unit| unit.id.clone()),
+        );
+    }
     let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
     Ok(UnitSelection {
         units: ordered_units(&config.unit, Some(&selected))?,
         full_units,
     })
-}
-
-/// Select only the workspace checks that share a Cargo lockfile root with a
-/// directly selected Rust unit. This keeps independent Cargo projects
-/// affected-only while preserving the workspace gate for each matching root.
-fn extend_workspace_checks_for_cargo_roots(config: &CiConfig, selected: &mut BTreeSet<String>) {
-    let selected_cargo_roots = config
-        .unit
-        .iter()
-        .filter(|unit| {
-            selected.contains(&unit.id) && unit.kind == "rust" && !unit.is_workspace_check()
-        })
-        .map(CiUnit::cargo_lockfile_root)
-        .collect::<BTreeSet<_>>();
-    if selected_cargo_roots.is_empty() {
-        return;
-    }
-    selected.extend(
-        config
-            .unit
-            .iter()
-            .filter(|unit| {
-                unit.is_workspace_check()
-                    && selected_cargo_roots.contains(unit.cargo_lockfile_root())
-            })
-            .map(|unit| unit.id.clone()),
-    );
 }
 
 fn full_selection(config: &CiConfig) -> Result<UnitSelection<'_>, GeneratorError> {
@@ -4281,59 +4256,6 @@ velnor_pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
 velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
 "#;
 
-    const ROOT_SCOPED_SELECTION_PROJECT_CONFIG: &str = r#"schema = 2
-repository = "example/selection"
-profile = "generic"
-verified = true
-default_branch = "main"
-runners = "both"
-
-[workflow]
-version_bump_units = ["rust-velnor-workflow-contract"]
-
-[[unit]]
-id = "rust-root"
-kind = "rust"
-root = "crates/root"
-watch = ["crates/root/**", "Cargo.lock"]
-github_pr_commands = ["true"]
-github_full_commands = ["true"]
-velnor_pr_commands = ["true"]
-velnor_full_commands = ["true"]
-
-[[unit]]
-id = "rust-velnor-workflow-contract"
-kind = "rust"
-root = "crates/velnor-workflow-contract"
-watch = ["crates/velnor-workflow-contract/**", "Cargo.lock", "crates/velnor-workflow-contract/Cargo.lock"]
-github_pr_commands = ["true"]
-github_full_commands = ["true"]
-velnor_pr_commands = ["true"]
-velnor_full_commands = ["true"]
-
-[[unit]]
-id = "rust-root-workspace"
-kind = "rust"
-root = "."
-watch = ["Cargo.toml"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
-workspace_check = true
-
-[[unit]]
-id = "rust-contract-workspace"
-kind = "rust"
-root = "crates/velnor-workflow-contract"
-watch = ["crates/velnor-workflow-contract/Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
-workspace_check = true
-"#;
-
     fn current_project_selection_git_fixture(
         name: &str,
         changed: &str,
@@ -4893,109 +4815,6 @@ velnor_full_commands = ["markdownlint docs"]
             BTreeSet::from(["docs".to_owned()])
         );
         assert!(!selection.full_units.contains("rust-workspace"));
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn affected_selection_scopes_root_workspace_check_to_root_cargo_project(
-    ) -> Result<(), Box<dyn Error>> {
-        let (root, base, head) = current_project_selection_git_fixture_with_config(
-            "root-cargo-project",
-            "crates/root/src/lib.rs",
-            "initial\n",
-            "changed\n",
-            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
-        )?;
-        let config = read_config(&root.join(".github/ci/project.toml"))?;
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let expected = BTreeSet::from(["rust-root".to_owned(), "rust-root-workspace".to_owned()]);
-        assert_eq!(selected_id_set(&selection), expected);
-        assert_eq!(selection.full_units, expected);
-        assert!(!selection
-            .units
-            .iter()
-            .any(|unit| unit.id == "rust-velnor-workflow-contract"));
-        assert!(!selection
-            .units
-            .iter()
-            .any(|unit| unit.id == "rust-contract-workspace"));
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn affected_selection_scopes_contract_workspace_check_to_independent_cargo_project(
-    ) -> Result<(), Box<dyn Error>> {
-        let (root, base, head) = current_project_selection_git_fixture_with_config(
-            "independent-cargo-project",
-            "crates/velnor-workflow-contract/src/lib.rs",
-            "initial\n",
-            "changed\n",
-            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
-        )?;
-        let config = read_config(&root.join(".github/ci/project.toml"))?;
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let expected = BTreeSet::from([
-            "rust-velnor-workflow-contract".to_owned(),
-            "rust-contract-workspace".to_owned(),
-        ]);
-        assert_eq!(selected_id_set(&selection), expected);
-        assert_eq!(selection.full_units, expected);
-        assert!(!selection
-            .units
-            .iter()
-            .any(|unit| unit.id == "rust-root-workspace"));
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn affected_selection_includes_workspace_checks_for_each_changed_cargo_root(
-    ) -> Result<(), Box<dyn Error>> {
-        let (root, base, head) = current_project_selection_git_fixture_with_config(
-            "mixed-cargo-roots",
-            "Cargo.lock",
-            "initial\n",
-            "changed\n",
-            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
-        )?;
-        let config = read_config(&root.join(".github/ci/project.toml"))?;
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let expected = BTreeSet::from([
-            "rust-root".to_owned(),
-            "rust-velnor-workflow-contract".to_owned(),
-            "rust-root-workspace".to_owned(),
-            "rust-contract-workspace".to_owned(),
-        ]);
-        assert_eq!(selected_id_set(&selection), expected);
-        assert_eq!(selection.full_units, expected);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn version_bump_selection_scopes_workspace_check_to_matching_cargo_root(
-    ) -> Result<(), Box<dyn Error>> {
-        let (root, base, head) = current_project_selection_git_fixture_with_config(
-            "independent-version-bump",
-            "crates/velnor-workflow-contract/Cargo.toml",
-            "version = \"0.1.0\"\n",
-            "version = \"0.1.1\"\n",
-            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
-        )?;
-        let config = read_config(&root.join(".github/ci/project.toml"))?;
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let expected = BTreeSet::from([
-            "rust-velnor-workflow-contract".to_owned(),
-            "rust-contract-workspace".to_owned(),
-        ]);
-        assert_eq!(selected_id_set(&selection), expected);
-        assert_eq!(selection.full_units, expected);
-        assert!(!selection
-            .units
-            .iter()
-            .any(|unit| unit.id == "rust-root-workspace"));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -5957,10 +5776,10 @@ jobs:
         );
         let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
         let combined_gate = format!(
-            "(contains(format(',{{0}},',inputs.selected_units),',rust-policy,')||contains(format(',{{0}},',inputs.selected_units),',example-unit,'))&&({gate})"
+            "(contains(format(',{{0}},',inputs.selected_units),',rust-policy,')||contains(format(',{{0}},',inputs.selected_units),',rust-example-workflow,'))&&({gate})"
         );
         let root = policy_fixture(
-            "trusted-suffix-and-combined-gates",
+            "example-trusted-combined-gates",
             "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
             "both",
         )?;

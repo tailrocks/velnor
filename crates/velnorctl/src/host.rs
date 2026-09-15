@@ -167,9 +167,8 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
 /// Reconnect an explicitly restarted on-demand host to its durable state.
 /// `host start` is the operator's ownership boundary: after the PID guard is
 /// installed, a previous graceful drain marker may be cleared and a durable
-/// `draining` intent is changed to `ready` with OCC. Live workers still block
-/// the restart so a new controller cannot race a surviving process. Dead
-/// persisted jobs are left for controller orphan recovery.
+/// `draining` intent is changed to `ready` with OCC. Active jobs block the
+/// restart so a new controller cannot race a surviving worker.
 fn resume_host_state(
     config_dir: &Path,
     state_db: &Path,
@@ -1745,13 +1744,31 @@ mod tests {
 
     #[test]
     fn reconnect_allows_completing_job_without_owned_pid() {
+        use velnor_control::ports::{MutationKind, MutationPort, MutationRequest};
         use velnor_model::JobPhase2;
 
         let root = host_resume_root("completing");
         let config_dir = root.join("config");
         std::fs::create_dir_all(&config_dir).expect("config directory");
         let state_db = root.join("state.db");
-        seed_draining_lifecycle(&state_db, "host-drain-completing");
+        let store = Arc::new(Store::open(&state_db).expect("store"));
+        let store_instance = velnor_runner::scaffold::operational_instance_slug();
+        let lifecycle = LifecycleService::with_store_and_api_instance(
+            Arc::clone(&store),
+            &store_instance,
+            "primary",
+        )
+        .expect("lifecycle");
+        lifecycle
+            .mutate(MutationRequest {
+                kind: MutationKind::Drain,
+                target: "primary".to_owned(),
+                reason: "test drain".to_owned(),
+                idempotency_key: "host-drain-completing".to_owned(),
+                expected_version: None,
+                scale_to: None,
+            })
+            .expect("drain");
         let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
         seed_job_phase(&mut journal, "slot-6", "654cacd8", JobPhase2::Completing);
         journal.set_drain(2).expect("drain marker");

@@ -2060,42 +2060,6 @@ pub fn reclaim_stale_job_owned(
     Ok(())
 }
 
-/// Force-remove every container carrying `velnor.job-id=<job_id>`, running or
-/// stopped. Stale in-flight recovery calls this before restoring the slot to
-/// Ready: the worker is provably dead, so a still-running container can only
-/// be a leak — the stopped-only reclaim above would leave it burning CPU
-/// behind a Ready slot. Already-gone containers are success; only this job's
-/// exact label is ever listed or removed, so other jobs' containers are
-/// untouched. BuildKit daemon rows go one `rm` at a time (batched Engine
-/// deletes of Created/removing BuildKit deadlock); persistent builders are
-/// excluded by the parser because other jobs share them.
-pub fn force_remove_job_owned_containers(
-    job_id: &str,
-    mut docker: impl FnMut(&[String]) -> Result<String>,
-) -> Result<()> {
-    let listed = docker(&list_owned_containers_state_args(job_id))?;
-    let Some(ids) = docker_client::job_owned_container_ids(job_id, &listed) else {
-        bail!(
-            "refusing to force-remove containers for job {job_id}: ownership listing failed closed"
-        );
-    };
-    if !ids.containers.is_empty() {
-        match docker(&force_remove_container_args(&ids.containers)) {
-            Ok(_) => {}
-            Err(error) if docker_client::is_not_found(&error) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    if !ids.buildkit.is_empty() {
-        force_remove_containers_serially(&ids.buildkit, |args| match docker(args) {
-            Ok(_) => Ok(()),
-            Err(error) if docker_client::is_not_found(&error) => Ok(()),
-            Err(error) => Err(error),
-        })?;
-    }
-    Ok(())
-}
-
 pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) -> Result<()> {
     let formatted = docker(&list_owned_job_format_args())?;
     for job_id in docker_client::orphan_job_ids(&formatted) {
@@ -5163,61 +5127,6 @@ mod tests {
         assert!(calls
             .iter()
             .all(|call| !call.iter().any(|arg| arg == "--force")));
-    }
-
-    #[test]
-    fn force_remove_job_owned_containers_batches_guest_rm_and_serializes_buildkit() {
-        let job_id = "velnor-job-orphan";
-        let listing = format!(
-            "job-id\t{job_id}\t{job_id}\trunning\n\
-             guest-id\tguest-container\t{job_id}\texited\n\
-             bk-id\t{BUILDKIT_CONTAINER_NAME_PREFIX}deadbeef\t{job_id}\trunning\n"
-        );
-        let mut calls = Vec::new();
-        let mut outputs = vec![listing, String::new(), String::new()];
-        force_remove_job_owned_containers(job_id, |args| {
-            calls.push(args.to_vec());
-            Ok(outputs.remove(0))
-        })
-        .unwrap();
-
-        assert_eq!(calls[0], list_owned_containers_state_args(job_id));
-        assert_eq!(
-            calls[1],
-            force_remove_container_args(&["guest-id".into(), "job-id".into()])
-        );
-        assert_eq!(calls[2], force_remove_one_container_args("bk-id"));
-        assert_eq!(calls.len(), 3);
-    }
-
-    #[test]
-    fn force_remove_job_owned_containers_treats_missing_as_success() {
-        let job_id = "velnor-job-gone";
-        let listing = format!("job-id\t{job_id}\t{job_id}\texited\n");
-        let mut calls = Vec::new();
-        force_remove_job_owned_containers(job_id, |args| {
-            calls.push(args.to_vec());
-            if args.first().is_some_and(|command| command == "ps") {
-                return Ok(listing.clone());
-            }
-            Err(anyhow::Error::new(docker_client::NotFound {
-                object: "job-id".to_string(),
-            }))
-        })
-        .unwrap();
-        assert_eq!(calls.len(), 2);
-    }
-
-    #[test]
-    fn force_remove_job_owned_containers_removes_nothing_when_listing_fails_closed() {
-        let job_id = "velnor-job-foreign";
-        let mut calls = Vec::new();
-        let result = force_remove_job_owned_containers(job_id, |args| {
-            calls.push(args.to_vec());
-            Ok("other-id\tother\tvelnor-job-other\trunning\n".to_string())
-        });
-        assert!(result.is_err());
-        assert_eq!(calls, vec![list_owned_containers_state_args(job_id)]);
     }
 
     #[test]

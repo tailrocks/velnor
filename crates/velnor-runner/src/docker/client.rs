@@ -876,60 +876,6 @@ pub(crate) fn stale_job_owned_snapshot(
     })
 }
 
-/// Split of one job's labeled containers for force removal.
-pub(crate) struct JobOwnedContainerIds {
-    /// Ordinary containers (job container, services, guests): one batched
-    /// `rm --force`.
-    pub containers: Vec<String>,
-    /// Legacy BuildKit daemon rows: serial `rm --force`, never batched.
-    pub buildkit: Vec<String>,
-}
-
-/// Every container id carrying exactly `velnor.job-id == job_id`, running or
-/// stopped: the caller proved the worker dead, so each one is a leak. Parses
-/// the `list_owned_containers_state_args` row shape (`id \t names \t
-/// job-id \t state`). Fail-closed: a malformed row or a row whose label is
-/// not exactly `job_id` is `None` — the Docker label filter should make that
-/// impossible, so its presence means the listing cannot be trusted and
-/// nothing may be removed. Persistent builder objects are excluded: they
-/// carry the creating job's label by design but are shared with other jobs.
-pub(crate) fn job_owned_container_ids(
-    job_id: &str,
-    formatted: &str,
-) -> Option<JobOwnedContainerIds> {
-    let mut containers = Vec::new();
-    let mut buildkit = Vec::new();
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 4 {
-            return None;
-        }
-        let id = fields[0].trim();
-        let names = fields[1].trim();
-        let label = fields[2].trim();
-        if id.is_empty() || names.is_empty() || label != job_id {
-            return None;
-        }
-        ContainerState::parse(fields[3])?;
-        if crate::buildkit::is_persistent_builder_object(names) {
-            continue;
-        }
-        if names.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX) {
-            buildkit.push(id.to_string());
-        } else {
-            containers.push(id.to_string());
-        }
-    }
-    containers.sort();
-    containers.dedup();
-    buildkit.sort();
-    buildkit.dedup();
-    Some(JobOwnedContainerIds {
-        containers,
-        buildkit,
-    })
-}
-
 /// Project API container rows into the CLI `ps` shape: short ids,
 /// slashless comma-joined names. Named so the parity test covers the
 /// projection directly, including the shapes the socket test never serves
@@ -2215,65 +2161,6 @@ mod tests {
 
     /// Every fixture below is output captured from a real Engine 29.4.0
     /// invocation of the exact argument vector the parser consumes.
-
-    #[test]
-    fn job_owned_container_ids_collects_running_and_stopped_rows() {
-        let job_id = "velnor-job-9";
-        let ids = job_owned_container_ids(
-            job_id,
-            &format!(
-                "aaa111\t{job_id}\t{job_id}\trunning\n\
-                 bbb222\tguest-sidecar\t{job_id}\texited\n\
-                 ccc333\tcreated-guest\t{job_id}\tcreated\n"
-            ),
-        )
-        .unwrap();
-        assert_eq!(ids.containers, vec!["aaa111", "bbb222", "ccc333"]);
-        assert!(ids.buildkit.is_empty());
-    }
-
-    #[test]
-    fn job_owned_container_ids_splits_buildkit_and_skips_shared_builders() {
-        let job_id = "velnor-job-9";
-        let buildkit_prefix = crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX;
-        let ids = job_owned_container_ids(
-            job_id,
-            &format!(
-                "aaa111\t{job_id}\t{job_id}\trunning\n\
-                 ddd444\t{buildkit_prefix}deadbeef\t{job_id}\trunning\n\
-                 eee555\t{buildkit_prefix}velnor-builder-shared-deadbeef-high-acme\t{job_id}\trunning\n"
-            ),
-        )
-        .unwrap();
-        assert_eq!(ids.containers, vec!["aaa111"]);
-        assert_eq!(ids.buildkit, vec!["ddd444"]);
-    }
-
-    #[test]
-    fn job_owned_container_ids_fails_closed_on_foreign_label_or_malformed_row() {
-        let job_id = "velnor-job-9";
-        assert!(job_owned_container_ids(job_id, "")
-            .unwrap()
-            .containers
-            .is_empty());
-        assert!(job_owned_container_ids(
-            job_id,
-            &format!("aaa111\t{job_id}\tvelnor-job-other\trunning\n"),
-        )
-        .is_none());
-        assert!(job_owned_container_ids(job_id, "aaa111\t\tvelnor-job-9\trunning\n").is_none());
-        assert!(
-            job_owned_container_ids(job_id, &format!("aaa111\t{job_id}\t{job_id}\n"),).is_none()
-        );
-        assert!(job_owned_container_ids(
-            job_id,
-            &format!("aaa111\t{job_id}\t{job_id}\tpaused-by-engine\n"),
-        )
-        .is_none());
-        assert!(
-            job_owned_container_ids(job_id, &format!("\t{job_id}\t{job_id}\trunning\n"),).is_none()
-        );
-    }
 
     #[test]
     fn empty_argv_cannot_form_a_claimed_rm_argument_view() {

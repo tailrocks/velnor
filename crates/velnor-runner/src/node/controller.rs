@@ -1129,14 +1129,7 @@ async fn reconcile_once(
     spawn_ready_waiters(args, journal, jobs)?;
     reap(jobs);
     let outbox_reconcile_due = last_outbox_reconcile.elapsed() >= OUTBOX_RECONCILIATION_INTERVAL;
-    reclaim_orphaned_jobs(
-        args,
-        journal,
-        remote_deadline,
-        outbox_reconcile_due,
-        crate::docker::client::host_call,
-    )
-    .await?;
+    reclaim_orphaned_jobs(args, journal, remote_deadline, outbox_reconcile_due).await?;
     if outbox_reconcile_due {
         reconcile_orphaned_outboxes(args, journal)?;
         *last_outbox_reconcile = Instant::now();
@@ -1886,25 +1879,6 @@ fn stop_idle_waiters(
     Ok(())
 }
 
-/// Force-remove a provably dead worker's containers before its slot returns
-/// to Ready. Best-effort by design: a wedged Docker daemon must not wedge
-/// slot recovery (capacity loss is worse than a leaked container), so
-/// failures are loud warnings, never errors.
-fn teardown_orphaned_job_containers(
-    job_id: &str,
-    docker_backend: bool,
-    docker: impl FnMut(&[String]) -> anyhow::Result<String>,
-) {
-    if !docker_backend {
-        return;
-    }
-    if let Err(error) = crate::docker_lease::force_remove_job_owned_containers(job_id, docker) {
-        eprintln!(
-            "Warning: orphan recovery for job {job_id} could not remove its containers: {error:#}"
-        );
-    }
-}
-
 /// Return slots occupied by job workers that died without a terminal
 /// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
 /// slot stays `Assigned` forever and advertised capacity never recovers.
@@ -1913,7 +1887,6 @@ async fn reclaim_orphaned_jobs(
     journal: &mut Journal,
     remote_deadline: tokio::time::Instant,
     scan_persisted_markers: bool,
-    mut docker: impl FnMut(&[String]) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
     let orphan_jobs: Vec<_> = state
@@ -1970,29 +1943,11 @@ async fn reclaim_orphaned_jobs(
         return Ok(());
     };
 
-    // Container teardown runs only on the docker backend. Missing or
-    // unparsable selection is never treated as docker, which also keeps
-    // backend-less unit fixtures hermetic.
-    let backend = crate::execution::load_execution_file(&args.state_dir, None)
-        .ok()
-        .map(|file| file.backend());
-    let docker_backend =
-        velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend);
-
     for job in orphan_jobs {
         // One Completing row must not abort the fleet cycle. Log and move on
         // so other slots still reclaim; the next tick retries this job.
-        if let Err(error) = recover_one_orphaned_job(
-            args,
-            journal,
-            &exec,
-            &state,
-            &job,
-            remote_deadline,
-            docker_backend,
-            &mut docker,
-        )
-        .await
+        if let Err(error) =
+            recover_one_orphaned_job(args, journal, &exec, &state, &job, remote_deadline).await
         {
             eprintln!(
                 "Warning: orphan recovery for job {} failed this cycle: {error:#}",
@@ -2100,8 +2055,6 @@ async fn recover_one_orphaned_job(
     state: &velnor_control::journal::FleetState,
     job: &velnor_control::journal::JobRecord,
     remote_deadline: tokio::time::Instant,
-    docker_backend: bool,
-    docker: &mut impl FnMut(&[String]) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let slot_dir = recovery_slot_config_dir(&args.state_dir, exec, state, &job.slot_id)?;
     let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
@@ -2115,18 +2068,14 @@ async fn recover_one_orphaned_job(
     if let Some(marker_job_id) = marker_job_id.as_deref()
         && marker_job_id != job.job_id.0
     {
-        return Err(anyhow::anyhow!(
+        anyhow::bail!(
             "in-flight marker job {} does not match orphan job {}",
             marker_job_id,
             job.job_id.0
-        ));
+        );
     }
     if job.phase == JobPhase2::Completing
         && !pending_completion
-        // A job whose terminal result is durable but whose payload is not
-        // is the crash window between the two writes, not a lost payload.
-        // Its real conclusion is recorded, so recovery re-drives the
-        // completion instead of failing the whole reconciliation.
         && job.terminal_conclusion.is_none()
     {
         // Missing payload is a retryable gap, not a controller failure.
@@ -2150,12 +2099,6 @@ async fn recover_one_orphaned_job(
                 {
                     Ok(cleanup) => cleanup,
                     Err(error) => {
-                        // A completion that cannot be delivered is not a
-                        // controller failure. The completion path already
-                        // charged this attempt to the row's durable
-                        // budget; propagating instead would re-run the
-                        // same doomed replay on every cycle and never let
-                        // the row terminate.
                         eprintln!(
                             "Warning: completion replay for job {} failed: {error:#}",
                             job.job_id.0
@@ -2175,21 +2118,41 @@ async fn recover_one_orphaned_job(
                     }
                 }
             } else if let Some(conclusion) = job.terminal_conclusion.as_deref() {
-                defer_remote_recovery_on_timeout(
+                match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
                     crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion(
                         &slot_dir, &stored, conclusion,
                     ),
                     "complete recorded terminal conclusion during orphan recovery",
                 )
-                .await?
+                .await
+                {
+                    Ok(cleanup) => cleanup,
+                    Err(error) => {
+                        eprintln!(
+                            "Warning: terminal conclusion replay for job {} failed: {error:#}",
+                            job.job_id.0
+                        );
+                        return Ok(());
+                    }
+                }
             } else {
-                defer_remote_recovery_on_timeout(
+                match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
                     crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
                     "complete recorded in-flight job during orphan recovery",
                 )
-                .await?
+                .await
+                {
+                    Ok(cleanup) => cleanup,
+                    Err(error) => {
+                        eprintln!(
+                            "Warning: in-flight completion for job {} failed: {error:#}",
+                            job.job_id.0
+                        );
+                        return Ok(());
+                    }
+                }
             };
             let Some(cleanup) = cleanup else {
                 return Ok(());
@@ -2202,36 +2165,38 @@ async fn recover_one_orphaned_job(
             }
         }
     } else if marker_job_id.is_some() {
-        return Err(anyhow::anyhow!(
+        if job.phase == JobPhase2::Completing {
+            eprintln!(
+                "Warning: runner credentials missing while recovering completing job {}; retrying next cycle",
+                job.job_id.0
+            );
+            return Ok(());
+        }
+        anyhow::bail!(
             "runner credentials missing while recovering in-flight job {}",
             job.job_id.0
-        ));
+        );
     }
     if crate::runner::recorded_in_flight_job_exists(&slot_dir)? && pending_completion {
-        return Err(anyhow::anyhow!(
-            "completing job {} retained its in-flight marker after recovery",
+        eprintln!(
+            "Warning: completing job {} retained its in-flight marker after recovery; retrying next cycle",
             job.job_id.0
-        ));
+        );
+        return Ok(());
     }
     let current = journal.materialized_state()?;
     if current.jobs.iter().all(|row| row.job_id != job.job_id) {
         // complete_recorded_in_flight_job already committed the terminal
-        // acknowledgement and removed this job from the journal. The worker
-        // is still dead: tear down leftover containers before Ready.
-        teardown_orphaned_job_containers(&job.job_id.0, docker_backend, docker);
+        // acknowledgement and removed this job from the journal.
         return Ok(());
     }
     if pending_completion {
-        return Err(anyhow::anyhow!(
-            "completing job {} has no recoverable terminal acknowledgement",
+        eprintln!(
+            "Warning: completing job {} has no recoverable terminal acknowledgement; retrying next cycle",
             job.job_id.0
-        ));
+        );
+        return Ok(());
     }
-    // The worker is dead (both ownership pids are gone), so any
-    // container still carrying this job's label is a leak. Remove them
-    // before the slot returns to Ready; after JobWorkerLost no path
-    // would ever touch them again.
-    teardown_orphaned_job_containers(&job.job_id.0, docker_backend, docker);
     let lost = journal.apply(Event::JobWorkerLost {
         job_id: job.job_id.clone(),
         generation: job.generation,
@@ -4319,7 +4284,6 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             false,
-            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .unwrap();
@@ -4331,238 +4295,6 @@ mod tests {
             .find(|job| job.job_id == JobId("job-1".to_owned()))
             .unwrap();
         assert_eq!(job.phase, JobPhase2::Running);
-
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    /// Journal with one Running job whose worker and waiter pids are both
-    /// dead, plus an exec config whose two-slot layout maps `velnor-1` to
-    /// `slots/slot-1`. With `backend`, the state dir also selects that
-    /// execution backend; without it no `execution.toml` exists.
-    fn stale_running_job_fixture(label: &str, backend: Option<&str>) -> (PathBuf, Journal) {
-        let dir = std::env::temp_dir().join(format!(
-            "velnor-orphan-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        if let Some(backend) = backend {
-            std::fs::write(
-                dir.join("execution.toml"),
-                format!("[execution]\nbackend = \"{backend}\"\n"),
-            )
-            .unwrap();
-        }
-        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
-        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
-        for event in [
-            Event::ControlLive,
-            Event::JournalWritable,
-            Event::Dependency {
-                github_reachable: true,
-            },
-            Event::Routing {
-                valid: true,
-                group_valid: true,
-            },
-            Event::DesiredCapacity { ready: 1 },
-            Event::PermitReserved {
-                slot_id: SlotId("velnor-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
-            Event::ExecutorProven {
-                slot_id: SlotId("velnor-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
-            Event::SessionLive {
-                slot_id: SlotId("velnor-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
-            Event::RegistrationIntended {
-                slot_id: SlotId("velnor-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
-            Event::Registered {
-                slot_id: SlotId("velnor-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
-            Event::ReadyAttempt {
-                slot_id: SlotId("velnor-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
-            Event::JobAcquisitionIntended {
-                slot_id: SlotId("velnor-1".to_owned()),
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-                message_id: "msg-1".into(),
-                run_service_url: "https://run.example/run".into(),
-                intended_unix: 1_000,
-            },
-            Event::JobOwned {
-                job_id: JobId("job-1".to_owned()),
-                slot_id: SlotId("velnor-1".to_owned()),
-                attempt: 1,
-                generation: Generation::INITIAL,
-                worker: "worker-1".to_owned(),
-                accepted_unix: 1_234,
-            },
-            Event::JobStarted {
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
-        ] {
-            assert!(!journal.apply(event).unwrap().rejected);
-        }
-        cleanup::write_owned_pid(&dir, "job-1", Generation::INITIAL.0, stale_pid()).unwrap();
-        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
-            .unwrap();
-        (dir, journal)
-    }
-
-    #[tokio::test]
-    async fn stale_recovery_force_removes_containers_before_restoring_slot() {
-        let (dir, mut journal) = stale_running_job_fixture("teardown", Some("docker"));
-        let args = ControllerArgs {
-            state_dir: dir.clone(),
-            scope: "velnor".to_owned(),
-            desired_ready: 1,
-            once: true,
-            spawn_slots: false,
-            lifecycle: None,
-        };
-        let listing =
-            "job-cid\tjob-1\tjob-1\trunning\nguest-cid\tguest-sidecar\tjob-1\texited\n".to_string();
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let recorded = calls.clone();
-        reclaim_orphaned_jobs(
-            &args,
-            &mut journal,
-            tokio::time::Instant::now() + Duration::from_secs(15),
-            false,
-            move |docker_args: &[String]| {
-                recorded.lock().unwrap().push(docker_args.to_vec());
-                if docker_args.first().is_some_and(|command| command == "ps") {
-                    return Ok(listing.clone());
-                }
-                Ok(String::new())
-            },
-        )
-        .await
-        .unwrap();
-
-        let calls = calls.lock().unwrap();
-        assert_eq!(
-            calls[0],
-            crate::docker_lease::list_owned_containers_state_args("job-1")
-        );
-        assert_eq!(
-            calls[1],
-            crate::docker_lease::force_remove_container_args(&[
-                "guest-cid".to_string(),
-                "job-cid".to_string()
-            ])
-        );
-        assert_eq!(calls.len(), 2);
-
-        let state = journal.load_state().unwrap();
-        assert!(
-            state
-                .jobs
-                .iter()
-                .all(|job| job.job_id != JobId("job-1".to_owned())),
-            "JobWorkerLost must remove the job row"
-        );
-        let slot = state
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
-            .unwrap();
-        assert_eq!(slot.phase, SlotPhase2::Ready);
-
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[tokio::test]
-    async fn stale_recovery_without_docker_backend_restores_slot_without_docker() {
-        let (dir, mut journal) = stale_running_job_fixture("no-backend", None);
-        let args = ControllerArgs {
-            state_dir: dir.clone(),
-            scope: "velnor".to_owned(),
-            desired_ready: 1,
-            once: true,
-            spawn_slots: false,
-            lifecycle: None,
-        };
-        reclaim_orphaned_jobs(
-            &args,
-            &mut journal,
-            tokio::time::Instant::now() + Duration::from_secs(15),
-            false,
-            |docker_args| {
-                panic!("docker must not be invoked without a docker backend: {docker_args:?}")
-            },
-        )
-        .await
-        .unwrap();
-
-        let state = journal.load_state().unwrap();
-        assert!(
-            state
-                .jobs
-                .iter()
-                .all(|job| job.job_id != JobId("job-1".to_owned())),
-            "JobWorkerLost must remove the job row"
-        );
-        let slot = state
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
-            .unwrap();
-        assert_eq!(slot.phase, SlotPhase2::Ready);
-
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[tokio::test]
-    async fn stale_recovery_on_microvm_backend_restores_slot_without_docker() {
-        let (dir, mut journal) = stale_running_job_fixture("microvm", Some("microvm"));
-        let args = ControllerArgs {
-            state_dir: dir.clone(),
-            scope: "velnor".to_owned(),
-            desired_ready: 1,
-            once: true,
-            spawn_slots: false,
-            lifecycle: None,
-        };
-        reclaim_orphaned_jobs(
-            &args,
-            &mut journal,
-            tokio::time::Instant::now() + Duration::from_secs(15),
-            false,
-            |docker_args| {
-                panic!("docker must not be invoked on the microvm backend: {docker_args:?}")
-            },
-        )
-        .await
-        .unwrap();
-
-        let state = journal.load_state().unwrap();
-        assert!(
-            state
-                .jobs
-                .iter()
-                .all(|job| job.job_id != JobId("job-1".to_owned())),
-            "JobWorkerLost must remove the job row"
-        );
-        let slot = state
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
-            .unwrap();
-        assert_eq!(slot.phase, SlotPhase2::Ready);
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -4729,7 +4461,6 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             true,
-            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .unwrap();
@@ -4737,6 +4468,68 @@ mod tests {
         assert!(
             slot_dir.join("in-flight-job.json").exists(),
             "live waiter must keep its in-flight marker for the next tick"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_reclaims_once_worker_and_waiter_are_dead() {
+        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("dead-waiter");
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
+            .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        let error = reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap_err();
+        // Both ownership markers are dead, so recovery advances past the
+        // ownership gate and stops only at the missing runner credentials.
+        assert!(
+            error.to_string().contains(
+                "runner credentials missing while recovering marker-only in-flight job job-9"
+            ),
+            "{error:#}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_without_any_ownership_marker_errors() {
+        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("no-owner");
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        let error = reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no valid worker or waiter ownership pid"),
+            "{error:#}"
         );
         std::fs::remove_dir_all(dir).ok();
     }
@@ -4880,7 +4673,6 @@ mod tests {
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
             false,
-            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
         )
         .await
         .expect("missing completion payload must not abort the controller cycle");
@@ -4910,65 +4702,210 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn marker_only_in_flight_job_reclaims_once_worker_and_waiter_are_dead() {
-        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("dead-waiter");
-        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
-            .unwrap();
-
-        let args = ControllerArgs {
-            state_dir: dir.clone(),
-            scope: "velnor".to_owned(),
-            desired_ready: 1,
-            once: true,
-            spawn_slots: false,
-            lifecycle: None,
-        };
-        let error = reclaim_orphaned_jobs(
-            &args,
-            &mut journal,
-            tokio::time::Instant::now() + Duration::from_secs(15),
-            true,
-            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
-        )
-        .await
-        .unwrap_err();
-        // Both ownership markers are dead, so recovery advances past the
-        // ownership gate and stops only at the missing runner credentials.
-        assert!(
-            error.to_string().contains(
-                "runner credentials missing while recovering marker-only in-flight job job-9"
+    async fn completing_job_with_pending_outbox_does_not_reconstruct_after_replay_failure() {
+        let dir = metrics_test_dir("completing-pending-outbox-no-reconstruct");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let generation = Generation::INITIAL;
+        let completing_slot = SlotId("velnor-1".to_owned());
+        let running_slot = SlotId("velnor-2".to_owned());
+        let completing_job = JobId("job-completing".to_owned());
+        let running_job = JobId("job-running".to_owned());
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 2 },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        for slot_id in [completing_slot.clone(), running_slot.clone()] {
+            for event in [
+                Event::PermitReserved {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::ExecutorProven {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::SessionLive {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::RegistrationIntended {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::Registered {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::ReadyAttempt {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+            ] {
+                assert!(!journal.apply(event).unwrap().rejected);
+            }
+        }
+        for (slot_id, job_id, message_id) in [
+            (
+                completing_slot.clone(),
+                completing_job.clone(),
+                "msg-completing",
             ),
-            "{error:#}"
+            (running_slot.clone(), running_job.clone(), "msg-running"),
+        ] {
+            for event in [
+                Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: job_id.clone(),
+                    generation,
+                    message_id: message_id.into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
+                },
+                Event::JobOwned {
+                    job_id: job_id.clone(),
+                    slot_id: slot_id.clone(),
+                    attempt: 1,
+                    generation,
+                    worker: format!("worker-{}", job_id.0),
+                    accepted_unix: 1,
+                },
+                Event::JobStarted {
+                    job_id: job_id.clone(),
+                    generation,
+                },
+            ] {
+                assert!(!journal.apply(event).unwrap().rejected);
+            }
+        }
+        assert!(
+            !journal
+                .apply(Event::JobTerminalResult {
+                    job_id: completing_job.clone(),
+                    generation,
+                    conclusion: "success".to_owned(),
+                })
+                .unwrap()
+                .rejected
         );
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[tokio::test]
-    async fn marker_only_in_flight_job_without_any_ownership_marker_errors() {
-        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("no-owner");
+        let payload = b"payload";
+        let payload_sha256 = velnor_control::journal::payload_checksum(payload);
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: completing_job.clone(),
+                    generation,
+                    payload_sha256: payload_sha256.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        cleanup::write_outbox(&dir, &completing_job.0, generation.0, payload).unwrap();
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
+        let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        config::save(
+            &slot_dir,
+            &config::StoredRunnerConfig {
+                settings: config::RunnerSettings {
+                    github_url: "https://github.com/tailrocks/fixture".to_owned(),
+                    server_url: None,
+                    server_url_v2: None,
+                    pool_id: Some(7),
+                    pool_name: Some("velnor".to_owned()),
+                    agent_id: Some(7),
+                    agent_name: "slot-1".to_owned(),
+                    labels: vec!["velnor".to_owned()],
+                    use_v2_flow: true,
+                    ephemeral: true,
+                    disable_update: true,
+                },
+                credentials: None,
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            slot_dir.join("in-flight-job.json"),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": completing_job.0,
+                "run_service_url": "https://example.invalid/run-service",
+                "billing_owner_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let stale = stale_pid();
+        for isolation in [
+            completing_job.0.as_str(),
+            running_job.0.as_str(),
+            "wait-velnor-1",
+            "wait-velnor-2",
+        ] {
+            cleanup::write_owned_pid(&dir, isolation, generation.0, stale).unwrap();
+        }
 
         let args = ControllerArgs {
             state_dir: dir.clone(),
             scope: "velnor".to_owned(),
-            desired_ready: 1,
+            desired_ready: 2,
             once: true,
             spawn_slots: false,
             lifecycle: None,
         };
-        let error = reclaim_orphaned_jobs(
+        reclaim_orphaned_jobs(
             &args,
             &mut journal,
             tokio::time::Instant::now() + Duration::from_secs(15),
-            true,
-            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
+            false,
         )
         .await
-        .unwrap_err();
+        .expect("replay failure must not abort the controller cycle");
+
+        let state = journal.materialized_state().unwrap();
+        let completing = state
+            .jobs
+            .iter()
+            .find(|job| job.job_id == completing_job)
+            .expect("completing job is retried, not reconstructed");
+        assert_eq!(completing.phase, JobPhase2::Completing);
+        assert_eq!(completing.terminal_conclusion.as_deref(), Some("success"));
+        let outbox = state
+            .outbox
+            .iter()
+            .find(|row| row.job_id == completing_job && row.generation == generation)
+            .expect("pending outbox row is kept");
+        assert!(outbox.is_pending());
+        assert_eq!(outbox.payload_sha256, payload_sha256);
+        assert_eq!(
+            cleanup::read_outbox(&dir, &completing_job.0, generation.0).unwrap(),
+            payload
+        );
         assert!(
-            error
-                .to_string()
-                .contains("has no valid worker or waiter ownership pid"),
-            "{error:#}"
+            slot_dir.join("in-flight-job.json").exists(),
+            "replay failure must not reconstruct or clear the in-flight marker"
+        );
+        assert!(
+            state.jobs.iter().all(|job| job.job_id != running_job),
+            "the other slot must still reclaim after replay failure: {:?}",
+            state.jobs
+        );
+        assert_eq!(
+            state
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == running_slot)
+                .map(|slot| slot.phase),
+            Some(SlotPhase2::Ready)
         );
         std::fs::remove_dir_all(dir).ok();
     }

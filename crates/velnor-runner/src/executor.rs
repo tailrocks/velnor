@@ -39,7 +39,7 @@ use std::os::unix::{
     io::{AsRawFd, FromRawFd},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
@@ -52,10 +52,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{
-    mpsc::{error::TrySendError, Sender},
-    Notify,
-};
+use tokio::sync::mpsc::{error::TrySendError, Sender};
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -1108,18 +1105,31 @@ fn stream_reader<R: std::io::Read + Send + 'static>(
         }
     });
     let mut pending = Vec::new();
+    // A receive timeout is not a clock: a busy producer can satisfy every
+    // receive before the timeout elapses. Keep an absolute deadline so the
+    // live partial-line bound remains real under continuous output, matching
+    // the Docker engine's periodic partial flush.
+    let mut next_flush = Instant::now() + PARTIAL_LINE_FLUSH;
     loop {
-        match chunk_rx.recv_timeout(PARTIAL_LINE_FLUSH) {
+        let wait = next_flush.saturating_duration_since(Instant::now());
+        match chunk_rx.recv_timeout(wait) {
             Ok(chunk) => {
                 pending.extend_from_slice(&chunk);
                 if !emit_complete_stream_lines(&mut pending, stream, &sender) {
                     break;
+                }
+                if Instant::now() >= next_flush {
+                    if !flush_partial_stream_line(&mut pending, stream, &sender) {
+                        break;
+                    }
+                    next_flush = Instant::now() + PARTIAL_LINE_FLUSH;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !flush_partial_stream_line(&mut pending, stream, &sender) {
                     break;
                 }
+                next_flush = Instant::now() + PARTIAL_LINE_FLUSH;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = emit_complete_stream_lines(&mut pending, stream, &sender);
@@ -1467,76 +1477,18 @@ pub struct StepStartEvent {
     pub order: i32,
 }
 
-/// Capacity of the bounded step-publish channels (step starts and step logs).
-/// The executor runs on a dedicated synchronous thread, so every send is a
-/// non-blocking `try_send`: a stalled publisher surfaces as counted drops,
-/// never as executor backpressure or unbounded queue memory.
-pub const STEP_PUBLISH_CHANNEL_CAPACITY: usize = 1024;
+/// Total capacity of each bounded step-publish FIFO (step starts and step
+/// logs). The executor runs on a dedicated synchronous thread, so every send
+/// is a non-blocking `try_send`: a stalled publisher surfaces as counted
+/// drops, never as executor backpressure or unbounded queue memory.
+pub const STEP_PUBLISH_QUEUE_CAPACITY: usize = 1024 + 8192;
 
-/// Ordered overflow after the live channel fills. GitHub upload slowness
-/// must not erase step output: events spill here, still in send order, and
-/// drop only when this buffer is also full. The publisher drains the channel
-/// first, then this queue.
-pub const STEP_PUBLISH_OVERFLOW_CAPACITY: usize = 8192;
-
-/// Mutex-ordered overflow paired with a `Notify` so the publisher wakes
-/// when the live channel is empty but spilled events remain.
-#[derive(Debug)]
-pub struct StepPublishSpill<T> {
-    overflow: Mutex<VecDeque<T>>,
-    notify: Notify,
-}
-
-impl<T> StepPublishSpill<T> {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            overflow: Mutex::new(VecDeque::new()),
-            notify: Notify::new(),
-        })
-    }
-
-    /// Store `value` at the tail. Returns false only when the overflow is
-    /// already at `STEP_PUBLISH_OVERFLOW_CAPACITY`.
-    pub fn push(&self, value: T) -> bool {
-        let mut overflow = self
-            .overflow
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if overflow.len() >= STEP_PUBLISH_OVERFLOW_CAPACITY {
-            return false;
-        }
-        overflow.push_back(value);
-        self.notify.notify_one();
-        true
-    }
-
-    pub fn take_front(&self) -> Option<T> {
-        self.overflow
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop_front()
-    }
-
-    pub fn take_all(&self) -> Vec<T> {
-        self.overflow
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-            .collect()
-    }
-
-    pub async fn notified(&self) {
-        self.notify.notified().await;
-    }
-}
-
-/// Best-effort step-publish sender over a bounded channel plus optional
-/// ordered overflow.
+/// Best-effort step-publish sender over one bounded FIFO.
 ///
 /// Publishing is advisory — the authoritative step records travel in
-/// `ScriptJobResult` — so a full channel+overflow (stalled publisher) drops
-/// the event and bumps the counter instead of blocking the execution thread.
-/// The runner reads the counter at drain time for the forensics line.
+/// `ScriptJobResult` — so a full FIFO (stalled publisher) drops the event and
+/// bumps the counter instead of blocking the execution thread. The runner
+/// reads the counter at drain time for the forensics line.
 /// Exception: on the cancel path the executor never returns `ScriptJobResult`,
 /// so the streamed mirror (fed through this channel) is the persisted log's
 /// only source — drops there surface in the cancel-path truncation marker.
@@ -1544,7 +1496,6 @@ impl<T> StepPublishSpill<T> {
 pub struct BoundedStepSender<T> {
     sender: Sender<T>,
     drops: Arc<AtomicU64>,
-    spill: Option<Arc<StepPublishSpill<T>>>,
 }
 
 impl<T> BoundedStepSender<T> {
@@ -1552,15 +1503,6 @@ impl<T> BoundedStepSender<T> {
         Self {
             sender,
             drops: Arc::new(AtomicU64::new(0)),
-            spill: None,
-        }
-    }
-
-    pub fn with_spill(sender: Sender<T>, spill: Arc<StepPublishSpill<T>>) -> Self {
-        Self {
-            sender,
-            drops: Arc::new(AtomicU64::new(0)),
-            spill: Some(spill),
         }
     }
 
@@ -1574,20 +1516,14 @@ impl<T> BoundedStepSender<T> {
         self.drops.load(Ordering::Relaxed)
     }
 
-    /// Non-blocking best-effort send. A full channel spills into the ordered
-    /// overflow when one is attached. Drop (and count) only when the overflow
-    /// is also full, or when the publisher is gone. Authoritative records
-    /// travel in `ScriptJobResult` — except on the cancel path, where the
-    /// count feeds the truncation marker instead.
+    /// Non-blocking best-effort send. A full FIFO drops (and counts) the
+    /// event, or a closed FIFO counts it as unavailable. Authoritative
+    /// records travel in `ScriptJobResult` — except on the cancel path, where
+    /// the count feeds the truncation marker instead.
     pub fn send_best_effort(&self, value: T) {
         match self.sender.try_send(value) {
             Ok(()) => {}
-            Err(TrySendError::Full(value)) => {
-                if let Some(spill) = &self.spill
-                    && spill.push(value)
-                {
-                    return;
-                }
+            Err(TrySendError::Full(_)) => {
                 self.drops.fetch_add(1, Ordering::Relaxed);
             }
             Err(TrySendError::Closed(_)) => {
@@ -15944,6 +15880,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stream_reader_flushes_during_continuous_output() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader_thread =
+            thread::spawn(move || stream_reader(reader, CommandStream::Stdout, sender));
+        let writer_thread = thread::spawn(move || {
+            // Keep data arriving for longer than PARTIAL_LINE_FLUSH. A
+            // receive-timeout implementation never flushes this tail until
+            // EOF, while a real deadline must emit it while the stream stays
+            // busy.
+            for _ in 0..40 {
+                writer.write_all(b"x").unwrap();
+                writer.flush().unwrap();
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let first = receiver
+            .recv_timeout(Duration::from_millis(600))
+            .expect("continuous output must not postpone partial flushing until EOF");
+        assert_eq!(first.0, CommandStream::Stdout);
+        assert!(!first.1.is_empty());
+        assert!(first.1.bytes().all(|byte| byte == b'x'));
+
+        writer_thread.join().unwrap();
+        reader_thread.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stream_reader_holds_partial_workflow_commands_until_newline() {
         use std::os::unix::net::UnixStream;
         let (mut writer, reader) = UnixStream::pair().unwrap();
@@ -23239,7 +23206,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
@@ -23292,7 +23259,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let mut executor = DockerJobEngine::inert(StdoutCommandRunner::default())
             .with_step_log_sender(BoundedStepSender::new(sender));
 
@@ -23342,51 +23309,163 @@ fi"#
     }
 
     #[test]
-    fn bounded_step_sender_overflow_preserves_order_when_channel_full() {
+    fn bounded_step_sender_preserves_fifo_when_queue_reopens_after_full() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        let spill = StepPublishSpill::new();
-        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
-        for order in 0..5 {
+        let sender = BoundedStepSender::new(tx);
+
+        // Fill the one logical FIFO, consume its oldest item, then enqueue
+        // again. The item that occupied the former overflow position must
+        // remain ahead of the later send.
+        for order in 0..2 {
             sender.send_best_effort(StepStartEvent {
                 step_id: format!("step-{order}"),
                 display_name: String::new(),
                 order,
             });
         }
-        assert_eq!(sender.drops(), 0);
-        let mut received = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            received.push(event.order);
-        }
-        assert_eq!(received, vec![0, 1]);
-        let spilled: Vec<i32> = spill
-            .take_all()
-            .into_iter()
+        assert_eq!(rx.try_recv().unwrap().order, 0);
+        sender.send_best_effort(StepStartEvent {
+            step_id: "step-2".to_string(),
+            display_name: String::new(),
+            order: 2,
+        });
+        drop(sender);
+
+        let received: Vec<i32> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|event| event.order)
             .collect();
-        assert_eq!(spilled, vec![2, 3, 4]);
+        assert_eq!(received, vec![1, 2]);
     }
 
     #[test]
-    fn bounded_step_sender_drops_only_after_overflow_is_full() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let spill = StepPublishSpill::new();
-        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
-        let total = 1 + STEP_PUBLISH_OVERFLOW_CAPACITY + 3;
+    fn bounded_step_sender_preserves_fifo_for_interleaved_step_start_producers() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(3);
+        let sender = BoundedStepSender::new(tx);
+        let clone = sender.clone();
+
+        sender.send_best_effort(StepStartEvent {
+            step_id: "step-0".to_string(),
+            display_name: String::new(),
+            order: 0,
+        });
+        clone.send_best_effort(StepStartEvent {
+            step_id: "step-1".to_string(),
+            display_name: String::new(),
+            order: 1,
+        });
+        assert_eq!(rx.try_recv().unwrap().order, 0);
+        sender.send_best_effort(StepStartEvent {
+            step_id: "step-2".to_string(),
+            display_name: String::new(),
+            order: 2,
+        });
+        clone.send_best_effort(StepStartEvent {
+            step_id: "step-3".to_string(),
+            display_name: String::new(),
+            order: 3,
+        });
+        drop(sender);
+        drop(clone);
+
+        let received: Vec<i32> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|event| event.order)
+            .collect();
+        assert_eq!(received, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn bounded_step_sender_drops_only_after_single_fifo_is_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let sender = BoundedStepSender::new(tx);
+        let total = 2 + 3;
         for order in 0..total {
             sender.send_best_effort(StepStartEvent {
                 step_id: format!("step-{order}"),
                 display_name: String::new(),
-                order: order as i32,
+                order,
             });
         }
         assert_eq!(sender.drops(), 3);
-        assert_eq!(spill.take_all().len(), STEP_PUBLISH_OVERFLOW_CAPACITY);
+        assert_eq!(rx.try_recv().unwrap().order, 0);
+        assert_eq!(rx.try_recv().unwrap().order, 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn bounded_step_sender_preserves_fifo_for_interleaved_step_log_producers() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(3);
+        let sender = BoundedStepSender::new(tx);
+        let clone = sender.clone();
+
+        for (sender, order) in [(&sender, 0), (&clone, 1)] {
+            sender.send_best_effort(StepLog {
+                step_id: format!("step-{order}"),
+                display_name: String::new(),
+                order,
+                started_at: String::new(),
+                completed_at: String::new(),
+                lines: vec![format!("line-{order}")],
+                masks: Vec::new(),
+                annotations: Vec::new(),
+                telemetry: Vec::new(),
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                error_count: 0,
+                warning_count: 0,
+                notice_count: 0,
+                summary: String::new(),
+            });
+        }
+        assert_eq!(rx.try_recv().unwrap().order, 0);
+        sender.send_best_effort(StepLog {
+            step_id: "step-2".to_string(),
+            display_name: String::new(),
+            order: 2,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: vec!["line-2".to_string()],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        });
+        clone.send_best_effort(StepLog {
+            step_id: "step-3".to_string(),
+            display_name: String::new(),
+            order: 3,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: vec!["line-3".to_string()],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        });
+        drop(sender);
+        drop(clone);
+
+        let received: Vec<i32> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|event| event.order)
+            .collect();
+        assert_eq!(received, vec![1, 2, 3]);
     }
 
     #[test]
     fn bounded_step_sender_counts_drops_after_publisher_exit() {
-        let (tx, rx) = tokio::sync::mpsc::channel::<StepLog>(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (tx, rx) = tokio::sync::mpsc::channel::<StepLog>(STEP_PUBLISH_QUEUE_CAPACITY);
         let sender = BoundedStepSender::new(tx);
         drop(rx);
         sender.send_best_effort(StepLog {
@@ -23415,12 +23494,12 @@ fi"#
         // Brief benchmark: fill/drain cycles over the production capacity.
         // Asserts the ceiling generously (loaded CI must not flake); the
         // printed line is the measurement.
-        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let sender = BoundedStepSender::new(tx);
         let started = Instant::now();
         let mut received = 0u64;
         for _ in 0..100 {
-            for order in 0..STEP_PUBLISH_CHANNEL_CAPACITY {
+            for order in 0..STEP_PUBLISH_QUEUE_CAPACITY {
                 sender.send_best_effort(StepStartEvent {
                     step_id: "bench".to_string(),
                     display_name: String::new(),
@@ -23433,7 +23512,7 @@ fi"#
         }
         let elapsed = started.elapsed();
         eprintln!("step-publish throughput: {received} events in {elapsed:?}");
-        assert_eq!(received, 100 * STEP_PUBLISH_CHANNEL_CAPACITY as u64);
+        assert_eq!(received, 100 * STEP_PUBLISH_QUEUE_CAPACITY as u64);
         assert_eq!(sender.drops(), 0);
         assert!(
             elapsed < Duration::from_secs(60),
@@ -23456,7 +23535,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let mut executor = DockerJobEngine::inert(StreamingMaskRunner::default())
             .with_step_log_sender(BoundedStepSender::new(sender));
 
@@ -29647,7 +29726,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
@@ -29751,7 +29830,7 @@ bitcoin-processor-app.push=true")
             },
             sccache("sccache-last", "Run sccache-last"),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
@@ -29869,7 +29948,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),

@@ -18,7 +18,6 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     sync::{mpsc::Receiver, oneshot, Semaphore},
     task::JoinHandle,
@@ -44,8 +43,7 @@ use crate::{
     execution::condition_is_statically_false,
     executor::{
         BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
-        ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
-        STEP_PUBLISH_CHANNEL_CAPACITY,
+        ProcessCommandRunner, StepLog, StepStartEvent, STEP_PUBLISH_QUEUE_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -2771,53 +2769,16 @@ fn controller_lifecycle_for_daemon(
     }
 }
 
-fn invalidate_drain_hint_cache() {
-    if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
-        *cache = None;
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn reset_drain_hint_cache_for_tests() {
     // Test-only: a blocking lock is fine here (and must not silently skip
     // the reset). The production path above uses `try_lock` exclusively.
-    invalidate_drain_hint_cache();
+    if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
+        *cache = None;
+    }
     if let Ok(mut cache) = ADMISSION_HINT_CACHE.lock() {
         *cache = None;
     }
-}
-
-/// systemd `Restart=always` starts a new process after a Type=notify drain
-/// exit. The previous process latched a durable journal drain so slots would
-/// stop. If this process honors that leftover marker it returns `Ok(())`
-/// before `READY=1` and systemd reports `Failed with result 'protocol'`.
-///
-/// `Journal::clear_drain` is the restart/resume ownership transfer. The
-/// in-process SIGTERM latch is unchanged.
-fn reclaim_stale_journal_drain_for_supervised_start(journal_path: &Path) {
-    if draining() {
-        return;
-    }
-    if !journal_drain_hint(journal_path) {
-        return;
-    }
-    match velnor_control::journal::Journal::open(journal_path) {
-        Ok(mut journal) => match journal.clear_drain() {
-            Ok(true) => eprintln!(
-                "cleared leftover journal drain from a previous process; this start owns the journal"
-            ),
-            Ok(false) => {}
-            Err(error) => eprintln!(
-                "cannot clear leftover journal drain {}: {error}",
-                journal_path.display()
-            ),
-        },
-        Err(error) => eprintln!(
-            "cannot open journal {} to clear leftover drain: {error}",
-            journal_path.display()
-        ),
-    }
-    invalidate_drain_hint_cache();
 }
 
 /// Emit `drain.completed` exactly once per process, from whichever exit
@@ -2973,11 +2934,6 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // Journal path for the durable drain leg of the daemon gates below.
     // `None` (unresolvable config dir) degrades them to the static latch.
     let drain_journal = daemon_drain_journal(&args);
-    if supervised {
-        if let Some(path) = drain_journal.as_deref() {
-            reclaim_stale_journal_drain_for_supervised_start(path);
-        }
-    }
 
     // Reclaim credentials abandoned by a prior daemon before any slot can
     // accept a job. This runs once per daemon process, outside pass retries.
@@ -5487,8 +5443,11 @@ fn reclaim_orphan_job_containers_refreshing(
         .collect();
     // A sibling slot can persist a marker and create a container after the
     // first live-set snapshot. Re-read immediately before `rm --force`.
-    let live = match refresh_live() {
-        Ok(names) => names,
+    let candidates = match refresh_live() {
+        Ok(live) => owned
+            .into_iter()
+            .filter(|(_, job_container)| job_container.is_empty() || !live.contains(job_container))
+            .collect::<Vec<_>>(),
         Err(error) => {
             eprintln!(
                 "periodic orphan job-container reclaim skipped: live-set refresh failed: {}",
@@ -5497,18 +5456,19 @@ fn reclaim_orphan_job_containers_refreshing(
             return 0;
         }
     };
-    let stale: Vec<String> = owned
-        .into_iter()
-        .filter(|(_, job_container)| job_container.is_empty() || !live.contains(job_container))
-        .map(|(id, _)| id)
-        .collect();
-    if stale.is_empty() {
-        return 0;
+    let mut removed = 0usize;
+    for (id, job_container) in candidates {
+        match refresh_live() {
+            Ok(live) if job_container.is_empty() || !live.contains(&job_container) => {
+                let args = stale_job_container_remove_args(std::slice::from_ref(&id));
+                let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
+                removed += 1;
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
     }
-    let args = stale_job_container_remove_args(&stale);
-    let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let _ = docker(&argv);
-    stale.len()
+    removed
 }
 
 /// In-flight markers live under the daemon config root (`config_base` and
@@ -7548,21 +7508,16 @@ async fn handle_job_request(
             config_dir,
             &job.job_id,
         );
-        let step_start_spill = StepPublishSpill::new();
         let (step_start_tx, step_start_receiver) =
-            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_start_sender =
-            BoundedStepSender::with_spill(step_start_tx, Arc::clone(&step_start_spill));
+            tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
+        let step_start_sender = BoundedStepSender::new(step_start_tx);
         // Counter handles only: cloning the senders here would hold the
         // channels open past execution and the publishers would never drain.
         let step_start_drops = step_start_sender.drops_handle();
-        let step_timeline =
-            start_step_timeline_publisher(job.clone(), step_start_receiver, step_start_spill);
-        let step_log_spill = StepPublishSpill::new();
+        let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
         let (step_log_tx, step_log_receiver) =
-            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_log_sender =
-            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill));
+            tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
+        let step_log_sender = BoundedStepSender::new(step_log_tx);
         let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
@@ -7580,7 +7535,6 @@ async fn handle_job_request(
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
-            step_log_spill,
             console_log_path,
             Arc::clone(&streamed_step_logs),
         );
@@ -8711,7 +8665,6 @@ fn step_log_mirror_bytes(log: &StepLog) -> u64 {
 fn start_step_timeline_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepStartEvent>,
-    spill: Arc<StepPublishSpill<StepStartEvent>>,
 ) -> JoinHandle<()> {
     // Build Twirp client for Results Service step status updates if available.
     let twirp_client = job
@@ -8732,7 +8685,7 @@ fn start_step_timeline_publisher(
 
     tokio::spawn(async move {
         let mut change_order: i64 = 1;
-        while let Some(event) = recv_published(&mut receiver, &spill).await {
+        while let Some(event) = receiver.recv().await {
             // Send step "in-progress" update via Twirp Results Service
             if let Some(client) = &twirp_client {
                 let step = crate::protocol::TwirpStep {
@@ -8782,7 +8735,6 @@ fn start_step_timeline_publisher(
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepLog>,
-    spill: Arc<StepPublishSpill<StepLog>>,
     console_log_path: Option<PathBuf>,
     streamed_step_logs: Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
 ) -> JoinHandle<()> {
@@ -8878,30 +8830,11 @@ fn start_step_log_publisher(
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         'publish: loop {
             let first_log = loop {
-                match receiver.try_recv() {
-                    Ok(log) => break log,
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => {
-                        if let Some(log) = spill.take_front() {
-                            break log;
-                        }
-                        break 'publish;
-                    }
-                }
-                if let Some(log) = spill.take_front() {
-                    break log;
-                }
                 tokio::select! {
                     maybe = receiver.recv() => match maybe {
                         Some(log) => break log,
-                        None => {
-                            if let Some(log) = spill.take_front() {
-                                break log;
-                            }
-                            break 'publish;
-                        }
+                        None => break 'publish,
                     },
-                    _ = spill.notified() => continue,
                     _ = ping_interval.tick() => {
                         if let Some(ws) = ws_conn.as_mut()
                             && let Err(e) = publish_with_timeout(
@@ -8919,7 +8852,7 @@ fn start_step_log_publisher(
                     }
                 }
             };
-            let logs = step_log_batch(first_log, &mut receiver, &spill);
+            let logs = step_log_batch(first_log, &mut receiver);
             let mut processed = Vec::with_capacity(logs.len());
             let mut live_batches = Vec::new();
             for log in logs {
@@ -9102,42 +9035,9 @@ struct LiveFeedBatch {
     start_line: i64,
 }
 
-async fn recv_published<T>(receiver: &mut Receiver<T>, spill: &StepPublishSpill<T>) -> Option<T> {
-    loop {
-        match receiver.try_recv() {
-            Ok(value) => return Some(value),
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => return spill.take_front(),
-        }
-        if let Some(value) = spill.take_front() {
-            return Some(value);
-        }
-        tokio::select! {
-            maybe = receiver.recv() => {
-                return match maybe {
-                    Some(value) => Some(value),
-                    None => spill.take_front(),
-                };
-            }
-            _ = spill.notified() => {}
-        }
-    }
-}
-
-fn step_log_batch(
-    first: StepLog,
-    receiver: &mut Receiver<StepLog>,
-    spill: &StepPublishSpill<StepLog>,
-) -> Vec<StepLog> {
+fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepLog> {
     let mut logs = vec![first];
-    loop {
-        match receiver.try_recv() {
-            Ok(log) => logs.push(log),
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => break,
-        }
-    }
-    while let Some(log) = spill.take_front() {
+    while let Ok(log) = receiver.try_recv() {
         logs.push(log);
     }
     logs
@@ -15379,7 +15279,6 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
-    use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
 
@@ -16027,59 +15926,6 @@ mod tests {
         // No journal path degrades to the static latch however the latch is
         // set, so latch-only paths observe no behavior change.
         assert_eq!(effective_draining(None), draining());
-    }
-
-    #[test]
-    fn supervised_start_clears_leftover_journal_drain_from_prior_process() {
-        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
-        reset_drain_hint_cache_for_tests();
-        let dir = unique_temp_dir("stale-drain-reclaim");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("journal.db");
-        let mut journal = velnor_control::journal::Journal::open(&path).unwrap();
-        assert!(journal.set_drain(14).unwrap());
-        drop(journal);
-        reset_drain_hint_cache_for_tests();
-        assert!(journal_drain_hint(&path));
-        assert!(effective_draining(Some(&path)));
-
-        reclaim_stale_journal_drain_for_supervised_start(&path);
-
-        assert!(
-            !journal_drain_hint(&path),
-            "leftover drain must not survive a supervised start"
-        );
-        assert!(
-            !effective_draining(Some(&path)),
-            "Type=notify must not see a stale drain and exit before READY"
-        );
-        DRAINING.store(previous_draining, Ordering::SeqCst);
-        reset_drain_hint_cache_for_tests();
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn supervised_start_does_not_clear_drain_while_this_process_is_draining() {
-        let previous_draining = DRAINING.swap(true, Ordering::SeqCst);
-        reset_drain_hint_cache_for_tests();
-        let dir = unique_temp_dir("live-drain-kept");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("journal.db");
-        let mut journal = velnor_control::journal::Journal::open(&path).unwrap();
-        assert!(journal.set_drain(3).unwrap());
-        drop(journal);
-        reset_drain_hint_cache_for_tests();
-
-        reclaim_stale_journal_drain_for_supervised_start(&path);
-
-        reset_drain_hint_cache_for_tests();
-        assert!(
-            journal_drain_hint(&path),
-            "SIGTERM drain in this process must keep the journal marker"
-        );
-        DRAINING.store(previous_draining, Ordering::SeqCst);
-        reset_drain_hint_cache_for_tests();
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -17920,15 +17766,24 @@ jobs:
     #[test]
     fn reclaim_rechecks_in_flight_markers_immediately_before_rm() {
         let live = BTreeSet::new();
+        let refreshes = std::cell::Cell::new(0);
         let removed = reclaim_orphan_job_containers_refreshing(
             "/daemon/work",
             &live,
-            || Ok(BTreeSet::from(["velnor-job-new".to_owned()])),
+            || {
+                let n = refreshes.get();
+                refreshes.set(n + 1);
+                if n == 0 {
+                    Ok(BTreeSet::new())
+                } else {
+                    Ok(BTreeSet::from(["velnor-job-new".to_owned()]))
+                }
+            },
             |args| {
                 if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
                     return Some(std::process::Output {
                         status: success_exit_status(),
-                        stdout: b"id-new\n".to_vec(),
+                        stdout: b"id-dead\nid-new\n".to_vec(),
                         stderr: Vec::new(),
                     });
                 }
@@ -17936,6 +17791,13 @@ jobs:
                     return Some(std::process::Output {
                         status: success_exit_status(),
                         stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"inspect") && args.last() == Some(&"id-dead") {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"/daemon/work/slot-1\tvelnor-job-dead\n".to_vec(),
                         stderr: Vec::new(),
                     });
                 }
@@ -17947,28 +17809,46 @@ jobs:
                     });
                 }
                 if args.first() == Some(&"rm") {
-                    panic!(
-                        "a container admitted after the first snapshot must not be force-removed"
+                    let expected = stale_job_container_remove_args(&["id-dead".to_owned()]);
+                    assert_eq!(
+                        args,
+                        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+                        "late marker after the batch snapshot must keep id-new; rm is one-id"
                     );
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
                 }
                 None
             },
         );
-        assert_eq!(removed, 0);
+        assert_eq!(removed, 1);
     }
 
     #[test]
-    fn startup_prune_rechecks_in_flight_markers_immediately_before_rm() {
+    fn prune_rechecks_in_flight_markers_immediately_before_rm() {
         let live = BTreeSet::new();
+        let refreshes = std::cell::Cell::new(0);
+        let removed = std::cell::Cell::new(0);
         prune_stale_velnor_docker_resources_refreshing(
             "/daemon/work",
             &live,
-            || Ok(BTreeSet::from(["velnor-job-new".to_owned()])),
+            || {
+                let n = refreshes.get();
+                refreshes.set(n + 1);
+                if n == 0 {
+                    Ok(BTreeSet::new())
+                } else {
+                    Ok(BTreeSet::from(["velnor-job-new".to_owned()]))
+                }
+            },
             |args| {
                 if args == ["ps", "-aq", "--filter", "name=velnor-job"] {
                     return Some(std::process::Output {
                         status: success_exit_status(),
-                        stdout: b"id-new\n".to_vec(),
+                        stdout: b"id-dead\nid-new\n".to_vec(),
                         stderr: Vec::new(),
                     });
                 }
@@ -17976,6 +17856,13 @@ jobs:
                     return Some(std::process::Output {
                         status: success_exit_status(),
                         stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if args.first() == Some(&"inspect") && args.last() == Some(&"id-dead") {
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: b"/daemon/work/slot-1\tvelnor-job-dead\n".to_vec(),
                         stderr: Vec::new(),
                     });
                 }
@@ -17994,13 +17881,23 @@ jobs:
                     });
                 }
                 if args.first() == Some(&"rm") {
-                    panic!(
-                        "a container admitted after the first snapshot must not be force-removed"
+                    let expected = stale_job_container_remove_args(&["id-dead".to_owned()]);
+                    assert_eq!(
+                        args,
+                        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+                        "late marker after the batch snapshot must keep id-new; rm is one-id"
                     );
+                    removed.set(removed.get() + 1);
+                    return Some(std::process::Output {
+                        status: success_exit_status(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
                 }
                 None
             },
         );
+        assert_eq!(removed.get(), 1);
     }
 
     #[test]
@@ -25114,15 +25011,9 @@ runs:
         }))
         .unwrap();
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
-        let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let held = mirror.lock().await;
-        let mut publisher = start_step_log_publisher(
-            job,
-            receiver,
-            StepPublishSpill::new(),
-            None,
-            Arc::clone(&mirror),
-        );
+        let mut publisher = start_step_log_publisher(job, receiver, None, Arc::clone(&mirror));
         sender
             .send(partial_step_log("contended", &["line"], ""))
             .await
@@ -25143,6 +25034,34 @@ runs:
             .expect("publisher must drain after unlock")
             .unwrap();
         assert_eq!(mirror.lock().await.len(), 1);
+    }
+
+    #[test]
+    fn step_log_batch_preserves_fifo_when_queue_reopens_after_full() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .try_send(partial_step_log("step-0", &["line-0"], ""))
+            .unwrap();
+        sender
+            .try_send(partial_step_log("step-1", &["line-1"], ""))
+            .unwrap();
+
+        // Consume one item to reopen the single FIFO, then enqueue a later
+        // item. The former overflow position is represented by the queued
+        // item itself, so it must still be batched before the later send.
+        let first = receiver.try_recv().unwrap();
+        sender
+            .try_send(partial_step_log("step-2", &["line-2"], ""))
+            .unwrap();
+        drop(sender);
+
+        let logs = step_log_batch(first, &mut receiver);
+        assert_eq!(
+            logs.iter()
+                .map(|log| log.step_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step-0", "step-1", "step-2"]
+        );
     }
 
     #[tokio::test]
@@ -25246,9 +25165,8 @@ runs:
         // publisher (no receiver progress). The bounded channel must absorb
         // the burst as counted drops and the mirror must hold the ceiling —
         // neither may grow with the number of emitted events.
-        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let spill = StepPublishSpill::new();
-        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let started = Instant::now();
         let events: u64 = 100_000;
@@ -25270,12 +25188,12 @@ runs:
             mirror_guard.len(),
             mirror_guard.bytes(),
         );
-        let retained = STEP_PUBLISH_CHANNEL_CAPACITY as u64 + STEP_PUBLISH_OVERFLOW_CAPACITY as u64;
+        let retained = STEP_PUBLISH_QUEUE_CAPACITY as u64;
         assert_eq!(sender.drops(), events - retained);
         assert!(mirror_guard.len() <= STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
         assert!(mirror_guard.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
-        // The soak's overflow is fully accounted: every record past the
-        // entry cap was counted as an oldest-first eviction.
+        // Every record past the mirror entry cap was counted as an
+        // oldest-first eviction.
         assert_eq!(
             mirror_guard.evicted(),
             events - STREAMED_STEP_LOG_MIRROR_MAX_LOGS as u64
@@ -25286,14 +25204,13 @@ runs:
             elapsed < Duration::from_secs(60),
             "soak sender blocked: {elapsed:?}"
         );
-        // The stalled publisher still drains the live channel plus the
-        // ordered overflow once it makes progress — nothing was lost except
-        // the counted drops past both buffers.
+        // The stalled publisher still drains the bounded FIFO once it makes
+        // progress — nothing was lost except the counted drops past its
+        // capacity.
         let mut drained = 0u64;
         while rx.try_recv().is_ok() {
             drained += 1;
         }
-        drained += spill.take_all().len() as u64;
         assert_eq!(drained, retained);
     }
 
