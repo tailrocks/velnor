@@ -8709,6 +8709,46 @@ channel = "stable"
             "{preview}"
         );
 
+        let guest_start = must_some(preview.find("  guest-payload:\n"), "guest payload job");
+        let guest_len = must_some(
+            preview[guest_start..].find("\n  metadata:"),
+            "guest payload job boundary",
+        );
+        let guest = &preview[guest_start..guest_start + guest_len];
+        assert_eq!(guest.matches("runs-on:").count(), 1, "{guest}");
+        assert!(
+            guest.contains(&format!(
+                "    runs-on: {}\n",
+                yaml_scalar(&scanned.config.github_runner)
+            )),
+            "the cross-target guest producer must stay on the configured hosted runner: {guest}"
+        );
+        assert!(
+            !guest.contains("runs-on: [self-hosted"),
+            "the guest producer must never enter the Velnor lane: {guest}"
+        );
+
+        let ci_units = must_some(
+            surface
+                .files
+                .get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "Rust unit workflow",
+        );
+        for unit in [
+            "rust-velnor-runner",
+            "rust-velnorctl",
+            "rust-production-topology",
+        ] {
+            assert!(
+                ci_units.contains(&format!("name: \"GitHub / {unit}\"")),
+                "native verification unit lost its GitHub lane: {unit}: {ci_units}"
+            );
+            assert!(
+                ci_units.contains(&format!("name: \"Velnor / {unit}\"")),
+                "native verification unit lost its Docker-backed Velnor lane: {unit}: {ci_units}"
+            );
+        }
+
         let restore = must_some(preview.find("- name: Restore guest seed"), "restore step");
         let agent = must_some(
             preview.find("- name: Build guest agent for rootfs"),
