@@ -3056,7 +3056,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         let backend = crate::execution::load_execution_file(&config_base, None)
             .ok()
             .map(|file| file.backend());
-        maybe_startup_host_docker_reclaim(backend, &daemon_id);
+        maybe_startup_host_docker_reclaim(backend, &daemon_id, &config_base);
         if let Some(sink) = crate::ops::global() {
             sink.emit(
                 velnor_model::EventReason::GcCompleted,
@@ -4874,11 +4874,13 @@ fn validated_slot_count(slots: usize) -> Result<NonZeroU32> {
 fn maybe_startup_host_docker_reclaim(
     backend: Option<velnor_model::ExecutionBackendKind>,
     daemon_id: &str,
+    config_base: &Path,
 ) {
     maybe_startup_host_docker_reclaim_with(
         backend,
         daemon_id,
-        prune_stale_velnor_docker_resources,
+        config_base,
+        |daemon_id, config_base| prune_stale_velnor_docker_resources(daemon_id, config_base),
         |id| crate::docker_lease::reclaim_daemon_orphan_jobs(id, crate::docker::client::host_call),
     );
 }
@@ -4886,7 +4888,8 @@ fn maybe_startup_host_docker_reclaim(
 fn maybe_startup_host_docker_reclaim_with(
     backend: Option<velnor_model::ExecutionBackendKind>,
     daemon_id: &str,
-    mut prune: impl FnMut(&str),
+    config_base: &Path,
+    mut prune: impl FnMut(&str, &Path),
     mut reclaim: impl FnMut(&str) -> anyhow::Result<()>,
 ) {
     if let Some(reason) =
@@ -4895,7 +4898,7 @@ fn maybe_startup_host_docker_reclaim_with(
         eprintln!("startup host Docker reclaim skipped: {reason}");
         return;
     }
-    prune(daemon_id);
+    prune(daemon_id, config_base);
     // Reclaim job-id-labelled objects (precreated job environments and
     // their guest siblings) orphaned by the previous drain/restart. Runs
     // before any slot accepts a job, so nothing this boot created can be
@@ -4942,12 +4945,16 @@ fn maybe_startup_host_docker_reclaim_with(
 /// ("all predefined address pools have been fully subnetted"). Pruning on
 /// startup makes a crash self-healing. Best-effort — never fails startup.
 ///
-/// Force-remove. Startup runs before slots accept jobs, so any still-Up
-/// container labelled with this daemon is an orphan from a previous
-/// generation (cancelled run, 401 completion, crash). Non-force `docker rm`
-/// leaves those Up, their networks stay allocated, and the next job fails
-/// with the address-pool error above. Foreign daemons are not in `containers`.
-fn prune_stale_velnor_docker_resources(daemon_id: &str) {
+/// Force-remove orphaned containers. Running containers whose slot still
+/// records an in-flight job (a slot runner survived daemon restart) are
+/// skipped so startup reclaim cannot delete a live job's environment. Any
+/// other still-Up container labelled with this daemon is an orphan from a
+/// previous generation (cancelled run, 401 completion, crash). Non-force
+/// `docker rm` leaves those Up, their networks stay allocated, and the next
+/// job fails with the address-pool error above. Foreign daemons are not in
+/// `containers`.
+fn prune_stale_velnor_docker_resources(daemon_id: &str, config_base: &Path) {
+    let live_job_containers = startup_live_job_container_names(config_base);
     let docker = |args: &[&str]| {
         let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
         let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
@@ -4989,18 +4996,27 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     ]));
     container_ids.sort();
     container_ids.dedup();
+    const STARTUP_CONTAINER_INSPECT_FORMAT: &str =
+        r#"{{ index .Config.Labels "velnor.daemon-id" }}{{ "\t" }}{{ index .Config.Labels "velnor.job-id" }}"#;
     let containers = container_ids
         .into_iter()
         .filter(|id| {
             docker(&[
                 "inspect",
                 "--format",
-                "{{ index .Config.Labels \"velnor.daemon-id\" }}",
+                STARTUP_CONTAINER_INSPECT_FORMAT,
                 id,
             ])
             .filter(|output| output.status.success())
             .is_some_and(|output| {
-                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut parts = text.trim().split('\t');
+                let owner = parts.next().unwrap_or("");
+                let job_container = parts.next().unwrap_or("");
+                if !job_container.is_empty() && live_job_containers.contains(job_container) {
+                    return false;
+                }
+                daemon_owns_resource(owner, daemon_id)
             })
         })
         .collect::<Vec<_>>();
@@ -5052,6 +5068,32 @@ fn stale_job_container_remove_args(ids: &[String]) -> Vec<String> {
     let mut args = vec!["rm".to_string(), "--force".to_string()];
     args.extend(ids.iter().cloned());
     args
+}
+
+/// Container names (`velnor.job-id`) for jobs a slot runner may still be
+/// executing after daemon restart. The in-flight marker is written before any
+/// Docker environment is created and cleared only after terminal cleanup.
+fn startup_live_job_container_names(config_base: &Path) -> BTreeSet<String> {
+    let mut protected = BTreeSet::new();
+    let mut scan_slot = |dir: &Path| {
+        if let Ok(Some(record)) = load_in_flight_job(dir) {
+            protected.insert(job_container_name_for_id(&record.job_id));
+        }
+    };
+    scan_slot(config_base);
+    let slots = config_base.join("slots");
+    if let Ok(entries) = std::fs::read_dir(slots) {
+        for entry in entries.flatten() {
+            if entry.file_type().ok().is_some_and(|kind| kind.is_dir()) {
+                scan_slot(&entry.path());
+            }
+        }
+    }
+    protected
+}
+
+fn job_container_name_for_id(job_id: &str) -> String {
+    format!("velnor-job-{}", sanitize_path_segment(job_id))
 }
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
@@ -17128,10 +17170,12 @@ jobs:
         for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
             let mut pruned = false;
             let mut reclaimed = false;
+            let config_base = unique_temp_dir("startup-skip");
             maybe_startup_host_docker_reclaim_with(
                 backend,
                 "daemon-x",
-                |_| pruned = true,
+                &config_base,
+                |_, _| pruned = true,
                 |_| {
                     reclaimed = true;
                     Ok(())
@@ -17146,10 +17190,12 @@ jobs:
     fn startup_host_docker_reclaim_runs_when_docker_selected() {
         let mut pruned = None;
         let mut reclaimed = None;
+        let config_base = unique_temp_dir("startup-run");
         maybe_startup_host_docker_reclaim_with(
             Some(velnor_model::ExecutionBackendKind::Docker),
             "daemon-x",
-            |id| pruned = Some(id.to_string()),
+            &config_base,
+            |id, _| pruned = Some(id.to_string()),
             |id| {
                 reclaimed = Some(id.to_string());
                 Ok(())
@@ -17157,6 +17203,35 @@ jobs:
         );
         assert_eq!(pruned.as_deref(), Some("daemon-x"));
         assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn startup_live_job_container_names_collects_single_and_multislot_markers() {
+        let base = unique_temp_dir("startup-live-containers");
+        std::fs::create_dir_all(base.join("slots/slot-1")).unwrap();
+        let context = |journal_dir: PathBuf| RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir,
+            journal_state: RunServiceJobJournalState::Accepted,
+        };
+        let mut job_a = minimal_job_with_variables(serde_json::json!({}));
+        job_a.job_id = "job-a".into();
+        persist_in_flight_job(&base, &context(base.join("journal.db")), &job_a).unwrap();
+        let mut job_b = minimal_job_with_variables(serde_json::json!({}));
+        job_b.job_id = "job/b".into();
+        persist_in_flight_job(
+            &base.join("slots/slot-1"),
+            &context(base.join("journal.db")),
+            &job_b,
+        )
+        .unwrap();
+        let names = startup_live_job_container_names(&base);
+        assert!(names.contains("velnor-job-job-a"));
+        assert!(names.contains("velnor-job-job_b"));
+        assert_eq!(names.len(), 2);
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
