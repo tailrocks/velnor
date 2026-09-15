@@ -284,7 +284,7 @@ fn write_member_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(),
 /// check-then-rename gap is the accepted single-writer stance; the rename
 /// itself never follows a symbolic link at the destination path.
 fn write_and_rename(temp: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -293,7 +293,10 @@ fn write_and_rename(temp: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Re
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(temp, final_path)
+    std::fs::rename(temp, final_path)?;
+    let mut permissions = std::fs::metadata(final_path)?.permissions();
+    permissions.set_mode(0o644);
+    std::fs::set_permissions(final_path, permissions)
 }
 
 fn io_error(message: impl std::fmt::Display, error: std::io::Error) -> CommandError {
