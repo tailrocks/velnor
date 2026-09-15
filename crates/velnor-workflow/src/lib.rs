@@ -3406,9 +3406,19 @@ fn generated_files_with_surface(
     files.insert(PathBuf::from(".github/ci/project.toml"), config.toml());
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
-        if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
-            files.insert(path, content.clone());
-            continue;
+        // Declared aggregates render before kind workflows are packed into
+        // shard files, so their callers still name only `ci-unit-rust.yml`.
+        // Re-render them from the assigned units so every `ci-unit-*.yml`
+        // shard gets a group-* caller and a ci-required need.
+        let surface_aggregates_predates_shards = matches!(
+            workflow_file.as_str(),
+            "ci-pr.yml" | "ci-pull-request.yml" | "ci-main.yml" | "nightly.yml"
+        );
+        if !surface_aggregates_predates_shards {
+            if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
+                files.insert(path, content.clone());
+                continue;
+            }
         }
         let content = config
             .workflow_templates
@@ -9817,6 +9827,75 @@ channel = "stable"
         assert!(crate_workflow.contains("HEAD_SHA: ${{ inputs.head_sha }}"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'velnor'"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'github'"));
+    }
+
+    #[test]
+    fn rust_kind_shards_get_aggregate_group_callers() {
+        let scanned = must(
+            scan_target(&fixture_root(), RunnerMode::Both, "main"),
+            "scan fixture for rust shard callers",
+        );
+        let mut config = scanned.config;
+        config.velnor_labels = FIXTURE_LABELS
+            .iter()
+            .map(|label| (*label).to_owned())
+            .collect();
+        let rust = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Rust)
+                .cloned(),
+            "fixture rust unit",
+        );
+        // KIND_WORKFLOW_SHARD_BUDGET is 480 KiB; each both-lane rust unit is
+        // roughly 15 KiB. Thirty extra units overflow into ci-unit-rust-2.yml.
+        for index in 0..32 {
+            let mut unit = rust.clone();
+            unit.id = format!("rust-shard-pad{index:02}");
+            unit.label = format!("Rust crate (shard-pad{index:02})");
+            config.units.push(unit);
+        }
+        let surface = must(
+            crate::primitives::generate(
+                &fixture_root(),
+                &scanned.shape,
+                &config,
+                scanned.generation.as_ref(),
+            ),
+            "render surface before shard assignment",
+        );
+        config.units.clone_from(&surface.units);
+        let files = must(
+            generated_files_with_surface(&config, Some(&surface)),
+            "generate after shard assignment",
+        );
+        assert!(
+            files.contains_key(&PathBuf::from(".github/workflows/ci-unit-rust-2.yml")),
+            "padding must emit a second rust shard so this locks the caller bug"
+        );
+        for name in ["ci-pr.yml", "ci-main.yml", "nightly.yml"] {
+            let workflow = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(name)),
+                name,
+            );
+            assert!(
+                workflow.contains("  group-rust-2:\n"),
+                "{name} must declare a group-rust-2 caller:\n{workflow}"
+            );
+            assert!(
+                workflow.contains("uses: ./.github/workflows/ci-unit-rust-2.yml"),
+                "{name} must invoke ci-unit-rust-2.yml:\n{workflow}"
+            );
+            assert!(
+                workflow.contains("group-rust-2"),
+                "{name} ci-required must need group-rust-2:\n{workflow}"
+            );
+            assert!(
+                workflow.contains("rust-2_matrix"),
+                "{name} plan must expose rust-2_matrix:\n{workflow}"
+            );
+        }
     }
 
     #[test]
