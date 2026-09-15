@@ -5174,8 +5174,8 @@ jobs:
             );
             assert_eq!(
                 job.matches(POLICY_REVISION).count(),
-                3,
-                "{name} must use the policy revision for the cache key, the install pin, and the audit env"
+                5,
+                "{name} must use the policy revision for the cache key, the install pin, the audit env, and the two rev-keyed cache-path uses"
             );
         }
     }
