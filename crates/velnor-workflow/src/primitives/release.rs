@@ -584,6 +584,17 @@ fn render_guest_seed_assemble(
         if: steps.guest-seed-reuse.outputs.restored != 'true'
         run: |
           set -euo pipefail
+          # Hosted mold setup replaces /usr/bin/ld. Linux kconfig then fails
+          # closed with "ld: unknown linker" / "this linker is not supported".
+          if [ -x /usr/bin/ld.bfd ]; then
+            if [ "$(id -u)" -eq 0 ]; then
+              ln -sf /usr/bin/ld.bfd /usr/bin/ld
+            else
+              sudo ln -sf /usr/bin/ld.bfd /usr/bin/ld
+            fi
+          fi
+          ld --version | grep -Eiq 'GNU (ld|gold)|bfd' \
+            || {{ echo "::error::kernel build needs GNU ld; mold must not own /usr/bin/ld" >&2; exit 1; }}
           mkdir -p dist/microvm
           agent="target/$TARGET/release/{agent_bin}"
           {cargo_cmd} run --locked --release --package {package} --bin {image_bin} -- \
@@ -621,10 +632,17 @@ fn guest_arch_matrix(config: &ProjectConfig) -> String {
         ("x86_64", "x86_64-unknown-linux-gnu"),
         ("aarch64", "aarch64-unknown-linux-gnu"),
     ] {
+        // aarch64 guest-agent + aws-lc/openssl need native headers. Crossing
+        // on ubuntu-24.04 with only gcc-aarch64-linux-gnu fails closed
+        // (bits/libc-header-start.h / sys/types.h). The image lane already
+        // names GitHub's hosted arm64 label for the same reason.
+        let runner = match arch {
+            "aarch64" => "ubuntu-24.04-arm".to_owned(),
+            _ => yaml_scalar(&config.github_runner),
+        };
         let _ = writeln!(
             matrix,
-            "          - arch: {arch}\n            target: {target}\n            runner: {}",
-            release_runner(config, target),
+            "          - arch: {arch}\n            target: {target}\n            runner: {runner}",
         );
     }
     matrix
@@ -673,7 +691,10 @@ fn render_guest_payload_job(
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
             mmdebstrap debootstrap arch-test
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or
+            # vendored openssl (sys/types.h / bits/libc-header-start.h).
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
           else
             sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
             sudo update-binfmts --enable qemu-aarch64 || true
@@ -712,9 +733,8 @@ fn render_guest_payload_job(
         ("", "")
     };
     Some(format!(
-        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n{needs}    runs-on: {guest_runner}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm/*\n          if-no-files-found: error\n",
+        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n{needs}    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm/*\n          if-no-files-found: error\n",
         matrix = matrix,
-        guest_runner = yaml_scalar(&config.github_runner),
     ))
 }
 
@@ -1494,7 +1514,7 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         sign_job.is_some(),
     ));
     format!(
-        "{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{jobs}",
+        "{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n{jobs}",
         yaml_scalar(&config.default_branch),
         paths = release_watch_paths(config),
     )
@@ -3982,8 +4002,9 @@ mod tests {
             panic!("identity fixture must carry a release contract")
         };
         let preview = super::render_preview(&config, Some(release));
-        // The rolling lane never cancels a replace in progress.
-        assert!(preview.contains("cancel-in-progress: false"), "{preview}");
+        // A newer main must cancel a stale preview so it cannot publish after
+        // the current tip; only one run is active, so replaces cannot race.
+        assert!(preview.contains("cancel-in-progress: true"), "{preview}");
         // Identity resolves one preview version from the crate manifest.
         let identity = yaml_job(&preview, "identity");
         assert!(identity.contains("name=Preview $version"), "{identity}");
@@ -4202,6 +4223,22 @@ mod tests {
             );
             assert!(preview.contains(&format!("--bin {agent}")), "{preview}");
             assert!(preview.contains(&format!("--bin {image}")), "{preview}");
+            assert!(
+                preview.contains("runs-on: ${{ matrix.runner }}"),
+                "guest payload must honor the per-arch runner: {preview}"
+            );
+            assert!(
+                preview.contains("runner: ubuntu-24.04-arm"),
+                "aarch64 guest payload must build on hosted arm64: {preview}"
+            );
+            assert!(
+                preview.contains("libc6-dev-arm64-cross"),
+                "aarch64 guest payload must install the cross sysroot: {preview}"
+            );
+            assert!(
+                preview.contains("ln -sf /usr/bin/ld.bfd /usr/bin/ld"),
+                "kernel build must restore GNU ld after mold: {preview}"
+            );
             assert!(!preview.contains("velnor-guest-"), "{preview}");
             assert!(
                 !preview.contains("velnor-workflow release package-guest"),
