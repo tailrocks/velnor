@@ -40,6 +40,7 @@ pub fn velnor_runner_display() -> String {
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_MAX_TIME_SECS: u64 = 5;
+const GITHUB_CONTENTS_MAX_TIME_SECS: u64 = 30;
 const GITHUB_CURL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const OAUTH_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
@@ -1206,10 +1207,89 @@ impl RunnerKeyPair {
 #[derive(Clone)]
 pub struct RegistrationClient;
 
-struct GithubHttpResponse {
-    status: u16,
-    body: String,
-    headers: HeaderMap,
+pub(crate) struct GithubHttpResponse {
+    pub(crate) status: u16,
+    pub(crate) body: String,
+    pub(crate) headers: HeaderMap,
+}
+
+/// Read an authenticated raw GitHub Contents response through the selected
+/// host transport. Native mode keeps the existing blocking client; curl mode
+/// uses the typed argv/header-pipe path and never falls back to native.
+pub(crate) fn github_contents_request(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    bearer_token: &str,
+    max_body_bytes: usize,
+) -> Result<GithubHttpResponse> {
+    let transport = github_http_transport()?;
+    validate_authenticated_url(url)?;
+    match transport {
+        "native" => {
+            let response = client
+                .get(url)
+                .bearer_auth(bearer_token)
+                .header(ACCEPT, "application/vnd.github.raw+json")
+                .header("X-GitHub-Api-Version", "2026-03-10")
+                .timeout(Duration::from_secs(GITHUB_CONTENTS_MAX_TIME_SECS))
+                .send()
+                .with_context(|| {
+                    format!(
+                        "send native GitHub Contents request {}",
+                        redacted_authenticated_url(url)
+                    )
+                })?;
+            let status = response.status().as_u16();
+            let headers = response.headers().clone();
+            let content_length = response.content_length();
+            let body = read_bounded_http_body(response, content_length, max_body_bytes)?;
+            Ok(GithubHttpResponse {
+                status,
+                body,
+                headers,
+            })
+        }
+        "curl" => {
+            let redacted_url = redacted_authenticated_url(url);
+            let spec = curl_command_args(
+                "GET",
+                url,
+                bearer_token,
+                None,
+                GITHUB_CONTENTS_MAX_TIME_SECS,
+                "application/vnd.github.raw+json",
+                Some("2026-03-10"),
+            )
+            .with_context(|| format!("build curl GitHub Contents request {redacted_url}"))?;
+            let response = run_curl_command(spec)
+                .with_context(|| format!("send curl GitHub Contents request {redacted_url}"))?;
+            if response.body.len() > max_body_bytes {
+                anyhow::bail!("GitHub Contents response exceeds {max_body_bytes} bytes");
+            }
+            Ok(response)
+        }
+        other => bail!("github HTTP transport selector returned an unknown value: {other}"),
+    }
+}
+
+pub(crate) fn read_bounded_http_body<R: Read>(
+    reader: R,
+    content_length: Option<u64>,
+    max_body_bytes: usize,
+) -> Result<String> {
+    let max_body_bytes = u64::try_from(max_body_bytes).context("metadata body limit overflows")?;
+    if content_length.is_some_and(|length| length > max_body_bytes) {
+        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+    }
+    let mut body =
+        Vec::with_capacity(content_length.unwrap_or_default().min(max_body_bytes) as usize);
+    reader
+        .take(max_body_bytes.saturating_add(1))
+        .read_to_end(&mut body)?;
+    if body.len() > max_body_bytes as usize {
+        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+    }
+    String::from_utf8(body).context("decode GitHub response body as UTF-8")
 }
 
 fn github_error_from_response(action: &str, response: GithubHttpResponse) -> anyhow::Error {
