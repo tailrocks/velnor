@@ -2656,16 +2656,6 @@ pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Lifecycle drain unification (steps 1-4), gated by `VELNOR_JOURNAL_DRAIN=1`
-/// and default off. With the flag off every reader below collapses to the
-/// static latch and the pre-unification path is behaviorally identical on
-/// marker-free journals. A latched marker still drains with the flag off
-/// (fail-closed): the flag gates the new signal legs and the edge write,
-/// never the durable marker itself.
-pub(crate) fn journal_drain_enabled() -> bool {
-    std::env::var("VELNOR_JOURNAL_DRAIN").is_ok_and(|value| value == "1")
-}
-
 /// Cached journal-drain reads: one zero-timeout `SELECT` per journal path at
 /// most this often. Poll boundaries tick every ~2s, so a 2s TTL bounds each
 /// boundary to one SQLite open without letting a drain order go stale.
@@ -2677,14 +2667,11 @@ static DRAIN_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> =
     std::sync::Mutex::new(None);
 
 /// Non-blocking journal-drain hint for slot and daemon poll boundaries.
-/// False with the flag off, on any read failure, or when no marker is
-/// latched; never blocks on a writer's lock — or on the cache mutex: a
-/// contended cache degrades to a fresh zero-timeout read (and a skipped
-/// store), which is always safe because the cache is a pure TTL overlay.
+/// False on any read failure or when no marker is latched; never blocks on a
+/// writer's lock — or on the cache mutex: a contended cache degrades to a
+/// fresh zero-timeout read (and a skipped store), which is always safe because
+/// the cache is a pure TTL overlay.
 pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
-    if !journal_drain_enabled() {
-        return false;
-    }
     let now = Instant::now();
     if let Ok(cache) = DRAIN_HINT_CACHE.try_lock()
         && let Some((path, hint, at)) = cache.as_ref()
@@ -2701,9 +2688,9 @@ pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
     hint
 }
 
-/// Effective drain signal at a poll boundary: the static signal latch, or
-/// (flag-gated) the cached journal hint. `None` degrades to the latch for
-/// paths that cannot name their journal.
+/// Effective drain signal at a poll boundary: the static signal latch or the
+/// cached journal hint. `None` degrades to the latch for paths that cannot
+/// name their journal.
 pub(crate) fn effective_draining(journal_path: Option<&Path>) -> bool {
     draining() || journal_path.is_some_and(journal_drain_hint)
 }
@@ -2717,16 +2704,13 @@ fn daemon_drain_journal(args: &DaemonArgs) -> Option<PathBuf> {
 }
 
 /// Thread the operational store plus the explicit lifecycle ledger slug to
-/// the supervised controller. `None` with the flag off (or when the store
-/// cannot be reopened for supervision): the controller then drains on the
-/// signal latch plus the journal marker only.
+/// the supervised controller. `None` is used only when the store cannot be
+/// reopened for supervision; the controller still drains on the signal latch
+/// plus the journal marker.
 fn controller_lifecycle_for_daemon(
     args: &DaemonArgs,
     sink: &crate::ops::OpsSink,
 ) -> Option<crate::node::controller::ControllerLifecycle> {
-    if !journal_drain_enabled() {
-        return None;
-    }
     let path = args
         .state_db
         .clone()
@@ -2904,7 +2888,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         start_drain_listener(config_base);
     }
 
-    // Journal path for the flag-gated drain leg of the daemon gates below.
+    // Journal path for the durable drain leg of the daemon gates below.
     // `None` (unresolvable config dir) degrades them to the static latch.
     let drain_journal = daemon_drain_journal(&args);
 
@@ -4472,13 +4456,12 @@ fn reserve_capacity_permits(config_base: &Path, args: &DaemonArgs, desired: u32)
     std::fs::create_dir_all(config_base)?;
     let mut journal = Journal::open(config_base.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
-    // Unified drain (flag-gated, default off): a draining daemon reserves no
-    // fresh capacity. The reducer would reject the permits anyway.
-    if journal_drain_enabled()
-        && journal
-            .materialized_state()
-            .map(|state| state.drain_active)
-            .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+    // A draining daemon reserves no fresh capacity. The reducer rejects the
+    // same event too, closing the race between this read and the apply.
+    if journal
+        .materialized_state()
+        .map(|state| state.drain_active)
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
     {
         return Ok(());
     }
@@ -6320,9 +6303,9 @@ async fn handle_v2_message(
     // recorded, do not make the request: an unrecorded acquisition is the exact
     // failure this write exists to prevent, and the broker redelivers.
     let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
-    // Unified drain (flag-gated, default off): never start an acquisition
-    // while draining. The broker redelivers to a live runner; this slot
-    // exits at its next idle poll boundary.
+    // Unified drain: never start an acquisition while draining. The broker
+    // redelivers to a live runner; this slot exits at its next idle poll
+    // boundary.
     let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
     if journal_drain_hint(&acquisition_drain_journal) {
         forensics.broker(&format!(

@@ -483,28 +483,12 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut metrics = MetricsPublisher::start(&args.state_dir);
     let lifecycle = args.lifecycle.as_ref().and_then(ActiveLifecycle::bind);
     loop {
-        // Unified drain (flag-gated, default off): the signal latch, the
-        // durable journal marker, or a fresh lifecycle `draining` desired
-        // state all converge on the same child-drain exit. With the flag
-        // off the static path is behaviorally identical on marker-free
-        // journals; a latched marker still drains (fail-closed, below).
-        if crate::runner::journal_drain_enabled()
-            && should_drain(crate::runner::draining(), &journal, lifecycle.as_ref())
-        {
+        // Unified drain: the signal latch, durable journal marker, or fresh
+        // lifecycle `draining` desired state all converge on one child-drain
+        // exit. The lifecycle ledger is now the production path, not a
+        // separately enabled compatibility mode.
+        if should_drain(crate::runner::draining(), &journal, lifecycle.as_ref()) {
             drain_edge(&mut journal, lifecycle.as_ref());
-            drain_children(&journal, &mut slots, &mut jobs).await?;
-            metrics.update(&slots, &jobs, last_reconcile_duration_ms);
-            metrics.stop_and_publish().await?;
-            return Ok(());
-        }
-        // Fail-closed with the flag off: a marker latched by an earlier
-        // flag-on run is still a durable drain order, and the reducer
-        // already rejects new work against it unconditionally. The flag
-        // gates the new signal legs (fresh lifecycle desired, hint cache)
-        // and the edge write — never the marker itself.
-        if crate::runner::draining()
-            || (!crate::runner::journal_drain_enabled() && journal_marker_latched(&journal))
-        {
             drain_children(&journal, &mut slots, &mut jobs).await?;
             metrics.update(&slots, &jobs, last_reconcile_duration_ms);
             metrics.stop_and_publish().await?;
@@ -626,10 +610,9 @@ fn job_process_counts<'a>(job_ids: impl Iterator<Item = &'a String>) -> (usize, 
     })
 }
 
-/// Durable marker leg of the drain signal, shared by the flag-on
-/// `should_drain` and the flag-off fail-closed arm. Unreadable is not a
-/// drain order here: a store or journal blip must not tear down
-/// supervision, while a marker any reader can see still does.
+/// Durable marker leg of the drain signal. Unreadable is not a drain order
+/// here: a store or journal blip must not tear down supervision, while a
+/// marker any reader can see still does.
 fn journal_marker_latched(journal: &Journal) -> bool {
     journal
         .materialized_state()
@@ -843,11 +826,10 @@ async fn reconcile_once(
     // heartbeat is the only fresh local proof that prevents a double spawn.
     ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
     let state = journal.materialized_state()?;
-    // Unified drain (flag-gated, default off): the loop top already exits on
-    // drain, so this only closes the race where another process latches the
-    // marker after this cycle's check. No new permits while draining; the
-    // reducer would reject them anyway.
-    let permits_gated = crate::runner::journal_drain_enabled() && state.drain_active;
+    // The loop top exits on drain, so this closes the race where another
+    // process latches the marker after this cycle's check. No new permits
+    // while draining; the reducer rejects them too.
+    let permits_gated = state.drain_active;
     for index in 1..=total {
         if permits_gated {
             continue;
@@ -2915,7 +2897,7 @@ fn kill_draining_jobs(
 /// `lifecycle` carries the operational-store handle plus the explicit
 /// lifecycle ledger slug. That slug is the hostname-derived daemon slug and
 /// differs from `scope` (the slot-id prefix); the daemon maps both at its
-/// call site. `None` (or flag off) drains on latch plus journal only.
+/// call site. `None` drains on the signal latch plus journal marker only.
 pub async fn supervise_from_daemon(
     state_dir: PathBuf,
     scope: String,
