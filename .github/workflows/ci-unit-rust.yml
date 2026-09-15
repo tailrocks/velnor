@@ -101,12 +101,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-500ae3b986045766c238f2da4c9ccef459678f69-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-8decfeeb8599345c4d047301550ffd0e894fc06f-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 500ae3b986045766c238f2da4c9ccef459678f69
+          EXPECTED_REVISION: 8decfeeb8599345c4d047301550ffd0e894fc06f
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -165,7 +165,7 @@ jobs:
           fi
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -179,7 +179,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -187,7 +187,7 @@ jobs:
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -200,26 +200,26 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore cargo bin toolchain
         if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-cargo-bin-toolchain
+        id: cargo-bin-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin
           key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
       - name: Save cargo bin toolchain
-        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-cargo-bin-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cargo-bin-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin
           key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
       - name: Set up cargo-deny
-        if: ${{ inputs.unit == 'rust-policy' && (steps.rust-policy-cargo-bin-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-policy' && (steps.cargo-bin-toolchain.outputs.cache-hit != 'true') }}
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-deny
           fallback: none
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -259,7 +259,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-policy' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -278,7 +278,7 @@ jobs:
           fi
       - name: Restore "Rust dependency policy" cache
         if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -347,7 +347,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust dependency policy" cache
-        if: ${{ inputs.unit == 'rust-policy' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-policy-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-policy' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -370,20 +370,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-policy' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-policy-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-policy-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-policy-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-policy-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-policy-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-policy-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-policy-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-policy-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-policy
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -397,7 +397,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-unit-collector' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-unit-collector-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-unit-collector' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -412,7 +412,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -425,7 +425,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -465,7 +465,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-unit-collector' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-unit-collector-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-unit-collector' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -484,7 +484,7 @@ jobs:
           fi
       - name: Restore "Rust crate (unit-collector)" cache
         if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -506,7 +506,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-unit-collector' && (steps.rust-unit-collector-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-unit-collector' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -567,7 +567,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (unit-collector)" cache
-        if: ${{ inputs.unit == 'rust-unit-collector' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-unit-collector-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-unit-collector' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -590,20 +590,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-unit-collector' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-unit-collector-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-unit-collector-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-unit-collector-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-unit-collector-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-unit-collector-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-unit-collector-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-unit-collector-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-unit-collector-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-unit-collector
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -617,7 +617,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-bench-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-bench' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -632,7 +632,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -645,7 +645,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -685,7 +685,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-bench-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-bench' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -704,7 +704,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-bench)" cache
         if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -726,7 +726,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (steps.rust-velnor-bench-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-bench' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -787,7 +787,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-bench)" cache
-        if: ${{ inputs.unit == 'rust-velnor-bench' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-bench-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-bench' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -810,20 +810,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-bench' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-bench-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-bench-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-bench-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-bench-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-bench-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-bench-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-bench-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-bench-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-bench
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -837,7 +837,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-client' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-client-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-client' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -852,7 +852,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -865,7 +865,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -905,7 +905,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-client' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-client-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-client' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -924,7 +924,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-client)" cache
         if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -946,7 +946,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-client' && (steps.rust-velnor-client-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-client' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1007,7 +1007,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-client)" cache
-        if: ${{ inputs.unit == 'rust-velnor-client' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-client-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-client' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1030,20 +1030,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-client' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-client-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-client-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-client-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-client-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-client-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-client-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-client-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-client-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-client
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1057,7 +1057,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-control' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-control-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-control' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1072,7 +1072,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -1085,7 +1085,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1125,7 +1125,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-control' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-control-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-control' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1144,7 +1144,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-control)" cache
         if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1166,7 +1166,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-control' && (steps.rust-velnor-control-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-control' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1227,7 +1227,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-control)" cache
-        if: ${{ inputs.unit == 'rust-velnor-control' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-control-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-control' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1250,20 +1250,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-control' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-control-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-control-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-control-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-control-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-control-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-control-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-control-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-control-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-control
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1277,7 +1277,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-model' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-model-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-model' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1292,7 +1292,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -1305,7 +1305,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1345,7 +1345,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-model' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-model-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-model' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1364,7 +1364,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-model)" cache
         if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1386,7 +1386,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-model' && (steps.rust-velnor-model-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-model' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1447,7 +1447,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-model)" cache
-        if: ${{ inputs.unit == 'rust-velnor-model' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-model-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-model' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1470,20 +1470,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-model' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-model-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-model-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-model-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-model-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-model-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-model-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-model-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-model-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-model
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-render' }}
-        id: rust-velnor-render-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1497,7 +1497,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-render' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-render-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1512,7 +1512,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-render' }}
-        id: rust-velnor-render-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -1525,7 +1525,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-render' }}
-        id: rust-velnor-render-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1565,7 +1565,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-render' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-render-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1584,7 +1584,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-render)" cache
         if: ${{ inputs.unit == 'rust-velnor-render' }}
-        id: rust-velnor-render-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1606,7 +1606,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-render' && (steps.rust-velnor-render-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1667,7 +1667,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-render)" cache
-        if: ${{ inputs.unit == 'rust-velnor-render' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-render-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-render' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1690,20 +1690,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-render' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-render-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-render-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-render-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-render-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-render-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-render-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-render-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-render-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-render
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-runner' }}
-        id: rust-velnor-runner-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1717,7 +1717,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-runner' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-runner-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1732,7 +1732,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-runner' }}
-        id: rust-velnor-runner-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -1745,7 +1745,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-runner' }}
-        id: rust-velnor-runner-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1785,7 +1785,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-runner' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-runner-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -1804,7 +1804,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-runner)" cache
         if: ${{ inputs.unit == 'rust-velnor-runner' }}
-        id: rust-velnor-runner-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1826,7 +1826,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-runner' && (steps.rust-velnor-runner-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -1887,7 +1887,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-runner)" cache
-        if: ${{ inputs.unit == 'rust-velnor-runner' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-runner-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-runner' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1910,20 +1910,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-runner' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-runner-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-runner-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-runner-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-runner-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-runner-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-runner-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-runner-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-runner-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-runner
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-tools' }}
-        id: rust-velnor-tools-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1937,7 +1937,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-tools' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-tools-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1952,7 +1952,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-tools' }}
-        id: rust-velnor-tools-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -1965,7 +1965,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-tools' }}
-        id: rust-velnor-tools-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2005,7 +2005,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-tools' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-tools-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2024,7 +2024,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-tools)" cache
         if: ${{ inputs.unit == 'rust-velnor-tools' }}
-        id: rust-velnor-tools-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2046,7 +2046,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-tools' && (steps.rust-velnor-tools-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2107,7 +2107,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-tools)" cache
-        if: ${{ inputs.unit == 'rust-velnor-tools' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-tools-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-tools' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2130,20 +2130,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-tools' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-tools-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-tools-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-tools-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-tools-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-tools-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-tools-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-tools-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-tools-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-tools
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-workflow' }}
-        id: rust-velnor-workflow-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2157,7 +2157,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-workflow' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2172,7 +2172,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-workflow' }}
-        id: rust-velnor-workflow-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -2185,7 +2185,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-workflow' }}
-        id: rust-velnor-workflow-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2225,7 +2225,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-workflow' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2244,7 +2244,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-workflow)" cache
         if: ${{ inputs.unit == 'rust-velnor-workflow' }}
-        id: rust-velnor-workflow-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2266,7 +2266,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-workflow' && (steps.rust-velnor-workflow-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2327,7 +2327,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-workflow)" cache
-        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2350,20 +2350,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-workflow-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-workflow-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-workflow-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-workflow-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-workflow-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-workflow-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-workflow-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-workflow-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-workflow
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
-        id: rust-velnor-workflow-contract-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2377,7 +2377,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-contract-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2392,7 +2392,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
-        id: rust-velnor-workflow-contract-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -2405,7 +2405,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
-        id: rust-velnor-workflow-contract-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2445,7 +2445,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-contract-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2464,7 +2464,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnor-workflow-contract)" cache
         if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
-        id: rust-velnor-workflow-contract-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2486,7 +2486,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (steps.rust-velnor-workflow-contract-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2547,7 +2547,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnor-workflow-contract)" cache
-        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnor-workflow-contract-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2570,20 +2570,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnor-workflow-contract-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnor-workflow-contract-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnor-workflow-contract-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnor-workflow-contract-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnor-workflow-contract-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnor-workflow-contract-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnor-workflow-contract-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnor-workflow-contract-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnor-workflow-contract
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-velnorctl' }}
-        id: rust-velnorctl-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2597,7 +2597,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-velnorctl' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnorctl-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnorctl' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2612,7 +2612,7 @@ jobs:
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnorctl' }}
-        id: rust-velnorctl-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -2625,7 +2625,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-velnorctl' }}
-        id: rust-velnorctl-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2665,7 +2665,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-velnorctl' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnorctl-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnorctl' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2684,7 +2684,7 @@ jobs:
           fi
       - name: Restore "Rust crate (velnorctl)" cache
         if: ${{ inputs.unit == 'rust-velnorctl' }}
-        id: rust-velnorctl-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2706,7 +2706,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-velnorctl' && (steps.rust-velnorctl-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnorctl' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2767,7 +2767,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust crate (velnorctl)" cache
-        if: ${{ inputs.unit == 'rust-velnorctl' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-velnorctl-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-velnorctl' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2790,20 +2790,20 @@ jobs:
         if: ${{ inputs.unit == 'rust-velnorctl' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-velnorctl-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-velnorctl-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-velnorctl-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-velnorctl-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-velnorctl-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-velnorctl-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-velnorctl-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-velnorctl-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-velnorctl
       - name: Restore Rust toolchain
         if: ${{ inputs.unit == 'rust-production-topology' }}
-        id: rust-production-topology-rustup-toolchain
+        id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2817,7 +2817,7 @@ jobs:
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
       - name: Save Rust toolchain
-        if: ${{ inputs.unit == 'rust-production-topology' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-production-topology-rustup-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-production-topology' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2830,7 +2830,7 @@ jobs:
           install: false
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-production-topology' }}
-        id: rust-production-topology-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
@@ -2843,7 +2843,7 @@ jobs:
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         if: ${{ inputs.unit == 'rust-production-topology' }}
-        id: rust-production-topology-mold-cache
+        id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2883,7 +2883,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: ${{ inputs.unit == 'rust-production-topology' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-production-topology-mold-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-production-topology' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -2902,7 +2902,7 @@ jobs:
           fi
       - name: Restore "Rust production topology" cache
         if: ${{ inputs.unit == 'rust-production-topology' }}
-        id: rust-production-topology-cache
+        id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2924,7 +2924,7 @@ jobs:
             fi
           fi
       - name: Prepare Cargo sources
-        if: ${{ inputs.unit == 'rust-production-topology' && (steps.rust-production-topology-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-production-topology' && (steps.cache.outputs.cache-hit != 'true') }}
         env:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -2985,7 +2985,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Rust production topology" cache
-        if: ${{ inputs.unit == 'rust-production-topology' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rust-production-topology-cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'rust-production-topology' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -3008,14 +3008,14 @@ jobs:
         if: ${{ inputs.unit == 'rust-production-topology' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rust-production-topology-rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rust-production-topology-rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.rust-production-topology-mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.rust-production-topology-mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.rust-production-topology-mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.rust-production-topology-mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.rust-production-topology-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.rust-production-topology-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
+          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: rust-production-topology
@@ -3107,7 +3107,7 @@ jobs:
           mise --yes install aqua:EmbarkStudios/cargo-deny
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-policy' }}
-        id: rust-policy-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3209,7 +3209,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-unit-collector' }}
-        id: rust-unit-collector-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3300,7 +3300,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-bench' }}
-        id: rust-velnor-bench-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3391,7 +3391,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-client' }}
-        id: rust-velnor-client-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3482,7 +3482,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-control' }}
-        id: rust-velnor-control-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3573,7 +3573,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-model' }}
-        id: rust-velnor-model-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3664,7 +3664,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-render' }}
-        id: rust-velnor-render-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3755,7 +3755,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-runner' }}
-        id: rust-velnor-runner-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3846,7 +3846,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-tools' }}
-        id: rust-velnor-tools-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -3937,7 +3937,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-workflow' }}
-        id: rust-velnor-workflow-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -4028,7 +4028,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnor-workflow-contract' }}
-        id: rust-velnor-workflow-contract-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -4119,7 +4119,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-velnorctl' }}
-        id: rust-velnorctl-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
@@ -4205,7 +4205,7 @@ jobs:
           job_label: rust-velnorctl
       - name: Set up Mr. Boxington
         if: ${{ inputs.unit == 'rust-production-topology' }}
-        id: rust-production-topology-mbx-cache
+        id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
