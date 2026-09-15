@@ -1737,6 +1737,10 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "release unit jobs render every lane contract in one pass"
+)]
 fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
     let workflow = WorkflowIr::from_config(config);
     let lanes = match config.runners {

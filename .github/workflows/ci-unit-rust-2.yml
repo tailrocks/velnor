@@ -75,6 +75,10 @@ jobs:
             cargo fetch --locked
           fi
           cd -- "$GITHUB_WORKSPACE"
+          install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-284f109157fe37bcf7bedbbe4f0f2d5c55c460dc"
+          if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
+            cargo install --locked --git https://github.com/tailrocks/velnor --rev 284f109157fe37bcf7bedbbe4f0f2d5c55c460dc --root "$install_root" velnor-workflow --bin velnor-workflow
+          fi
   verify-github:
     name: GitHub
     if: ${{ inputs.lane == 'github' && (contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,')) && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
@@ -960,7 +964,6 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
-          cd -- "$GITHUB_WORKSPACE"
           install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-284f109157fe37bcf7bedbbe4f0f2d5c55c460dc"
           if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
             cargo install --locked --git https://github.com/tailrocks/velnor --rev 284f109157fe37bcf7bedbbe4f0f2d5c55c460dc --root "$install_root" velnor-workflow --bin velnor-workflow

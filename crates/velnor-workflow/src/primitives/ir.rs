@@ -437,6 +437,10 @@ pub(crate) fn render_phase_report_step(
     );
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "cache outcome env wiring stays colocated with the report step it feeds"
+)]
 fn render_cache_outcome_report_env(
     output: &mut String,
     lane: RunnerMode,
@@ -783,7 +787,7 @@ pub(crate) fn render_pinned_toolchain_steps(
 }
 
 /// Trusted GitHub Actions cache save gate for unit lanes: default-branch push,
-/// schedule, and default-branch workflow_dispatch. Excludes every
+/// schedule, and default-branch `workflow_dispatch`. Excludes every
 /// `pull_request` variant and `merge_group` (D7, D8).
 pub(crate) fn trusted_cache_save_expression(default_branch: &str) -> String {
     format!(
@@ -794,7 +798,7 @@ pub(crate) fn trusted_cache_save_expression(default_branch: &str) -> String {
 }
 
 /// Push-only trusted save gate for release and preview surfaces that never
-/// admit schedule or workflow_dispatch producers (RC-4 release family).
+/// admit schedule or `workflow_dispatch` producers (RC-4 release family).
 pub(crate) fn default_branch_push_cache_save_expression(default_branch: &str) -> String {
     format!("github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}'")
 }
@@ -1561,8 +1565,7 @@ fn kind_from_unit_workflow_file(file: &str) -> Option<UnitKind> {
     let kind = stem
         .rsplit_once('-')
         .filter(|(_, suffix)| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
-        .map(|(kind, _)| kind)
-        .unwrap_or(stem);
+        .map_or(stem, |(kind, _)| kind);
     match kind {
         "rust" => Some(UnitKind::Rust),
         "gradle" => Some(UnitKind::Gradle),
@@ -1954,7 +1957,6 @@ impl WorkflowIr {
     }
 
     fn render_prepare_cargo_caller(
-        &self,
         output: &mut String,
         file: &str,
         sample_unit: &str,
@@ -1994,16 +1996,14 @@ impl WorkflowIr {
         extra_needs: &[String],
         read_only_cache: bool,
     ) {
-        let lane = match caller.lane {
-            "github" => RunnerMode::Github,
-            "velnor" => RunnerMode::Velnor,
-            other => panic!("unexpected lane token `{other}`"),
+        let lane = if caller.lane == "github" {
+            RunnerMode::Github
+        } else {
+            RunnerMode::Velnor
         };
-        let unit = self
-            .units
-            .iter()
-            .find(|unit| unit.id == caller.unit_id)
-            .expect("unit");
+        let Some(unit) = self.units.iter().find(|unit| unit.id == caller.unit_id) else {
+            return;
+        };
         // PR triggers already default to read-only cache. Explicit cache-mode on
         // reusable-workflow callers rejects callees that declare cache saves at
         // validation time, so rely on the platform default instead.
@@ -2084,7 +2084,7 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                self.render_prepare_cargo_caller(output, file, unit_id, include_policy);
+                Self::render_prepare_cargo_caller(output, file, unit_id, include_policy);
             }
             for caller in self.unit_lane_callers(unit, file) {
                 let extra_needs = if self.runners == RunnerMode::Velnor
@@ -2110,6 +2110,10 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "aggregate validation script is generated inline so fork and skip rules stay visible"
+    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -2239,7 +2243,7 @@ impl WorkflowIr {
         needs_job: &str,
         if_override: Option<&str>,
     ) {
-        let if_condition = if_override.map(str::to_owned).unwrap_or_else(|| {
+        let if_condition = if_override.map_or_else(|| {
             if self.control_plane_lane() == RunnerMode::Velnor {
                 format!(
                     "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
@@ -2248,7 +2252,7 @@ impl WorkflowIr {
             } else {
                 "always()".to_owned()
             }
-        });
+        }, str::to_owned);
         let _ = writeln!(
             output,
             "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
@@ -2426,6 +2430,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         (files, assignments)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shard flush carries every output artifact the kind workflow split owns"
+    )]
     fn flush_kind_workflow_shard(
         &self,
         kind: UnitKind,
@@ -2441,7 +2449,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if members.is_empty() {
             return;
         }
-        *current = header.to_owned();
+        current.clear();
+        current.push_str(header);
         self.append_lane_cargo_prep_jobs(current, members, contracts);
         self.render_collapsed_kind_verify_job(current, members, contracts);
         for member in members {
@@ -2494,7 +2503,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     fn collapsed_timeout_minutes(
-        &self,
         members: &[&Unit],
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> u32 {
@@ -2503,8 +2511,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .map(|unit| {
                 contracts
                     .and_then(|contracts| contracts.get(&unit.id))
-                    .map(|contract| contract.timeout_minutes)
-                    .unwrap_or(DEFAULT_UNIT_TIMEOUT_MINUTES)
+                    .map_or(DEFAULT_UNIT_TIMEOUT_MINUTES, |contract| contract.timeout_minutes)
             })
             .max()
             .unwrap_or(DEFAULT_UNIT_TIMEOUT_MINUTES)
@@ -2546,6 +2553,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let github_members =
             self.collapsed_lane_members(members, contracts, RunnerMode::Github, None);
         if !github_members.is_empty() {
+            let runs_on = self.runner_for(RunnerMode::Github);
             self.render_collapsed_lane_verify_job(
                 output,
                 &github_members,
@@ -2553,7 +2561,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Github,
                 "verify-github",
                 RunnerMode::Github.display_name(),
-                self.runner_for(RunnerMode::Github),
+                &runs_on,
             );
         }
         let velnor_plain =
@@ -2561,6 +2569,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let velnor_trusted =
             self.collapsed_lane_members(members, contracts, RunnerMode::Velnor, Some(true));
         if !velnor_plain.is_empty() {
+            let runs_on = self.runner_for(RunnerMode::Velnor);
             self.render_collapsed_lane_verify_job(
                 output,
                 &velnor_plain,
@@ -2568,11 +2577,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Velnor,
                 "verify-velnor",
                 RunnerMode::Velnor.display_name(),
-                self.runner_for(RunnerMode::Velnor),
+                &runs_on,
             );
         }
         if !velnor_trusted.is_empty() {
             let sample = velnor_trusted[0];
+            let runs_on = self.runner_for_unit(RunnerMode::Velnor, sample);
             self.render_collapsed_lane_verify_job(
                 output,
                 &velnor_trusted,
@@ -2580,11 +2590,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Velnor,
                 "verify-velnor-trusted",
                 RunnerMode::Velnor.display_name(),
-                self.runner_for_unit(RunnerMode::Velnor, sample),
+                &runs_on,
             );
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "collapsed verify jobs carry lane identity, gate, and runner placement together"
+    )]
     fn render_collapsed_lane_verify_job(
         &self,
         output: &mut String,
@@ -2593,14 +2607,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         lane: RunnerMode,
         job_id: &str,
         display_name: &str,
-        runs_on: String,
+        runs_on: &str,
     ) {
         let Some(mut gate) = self.collapsed_lane_gate(members, contracts, lane) else {
             return;
         };
         let mut display_name = display_name.to_owned();
-        if lane == RunnerMode::Velnor {
-            if let Some(unit) = members
+        if lane == RunnerMode::Velnor
+            && let Some(unit) = members
                 .iter()
                 .find(|unit| self.trust_gated_velnor_job_skipped(lane, unit))
             {
@@ -2610,12 +2624,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
                 display_name = self.trusted_unit_display_name(lane, unit, display_name);
             }
-        }
         let display_name = yaml_scalar(&display_name);
         let _ = writeln!(
             output,
             "  {job_id}:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    runs-on: {runs_on}\n    timeout-minutes: {}",
-            self.collapsed_timeout_minutes(members, contracts),
+            Self::collapsed_timeout_minutes(members, contracts),
         );
         output.push_str("    steps:\n");
         render_ci_job_started_marker(output);
@@ -2656,7 +2669,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                         &contract,
                         None,
                         members,
-                        Some(guard),
+                        Some(guard.as_str()),
                         true,
                     );
                 }
@@ -2684,7 +2697,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .cache
             .as_ref()
             .is_some_and(cache_is_velnor_host_persistent);
-        let fetch_script = render_cargo_fetch_roots_script(&roots, skip_when_offline_ready);
+        let mut fetch_script = render_cargo_fetch_roots_script(&roots, skip_when_offline_ready);
+        if members
+            .iter()
+            .copied()
+            .any(unit_runs_workflow_plain_check)
+        {
+            fetch_script.push_str(&crate::render_pinned_policy_prefetch_bash(
+                crate::VELNOR_POLICY_WORKFLOW_REV,
+            ));
+        }
         // Only Velnor runners share persistent Cargo stores between jobs.
         // GitHub-hosted jobs must fetch into their own ephemeral workspace.
         for lane in [RunnerMode::Velnor] {
@@ -2810,6 +2832,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
     #[expect(
         clippy::too_many_lines,
+        clippy::too_many_arguments,
         reason = "each generated lane job keeps its complete setup and execution contract together"
     )]
     fn render_lane_job_for_input(
@@ -2820,13 +2843,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         contract: &UnitContract,
         input_unit: Option<&str>,
         members: &[&Unit],
-        step_guard: Option<String>,
+        step_guard: Option<&str>,
         steps_only: bool,
     ) {
         let lane = job.lane;
         let step_if = |extra: Option<&str>| -> String {
             let mut parts = Vec::new();
-            if let Some(guard) = step_guard.as_deref() {
+            if let Some(guard) = step_guard {
                 parts.push(guard.to_owned());
             }
             if let Some(extra) = extra {
@@ -2979,7 +3002,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 runtime_unit_id,
                 skip_fetch_on_cache_hit,
                 skip_when_offline_ready,
-                skip_fetch_on_cache_hit.then(|| cache_step_id.as_str()),
+                skip_fetch_on_cache_hit.then_some(cache_step_id.as_str()),
             );
             render_ci_cargo_fetch_end_marker(write_target);
         }
@@ -3038,7 +3061,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             step_id_prefix_ref,
         );
         if steps_only {
-            output.push_str(&prefix_step_block_with_if(&fragment, step_guard.as_deref()));
+            output.push_str(&prefix_step_block_with_if(&fragment, step_guard));
         } else {
             write_target.push('\n');
         }

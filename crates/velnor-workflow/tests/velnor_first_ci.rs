@@ -30,7 +30,7 @@ impl Generated {
     fn rust_unit_workflows(&self) -> BTreeSet<(String, String)> {
         fs::read_dir(self.output.join(".github/workflows"))
             .unwrap()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
             .filter(|path| {
                 path.file_name()

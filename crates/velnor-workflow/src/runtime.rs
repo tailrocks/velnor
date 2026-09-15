@@ -465,9 +465,7 @@ fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, Gen
 fn retention_policy_for_plan() -> RetentionPolicy {
     std::env::current_dir()
         .ok()
-        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten())
-        .map(|config| RetentionPolicy::from_config(config.cache_github()))
-        .unwrap_or_else(RetentionPolicy::default_policy)
+        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten()).map_or_else(RetentionPolicy::default_policy, |config| RetentionPolicy::from_config(config.cache_github()))
 }
 
 /// Emit per-class totals and headroom for the maintenance budget step.
