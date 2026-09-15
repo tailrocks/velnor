@@ -1774,7 +1774,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 let (paths, key) = rendered_cache_values(cache);
                 let _ = writeln!(
                     output,
-                    "      - name: Restore {} cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: ci-release-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                    "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: ci-release-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
                     verify_name,
                     ActionPin::CacheRestore.reference(),
                     unit.id
@@ -3365,6 +3365,32 @@ mod tests {
         );
         assert_eq!(surface.added_files, vec!["release.yml".to_owned()]);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn github_release_unit_cache_restore_declares_cache_step_id() {
+        let mut config = config(&["release.yml"], Some(binary_spec()));
+        config.units[0].pr_commands = vec!["mbx nextest run --locked".to_owned()];
+        config.units[0].full_commands = vec!["mbx nextest run --locked".to_owned()];
+        config.units[0].cache = Some(crate::CacheSpec {
+            key_files: vec!["Cargo.lock".to_owned()],
+            paths: vec!["~/.cargo/registry".to_owned()],
+            purpose: crate::CachePurpose::CargoSources,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
+        });
+        let Some(release) = config.release.as_ref() else {
+            panic!("binary fixture must carry a release contract");
+        };
+        let workflow = super::render_release(&config, release);
+        assert!(
+            workflow.contains("      - name: Restore rust-example cache\n        id: cache\n"),
+            "restore must expose steps.cache for the fetch gate: {workflow}"
+        );
+        assert!(
+            workflow.contains("        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n"),
+            "Prepare Cargo sources must key off the restore id: {workflow}"
+        );
     }
 
     #[test]
