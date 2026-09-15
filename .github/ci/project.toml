@@ -285,10 +285,10 @@ label = "Rust production topology"
 kind = "rust"
 root = "."
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-runner/**", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "scripts/check-release-feature-boundary.sh", "scripts/test-check-release-feature-boundary.sh"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-github_full_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+github_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+github_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
 workflow_file = "ci-unit-rust.yml"
 [unit.cache]
 key_files = ["Cargo.toml", "Cargo.lock"]
