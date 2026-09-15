@@ -1671,9 +1671,14 @@ impl WorkflowIr {
             &self.default_dispatch_runner,
         );
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
+        let workflow_cache_mode = if kind == WorkflowKind::PullRequest {
+            "cache-mode: read\n\n"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\n"
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}{workflow_cache_mode}permissions:\n  actions: read\n  contents: read\n\n"
         );
         if self.tools.contains(&ToolRequirement::Sccache)
             || self.tools.contains(&ToolRequirement::OpenTofu)
@@ -1784,9 +1789,14 @@ impl WorkflowIr {
             &self.default_dispatch_runner,
         );
         let concurrency = aggregate_concurrency_block(self, kind, cancel_in_progress);
+        let workflow_cache_mode = if kind == WorkflowKind::PullRequest {
+            "cache-mode: read\n\n"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}{workflow_cache_mode}permissions:\n  actions: read\n  contents: read\n\njobs:"
         );
         // Planning follows config.runners. A Velnor-configured repository
         // keeps plan on the image runtime for every aggregate. GitHub-default
@@ -1981,11 +1991,9 @@ impl WorkflowIr {
             .iter()
             .find(|unit| unit.id == caller.unit_id)
             .expect("unit");
-        let cache_mode = if read_only_cache {
-            "\n    cache-mode: read"
-        } else {
-            ""
-        };
+        // PR aggregate sets workflow-level cache-mode: read; do not repeat it on
+        // reusable-workflow callers (GitHub rejects the key on some job shapes).
+        let cache_mode = "";
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
