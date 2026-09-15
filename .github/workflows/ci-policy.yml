@@ -6,7 +6,7 @@ on:
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: velnor-${{ github.repository }}
+  group: velnor-${{ github.repository }}-policy
   cancel-in-progress: true
 
 permissions:
