@@ -10,11 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
@@ -182,6 +183,11 @@ struct CiUnit {
     cache: Option<Cache>,
     #[serde(default)]
     workflow_file: Option<String>,
+    /// A workspace-wide Rust verification gate. Its watch paths may stay
+    /// narrow; affected Rust changes select it explicitly to preserve the
+    /// workspace coverage without broadening every topology match.
+    #[serde(default)]
+    workspace_check: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,6 +224,20 @@ impl CiUnit {
             (RunnerLane::Velnor, Scope::Affected) => &self.velnor_pr_commands,
             (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
         }
+    }
+
+    /// Whether affected Rust changes should also select this workspace gate.
+    /// The generator keeps the flag in generation config only; pinned Planning
+    /// runtimes infer the gate from the emitted `cargo check --workspace`
+    /// command contract.
+    fn is_workspace_check(&self) -> bool {
+        if self.workspace_check {
+            return true;
+        }
+        [&self.github_pr_commands, &self.github_full_commands, &self.velnor_pr_commands, &self.velnor_full_commands]
+            .into_iter()
+            .flatten()
+            .any(|command| command.contains("cargo check --workspace"))
     }
 }
 
@@ -531,14 +551,15 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
                 unit.id
             )));
         }
-        if unit.watch.is_empty()
-            || unit.github_pr_commands.is_empty()
+        // An empty watch is valid: a unit with no sources never matches an
+        // affected diff but still runs in full scope.
+        if unit.github_pr_commands.is_empty()
             || unit.github_full_commands.is_empty()
             || unit.velnor_pr_commands.is_empty()
             || unit.velnor_full_commands.is_empty()
         {
             return Err(GeneratorError::usage(format!(
-                "CI unit must declare watch plus GitHub and Velnor PR/full commands: {}",
+                "CI unit must declare GitHub and Velnor PR/full commands: {}",
                 unit.id
             )));
         }
@@ -915,6 +936,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         assert_eq!(
             unit.commands(RunnerLane::Github, Scope::Affected),
@@ -951,6 +973,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "changed".to_owned(),
@@ -966,6 +989,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "sibling".to_owned(),
@@ -981,6 +1005,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "leaf".to_owned(),
@@ -996,6 +1021,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
         ];
         let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
@@ -1265,9 +1291,23 @@ fn selection_for_diff<'a>(
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
+        let mut selected = allowlist.clone();
+        let directly_matched_rust = config
+            .unit
+            .iter()
+            .any(|unit| allowlist.contains(&unit.id) && unit.kind == "rust");
+        if directly_matched_rust {
+            let workspace_checks = config
+                .unit
+                .iter()
+                .filter(|unit| unit.is_workspace_check())
+                .map(|unit| unit.id.clone())
+                .collect::<Vec<_>>();
+            selected.extend(workspace_checks);
+        }
         return Ok(UnitSelection {
-            units: ordered_units(&config.unit, Some(&allowlist))?,
-            full_units: allowlist,
+            units: ordered_units(&config.unit, Some(&selected))?,
+            full_units: selected,
         });
     }
     let matchers = config
@@ -1299,6 +1339,21 @@ fn selection_for_diff<'a>(
         if !matched {
             return full_selection(config);
         }
+    }
+    let directly_matched_rust = selected.iter().any(|unit_id| {
+        config
+            .unit
+            .iter()
+            .any(|unit| unit.id == *unit_id && unit.kind == "rust")
+    });
+    if directly_matched_rust {
+        selected.extend(
+            config
+                .unit
+                .iter()
+                .filter(|unit| unit.is_workspace_check())
+                .map(|unit| unit.id.clone()),
+        );
     }
     let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
     Ok(UnitSelection {
@@ -1547,26 +1602,278 @@ fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<S
         .collect()
 }
 
-fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
-    for command in commands {
-        println!("::group::{}: {}", unit.id, command);
-        let status = Command::new("bash")
-            .args(["-euo", "pipefail", "-c", command])
-            .current_dir(root)
-            .stdin(Stdio::null())
-            .status()
-            .map_err(|error| {
-                GeneratorError::usage(format!("run CI command {}: {error}", unit.id))
-            })?;
-        println!("::endgroup::");
-        if !status.success() {
-            return Err(GeneratorError::usage(format!(
-                "CI command failed for unit {} with {status}",
-                unit.id
-            )));
+/// Default output-stall budget for one `run_unit` project command: kill the
+/// child when no stdout/stderr byte arrives for this long.
+///
+/// Ten minutes because healthy compile/test commands stream at least a line
+/// every ~2-5 minutes while measured Mac wedges sat 34+ minutes with zero
+/// stdout bytes at the first compile-path `mbx` call — the gap between ~5
+/// and 34 minutes leaves 10 far from both a slow healthy command and a real
+/// wedge. The guard is stall-based, never wall-clock: every output byte
+/// resets the timer, so a chatty 28-minute suite runs to completion.
+/// Override with `VELNOR_RUN_CMD_STALL_SECS`; a missing, unparsable, or
+/// zero value falls back to this default.
+const DEFAULT_RUN_CMD_STALL_SECS: u64 = 600;
+/// Environment override for [`DEFAULT_RUN_CMD_STALL_SECS`], in seconds.
+const RUN_CMD_STALL_ENV: &str = "VELNOR_RUN_CMD_STALL_SECS";
+/// Silence quantum between child-exit polls while waiting for output: a
+/// silent command that already exited (or whose pipes grandchildren hold
+/// open) is noticed within this long instead of at the stall deadline.
+const RUN_CMD_EXIT_POLL_QUANTUM: Duration = Duration::from_secs(1);
+/// Bounded grace to drain a piped tail after the child exits, so detached
+/// pumps forward every byte before completion. Grandchildren holding the
+/// pipes open must not hang this drain.
+const RUN_CMD_DRAIN_GRACE: Duration = Duration::from_secs(10);
+
+fn run_cmd_stall_limit() -> Duration {
+    parse_run_cmd_stall_limit(env::var(RUN_CMD_STALL_ENV).ok().as_deref())
+}
+
+fn parse_run_cmd_stall_limit(raw: Option<&str>) -> Duration {
+    let seconds = raw
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0);
+    Duration::from_secs(seconds.unwrap_or(DEFAULT_RUN_CMD_STALL_SECS))
+}
+
+/// One output chunk forwarded by a child-stream pump, or that stream's EOF.
+enum PumpEvent {
+    Output,
+    Eof,
+}
+
+/// Forward one child pipe to the matching process stream, reporting every
+/// chunk as [`PumpEvent::Output`] so the stall guard treats output bytes as
+/// heartbeats. Runs detached: it exits on pipe EOF (or when the guard drops
+/// the receiver), so a wedged grandchild holding the pipe cannot hang the
+/// stall kill.
+fn pump_child_stream<R, W>(mut reader: R, mut writer: W, sender: mpsc::Sender<PumpEvent>)
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let _ = writer.write_all(&buffer[..read]);
+                let _ = writer.flush();
+                if sender.send(PumpEvent::Output).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
+    let _ = sender.send(PumpEvent::Eof);
+}
+
+/// The pre-guard failure contract, unchanged: exit status decides.
+fn check_unit_command_status(unit_id: &str, status: ExitStatus) -> Result<(), GeneratorError> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(GeneratorError::usage(format!(
+            "CI command failed for unit {unit_id} with {status}"
+        )))
+    }
+}
+
+/// Run one project command, killing it on output stall: no stdout/stderr
+/// byte for `stall_limit` while the child is still alive. Every output byte
+/// resets the timer; a silent exit inside the deadline race counts as
+/// completion, not a stall.
+fn run_command_with_stall_guard(
+    root: &Path,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+) -> Result<(), GeneratorError> {
+    let mut child = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", command])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    let (sender, receiver) = mpsc::channel();
+    let mut expected_eof = 0;
+    if let Some(stdout) = child.stdout.take() {
+        expected_eof += 1;
+        let sender = sender.clone();
+        thread::spawn(move || pump_child_stream(stdout, std::io::stdout(), sender));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        expected_eof += 1;
+        let sender = sender.clone();
+        thread::spawn(move || pump_child_stream(stderr, std::io::stderr(), sender));
+    }
+    drop(sender);
+    let pid = child.id();
+    let mut deadline = Instant::now() + stall_limit;
+    let mut eofs = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining.min(RUN_CMD_EXIT_POLL_QUANTUM)) {
+            Ok(PumpEvent::Output) => {
+                deadline = Instant::now() + stall_limit;
+            }
+            Ok(PumpEvent::Eof) => {
+                eofs += 1;
+                if eofs >= expected_eof {
+                    break;
+                }
+            }
+            Err(_) => {
+                // A silent exit (or grandchildren holding the pipes) is
+                // completion, noticed within one poll quantum.
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    // No pool.lock/inflight path constants exist in
+                    // velnor-workflow, so there is no scheduler state to dump
+                    // without hardcoding host paths; the error carries unit,
+                    // command, stall budget, pid, and child state instead.
+                    let state = match child.try_wait() {
+                        Ok(Some(status)) => {
+                            return check_unit_command_status(unit_id, status);
+                        }
+                        Ok(None) => String::from("running"),
+                        Err(error) => format!("unknown (try_wait failed: {error})"),
+                    };
+                    let _ = child.kill();
+                    let reaped = match child.wait() {
+                        Ok(status) => format!("reaped with {status}"),
+                        Err(error) => format!("reap failed: {error}"),
+                    };
+                    return Err(GeneratorError::usage(format!(
+                        "CI command stalled for unit {unit_id}: no stdout/stderr output for {}s; killed pid {pid} (was {state}, {reaped}); command: {command}",
+                        stall_limit.as_secs(),
+                    )));
+                }
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    let drain_deadline = Instant::now() + RUN_CMD_DRAIN_GRACE;
+    while eofs < expected_eof && Instant::now() < drain_deadline {
+        match receiver.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())) {
+            Ok(PumpEvent::Output) => {}
+            Ok(PumpEvent::Eof) => {
+                eofs += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    check_unit_command_status(unit_id, status)
+}
+
+fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
+    let stall_limit = run_cmd_stall_limit();
+    for command in commands {
+        println!("::group::{}: {}", unit.id, command);
+        let outcome = run_command_with_stall_guard(root, &unit.id, command, stall_limit);
+        println!("::endgroup::");
+        outcome?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod run_cmd_stall_tests {
+    use super::{
+        parse_run_cmd_stall_limit, run_command_with_stall_guard, DEFAULT_RUN_CMD_STALL_SECS,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn stall_limit_parses_override_and_falls_back() {
+        assert_eq!(
+            parse_run_cmd_stall_limit(None),
+            Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS)
+        );
+        assert_eq!(
+            parse_run_cmd_stall_limit(Some("30")),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_run_cmd_stall_limit(Some(" 120 ")),
+            Duration::from_secs(120)
+        );
+        for invalid in ["", "0", "-5", "ten", "1.5"] {
+            assert_eq!(
+                parse_run_cmd_stall_limit(Some(invalid)),
+                Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS),
+                "invalid override {invalid:?} must fall back to the default",
+            );
+        }
+    }
+
+    #[test]
+    fn silent_command_past_stall_limit_fails_naming_the_stall() {
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exec sleep 30",
+            Duration::from_millis(200),
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("stall"),
+            "silent sleeper must fail naming the stall, got: {message}"
+        );
+        assert!(
+            message.contains("test-unit") && message.contains("exec sleep 30"),
+            "stall error must name unit and command, got: {message}"
+        );
+    }
+
+    #[test]
+    fn chatty_slow_command_succeeds_past_wall_clock_limit() {
+        // ~1.2s of wall-clock against a 0.3s stall window: periodic output
+        // resets the timer, so this must succeed.
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo tick-$i; sleep 0.1; done",
+            Duration::from_millis(300),
+        );
+        let message = match &result {
+            Ok(()) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            result.is_ok(),
+            "chatty command must succeed, got: {message}"
+        );
+    }
+
+    #[test]
+    fn failing_command_keeps_original_error() {
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exit 3",
+            Duration::from_secs(60),
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("CI command failed for unit test-unit"),
+            "exit-status failure must keep its error, got: {message}"
+        );
+    }
 }
 
 pub(crate) fn test_crates(
@@ -3524,6 +3831,7 @@ mod tests {
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         CiConfig {
             schema: 2,
@@ -3805,6 +4113,22 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
         base_contents: &str,
         head_contents: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        current_project_selection_git_fixture_with_config(
+            name,
+            changed,
+            base_contents,
+            head_contents,
+            SELECTION_PROJECT_CONFIG,
+        )
+    }
+
+    fn current_project_selection_git_fixture_with_config(
+        name: &str,
+        changed: &str,
+        base_contents: &str,
+        head_contents: &str,
+        config_text: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -3830,7 +4154,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
 
         let config = root.join(".github/ci/project.toml");
         std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
-        std::fs::write(&config, SELECTION_PROJECT_CONFIG)?;
+        std::fs::write(&config, config_text)?;
 
         let changed_path = root.join(changed);
         std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
@@ -3869,6 +4193,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         CiConfig {
             schema: 2,
@@ -4081,6 +4406,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         assert_eq!(
             prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
@@ -4198,6 +4524,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         let mut config = selection_config();
         config.workflow.version_bump_units = vec![
@@ -4271,6 +4598,74 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             .collect::<BTreeSet<_>>();
         assert_eq!(selected_id_set(&selection), expected_selected);
         assert_eq!(selection.full_units, expected_full);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_check_is_selected_for_leaf_rust_changes_but_not_docs() -> Result<(), Box<dyn Error>>
+    {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "docs"
+kind = "docs"
+root = "."
+watch = ["docs/**"]
+github_pr_commands = ["markdownlint docs"]
+github_full_commands = ["markdownlint docs"]
+velnor_pr_commands = ["markdownlint docs"]
+velnor_full_commands = ["markdownlint docs"]
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "leaf-source-workspace-check",
+            "crates/leaf/src/lib.rs",
+            "pub fn fixture() {}\n",
+            "pub fn fixture() { let _ = 1; }\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-base", "rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "docs-source-workspace-check",
+            "docs/index.md",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            BTreeSet::from(["docs".to_owned()])
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

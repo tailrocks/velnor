@@ -31,23 +31,32 @@ impl ApplicationServices {
     /// Construct one production service bundle with Plan 066 durable state.
     pub fn with_store(store: Arc<Store>, instance_slug: impl Into<String>) -> StoreResult<Self> {
         let instance_slug = instance_slug.into();
+        Self::with_store_and_api_instance(&store, &instance_slug, &instance_slug)
+    }
+
+    /// Construct one production bundle when the durable runner identity and
+    /// local API identity are intentionally different.
+    pub fn with_store_and_api_instance(
+        store: &Arc<Store>,
+        store_instance: &str,
+        api_instance: &str,
+    ) -> StoreResult<Self> {
         Ok(Self {
-            // Normalized Store readers are not wired yet; never expose an
-            // empty projection as if it were authoritative.
-            query: Arc::new(QueryService::unsupported()),
-            events: Arc::new(EventStream::with_store(Arc::clone(&store), &instance_slug)?),
+            query: Arc::new(QueryService::with_store(Arc::clone(store), store_instance)),
+            events: Arc::new(EventStream::with_store(Arc::clone(store), store_instance)?),
             // Raw job logs remain outside the operational database; fail
             // closed until their durable access path is wired.
             logs: Arc::new(LogService::unsupported()),
-            lifecycle: Arc::new(LifecycleService::with_store_for_instance(
-                Arc::clone(&store),
-                &instance_slug,
+            lifecycle: Arc::new(LifecycleService::with_store_and_api_instance(
+                Arc::clone(store),
+                store_instance,
+                api_instance,
             )?),
             // Storage catalog durability is not wired to this bundle yet.
             storage: Arc::new(StorageService::unsupported()),
             telemetry: Arc::new(TelemetryService::new(path_for_instance(
                 store.path(),
-                &instance_slug,
+                store_instance,
             ))),
         })
     }
@@ -183,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn production_bundle_fails_closed_for_undurable_projections() {
+    fn production_bundle_reads_durable_projections_and_fails_closed_elsewhere() {
         let database = TempDb::new();
         let services = ApplicationServices::with_store(
             Arc::new(Store::open(&database.path).expect("open store")),
@@ -191,20 +200,23 @@ mod tests {
         )
         .expect("compose services");
 
-        assert!(matches!(
-            services
-                .query()
-                .query(crate::ports::QueryRequest::default()),
-            Err(PortError::Unsupported { .. })
-        ));
+        assert!(services
+            .query()
+            .query(crate::ports::QueryRequest::default())
+            .expect("empty durable projection")
+            .resources
+            .is_empty());
         assert!(matches!(
             services.query().replace(Vec::new()),
             Err(PortError::Unsupported { .. })
         ));
-        assert!(matches!(
-            services.query().generation(),
-            Err(PortError::Unsupported { .. })
-        ));
+        assert_eq!(
+            services
+                .query()
+                .generation()
+                .expect("projection generation"),
+            0
+        );
         services
             .events()
             .publish(event())
@@ -267,12 +279,16 @@ mod tests {
                 .len(),
             1
         );
-        assert!(matches!(
-            reopened
-                .query()
-                .query(crate::ports::QueryRequest::default()),
-            Err(PortError::Unsupported { .. })
-        ));
+        let resources = reopened
+            .query()
+            .query(crate::ports::QueryRequest {
+                resource_kind: "events".to_owned(),
+                ..crate::ports::QueryRequest::default()
+            })
+            .expect("event projection after reopen")
+            .resources;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].kind(), "Event");
         assert!(matches!(
             reopened.logs().logs(crate::ports::LogRequest {
                 subject: "instance/default".to_owned(),

@@ -7501,44 +7501,42 @@ fn restore_cache_glob_path(
 
 /// True for cache paths whose container locations are backed by Velnor's
 fn path_or_child(path: &str, root: &str) -> bool {
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|rest| rest.starts_with('/'))
+    cache_path_is_lexically_valid(path)
+        && (path == root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('/')))
 }
 
-/// Host-persistent or image-provided stores (mounted into every job container):
-/// the cargo registry/git stores, the mise tool store, the image-baked rustup
-/// toolchain store, and the shared sccache dir. These are always warm; the
-/// actions/cache adapter neither tars them into the store nor copies store bytes
-/// back over them.
+fn cache_path_is_lexically_valid(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains("//")
+        && !path.contains('\\')
+        && !path
+            .chars()
+            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+        && path
+            .split('/')
+            .skip(if path.starts_with('/') { 1 } else { 0 })
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+/// Host-persistent stores mounted into every Velnor job container.
+///
+/// The accepted aliases are limited to the documented Cargo forms. Rustup is
+/// intentionally excluded because its toolchain is image-baked, not a
+/// host-persistent cache mount.
 fn velnor_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
-    // These are the relative aliases emitted by the canonical fleet cache
-    // declarations. They resolve to Velnor's mounted Cargo/mise stores even
-    // though Actions treats them as workspace-relative paths on GitHub.
-    if path_or_child(path, ".cargo/registry")
+    path_or_child(path, "/github/home/.cargo/registry")
+        || path_or_child(path, "/github/home/.cargo/git")
+        || path_or_child(path, "/opt/mise/installs")
+        || path_or_child(path, "/opt/mise/cache")
+        || path_or_child(path, "/var/cache/sccache")
+        || path_or_child(path, "~/.cargo/registry")
+        || path_or_child(path, "~/.cargo/git")
+        || path_or_child(path, ".cargo/registry")
         || path_or_child(path, ".cargo/git")
-        || path_or_child(path, ".cache/mise")
-        || path_or_child(path, ".local/share/mise/installs")
-    {
-        return true;
-    }
-    let home_relative = path
-        .strip_prefix("~/")
-        .or_else(|| path.strip_prefix("/github/home/"));
-    if let Some(rest) = home_relative {
-        return path_or_child(rest, ".cargo/registry")
-            || path_or_child(rest, ".cargo/git")
-            // Workflows usually cache ~/.rustup on GitHub-hosted runners. Velnor
-            // points RUSTUP_HOME at the image-baked /root/.rustup store instead,
-            // so a ~/.rustup cache restore is pure hosted-runner compatibility
-            // noise on the Velnor lane.
-            || path_or_child(rest, ".rustup");
-    }
-    path_or_child(path, "/opt/mise")
-        || path_or_child(path, "/root/.rustup")
-        || path_or_child(path, crate::sccache_compat::CONTAINER_DIR)
 }
 
 fn rust_cache_covered_by_persistent_storage(cache_directories: &str) -> bool {
@@ -17296,61 +17294,19 @@ esac
     }
 
     #[test]
-    fn native_cache_treats_rustup_paths_as_velnor_provided() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::Native {
-            step_id: "cache".into(),
-            display_name: String::new(),
-            invocation: NativeActionInvocation {
-                git_ref: String::new(),
-                adapter: NativeActionAdapter::Cache,
-                cache_kind: None,
-                source_path: None,
-                inputs: [
-                    (
-                        "path".into(),
-                        "~/.rustup/toolchains\n~/.rustup/update-hashes\n".into(),
-                    ),
-                    ("key".into(), "rustup-Linux-X64-lock".into()),
-                    ("restore-keys".into(), "rustup-Linux-X64-\n".into()),
-                ]
-                .into(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        }];
-
-        let results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
-        assert!(results[0]
-            .stdout
-            .contains("Cache paths live on Velnor host-persistent storage (always warm)"));
-        assert!(!results[0].stdout.contains("Cache not found"));
-        assert!(results[0]
-            .state
-            .summary
-            .contains("host-persistent store — restore/save skipped"));
-        assert!(results[1].stdout.contains("nothing to save"));
-        assert!(results[1]
-            .state
-            .summary
-            .contains("host-persistent store — restore/save skipped"));
-        assert!(results[1].stderr.is_empty());
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn native_cache_treats_root_rustup_path_as_velnor_provided() {
-        assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
-        assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
+    fn native_cache_excludes_image_baked_rustup_paths() {
+        for path in [
+            "~/.rustup/toolchains",
+            "~/.rustup/update-hashes",
+            "/root/.rustup/toolchains",
+            "/root/.rustup/update-hashes",
+            "/github/home/.rustup/toolchains",
+        ] {
+            assert!(
+                !velnor_persistent_cache_path(path),
+                "image-baked rustup path was classified as host-persistent: {path}"
+            );
+        }
     }
 
     #[test]
@@ -17806,12 +17762,22 @@ esac
     }
 
     #[test]
-    fn canonical_fleet_cache_aliases_are_host_persistent() {
+    fn canonical_velnor_cache_mounts_and_aliases_are_host_persistent() {
         for path in [
-            ".cache/mise",
-            ".cache/mise/downloads",
-            ".local/share/mise/installs",
-            ".local/share/mise/installs/rust/1.85.0",
+            "/github/home/.cargo/registry",
+            "/github/home/.cargo/registry/cache",
+            "/github/home/.cargo/git",
+            "/github/home/.cargo/git/db",
+            "/opt/mise/installs",
+            "/opt/mise/installs/rust/1.85.0",
+            "/opt/mise/cache",
+            "/opt/mise/cache/downloads",
+            "/var/cache/sccache",
+            "/var/cache/sccache/objects",
+            "~/.cargo/registry",
+            "~/.cargo/registry/cache",
+            "~/.cargo/git",
+            "~/.cargo/git/db",
             ".cargo/registry",
             ".cargo/registry/cache",
             ".cargo/git",
@@ -17822,16 +17788,33 @@ esac
                 "canonical cache alias was not recognized: {path}"
             );
         }
-        // Matching is component-aware: similarly named workspace paths must
-        // remain eligible for ordinary keyed cache storage.
+        // Matching is component-aware and strictly lexical: unsupported,
+        // normalized, or glob-like aliases remain ordinary keyed paths.
         for path in [
+            "/github/home/.cargo",
+            "/opt/mise",
+            "/var/cache",
             ".cargo/registry-old",
-            ".cache/mise-old",
+            ".cache/mise",
+            ".local/share/mise/installs",
             ".cargo/config.toml",
+            "~/.rustup/toolchains",
+            "/root/.rustup/toolchains",
+            "./.cargo/registry",
+            ".cargo/./registry",
+            ".cargo/../.cargo/registry",
+            "/github/home/.cargo/registry/../git",
+            ".cargo//registry",
+            "/github/home//.cargo/registry",
+            "/github/home/.cargo/registry//cache",
+            "~//.cargo/registry",
+            ".cargo/registry/**",
+            ".cargo/registry/[cache]",
+            ".cargo/registry/{cache}",
         ] {
             assert!(
                 !velnor_persistent_cache_path(path),
-                "non-canonical path was incorrectly treated as persistent: {path}"
+                "unsupported or unsafe path was incorrectly treated as persistent: {path}"
             );
         }
     }
@@ -18146,7 +18129,7 @@ esac
     }
 
     #[test]
-    fn native_rust_cache_treats_static_persistent_cache_directories_as_warm() {
+    fn native_rust_cache_treats_mounted_persistent_directories_as_warm() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
@@ -18161,7 +18144,7 @@ esac
                     ("shared-key".into(), "ci-custom-dir".into()),
                     (
                         "cache-directories".into(),
-                        "/var/cache/sccache\n/root/.rustup\n".into(),
+                        "/var/cache/sccache\n/opt/mise/cache\n".into(),
                     ),
                 ]
                 .into(),

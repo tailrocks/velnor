@@ -761,11 +761,7 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
-        // The durable ledger is not an actuator until a reconciler is wired
-        // into this daemon. Advertising write capability here would make the
-        // client claim that a lifecycle request can take effect when the
-        // handler correctly returns 501.
-        mutations: false,
+        mutations: true,
     })
 }
 
@@ -966,11 +962,18 @@ struct MutationBody {
     slots: Option<u32>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MutationResponseBody {
+    operation_id: String,
+    phase: String,
+}
+
 async fn mutate_instance(
     State(state): State<ApiState>,
     AxumPath((instance, operation)): AxumPath<(String, String)>,
     body: Result<Json<MutationBody>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<MutationResponseBody>), ApiError> {
     let Json(body) = body.map_err(|_| {
         ApiError::bad_request(
             "body",
@@ -990,21 +993,31 @@ async fn mutate_instance(
             "path instance does not match daemon instance",
         ));
     }
-    let _kind = parse_mutation(&operation)?;
+    let kind = parse_mutation(&operation)?;
     if body_operation != operation {
         return Err(ApiError::bad_request(
             "mutation.operation",
             "body operation does not match path",
         ));
     }
-    let _ = (reason, idempotency_key, expected_version, slots);
-    // The durable lifecycle ledger is not an actuator. Until the daemon
-    // reconciler consumes these intents, accepting them as HTTP 202 would
-    // claim an effect that the runtime cannot perform.
-    Err(ApiError::from(
-        velnor_control::ports::PortError::Unsupported {
-            operation: "lifecycle reconciler is not installed".to_owned(),
-        },
+    let mutation = Arc::clone(&state.mutation);
+    let result = run_application_call(state.blocking.clone(), move || {
+        mutation.mutate(velnor_control::ports::MutationRequest {
+            kind,
+            target: instance,
+            reason,
+            idempotency_key,
+            expected_version,
+            scale_to: slots,
+        })
+    })
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(MutationResponseBody {
+            operation_id: result.operation_id,
+            phase: result.phase,
+        }),
     ))
 }
 
@@ -1448,7 +1461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_control_socket_fails_closed_for_undurable_reads() {
+    async fn production_control_socket_reads_durable_resources_and_fails_closed_elsewhere() {
         let path = test_socket_path("production-control");
         let database = path.with_extension("db");
         let services = velnor_control::application::ApplicationServices::with_store(
@@ -1464,8 +1477,8 @@ mod tests {
         }));
 
         let query = socket_request(&path, "GET", "/v1/jobs", b"").await;
-        assert_eq!(response_status(&query), 501);
-        assert!(String::from_utf8_lossy(&query).contains("operation.unsupported"));
+        assert_eq!(response_status(&query), 200);
+        assert!(String::from_utf8_lossy(&query).contains("\"resources\":[]"));
 
         let logs = socket_request(&path, "GET", "/v1/logs/job-1", b"").await;
         assert_eq!(response_status(&logs), 501);
@@ -1479,7 +1492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_admin_socket_rejects_unimplemented_mutation_and_bad_json() {
+    async fn real_admin_socket_accepts_mutation_and_rejects_bad_json() {
         let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
         let mutation = Arc::new(RecordingMutation::default());
         let state = ApiState {
@@ -1505,8 +1518,11 @@ mod tests {
             br#"{"operation":"cordon","reason":"test","idempotencyKey":"test"}"#,
         )
         .await;
-        assert_eq!(response_status(&accepted), 501);
-        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(response_status(&accepted), 202);
+        let accepted_text = String::from_utf8_lossy(&accepted);
+        assert!(accepted_text.contains("operationId"));
+        assert!(accepted_text.contains("accepted"));
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
 
         let rejected = socket_request(
             &path,
@@ -1519,7 +1535,7 @@ mod tests {
         let rejected_text = String::from_utf8_lossy(&rejected);
         assert!(rejected_text.contains("body"));
         assert!(!rejected_text.contains("unknown"));
-        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
 
         shutdown.send(true).expect("signal admin shutdown");
         server.await.expect("join admin server").expect("serve");

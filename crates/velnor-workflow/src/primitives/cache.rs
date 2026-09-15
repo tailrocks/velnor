@@ -3,9 +3,14 @@
 use super::{Args, CacheBackend, Primitive, RenderCtx, Rendered, CACHE_CONTRACT};
 use crate::{CacheSpec, GeneratorError, RunnerMode, Unit, WorkflowIr};
 
-/// Container mount for the shared sccache store. Must stay aligned with
-/// `velnor-runner::sccache_compat::CONTAINER_DIR`.
-const VELNOR_SCCACHE_CONTAINER_DIR: &str = "/var/cache/sccache";
+/// Exact Velnor mounts whose contents persist across job containers. Keep this
+/// list lexical: classification must not turn path normalization into an
+/// authorization boundary.
+const VELNOR_CARGO_REGISTRY_MOUNT: &str = "/github/home/.cargo/registry";
+const VELNOR_CARGO_GIT_MOUNT: &str = "/github/home/.cargo/git";
+const VELNOR_MISE_INSTALLS_MOUNT: &str = "/opt/mise/installs";
+const VELNOR_MISE_CACHE_MOUNT: &str = "/opt/mise/cache";
+const VELNOR_SCCACHE_MOUNT: &str = "/var/cache/sccache";
 
 /// Declare the cache contract the unit pipelines render.
 ///
@@ -64,37 +69,46 @@ pub(crate) fn resolve(rows: &[super::ResolvedRow]) -> Result<ResolvedCache, Gene
 }
 
 fn path_or_child(path: &str, root: &str) -> bool {
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|rest| rest.starts_with('/'))
+    cache_path_is_lexically_valid(path)
+        && (path == root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('/')))
+}
+
+fn cache_path_is_lexically_valid(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains("//")
+        && !path.contains('\\')
+        && !path
+            .chars()
+            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+        && path
+            .split('/')
+            .skip(if path.starts_with('/') { 1 } else { 0 })
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 /// True when a declared cache path resolves to a Velnor host-persistent store.
+///
+/// The only accepted aliases are the documented `~/.cargo/*` and relative
+/// `.cargo/*` forms. Rustup is deliberately absent: its toolchain is baked
+/// into the image, not persisted by the Velnor host.
 ///
 /// Matches `velnor-runner::executor::velnor_persistent_cache_path` so the
 /// generator and executor agree about which actions/cache steps are no-ops on
 /// warm Velnor hosts.
 pub(crate) fn velnor_host_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
-    if path_or_child(path, ".cargo/registry")
+    path_or_child(path, VELNOR_CARGO_REGISTRY_MOUNT)
+        || path_or_child(path, VELNOR_CARGO_GIT_MOUNT)
+        || path_or_child(path, VELNOR_MISE_INSTALLS_MOUNT)
+        || path_or_child(path, VELNOR_MISE_CACHE_MOUNT)
+        || path_or_child(path, VELNOR_SCCACHE_MOUNT)
+        || path_or_child(path, "~/.cargo/registry")
+        || path_or_child(path, "~/.cargo/git")
+        || path_or_child(path, ".cargo/registry")
         || path_or_child(path, ".cargo/git")
-        || path_or_child(path, ".cache/mise")
-        || path_or_child(path, ".local/share/mise/installs")
-    {
-        return true;
-    }
-    let home_relative = path
-        .strip_prefix("~/")
-        .or_else(|| path.strip_prefix("/github/home/"));
-    if let Some(rest) = home_relative {
-        return path_or_child(rest, ".cargo/registry")
-            || path_or_child(rest, ".cargo/git")
-            || path_or_child(rest, ".rustup");
-    }
-    path_or_child(path, "/opt/mise")
-        || path_or_child(path, "/root/.rustup")
-        || path_or_child(path, VELNOR_SCCACHE_CONTAINER_DIR)
 }
 
 /// True when every declared cache path is host-persistent on Velnor.
@@ -104,6 +118,16 @@ pub(crate) fn cache_is_velnor_host_persistent(cache: &CacheSpec) -> bool {
             .paths
             .iter()
             .all(|path| velnor_host_persistent_cache_path(path))
+}
+
+fn should_bypass_host_persistent_cache(
+    backend: CacheBackend,
+    lane: RunnerMode,
+    cache: Option<&CacheSpec>,
+) -> bool {
+    backend == CacheBackend::Detected
+        && lane == RunnerMode::Velnor
+        && cache.is_some_and(cache_is_velnor_host_persistent)
 }
 
 impl CacheBackend {
@@ -121,16 +145,15 @@ impl CacheBackend {
         if !self.enables_actions_cache(ir, unit) {
             return false;
         }
-        if lane == RunnerMode::Velnor
-            && unit
-                .cache
-                .as_ref()
-                .is_some_and(cache_is_velnor_host_persistent)
-        {
+        if should_bypass_host_persistent_cache(self, lane, unit.cache.as_ref()) {
             return false;
         }
         true
     }
+}
+
+pub(crate) fn velnor_skips_pinned_rust_toolchain(lane: RunnerMode) -> bool {
+    lane == RunnerMode::Velnor
 }
 
 #[cfg(test)]
@@ -141,36 +164,88 @@ mod tests {
     #[test]
     fn velnor_host_persistent_cache_path_matches_runner_contract() {
         for path in [
+            "/github/home/.cargo/registry",
+            "/github/home/.cargo/registry/cache",
+            "/github/home/.cargo/git",
+            "/github/home/.cargo/git/db",
+            "/opt/mise/installs",
+            "/opt/mise/installs/node/24",
+            "/opt/mise/cache",
+            "/opt/mise/cache/downloads",
+            "/var/cache/sccache",
+            "/var/cache/sccache/objects",
             "~/.cargo/registry",
             "~/.cargo/git",
-            "/github/home/.cargo/registry/cache",
             ".cargo/registry",
             ".cargo/git/db",
-            "/opt/mise/installs/node/24",
-            "/root/.rustup/toolchains",
-            "/var/cache/sccache",
         ] {
             assert!(
                 velnor_host_persistent_cache_path(path),
                 "{path} should be host-persistent"
             );
         }
-        for path in ["target", "target/debug", "~/.terraform.d/plugin-cache"] {
+        for path in [
+            "target",
+            "target/debug",
+            "~/.terraform.d/plugin-cache",
+            "/github/home/.cargo",
+            "/opt/mise",
+            "/var/cache",
+            ".cache/mise",
+            ".local/share/mise/installs",
+            "~/.rustup/toolchains",
+            "/root/.rustup/toolchains",
+            "./.cargo/registry",
+            ".cargo/./registry",
+            ".cargo/../.cargo/registry",
+            "/github/home/.cargo/registry/../git",
+            ".cargo//registry",
+            "/github/home//.cargo/registry",
+            "/github/home/.cargo/registry//cache",
+            "~//.cargo/registry",
+            ".cargo/registry/**",
+            ".cargo/registry/[cache]",
+            ".cargo/registry/{cache}",
+        ] {
             assert!(
                 !velnor_host_persistent_cache_path(path),
-                "{path} should not be host-persistent"
+                "unsafe or unsupported alias {path} should not be host-persistent"
             );
         }
+    }
+
+    #[test]
+    fn host_persistent_bypass_is_only_for_detected_backend_on_velnor() {
+        let cache = CacheSpec {
+            key_files: vec!["Cargo.lock".to_owned()],
+            paths: vec!["~/.cargo/registry".to_owned()],
+            purpose: CachePurpose::CargoSources,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
+        };
+
+        assert!(should_bypass_host_persistent_cache(
+            CacheBackend::Detected,
+            RunnerMode::Velnor,
+            Some(&cache)
+        ));
+        assert!(!should_bypass_host_persistent_cache(
+            CacheBackend::Actions,
+            RunnerMode::Velnor,
+            Some(&cache)
+        ));
+        assert!(!should_bypass_host_persistent_cache(
+            CacheBackend::Detected,
+            RunnerMode::Github,
+            Some(&cache)
+        ));
     }
 
     #[test]
     fn cache_is_velnor_host_persistent_requires_every_path() {
         let cargo = CacheSpec {
             key_files: vec!["Cargo.lock".to_owned()],
-            paths: vec![
-                "~/.cargo/registry".to_owned(),
-                "~/.cargo/git".to_owned(),
-            ],
+            paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
             purpose: CachePurpose::CargoSources,
             mbx_output_cache_justification: None,
             mutable_mount_seed: false,
@@ -181,5 +256,11 @@ mod tests {
             ..cargo.clone()
         };
         assert!(!cache_is_velnor_host_persistent(&mixed));
+    }
+
+    #[test]
+    fn velnor_lane_skips_pinned_rust_toolchain() {
+        assert!(velnor_skips_pinned_rust_toolchain(RunnerMode::Velnor));
+        assert!(!velnor_skips_pinned_rust_toolchain(RunnerMode::Github));
     }
 }
