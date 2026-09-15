@@ -2521,13 +2521,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_velnor_runner_identity_step(output);
         }
         if lane == RunnerMode::Github && self.runners != RunnerMode::Velnor {
-            output.push_str("      - name: Set up Velnor workflow runtime\n");
-            if self.control_plane_lane() == RunnerMode::Github {
-                output.push_str("        if: ${{ runner.environment == 'github-hosted' }}\n");
-                output.push_str(&workflow_runtime_download(RunnerMode::Github));
-            } else {
-                output.push_str(&workflow_runtime_setup(RunnerMode::Github));
-            }
+            self.render_unit_runtime(output, lane, members[0]);
         }
         render_ci_runner_setup_end_marker(output);
         output.push_str(&workflow_selection_file_materialize(
