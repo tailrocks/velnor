@@ -263,8 +263,8 @@ jobs:
         if: ${{ inputs.unit == 'docker' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ steps.docker-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ steps.docker-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: docker

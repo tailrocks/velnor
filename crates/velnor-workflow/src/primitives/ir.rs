@@ -426,10 +426,11 @@ pub(crate) fn render_phase_report_step(
     lane: RunnerMode,
     unit: &Unit,
     ir: &WorkflowIr,
+    step_id_prefix: Option<&str>,
 ) {
     output.push_str("      - name: Report phase timings and cache outcomes\n");
     output.push_str("        if: always()\n");
-    render_cache_outcome_report_env(output, lane, unit, ir);
+    render_cache_outcome_report_env(output, lane, unit, ir, step_id_prefix);
     let _ = writeln!(
         output,
         "        uses: {VELNOR_CI_REPORT_ACTION}\n        with:\n          job_label: {job_display_name}"
@@ -441,6 +442,7 @@ fn render_cache_outcome_report_env(
     lane: RunnerMode,
     unit: &Unit,
     ir: &WorkflowIr,
+    step_id_prefix: Option<&str>,
 ) {
     let lane_name = match lane {
         RunnerMode::Github | RunnerMode::Both => "github",
@@ -484,24 +486,56 @@ fn render_cache_outcome_report_env(
         return;
     }
     if !velnor_skips_pinned_rust_toolchain(lane) && unit.toolchain.is_some() {
-        output.push_str("          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}\n");
-        output.push_str("          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}\n");
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_RUSTUP_PRIMARY: {}",
+            step_output_expr(step_id_prefix, "rustup-toolchain", "cache-primary-key")
+        );
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_RUSTUP_MATCHED: {}",
+            step_output_expr(step_id_prefix, "rustup-toolchain", "cache-matched-key")
+        );
     }
     if tools.contains(&ToolRequirement::Mold) {
-        output.push_str("          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}\n");
-        output.push_str("          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}\n");
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_MOLD_PRIMARY: {}",
+            step_output_expr(step_id_prefix, "mold-cache", "cache-primary-key")
+        );
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_MOLD_MATCHED: {}",
+            step_output_expr(step_id_prefix, "mold-cache", "cache-matched-key")
+        );
     }
     if tools.contains(&ToolRequirement::MrBoxington) {
-        output.push_str("          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}\n");
-        output.push_str("          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}\n");
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_MBX_HIT: {}",
+            step_output_expr(step_id_prefix, "mbx-cache", "cache-hit")
+        );
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_MBX_PRIMARY: {}",
+            step_output_expr(step_id_prefix, "mbx-cache", "cache-primary-key")
+        );
     }
     let uses_cargo_restore = unit.cache.as_ref().is_some_and(|cache| {
         !cache.mutable_mount_seed
             && CacheBackend::Detected.lane_enables_actions_cache(lane, ir, unit)
     });
     if uses_cargo_restore {
-        output.push_str("          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}\n");
-        output.push_str("          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}\n");
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_CARGO_PRIMARY: {}",
+            step_output_expr(step_id_prefix, "cache", "cache-primary-key")
+        );
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_CARGO_MATCHED: {}",
+            step_output_expr(step_id_prefix, "cache", "cache-matched-key")
+        );
     }
     if unit
         .cache
@@ -509,8 +543,16 @@ fn render_cache_outcome_report_env(
         .is_some_and(|cache| cache.mutable_mount_seed)
         && lane == RunnerMode::Github
     {
-        output.push_str("          VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}\n");
-        output.push_str("          VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}\n");
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_DOCKER_SEED_PRIMARY: {}",
+            step_output_expr(step_id_prefix, "cache", "cache-primary-key")
+        );
+        let _ = writeln!(
+            output,
+            "          VELNOR_CACHE_DOCKER_SEED_MATCHED: {}",
+            step_output_expr(step_id_prefix, "cache", "cache-matched-key")
+        );
     }
 }
 
@@ -677,6 +719,13 @@ pub(crate) fn nextest_tool_id(lock_keys: &BTreeSet<String>) -> &'static str {
 /// repository's pin, install exactly that pin, and — when `save_gate` carries
 /// the step's `if:` body — save the result for the next run. Image-backed
 /// Velnor jobs intentionally bypass this helper because their pinned toolchain
+fn step_output_expr(prefix: Option<&str>, base: &str, field: &str) -> String {
+    format!(
+        "${{{{ steps.{}.outputs.{field} }}}}",
+        crate::qualified_step_id(prefix, base)
+    )
+}
+
 /// is part of the runner image.
 pub(crate) fn render_pinned_toolchain_steps(
     output: &mut String,
@@ -684,7 +733,9 @@ pub(crate) fn render_pinned_toolchain_steps(
     cache_save: &str,
     toolchain: &RustToolchain,
     save_gate: Option<&str>,
+    step_id_prefix: Option<&str>,
 ) {
+    let rustup_id = crate::qualified_step_id(step_id_prefix, "rustup-toolchain");
     let (paths, key_files) = rendered_cache_values(&CacheSpec {
         key_files: vec![
             "rust-toolchain.toml".to_owned(),
@@ -700,7 +751,7 @@ pub(crate) fn render_pinned_toolchain_steps(
     );
     let _ = writeln!(
         output,
-        "      - name: Restore Rust toolchain\n        id: rustup-toolchain\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}"
+        "      - name: Restore Rust toolchain\n        id: {rustup_id}\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}"
     );
     // The channel is not passed explicitly: the checkout put the
     // repository's toolchain file at the workspace root, and a file-driven
@@ -751,8 +802,15 @@ pub(crate) fn default_branch_push_cache_save_expression(default_branch: &str) ->
 /// Dependency-bundle save gate: refresh trusted bundles even when checks fail,
 /// but never on an exact restore hit (RC-17).
 pub(crate) fn dependency_bundle_cache_save_if(default_branch: &str) -> String {
+    dependency_bundle_cache_save_if_for_step(default_branch, "cache")
+}
+
+pub(crate) fn dependency_bundle_cache_save_if_for_step(
+    default_branch: &str,
+    cache_step_id: &str,
+) -> String {
     format!(
-        "always() && ({}) && steps.cache.outputs.cache-hit != 'true'",
+        "always() && ({}) && steps.{cache_step_id}.outputs.cache-hit != 'true'",
         trusted_cache_save_expression(default_branch)
     )
 }
@@ -2745,6 +2803,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             |unit_id| unit_job_id(lane, unit_id),
         );
         let cache_save = job.cache_save && contract.cache_save;
+        let step_id_prefix = steps_only.then(|| format!("{}-", unit.id));
+        let step_id_prefix_ref = step_id_prefix.as_deref();
         let report_label = if input_unit.is_some() || steps_only {
             unit.id.clone()
         } else {
@@ -2837,9 +2897,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         } else {
             output
         };
-        self.render_tool_provisioning_for_unit(write_target, lane, unit, cache_save);
+        self.render_tool_provisioning_for_unit(
+            write_target,
+            lane,
+            unit,
+            cache_save,
+            step_id_prefix_ref,
+        );
         render_ci_tool_bootstrap_end_marker(write_target);
         let seed = contract.mutable_mount_seed;
+        let cache_step_id = crate::qualified_step_id(step_id_prefix_ref, "cache");
         let skip_fetch_on_cache_hit = if seed && lane == RunnerMode::Github {
             render_mutable_mount_seed_restore(write_target, self, unit);
             false
@@ -2853,7 +2920,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let (cache_key, restore_prefix) = format_cargo_bundle_cache_key(id_segment, &hash);
             let _ = writeln!(
                 write_target,
-                "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
+                "      - name: Restore {} cache\n        id: {cache_step_id}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
                 yaml_scalar(&unit.label),
                 self.pins.cache_restore,
             );
@@ -2914,12 +2981,19 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 write_target,
                 "      - name: Save {} cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
                 yaml_scalar(&unit.label),
-                dependency_bundle_cache_save_if(&self.default_branch),
+                dependency_bundle_cache_save_if_for_step(&self.default_branch, &cache_step_id),
                 self.pins.cache_save
             );
         }
         render_ci_cleanup_end_marker(write_target);
-        render_phase_report_step(write_target, &yaml_scalar(&report_label), lane, unit, self);
+        render_phase_report_step(
+            write_target,
+            &yaml_scalar(&report_label),
+            lane,
+            unit,
+            self,
+            step_id_prefix_ref,
+        );
         if steps_only {
             output.push_str(&prefix_step_block_with_if(&fragment, step_guard.as_deref()));
         } else {
@@ -3507,7 +3581,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 );
             }
             render_ci_cleanup_end_marker(output);
-            render_phase_report_step(output, &job_name, lane, unit, self);
+            render_phase_report_step(output, &job_name, lane, unit, self, None);
             output.push('\n');
         }
     }
@@ -3646,13 +3720,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output: &mut String,
         toolchain: &RustToolchain,
         cache_save: bool,
+        step_id_prefix: Option<&str>,
     ) {
         // Unit lanes run on push, schedule, and workflow_dispatch, so the
         // trusted gate is the full default-branch set. Surfaces with a
         // narrower trigger set pass their own gate.
         let trusted_cache = trusted_cache_save_expression(&self.default_branch);
+        let rustup_id = crate::qualified_step_id(step_id_prefix, "rustup-toolchain");
         let save_gate = cache_save.then(|| {
-            format!("({trusted_cache}) && steps.rustup-toolchain.outputs.cache-hit != 'true'")
+            format!("({trusted_cache}) && steps.{rustup_id}.outputs.cache-hit != 'true'")
         });
         render_pinned_toolchain_steps(
             output,
@@ -3660,6 +3736,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.pins.cache_save,
             toolchain,
             save_gate.as_deref(),
+            step_id_prefix,
         );
     }
 
@@ -3670,7 +3747,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         unit: &Unit,
         cache_save: bool,
     ) {
-        self.render_tool_provisioning_for_unit(output, lane, unit, cache_save);
+        self.render_tool_provisioning_for_unit(output, lane, unit, cache_save, None);
     }
 
     fn render_tool_provisioning_for_unit(
@@ -3679,7 +3756,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         lane: RunnerMode,
         unit: &Unit,
         cache_save: bool,
+        step_id_prefix: Option<&str>,
     ) {
+        let mbx_id = crate::qualified_step_id(step_id_prefix, "mbx-cache");
+        let cargo_bin_id = crate::qualified_step_id(step_id_prefix, "cargo-bin-toolchain");
         // The Velnor job image is the toolchain boundary for self-hosted jobs.
         // Hosted setup actions either are not admitted by Velnor or would
         // redundantly download tools already pinned in that image. Keep
@@ -3697,7 +3777,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if !velnor_skips_pinned_rust_toolchain(lane)
             && let Some(toolchain) = &unit.toolchain
         {
-            self.render_rust_toolchain_steps(output, toolchain, cache_save);
+            self.render_rust_toolchain_steps(output, toolchain, cache_save, step_id_prefix);
         }
         if github_lane && tools.contains(&ToolRequirement::Mise) {
             // The Rust toolchain is never a mise tool: the scan refuses a
@@ -3741,7 +3821,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 let (cache_key, restore_keys) = unit_snapshot(self, unit, UNIT_SNAPSHOT_NAMESPACE);
                 let _ = writeln!(
                     output,
-                    "      - name: Set up Mr. Boxington\n        id: mbx-cache\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
+                    "      - name: Set up Mr. Boxington\n        id: {mbx_id}\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
                     self.pins.mr_boxington
                 );
             } else {
@@ -3752,7 +3832,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 // release download on every job instead of reusing PATH mbx.
                 let _ = writeln!(
                     output,
-                    "      - name: Set up Mr. Boxington\n        id: mbx-cache\n        uses: {}\n        with:\n          backend: local",
+                    "      - name: Set up Mr. Boxington\n        id: {mbx_id}\n        uses: {}\n        with:\n          backend: local",
                     self.pins.mr_boxington
                 );
             }
@@ -3810,26 +3890,27 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             output.push_str(&hosted_cargo_bin_toolchain_setup(
                 &self.default_branch,
                 cache_save,
+                step_id_prefix,
             ));
         }
         if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_present {
             let _ = writeln!(
                 output,
-                "      - name: Set up cargo-nextest\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
+                "      - name: Set up cargo-nextest\n        if: ${{{{ steps.{cargo_bin_id}.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
                 self.pins.rust_tool
             );
         }
         if github_lane && tools.contains(&ToolRequirement::CargoDeny) {
             let _ = writeln!(
                 output,
-                "      - name: Set up cargo-deny\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
+                "      - name: Set up cargo-deny\n        if: ${{{{ steps.{cargo_bin_id}.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
                 self.pins.rust_tool
             );
         }
         if github_lane && tools.contains(&ToolRequirement::CargoAudit) {
             let _ = writeln!(
                 output,
-                "      - name: Set up cargo-audit\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
+                "      - name: Set up cargo-audit\n        if: ${{{{ steps.{cargo_bin_id}.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
                 self.pins.rust_tool
             );
         }
@@ -3848,7 +3929,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
         if github_lane && tools.contains(&ToolRequirement::Mold) {
-            output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
+            output.push_str(&hosted_mold_setup(
+                &self.default_branch,
+                cache_save,
+                step_id_prefix,
+            ));
         }
         if github_lane && tools.contains(&ToolRequirement::DockerBuildx) {
             let _ = writeln!(

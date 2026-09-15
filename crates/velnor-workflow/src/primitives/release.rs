@@ -675,6 +675,7 @@ fn render_guest_payload_job(
                 "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
                 config.default_branch
             )),
+            None,
         );
         "cargo"
     } else {
@@ -1625,6 +1626,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
             config.default_branch
         )),
+        None,
     );
     let mut matrix = String::new();
     for target in &release.targets {

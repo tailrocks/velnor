@@ -131,7 +131,7 @@ jobs:
           fi
       - name: Restore "Bun package (velnor)" cache
         if: ${{ inputs.unit == 'bun-velnor' }}
-        id: cache
+        id: bun-velnor-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -199,7 +199,7 @@ jobs:
           fi
           exit $rc
       - name: Save "Bun package (velnor)" cache
-        if: ${{ inputs.unit == 'bun-velnor' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'bun-velnor' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.bun-velnor-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -221,8 +221,8 @@ jobs:
         if: ${{ inputs.unit == 'bun-velnor' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.bun-velnor-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.bun-velnor-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: bun-velnor
