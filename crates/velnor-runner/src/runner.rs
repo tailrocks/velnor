@@ -146,7 +146,7 @@ const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
 /// admission's share of the control-plane blocking pool, so slow upstream
 /// fetches can never starve retention, teardown joins or Docker sweeps.
 /// Callers wait for a slot; they are never rejected for want of one.
-const ACTION_ADMISSION_CONCURRENCY: usize = 4;
+const ACTION_ADMISSION_CONCURRENCY: usize = 8;
 static ACTION_ADMISSION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// SQLite admission is already serialised by `Store`'s connection mutex, WAL
 /// and `busy_timeout`, and the control-plane blocking pool is explicitly
@@ -217,10 +217,22 @@ fn action_admission_limiter() -> Arc<Semaphore> {
 }
 
 /// Wait — never fail — for one of the bounded read-only admission slots.
+async fn wait_for_action_admission_slot() -> (tokio::sync::OwnedSemaphorePermit, Duration) {
+    let started = Instant::now();
+    #[allow(clippy::expect_used, reason = "static semaphore is never closed")]
+    let permit = action_admission_limiter()
+        .acquire_owned()
+        .await
+        .expect("the action admission limiter is never closed");
+    (permit, started.elapsed())
+}
+
+/// Bounded wait helper exercised by the action-admission limiter tests.
 ///
 /// Returns the permit and how long the caller waited. `Err` carries the wait
 /// that exhausted the budget, which is a bounded, explainable deadline rather
 /// than the old "a neighbour is busy, fail this job" rejection.
+#[cfg(test)]
 async fn acquire_action_admission_slot(
     budget: Duration,
 ) -> std::result::Result<(tokio::sync::OwnedSemaphorePermit, Duration), Duration> {
@@ -11116,8 +11128,7 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 ///
 /// Closure admission is read-only, so a job waits for a local admission slot
 /// instead of being failed for want of one. `ACTION_ADMISSION_TIMEOUT` bounds
-/// the whole stage — the wait for a slot plus the fetches — and an exhausted
-/// budget reports which of the two consumed it.
+/// only the Contents-API fetches; slot contention is never a rejection reason.
 async fn admit_job_closure(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
@@ -11125,27 +11136,8 @@ async fn admit_job_closure(
     telemetry_admission: Option<&crate::ops::JobAdmission>,
 ) -> Result<crate::admission::AdmissionGraph> {
     let stage_started_unix_ms = unix_millis_now();
-    let stage_started = Instant::now();
-    let permit = match acquire_action_admission_slot(ACTION_ADMISSION_TIMEOUT).await {
-        Ok((permit, _waited)) => permit,
-        Err(waited) => {
-            let waited_ms = duration_ms(waited);
-            emit_stage_wait_telemetry(
-                telemetry_admission,
-                JobStage::ActionAdmission,
-                WaitReason::LocalAdmissionLimiter,
-                waited_ms,
-                stage_started_unix_ms,
-            );
-            bail!(
-                "action admission waited {waited_ms}ms for one of {ACTION_ADMISSION_CONCURRENCY} \
-                 local admission slots and exhausted its {}s budget \
-                 (stage=action_admission wait_reason=local_admission_limiter)",
-                ACTION_ADMISSION_TIMEOUT.as_secs()
-            );
-        }
-    };
-    let limiter_wait_ms = duration_ms(stage_started.elapsed());
+    let (permit, limiter_wait) = wait_for_action_admission_slot().await;
+    let limiter_wait_ms = duration_ms(limiter_wait);
     emit_stage_wait_telemetry(
         telemetry_admission,
         JobStage::ActionAdmission,
@@ -11161,9 +11153,8 @@ async fn admit_job_closure(
         let _permit = permit;
         admit_job_closure_sync(&job, &context_data, &stored)
     });
-    // Whatever the limiter wait already spent is spent: the remaining budget
-    // belongs to the fetches, so the stage as a whole stays bounded.
-    let fetch_budget = ACTION_ADMISSION_TIMEOUT.saturating_sub(stage_started.elapsed());
+    // Slot wait is unbounded; only the Contents-API fetches are deadline-bounded.
+    let fetch_budget = ACTION_ADMISSION_TIMEOUT;
     let graph = tokio::time::timeout(fetch_budget, admission).await;
     emit_stage_wait_telemetry(
         telemetry_admission,
