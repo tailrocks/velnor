@@ -13,8 +13,9 @@ use super::snapshot::{
     CompatibilityFacts, SNAPSHOT_SCHEMA,
 };
 use super::{
-    cache::{cache_is_velnor_host_persistent, velnor_skips_pinned_rust_toolchain}, CacheBackend,
-    GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES, MUTABLE_MOUNT_HOST_DIR,
+    cache::{cache_is_velnor_host_persistent, velnor_skips_pinned_rust_toolchain},
+    CacheBackend, GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
+    MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::{
     config_rust_toolchain, github_expression, hosted_mold_setup, kind_unit_workflow_shard_file,

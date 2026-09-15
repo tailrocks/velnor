@@ -11118,7 +11118,9 @@ channel = "stable"
             "workspace members must not fetch per crate: {workflow}"
         );
         assert!(
-            workflow.contains("cd -- 'crates/contract'\n          if cargo metadata --locked --offline"),
+            workflow.contains(
+                "cd -- 'crates/contract'\n          if cargo metadata --locked --offline"
+            ),
             "independent lockfile trees keep their own fetch root"
         );
     }
