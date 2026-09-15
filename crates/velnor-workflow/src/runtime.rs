@@ -4396,6 +4396,18 @@ workspace_check = true
         head_contents: &str,
         config_text: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        current_project_selection_git_fixture_with_changes(
+            name,
+            &[(changed, base_contents, head_contents)],
+            config_text,
+        )
+    }
+
+    fn current_project_selection_git_fixture_with_changes(
+        name: &str,
+        changes: &[(&str, &str, &str)],
+        config_text: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -4423,14 +4435,18 @@ workspace_check = true
         std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
         std::fs::write(&config, config_text)?;
 
-        let changed_path = root.join(changed);
-        std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
-        std::fs::write(&changed_path, base_contents)?;
+        for (changed, base_contents, _) in changes {
+            let changed_path = root.join(changed);
+            std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
+            std::fs::write(changed_path, base_contents)?;
+        }
         init(&["add", "."])?;
         init(&["commit", "-qm", "base"])?;
         let base = init(&["rev-parse", "HEAD"])?;
 
-        std::fs::write(changed_path, head_contents)?;
+        for (changed, _, head_contents) in changes {
+            std::fs::write(root.join(changed), head_contents)?;
+        }
         init(&["add", "."])?;
         init(&["commit", "-qm", "change"])?;
         let head = init(&["rev-parse", "HEAD"])?;
@@ -4920,13 +4936,36 @@ workspace_check = true
     }
 
     #[test]
-    fn workspace_check_is_selected_for_leaf_rust_changes_but_not_docs() -> Result<(), Box<dyn Error>>
-    {
+    fn workspace_checks_are_selected_only_for_matching_cargo_roots() -> Result<(), Box<dyn Error>> {
         let workspace_unit = r#"[[unit]]
 id = "rust-workspace"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+
+[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
 github_pr_commands = ["cargo check --workspace --all-targets --locked"]
 github_full_commands = ["cargo check --workspace --all-targets --locked"]
 velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
@@ -4970,6 +5009,32 @@ velnor_full_commands = ["markdownlint docs"]
         std::fs::remove_dir_all(root)?;
 
         let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "contract-source-workspace-check",
+            "crates/contract/src/lib.rs",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
             "docs-source-workspace-check",
             "docs/index.md",
             "initial\n",
@@ -4983,6 +5048,250 @@ velnor_full_commands = ["markdownlint docs"]
             BTreeSet::from(["docs".to_owned()])
         );
         assert!(!selection.full_units.contains("rust-workspace"));
+        assert!(!selection.full_units.contains("rust-contract-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_workspace_roots_select_only_the_matching_checks_and_keep_closure(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+
+[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_changes(
+            "mixed-workspace-roots",
+            &[
+                ("crates/leaf/src/lib.rs", "initial\n", "changed leaf\n"),
+                (
+                    "crates/contract/src/lib.rs",
+                    "initial\n",
+                    "changed contract\n",
+                ),
+            ],
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            [
+                "rust-base",
+                "rust-contract",
+                "rust-contract-workspace",
+                "rust-leaf",
+                "rust-workspace"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            [
+                "rust-contract",
+                "rust-contract-workspace",
+                "rust-leaf",
+                "rust-workspace"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn version_bump_selects_workspace_check_for_the_allowlisted_root_only(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+
+[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}").replace(
+            "version_bump_units = [\"docker\", \"rust-bench\", \"rust-leaf\"]",
+            "version_bump_units = [\"rust-contract\"]",
+        );
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "contract-version-bump",
+            "crates/contract/Cargo.toml",
+            "version = \"0.1.0\"\n",
+            "version = \"0.1.1\"\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn independent_manifest_and_lock_version_bump_selects_matching_workspace_check(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}").replace(
+            "version_bump_units = [\"docker\", \"rust-bench\", \"rust-leaf\"]",
+            "version_bump_units = [\"rust-contract\"]",
+        );
+        let (root, base, head) = current_project_selection_git_fixture_with_changes(
+            "contract-version-bump-with-lock",
+            &[
+                (
+                    "crates/contract/Cargo.toml",
+                    "version = \"0.1.0\"\n",
+                    "version = \"0.1.1\"\n",
+                ),
+                (
+                    "crates/contract/Cargo.lock",
+                    "version = \"1\"\n",
+                    "version = \"2\"\n",
+                ),
+            ],
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(selection.full_units, selected_id_set(&selection));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_selection_keeps_matching_workspace_checks() -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "hosted-workspace-check",
+            "crates/leaf/src/lib.rs",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let hosted = selection_for_lanes(&config, selection, RunnerMode::Github);
+        assert!(hosted.units.iter().any(|unit| unit.id == "rust-workspace"));
+        assert!(hosted.full_units.contains("rust-workspace"));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -5086,67 +5395,6 @@ velnor_full_commands = ["markdownlint docs"]
             .units
             .iter()
             .any(|unit| unit.id == "rust-root-workspace"));
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn independent_manifest_and_lock_version_bump_selects_matching_workspace_check(
-    ) -> Result<(), Box<dyn Error>> {
-        let workspace_unit = r#"[[unit]]
-id = "rust-contract-workspace"
-kind = "rust"
-root = "crates/contract"
-watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
-workspace_check = true
-
-[[unit]]
-id = "rust-contract"
-kind = "rust"
-root = "crates/contract"
-watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-[unit.cache]
-key_files = ["crates/contract/Cargo.lock"]
-paths = ["~/.cargo/registry"]
-"#;
-        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}").replace(
-            "version_bump_units = [\"docker\", \"rust-bench\", \"rust-leaf\"]",
-            "version_bump_units = [\"rust-contract\"]",
-        );
-        let (root, base, head) = current_project_selection_git_fixture_with_changes(
-            "contract-version-bump-with-lock",
-            &[
-                (
-                    "crates/contract/Cargo.toml",
-                    "version = \"0.1.0\"\n",
-                    "version = \"0.1.1\"\n",
-                ),
-                (
-                    "crates/contract/Cargo.lock",
-                    "version = \"1\"\n",
-                    "version = \"2\"\n",
-                ),
-            ],
-            &config_text,
-        )?;
-        let config = read_config(&root.join(".github/ci/project.toml"))?;
-        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        assert_eq!(
-            selected_id_set(&selection),
-            ["rust-contract", "rust-contract-workspace"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        );
-        assert_eq!(selection.full_units, selected_id_set(&selection));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
