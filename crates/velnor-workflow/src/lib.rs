@@ -748,6 +748,10 @@ pub struct ProjectConfig {
     pub(crate) automatic_lanes: String,
     /// Whether Velnor-lane Rust unit jobs wait on their direct dependency jobs.
     pub(crate) velnor_rust_needs: VelnorRustNeeds,
+    /// Repository-scoped Velnor runner concurrency group for single-host recovery.
+    pub(crate) velnor_concurrency_group: Option<String>,
+    /// Serialize aggregate stack-group callers on the Velnor lane.
+    pub(crate) velnor_serial_stack_groups: bool,
     /// Repository-local files the generated output owns verbatim, read from
     /// the declared sources at scan time.
     pub(crate) static_files: Vec<StaticFile>,
@@ -868,6 +872,9 @@ impl ProjectConfig {
             write_toml_string(&mut output, "label", &unit.label);
             write_toml_string(&mut output, "kind", unit.kind.id_prefix());
             write_toml_string(&mut output, "root", &unit.root);
+            if unit.workspace_check {
+                output.push_str("workspace_check = true\n");
+            }
             write_toml_array(&mut output, "watch", &unit.watch);
             write_toml_array(
                 &mut output,
@@ -1581,6 +1588,13 @@ fn apply_generation_config(
     }
     if let Some(velnor_rust_needs) = generation.velnor_rust_needs() {
         config.velnor_rust_needs = parse_velnor_rust_needs(velnor_rust_needs)?;
+    }
+    if let Some(group) = generation.velnor_concurrency_group() {
+        validate_config_text(group, "[workflow] velnor_concurrency_group")?;
+        config.velnor_concurrency_group = Some(group.to_owned());
+    }
+    if let Some(serial) = generation.velnor_serial_stack_groups() {
+        config.velnor_serial_stack_groups = serial;
     }
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
@@ -2975,9 +2989,26 @@ fn render_policy_entrypoint(config: &ProjectConfig) -> String {
     } else {
         inline_policy_job("Policy", VELNOR_POLICY_WORKFLOW_REV)
     };
+    let concurrency = policy_concurrency_block(config);
     format!(
-        "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\nconcurrency:\n  group: policy-${{{{ github.repository }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n{policy_job}"
+        "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\n{concurrency}permissions:\n  contents: read\n\njobs:\n{policy_job}"
     )
+}
+
+fn policy_concurrency_block(config: &ProjectConfig) -> String {
+    let group = velnor_concurrency_group_expression(config).unwrap_or_else(|| {
+        "policy-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
+            .to_owned()
+    });
+    format!("concurrency:\n  group: {group}\n  cancel-in-progress: true\n\n")
+}
+
+fn velnor_concurrency_group_expression(config: &ProjectConfig) -> Option<String> {
+    if config.runners == RunnerMode::Velnor {
+        config.velnor_concurrency_group.clone()
+    } else {
+        None
+    }
 }
 
 pub(crate) fn stack_group_job_id(kind: UnitKind) -> String {
@@ -6016,6 +6047,8 @@ mod tests {
             velnor_runner_group: None,
             velnor_trusted_label: None,
             velnor_rust_needs: VelnorRustNeeds::Parallel,
+            velnor_concurrency_group: None,
+            velnor_serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -6471,6 +6504,45 @@ mod tests {
         must(
             runtime::read_config_for_test(&path),
             "emitted project.toml must parse through the runtime parser",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_check_metadata_round_trips_through_runtime_config() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nworkspace_check = true\n";
+        let root = configured_repository("workspace-check-runtime-roundtrip", Some(config));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan configured repository",
+        );
+        let emitted = scanned.config.toml();
+        assert!(emitted.contains("workspace_check = true"));
+        let document: toml::Table = must(toml::from_str(&emitted), "parse emitted config");
+        let unit = must_some(
+            document
+                .get("unit")
+                .and_then(toml::Value::as_array)
+                .and_then(|units| {
+                    units.iter().find(|unit| {
+                        unit.get("id").and_then(toml::Value::as_str) == Some("rust-fixture")
+                    })
+                }),
+            "emitted rust fixture unit",
+        );
+        assert_eq!(
+            unit.get("workspace_check").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        let path = root.join(".github/ci/project.toml");
+        must(
+            fs::create_dir_all(path.parent().expect("runtime config parent")),
+            "create runtime config directory",
+        );
+        must(fs::write(&path, &emitted), "write emitted runtime config");
+        must(
+            runtime::read_config_for_test(&path),
+            "emitted workspace metadata must parse through the runtime contract",
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -9650,6 +9722,8 @@ channel = "stable"
             default_dispatch_runner: DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: DEFAULT_AUTOMATIC_LANES.to_owned(),
             velnor_rust_needs: VelnorRustNeeds::Parallel,
+            velnor_concurrency_group: None,
+            velnor_serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -10732,6 +10806,32 @@ channel = "stable"
     }
 
     #[test]
+    fn velnor_lane_omits_redundant_rust_toolchain_steps() {
+        let config = scanned_fixture(RunnerMode::Velnor);
+        let rust_index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        let workflow = WorkflowIr::from_config(&config)
+            .render_nested_unit(&config.units[rust_index], WorkflowKind::Main);
+        assert!(
+            !workflow.contains("name: Restore Rust toolchain"),
+            "Velnor lane must not restore image-baked rustup: {workflow}"
+        );
+        assert!(
+            !workflow.contains("name: Provision Rust toolchain"),
+            "Velnor lane must not provision image-baked rustup: {workflow}"
+        );
+        assert!(
+            !workflow.contains("name: Save Rust toolchain"),
+            "Velnor lane must not save image-baked rustup: {workflow}"
+        );
+    }
+
+    #[test]
     fn raw_output_caches_alongside_mr_boxington_need_a_justification() {
         let mut config = scanned_fixture(RunnerMode::Github);
         let rust_index = must_some(
@@ -11072,6 +11172,87 @@ channel = "stable"
         assert!(
             !workflow.contains("needs: [velnor-prepare-cargo-sources, velnor-rust-client]"),
             "GitHub lane is absent and dependency edges must not invent reverse needs"
+        );
+    }
+
+    #[test]
+    fn velnor_recovery_concurrency_and_serial_stack_groups() {
+        let config = ProjectConfig {
+            runners: RunnerMode::Velnor,
+            automatic: RunnerMode::Velnor,
+            velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+            velnor_concurrency_group: Some("example-${{ github.repository }}".to_owned()),
+            velnor_serial_stack_groups: true,
+            units: vec![
+                Unit {
+                    id: "bun-root".to_owned(),
+                    label: "Bun".to_owned(),
+                    kind: UnitKind::Bun,
+                    root: ".".to_owned(),
+                    pinned_lockfile: false,
+                    watch: Vec::new(),
+                    pr_commands: Vec::new(),
+                    full_commands: Vec::new(),
+                    github_pr_commands: None,
+                    github_full_commands: None,
+                    velnor_pr_commands: None,
+                    velnor_full_commands: None,
+                    depends_on: Vec::new(),
+                    cache: None,
+                    tool_version: None,
+                    mise_tools: Vec::new(),
+                    toolchain: None,
+                    services: Vec::new(),
+                    workflow_file: None,
+                    requires_trusted: false,
+                    workspace_check: false,
+                },
+                Unit {
+                    id: "docs".to_owned(),
+                    label: "Documentation".to_owned(),
+                    kind: UnitKind::Docs,
+                    root: ".".to_owned(),
+                    pinned_lockfile: false,
+                    watch: Vec::new(),
+                    pr_commands: Vec::new(),
+                    full_commands: Vec::new(),
+                    github_pr_commands: None,
+                    github_full_commands: None,
+                    velnor_pr_commands: None,
+                    velnor_full_commands: None,
+                    depends_on: Vec::new(),
+                    cache: None,
+                    tool_version: None,
+                    mise_tools: Vec::new(),
+                    toolchain: None,
+                    services: Vec::new(),
+                    workflow_file: None,
+                    requires_trusted: false,
+                    workspace_check: false,
+                },
+            ],
+            ..header_fixture_config()
+        };
+        let pr = WorkflowIr::from_config(&config).render_nested(
+            WorkflowKind::PullRequest,
+            &legacy_plan(&WorkflowIr::from_config(&config)),
+        );
+        assert!(
+            pr.contains("group: example-${{ github.repository }}"),
+            "Velnor recovery host must share one repository-scoped concurrency group: {pr}"
+        );
+        assert!(
+            pr.contains("group-bun:\n    name: \"Bun / Packages\"\n    if:"),
+            "missing bun group caller: {pr}"
+        );
+        assert!(
+            pr.contains("needs: [plan, group-bun]"),
+            "serial stack groups must chain after plan: {pr}"
+        );
+        let policy = render_policy_entrypoint(&config);
+        assert!(
+            policy.contains("group: example-${{ github.repository }}"),
+            "policy must share the Velnor recovery concurrency group: {policy}"
         );
     }
 

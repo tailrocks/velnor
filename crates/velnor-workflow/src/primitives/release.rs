@@ -2951,6 +2951,8 @@ mod tests {
             default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
             velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
+            velnor_concurrency_group: None,
+            velnor_serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),

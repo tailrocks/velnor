@@ -182,6 +182,11 @@ struct CiUnit {
     cache: Option<Cache>,
     #[serde(default)]
     workflow_file: Option<String>,
+    /// A workspace-wide Rust verification gate. Its watch paths may stay
+    /// narrow; affected Rust changes select it explicitly to preserve the
+    /// workspace coverage without broadening every topology match.
+    #[serde(default)]
+    workspace_check: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -531,14 +536,15 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
                 unit.id
             )));
         }
-        if unit.watch.is_empty()
-            || unit.github_pr_commands.is_empty()
+        // An empty watch is valid: a unit with no sources never matches an
+        // affected diff but still runs in full scope.
+        if unit.github_pr_commands.is_empty()
             || unit.github_full_commands.is_empty()
             || unit.velnor_pr_commands.is_empty()
             || unit.velnor_full_commands.is_empty()
         {
             return Err(GeneratorError::usage(format!(
-                "CI unit must declare watch plus GitHub and Velnor PR/full commands: {}",
+                "CI unit must declare GitHub and Velnor PR/full commands: {}",
                 unit.id
             )));
         }
@@ -915,6 +921,7 @@ mod runner_lane_tests {
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         assert_eq!(
             unit.commands(RunnerLane::Github, Scope::Affected),
@@ -951,6 +958,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "changed".to_owned(),
@@ -966,6 +974,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "sibling".to_owned(),
@@ -981,6 +990,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
             CiUnit {
                 id: "leaf".to_owned(),
@@ -996,6 +1006,7 @@ mod runner_lane_tests {
                 tool_version: None,
                 cache: None,
                 workflow_file: None,
+                workspace_check: false,
             },
         ];
         let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
@@ -1265,9 +1276,23 @@ fn selection_for_diff<'a>(
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
+        let mut selected = allowlist.clone();
+        let directly_matched_rust = config
+            .unit
+            .iter()
+            .any(|unit| allowlist.contains(&unit.id) && unit.kind == "rust");
+        if directly_matched_rust {
+            let workspace_checks = config
+                .unit
+                .iter()
+                .filter(|unit| unit.workspace_check)
+                .map(|unit| unit.id.clone())
+                .collect::<Vec<_>>();
+            selected.extend(workspace_checks);
+        }
         return Ok(UnitSelection {
-            units: ordered_units(&config.unit, Some(&allowlist))?,
-            full_units: allowlist,
+            units: ordered_units(&config.unit, Some(&selected))?,
+            full_units: selected,
         });
     }
     let matchers = config
@@ -1299,6 +1324,21 @@ fn selection_for_diff<'a>(
         if !matched {
             return full_selection(config);
         }
+    }
+    let directly_matched_rust = selected.iter().any(|unit_id| {
+        config
+            .unit
+            .iter()
+            .any(|unit| unit.id == *unit_id && unit.kind == "rust")
+    });
+    if directly_matched_rust {
+        selected.extend(
+            config
+                .unit
+                .iter()
+                .filter(|unit| unit.workspace_check)
+                .map(|unit| unit.id.clone()),
+        );
     }
     let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
     Ok(UnitSelection {
@@ -3524,6 +3564,7 @@ mod tests {
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         CiConfig {
             schema: 2,
@@ -3805,6 +3846,22 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
         base_contents: &str,
         head_contents: &str,
     ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        current_project_selection_git_fixture_with_config(
+            name,
+            changed,
+            base_contents,
+            head_contents,
+            SELECTION_PROJECT_CONFIG,
+        )
+    }
+
+    fn current_project_selection_git_fixture_with_config(
+        name: &str,
+        changed: &str,
+        base_contents: &str,
+        head_contents: &str,
+        config_text: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -3830,7 +3887,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
 
         let config = root.join(".github/ci/project.toml");
         std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
-        std::fs::write(&config, SELECTION_PROJECT_CONFIG)?;
+        std::fs::write(&config, config_text)?;
 
         let changed_path = root.join(changed);
         std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
@@ -3869,6 +3926,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         CiConfig {
             schema: 2,
@@ -4081,6 +4139,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         assert_eq!(
             prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
@@ -4198,6 +4257,7 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             tool_version: None,
             cache: None,
             workflow_file: None,
+            workspace_check: false,
         };
         let mut config = selection_config();
         config.workflow.version_bump_units = vec![
@@ -4271,6 +4331,74 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
             .collect::<BTreeSet<_>>();
         assert_eq!(selected_id_set(&selection), expected_selected);
         assert_eq!(selection.full_units, expected_full);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_check_is_selected_for_leaf_rust_changes_but_not_docs() -> Result<(), Box<dyn Error>>
+    {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "docs"
+kind = "docs"
+root = "."
+watch = ["docs/**"]
+github_pr_commands = ["markdownlint docs"]
+github_full_commands = ["markdownlint docs"]
+velnor_pr_commands = ["markdownlint docs"]
+velnor_full_commands = ["markdownlint docs"]
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "leaf-source-workspace-check",
+            "crates/leaf/src/lib.rs",
+            "pub fn fixture() {}\n",
+            "pub fn fixture() { let _ = 1; }\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-base", "rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "docs-source-workspace-check",
+            "docs/index.md",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            BTreeSet::from(["docs".to_owned()])
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
