@@ -119,6 +119,7 @@ on:
       - "crates/velnor-workflow/benches/**"
       - "crates/velnor-workflow/examples/**"
       - "crates/velnor-workflow/src/**"
+      - "crates/velnor-workflow/src/runtime.rs"
       - "crates/velnor-workflow/templates/**"
       - "crates/velnor-workflow/templates/release-package-signer.yml"
       - "crates/velnor-workflow/tests/**"
