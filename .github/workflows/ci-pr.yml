@@ -13,8 +13,6 @@ on:
         type: choice
         options:
           - velnor
-          - github
-          - both
       scope:
         description: Verification scope
         required: true

@@ -322,6 +322,25 @@ fn dispatch_runner_default_is_configurable() {
 }
 
 #[test]
+fn velnor_only_runners_limit_dispatch_runner_options() {
+    let root = unique_dir("dispatch-velnor-only");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\ndefault_dispatch_runner = \"velnor\"\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    for name in ["ci-pr.yml", "ci-main.yml", "nightly.yml"] {
+        let workflow = generated.workflow(name);
+        assert!(workflow.contains("default: velnor"), "{name}");
+        assert!(workflow.contains("options:\n          - velnor"), "{name}");
+        assert!(!workflow.contains("          - github"), "{name}");
+        assert!(!workflow.contains("          - both"), "{name}");
+    }
+}
+
+#[test]
 fn github_only_runners_limit_dispatch_runner_options() {
     let root = unique_dir("dispatch-github-only");
     write_rust_fixture(&root, 2);

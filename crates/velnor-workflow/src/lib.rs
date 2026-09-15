@@ -1453,7 +1453,8 @@ pub(crate) fn validate_lane_selection(value: &str, field: &str) -> Result<(), Ge
 pub(crate) fn dispatch_runner_options(runners: RunnerMode) -> &'static [&'static str] {
     match runners {
         RunnerMode::Github => &["github"],
-        RunnerMode::Velnor | RunnerMode::Both => &["velnor", "github", "both"],
+        RunnerMode::Velnor => &["velnor"],
+        RunnerMode::Both => &["velnor", "github", "both"],
     }
 }
 
