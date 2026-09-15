@@ -985,10 +985,14 @@ fn scan_target(
         .unwrap_or(default_branch);
     let shape = scan::scan_shape(root, scan_runners, scan_default_branch, exclude)?;
     let mut config = ProjectConfig::from(shape.clone());
-    enable_mr_boxington_commands(&mut config);
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
     }
+    // Generation config can replace scanned Rust commands after the first pass
+    // (for example `workspace_check = true` rewrites the workspace gate back to
+    // raw `cargo check`). Re-mbxify once all overrides are applied so every Rust
+    // lane, including production topology, uses the same Mr. Boxington path.
+    enable_mr_boxington_commands(&mut config);
     if generation
         .as_ref()
         .and_then(|generation| generation.default_dispatch_runner())
@@ -6517,7 +6521,7 @@ mod tests {
             "pinned Planning runtimes reject unknown fields: {emitted}"
         );
         assert!(
-            emitted.contains("cargo check --workspace --all-targets --locked"),
+            emitted.contains("mbx check --workspace --all-targets --locked"),
             "workspace gate contract must live in emitted commands: {emitted}"
         );
         let path = root.join(".github/ci/project.toml");
