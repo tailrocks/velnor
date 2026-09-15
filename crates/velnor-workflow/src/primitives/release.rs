@@ -3163,15 +3163,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "e2fe4298df5f5b1852ee827319d68e6836b407d6c00c0a80c228633c5b35fc71",
+                "395eee45adec6abe36a2a89ac159950b511714e78942cf255e7908e42b9efc19",
             ),
             (
                 "preview.yml",
-                "0029b2513e0d6f2c9c8de9b782232d5a85024477cf115ee56b69aeeb2b77106e",
+                "a2b7b168d7413f9f5db17764c9c218fe41a2483205dca09c76bb6d0375432b62",
             ),
             (
                 "maintenance.yml",
-                "196a7c3f24188cddd659378c5b4d9a14564e2a40b2d0bfc5feeba9e4c921fa41",
+                "b1a8cf7dfa2e97241b92657769d63b0c734a52db0f29d226da95bd495a6bad43",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3239,11 +3239,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "7c82f9d1ef214b6ca6a717d75a6330f4a2c0f9ec6e216bf9d06d54323747502b",
+                "d3817d2e9039d3d2072067481a9b64ac5090aac61b20db53d58173c668559a9b",
             ),
             (
                 "preview.yml",
-                "0d04653545d49d5394b613060df02dcf1fa61f5a59d489e3b3b6a6cf4b344c9e",
+                "6197421bc5b32f08d7c3b7df6933860b3f9822fb921bb104352ee8491c1b09e7",
             ),
         ];
         let root = scanned_root("identity-pinned");
