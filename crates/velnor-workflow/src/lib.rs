@@ -80,7 +80,7 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-pub(crate) const VELNOR_POLICY_WORKFLOW_REV: &str = "8e1ae640d525125316d7ce8064e739728988b8fe";
+pub(crate) const VELNOR_POLICY_WORKFLOW_REV: &str = "284f109157fe37bcf7bedbbe4f0f2d5c55c460dc";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
@@ -90,7 +90,7 @@ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // PRs; anything older fails dispatch/schedule planning or poisons macOS
 // builds with the Linux mold link arg. Bump after publishing a Velnor commit
 // that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "8e1ae640d525125316d7ce8064e739728988b8fe";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "284f109157fe37bcf7bedbbe4f0f2d5c55c460dc";
 const MR_BOXINGTON_VERSION: &str = "1.11.1";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
@@ -1868,7 +1868,10 @@ fn docker_pull_request_target(command: &str) -> String {
         command.to_owned()
     } else {
         command
-            .replace("docker buildx build ", "docker buildx build --load --target ci ")
+            .replace(
+                "docker buildx build ",
+                "docker buildx build --load --target ci ",
+            )
             .replace("docker build ", "docker buildx build --load --target ci ")
     }
 }
@@ -1914,23 +1917,20 @@ fn materialize_capability_commands(
             for command in &mut unit.pr_commands {
                 *command = docker_pull_request_target(command);
             }
-            let hosted_pr = unit
-                .github_pr_commands
-                .as_ref()
-                .map_or_else(
-                    || {
-                        unit.pr_commands
-                            .iter()
-                            .map(|command| docker_hosted_pull_request_command(command, &unit.id))
-                            .collect()
-                    },
-                    |commands| {
-                        commands
-                            .iter()
-                            .map(|command| docker_hosted_pull_request_command(command, &unit.id))
-                            .collect()
-                    },
-                );
+            let hosted_pr = unit.github_pr_commands.as_ref().map_or_else(
+                || {
+                    unit.pr_commands
+                        .iter()
+                        .map(|command| docker_hosted_pull_request_command(command, &unit.id))
+                        .collect()
+                },
+                |commands| {
+                    commands
+                        .iter()
+                        .map(|command| docker_hosted_pull_request_command(command, &unit.id))
+                        .collect()
+                },
+            );
             unit.github_pr_commands = Some(hosted_pr);
             if let Some(commands) = &mut unit.velnor_pr_commands {
                 for command in commands {
@@ -3242,7 +3242,9 @@ const CI_PR_WORKFLOW: &str = ".github/workflows/ci-pr.yml";
 
 fn workflow_job_display_names(yaml: &str) -> Result<BTreeSet<String>, GeneratorError> {
     let doc: Value = serde_yaml::from_str(yaml).map_err(|error| {
-        GeneratorError::usage(format!("parse {CI_PR_WORKFLOW} for ruleset validation: {error}"))
+        GeneratorError::usage(format!(
+            "parse {CI_PR_WORKFLOW} for ruleset validation: {error}"
+        ))
     })?;
     let Some(jobs) = doc.get("jobs").and_then(Value::as_mapping) else {
         return Err(GeneratorError::usage(format!(
@@ -4536,13 +4538,11 @@ fn run_installed_policy(root: &Path, revision: &str) -> Result<(), GeneratorErro
         if env::var("CARGO_NET_OFFLINE").is_ok_and(|value| value == "true") {
             install.arg("--offline");
         }
-        let status = install
-            .status()
-            .map_err(|error| {
-                GeneratorError::usage(format!(
-                    "install velnor-workflow at pinned revision {revision}: {error}"
-                ))
-            })?;
+        let status = install.status().map_err(|error| {
+            GeneratorError::usage(format!(
+                "install velnor-workflow at pinned revision {revision}: {error}"
+            ))
+        })?;
         if !status.success() {
             return Err(GeneratorError::usage(format!(
                 "install velnor-workflow at pinned revision {revision} failed"
@@ -8940,14 +8940,8 @@ channel = "stable"
             github["cache_outcomes"]["mold"],
             serde_json::json!("prefix")
         );
-        assert_eq!(
-            github["cache_outcomes"]["cargo"],
-            serde_json::json!("cold")
-        );
-        assert_eq!(
-            github["cache_outcomes"]["mbx"],
-            serde_json::json!("prefix")
-        );
+        assert_eq!(github["cache_outcomes"]["cargo"], serde_json::json!("cold"));
+        assert_eq!(github["cache_outcomes"]["mbx"], serde_json::json!("prefix"));
 
         let velnor = run_report_action_case_with_env(
             "velnor-host-warm",
@@ -8956,10 +8950,7 @@ channel = "stable"
             None,
             &[
                 ("VELNOR_CI_LANE", "velnor"),
-                (
-                    "VELNOR_HOST_WARM_LAYERS",
-                    "rustup,mold,mbx,cargo",
-                ),
+                ("VELNOR_HOST_WARM_LAYERS", "rustup,mold,mbx,cargo"),
             ],
         );
         assert_eq!(
@@ -9288,7 +9279,6 @@ channel = "stable"
             "the guest producer must never enter the Velnor lane: {guest}"
         );
 
-        
         let generated = must(
             crate::generated_files(&scanned.config),
             "generate workflow files",
@@ -11772,9 +11762,9 @@ channel = "stable"
                 trimmed
                     .strip_prefix("key: ")
                     .or_else(|| {
-                        trimmed.starts_with("cache-key: ").then(|| {
-                            trimmed.strip_prefix("cache-key: ").unwrap_or(trimmed)
-                        })
+                        trimmed
+                            .starts_with("cache-key: ")
+                            .then(|| trimmed.strip_prefix("cache-key: ").unwrap_or(trimmed))
                     })
                     .map(str::to_owned)
             })
@@ -11785,13 +11775,11 @@ channel = "stable"
         workflow
             .lines()
             .filter_map(|line| {
-                line.trim_start()
-                    .strip_prefix("if: ")
-                    .filter(|body| {
-                        body.contains("cache-hit")
-                            || body.contains("rustup-toolchain.outputs")
-                            || body.contains("mold-cache.outputs")
-                    })
+                line.trim_start().strip_prefix("if: ").filter(|body| {
+                    body.contains("cache-hit")
+                        || body.contains("rustup-toolchain.outputs")
+                        || body.contains("mold-cache.outputs")
+                })
             })
             .map(str::to_owned)
             .collect()
@@ -11809,14 +11797,12 @@ channel = "stable"
             "rustup cache key shape must stay stable: {keys:?}"
         );
         assert!(
-            keys.iter()
-                .any(|key| key.starts_with("velnor-mbx-v3-")),
+            keys.iter().any(|key| key.starts_with("velnor-mbx-v3-")),
             "mbx cache keys must stay on the velnor-mbx namespace: {keys:?}"
         );
         assert!(
-            keys.iter().any(|key| {
-                key.starts_with("ci-${{ runner.os }}-${{ runner.arch }}-rust-")
-            }),
+            keys.iter()
+                .any(|key| { key.starts_with("ci-${{ runner.os }}-${{ runner.arch }}-rust-") }),
             "cargo bundle keys must stay on the ci-<os>-<arch>-rust- prefix: {keys:?}"
         );
     }
@@ -11943,7 +11929,10 @@ channel = "stable"
             "cargo restore",
         );
         let checks = must_some(github_lane.find("name: Run "), "checks step");
-        assert!(restore < checks, "restore must precede checks on GitHub lane");
+        assert!(
+            restore < checks,
+            "restore must precede checks on GitHub lane"
+        );
     }
 
     #[test]
@@ -12015,8 +12004,8 @@ channel = "stable"
             requires_trusted: false,
             workspace_check: false,
         });
-        let workflow =
-            WorkflowIr::from_config(&config).render_nested_unit(&config.units.last().unwrap(), WorkflowKind::Main);
+        let workflow = WorkflowIr::from_config(&config)
+            .render_nested_unit(&config.units.last().unwrap(), WorkflowKind::Main);
         let github_lane = workflow
             .split_once("\n  velnor:")
             .map_or(workflow.as_str(), |(lane, _)| lane);
@@ -12088,8 +12077,7 @@ channel = "stable"
         if let Some(job_id) = current_job {
             jobs.push((job_id, current_body));
         }
-        jobs
-            .into_iter()
+        jobs.into_iter()
             .filter(|(job_id, _)| job_id.starts_with("velnor-"))
             .collect()
     }
@@ -12100,7 +12088,10 @@ channel = "stable"
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
-        let scanned = must(scan_target(&root, RunnerMode::Both, "main"), "scan repository");
+        let scanned = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan repository",
+        );
         let ir = WorkflowIr::from_config(&scanned.config);
         let mut covered_kinds = std::collections::BTreeSet::new();
         for kind in scanned
@@ -12546,7 +12537,10 @@ channel = "stable"
             job_needs("velnor-rust-client").as_deref(),
             Some("[plan, policy, velnor-rust-model]")
         );
-        assert_eq!(job_needs("velnor-rust-model"), Some("[plan, policy]".to_owned()));
+        assert_eq!(
+            job_needs("velnor-rust-model"),
+            Some("[plan, policy]".to_owned())
+        );
         assert!(
             !workflow.contains("needs: [plan, policy, velnor-rust-client]"),
             "dependency edges must not invent reverse needs: {workflow}"
@@ -12696,8 +12690,14 @@ channel = "stable"
             job_needs("velnor-rust-policy"),
             Some("[plan, policy, prepare-cargo]".to_owned())
         );
-        assert_eq!(job_needs("github-rust-model"), Some("[plan, policy]".to_owned()));
-        assert_eq!(job_needs("github-rust-child"), Some("[plan, policy]".to_owned()));
+        assert_eq!(
+            job_needs("github-rust-model"),
+            Some("[plan, policy]".to_owned())
+        );
+        assert_eq!(
+            job_needs("github-rust-child"),
+            Some("[plan, policy]".to_owned())
+        );
         let kind = ir.render_kind_units(UnitKind::Rust, None);
         assert!(
             !kind.contains("needs: [velnor-rust-model]"),

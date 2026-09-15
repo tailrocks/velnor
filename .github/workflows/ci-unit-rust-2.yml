@@ -101,12 +101,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-8e1ae640d525125316d7ce8064e739728988b8fe-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-284f109157fe37bcf7bedbbe4f0f2d5c55c460dc-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 8e1ae640d525125316d7ce8064e739728988b8fe
+          EXPECTED_REVISION: 284f109157fe37bcf7bedbbe4f0f2d5c55c460dc
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -961,9 +961,9 @@ jobs:
           fi
           cargo fetch --locked
           cd -- "$GITHUB_WORKSPACE"
-          install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-8e1ae640d525125316d7ce8064e739728988b8fe"
+          install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-284f109157fe37bcf7bedbbe4f0f2d5c55c460dc"
           if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
-            cargo install --locked --git https://github.com/tailrocks/velnor --rev 8e1ae640d525125316d7ce8064e739728988b8fe --root "$install_root" velnor-workflow --bin velnor-workflow
+            cargo install --locked --git https://github.com/tailrocks/velnor --rev 284f109157fe37bcf7bedbbe4f0f2d5c55c460dc --root "$install_root" velnor-workflow --bin velnor-workflow
           fi
       - name: Mark cargo fetch end
         if: ${{ inputs.unit == 'rust-velnor-workflow' && (always()) }}

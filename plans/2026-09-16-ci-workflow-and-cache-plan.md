@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `8e1ae640` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `284f1091` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -889,3 +889,12 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | P0-6 collapsed docker Velnor skip (concurrency unblock) | V | `render_collapsed_lane_verify_job` applies `append_trusted_runner_availability_gate` (`ir.rs:2589-2604`); `ci-unit-docker.yml:271-274` `&& false` + skip comment |
 | `collapsed_trust_gated_docker_lane_skips_when_trusted_runner_is_unavailable` | V | `lib.rs:7098`; `cargo test -p velnor-workflow` 454 passed |
 | Pins @ `8e1ae640` (D19) | V | `lib.rs:83,93`; release golden digests updated |
+
+#### Rev 8 delta @ `284f1091` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Stuck PR CI concurrency (run 35027857785) | V | `gh run cancel --force`; run 35030781895 reached 93 jobs / 66 scheduled |
+| Policy prefetch `cargo install` package name | V | `lib.rs:4509` `velnor-workflow --bin velnor-workflow`; fixes run 35030781895 `Rust · velnor-workflow / GitHub` multi-binary error |
+| Fork aggregate gate D17 cleanup | V | `ir.rs:2208-2219`; github callers require success; velnor callers accept skipped on fork PR |
+| Pins @ `284f1091` (D19) | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 455 passed |
