@@ -967,21 +967,33 @@ pub(crate) fn render_cargo_source_preparation(
         }
         let root = yaml_scalar(&active.root);
         let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
+        let prefetch = if unit_runs_workflow_plain_check(active) {
+            crate::render_pinned_policy_prefetch_bash(crate::VELNOR_POLICY_WORKFLOW_REV)
+        } else {
+            String::new()
+        };
         let _ = write!(
             output,
-            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}",
+            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}{prefetch}",
             preparation_env()
         );
         return;
     }
+    let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
     let mut cases = String::new();
     for member in members {
         if cargo_network_is_restricted(member) {
-            let _ = writeln!(
+            let prefetch = if unit_runs_workflow_plain_check(member) {
+                crate::render_pinned_policy_prefetch_bash(crate::VELNOR_POLICY_WORKFLOW_REV)
+            } else {
+                String::new()
+            };
+            let _ = write!(
                 cases,
-                "            {}) root={} ;;",
-                crate::shell_quote(&member.id),
-                crate::shell_quote(&member.root)
+                "            {id})\n              root={root}\n              if [[ \"$root\" != \".\" ]]; then\n                cd -- \"$root\"\n              fi\n{fetch_body}{prefetch}\n              ;;\n",
+                id = crate::shell_quote(&member.id),
+                root = crate::shell_quote(&member.root),
+                prefetch = prefetch,
             );
         } else {
             // deny/audit/publish resolve their own inputs; skip fetch.
@@ -992,12 +1004,15 @@ pub(crate) fn render_cargo_source_preparation(
             );
         }
     }
-    let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
     let _ = write!(
         output,
-        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}",
+        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac",
         preparation_env()
     );
+}
+
+fn unit_runs_workflow_plain_check(unit: &Unit) -> bool {
+    unit_commands(unit).any(|command| command.contains("--plain --check"))
 }
 
 fn render_cargo_fetch_body(skip_when_offline_ready: bool) -> String {

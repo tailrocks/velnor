@@ -304,9 +304,9 @@ impl JobContainerSpec {
     }
 
     fn cargo_store_mount_root(&self) -> PathBuf {
-        self.prepared_cargo_store.clone().unwrap_or_else(|| {
-            cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
-        })
+        self.prepared_cargo_store
+            .clone()
+            .unwrap_or_else(|| cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()))
     }
 
     /// The tightest valid `--cpus` limit declared by the operator
@@ -521,6 +521,8 @@ impl JobContainerSpec {
                 ("CARGO_TARGET_DIR", target_root.as_str()),
                 ("MBX_GC_AUTO", "true"),
                 ("MBX_GC_MAX_SIZE", "20GiB"),
+                ("MBX_GC_INCREMENTAL_MAX_SIZE", "20GiB"),
+                ("MBX_GC_INCREMENTAL_MAX_AGE", "30d"),
                 ("MBX_TARGET_MAX_SIZE", "30GiB"),
                 ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
             ]);
@@ -1657,17 +1659,11 @@ impl JobContainerSpec {
     }
 
     fn playwright_browser_store_host(&self) -> PathBuf {
-        self.repository_scoped_home_cache_store_host(
-            "playwright",
-            ".cache/ms-playwright",
-        )
+        self.repository_scoped_home_cache_store_host("playwright", ".cache/ms-playwright")
     }
 
     fn bun_install_cache_store_host(&self) -> PathBuf {
-        self.repository_scoped_home_cache_store_host(
-            "bun-install-cache",
-            ".bun/install/cache",
-        )
+        self.repository_scoped_home_cache_store_host("bun-install-cache", ".bun/install/cache")
     }
 
     fn npm_cache_store_host(&self) -> PathBuf {

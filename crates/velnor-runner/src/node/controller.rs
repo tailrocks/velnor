@@ -5492,7 +5492,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {

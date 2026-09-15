@@ -139,10 +139,10 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
+          key: velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
           restore-keys: |
-            velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
-            velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-
+            velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
+            velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-
       - name: Prepare Docker build seed context
         if: ${{ inputs.unit == 'docker' }}
         env:
@@ -246,7 +246,7 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
+          key: velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
       - name: Mark cleanup end
         if: ${{ inputs.unit == 'docker' && (always()) }}
         run: |
