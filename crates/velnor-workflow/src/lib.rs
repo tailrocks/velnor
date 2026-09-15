@@ -8717,14 +8717,24 @@ channel = "stable"
         let guest = &preview[guest_start..guest_start + guest_len];
         assert_eq!(guest.matches("runs-on:").count(), 1, "{guest}");
         assert!(
+            guest.contains("    runs-on: ${{ matrix.runner }}\n"),
+            "the guest producer must honor each architecture's hosted runner: {guest}"
+        );
+        let configured_hosted_runner = yaml_scalar(&scanned.config.github_runner);
+        assert!(
             guest.contains(&format!(
-                "    runs-on: {}\n",
-                yaml_scalar(&scanned.config.github_runner)
+                "          - arch: x86_64\n            target: x86_64-unknown-linux-gnu\n            runner: {configured_hosted_runner}\n"
             )),
-            "the cross-target guest producer must stay on the configured hosted runner: {guest}"
+            "x86_64 guest payload must stay on the configured hosted runner: {guest}"
         );
         assert!(
-            !guest.contains("runs-on: [self-hosted"),
+            guest.contains(
+                "          - arch: aarch64\n            target: aarch64-unknown-linux-gnu\n            runner: ubuntu-24.04-arm\n"
+            ),
+            "aarch64 guest payload must use GitHub's hosted arm64 runner: {guest}"
+        );
+        assert!(
+            !guest.contains("self-hosted"),
             "the guest producer must never enter the Velnor lane: {guest}"
         );
 
