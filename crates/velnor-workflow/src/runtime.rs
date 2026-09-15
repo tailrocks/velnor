@@ -1879,13 +1879,20 @@ mod run_cmd_stall_tests {
 
     #[test]
     fn chatty_slow_command_succeeds_past_wall_clock_limit() {
-        // ~1.2s of wall-clock against a 0.3s stall window: periodic output
-        // resets the timer, so this must succeed.
+        // ~6s of wall-clock against a 4s stall window: periodic output
+        // resets the timer, so this must succeed. The chatter is
+        // shell-builtin-only: `echo` plus `read -t` on a pipe from one
+        // setup-time `sleep` (its stderr detached so the sleeper can't hold
+        // the child's pipes open past exit). The old per-tick external
+        // `sleep` fork/execed under parallel-test load, and its scheduling
+        // jitter crossed the window and flaked the suite. Six ~1s gaps
+        // hold 3s of slack each; the spelling stays bash-3.2-safe (no
+        // coproc, no fractional `read -t`).
         let result = run_command_with_stall_guard(
             &std::env::temp_dir(),
             "test-unit",
-            "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo tick-$i; sleep 0.1; done",
-            Duration::from_millis(300),
+            "exec 3< <(sleep 15 2>&-); for i in 1 2 3 4 5 6; do echo tick-$i; read -t 1 <&3 || true; done; exec 3<&-",
+            Duration::from_secs(4),
         );
         let message = match &result {
             Ok(()) => String::new(),
