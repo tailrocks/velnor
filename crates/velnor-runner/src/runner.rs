@@ -15702,6 +15702,7 @@ mod tests {
 
     #[test]
     fn on_demand_github_daemon_uses_explicit_local_storage() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
         // SAFETY: this test process owns the variable for the assertion.
         unsafe { std::env::remove_var("VELNOR_STORAGE_ROOT") };
@@ -15733,6 +15734,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_lifecycle_joins_and_releases_sink_on_stop() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let base = unique_temp_dir("retention-lifecycle-stop");
         fs::create_dir_all(&base).unwrap();
         let sink = Arc::new(
@@ -16020,6 +16022,7 @@ mod tests {
 
     #[test]
     fn effective_draining_without_journal_is_exactly_the_latch() {
+        let _serial = crate::trust_scope::test_support::serialized();
         // No journal path degrades to the static latch however the latch is
         // set, so latch-only paths observe no behavior change.
         assert_eq!(effective_draining(None), draining());
@@ -16027,6 +16030,7 @@ mod tests {
 
     #[test]
     fn supervised_start_clears_leftover_journal_drain_from_prior_process() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
         reset_drain_hint_cache_for_tests();
         let dir = unique_temp_dir("stale-drain-reclaim");
@@ -16056,6 +16060,7 @@ mod tests {
 
     #[test]
     fn supervised_start_does_not_clear_drain_while_this_process_is_draining() {
+        let _serial = crate::trust_scope::test_support::serialized();
         let previous_draining = DRAINING.swap(true, Ordering::SeqCst);
         reset_drain_hint_cache_for_tests();
         let dir = unique_temp_dir("live-drain-kept");
@@ -16080,6 +16085,7 @@ mod tests {
 
     #[test]
     fn admission_fence_hint_round_trips_and_fails_closed_on_corruption() {
+        let _serial = crate::trust_scope::test_support::serialized();
         reset_drain_hint_cache_for_tests();
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -16110,6 +16116,7 @@ mod tests {
 
     #[test]
     fn journal_drain_hint_caches_per_path_with_ttl() {
+        let _serial = crate::trust_scope::test_support::serialized();
         // Flag on for this process. Never unset: sibling tests create no
         // drain markers, so the leaked flag cannot change their outcome.
         unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
@@ -16152,6 +16159,7 @@ mod tests {
 
     #[test]
     fn reserve_capacity_permits_reserves_nothing_while_draining() {
+        let _serial = crate::trust_scope::test_support::serialized();
         // Flag on for this process. Never unset: sibling tests create no
         // drain markers, so the leaked flag cannot change their outcome.
         unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
