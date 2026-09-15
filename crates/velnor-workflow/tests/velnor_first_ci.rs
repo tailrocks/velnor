@@ -632,8 +632,27 @@ fn kind_reusable_caller_is_one_call_per_kind() {
     assert!(!pr.contains("matrix.unit"));
     assert!(!pr.contains("name: ${{ matrix.label }}"));
     assert!(pr.contains("selected_units: ${{ needs.plan.outputs.units }}"));
-    assert!(pr.contains("base_sha: ${{ github.event.pull_request.base.sha"));
-    assert!(pr.contains("head_sha: ${{ github.sha }}"));
+    assert!(pr.contains("full_units: ${{ needs.plan.outputs.full_units }}"));
+    assert!(pr.contains("base_sha: ${{ needs.plan.outputs.base_sha }}"));
+    assert!(pr.contains("head_sha: ${{ needs.plan.outputs.head_sha }}"));
+    assert!(!pr.contains("selection-artifact"));
+}
+
+#[test]
+fn kind_reusable_materializes_selection_from_inputs_without_artifact() {
+    let root = unique_dir("selection-materialize");
+    write_rust_fixture(&root, 2);
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(unit.contains("name: Materialize Velnor CI selection"));
+    assert!(unit.contains("SELECTION_UNITS: ${{ inputs.selected_units }}"));
+    assert!(unit.contains("SELECTION_FULL_UNITS: ${{ inputs.full_units }}"));
+    assert!(unit.contains("full_units:\n        required: true"));
+    assert!(!unit.contains("Download Velnor CI selection"));
+    assert!(!unit.contains("selection-artifact"));
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(!pr.contains("Publish Velnor CI selection"));
+    assert!(!pr.contains("velnor-ci-selection\n          path:"));
 }
 
 #[test]
@@ -642,14 +661,8 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
-    assert_eq!(
-        unit.matches("    name: \"Velnor / rust-crate").count(),
-        8
-    );
-    assert_eq!(
-        unit.matches("    name: \"GitHub / rust-crate").count(),
-        8
-    );
+    assert_eq!(unit.matches("    name: \"Velnor / rust-crate").count(), 8);
+    assert_eq!(unit.matches("    name: \"GitHub / rust-crate").count(), 8);
     let pr = generated.workflow("ci-pr.yml");
     assert_eq!(
         pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")

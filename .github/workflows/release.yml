@@ -247,7 +247,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (unit-collector)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-unit-collector
@@ -289,7 +290,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-bench)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-bench
@@ -331,7 +333,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-client)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-client
@@ -373,7 +376,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-control)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-control
@@ -415,7 +419,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-model)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-model
@@ -457,7 +462,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-render)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-render
@@ -499,7 +505,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-runner)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-runner
@@ -541,7 +548,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-tools)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-tools
@@ -583,7 +591,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-workflow)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow
@@ -625,7 +634,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnor-workflow-contract)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnor-workflow-contract
@@ -667,7 +677,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust crate (velnorctl)" checks
+          cargo fetch --locked
+      - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-velnorctl
@@ -705,7 +716,8 @@ jobs:
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
-          cargo fetch --locked      - name: Run "Rust production topology" checks
+          cargo fetch --locked
+      - name: Run "Rust production topology" checks
         env:
           CI_SCOPE: full
           CI_UNIT_ID: rust-production-topology

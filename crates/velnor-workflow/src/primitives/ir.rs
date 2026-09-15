@@ -20,12 +20,12 @@ use crate::{
     config_rust_toolchain, github_expression, hosted_mold_setup, kind_unit_workflow_shard_file,
     lane_supports_unit, nested_unit_workflow_file, rendered_cache_values, sidebar_group_name,
     stack_group_job_id, unit_group, unit_group_job_id, unit_job_id, unit_needs, velnor_runner,
-    velnor_runner_group, workflow_runtime_artifact_upload, workflow_runtime_download,
-    workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
-    workflow_selection_artifact_download, workflow_selection_artifact_upload,
-    workflow_setup_install_rev, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
-    ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER,
-    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
+    velnor_runner_group, velnor_rust_dependency_needs, workflow_runtime_artifact_upload,
+    workflow_runtime_download, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
+    workflow_selection_file_materialize, workflow_setup_install_rev, yaml_scalar, CachePurpose,
+    CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources,
+    Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
+    VELNOR_POLICY_WORKFLOW_REV,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -635,11 +635,7 @@ fn push_mise_tool(tools: &mut Vec<String>, tool: String) {
     }
 }
 
-fn render_velnor_mise_install(
-    output: &mut String,
-    unit: &Unit,
-    lock_keys: &BTreeSet<String>,
-) {
+fn render_velnor_mise_install(output: &mut String, unit: &Unit, lock_keys: &BTreeSet<String>) {
     let tools = velnor_mise_install_tool_ids(unit, lock_keys);
     if tools.is_empty() {
         return;
@@ -720,7 +716,7 @@ pub(crate) fn render_cargo_source_preparation(
         let root = yaml_scalar(&active.root);
         let _ = write!(
             output,
-            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
+            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked\n",
             preparation_env()
         );
         return;
@@ -745,7 +741,7 @@ pub(crate) fn render_cargo_source_preparation(
     }
     let _ = write!(
         output,
-        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
+        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked\n",
         preparation_env()
     );
 }
@@ -964,6 +960,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) default_dispatch_runner: String,
     pub(crate) runners: RunnerMode,
     pub(crate) automatic: RunnerMode,
+    pub(crate) velnor_rust_needs: VelnorRustNeeds,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
     /// never provides the Rust toolchain (rustup owns that), it only
@@ -1291,6 +1288,7 @@ impl WorkflowIr {
             default_dispatch_runner: config.default_dispatch_runner.clone(),
             runners: config.runners,
             automatic: config.automatic,
+            velnor_rust_needs: config.velnor_rust_needs,
             tools,
             mise_present,
             mr_boxington,
@@ -1457,7 +1455,6 @@ impl WorkflowIr {
     }
 
     pub(crate) fn render_nested_unit_callers(&self, output: &mut String, include_policy: bool) {
-        let base_sha = self.base_sha_expression();
         for unit in &self.units {
             let mut needs = vec!["plan".to_owned()];
             if include_policy {
@@ -1478,11 +1475,12 @@ impl WorkflowIr {
             ));
             let _ = writeln!(
                 output,
-                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection\n      base_sha: ${{{{ {base_sha} }}}}\n      head_sha: ${{{{ github.sha }}}}",
+                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: {}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
                 yaml_scalar(&name),
                 conditions.join(" && "),
                 needs.join(", "),
                 nested_unit_workflow_file(unit),
+                yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id),
             );
         }
@@ -1507,7 +1505,6 @@ impl WorkflowIr {
                 .or_default()
                 .push((unit_id, name));
         }
-        let base_sha = self.base_sha_expression();
         for ((job_id, file), _units) in groups {
             let mut needs = vec!["plan".to_owned()];
             if include_policy {
@@ -1528,7 +1525,7 @@ impl WorkflowIr {
             };
             let _ = writeln!(
                 output,
-                "  {job_id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection\n      base_sha: ${{{{ {base_sha} }}}}\n      head_sha: ${{{{ github.sha }}}}",
+                "  {job_id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
                 yaml_scalar(group_name),
                 conditions.join(" && "),
                 needs.join(", "),
@@ -1713,7 +1710,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string",
             yaml_scalar(&sidebar_group_name(unit))
         );
         self.render_workflow_env(&mut output, unit);
@@ -1739,7 +1736,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n\njobs:",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n\njobs:",
             yaml_scalar(unit_group(kind))
         );
         output
@@ -1849,9 +1846,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
                 self.pins.checkout
             );
-            output.push_str(&workflow_selection_artifact_download(Some(
-                "${{ inputs.selection-artifact }}",
-            )));
+            output.push_str(&workflow_selection_file_materialize(
+                &SelectionFieldSources {
+                    base_sha: "${{ inputs.base_sha }}",
+                    head_sha: "${{ inputs.head_sha }}",
+                    scope: "${{ inputs.scope }}",
+                    units: "${{ inputs.selected_units }}",
+                    full_units: "${{ inputs.full_units }}",
+                },
+            ));
             if let Some(toolchain) = cache_unit.toolchain.as_ref() {
                 render_pinned_toolchain_steps(
                     output,
@@ -1970,9 +1973,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
         let uses_lane_cargo_prep =
             input_unit.is_some() && cargo_network_is_restricted(unit) && !members.is_empty();
+        let mut needs = Vec::new();
         if uses_lane_cargo_prep {
-            let prep_id = format!("{}-prepare-cargo-sources", lane.as_str());
-            let _ = writeln!(output, "    needs: [{prep_id}]");
+            needs.push(format!("{}-prepare-cargo-sources", lane.as_str()));
+        }
+        needs.extend(velnor_rust_dependency_needs(
+            lane,
+            unit,
+            self.velnor_rust_needs,
+            &self.units,
+        ));
+        if !needs.is_empty() {
+            let _ = writeln!(output, "    needs: [{}]", needs.join(", "));
         }
         let _ = writeln!(output, "    runs-on: {}", self.runner_for_unit(lane, unit));
         if input_unit.is_some() {
@@ -1989,9 +2001,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         self.render_unit_runtime(output, lane, unit);
         render_ci_runner_setup_end_marker(output);
-        output.push_str(&workflow_selection_artifact_download(Some(
-            "${{ inputs.selection-artifact }}",
-        )));
+        let units_source =
+            input_unit.map_or("${{ inputs.unit }}", |_| "${{ inputs.selected_units }}");
+        output.push_str(&workflow_selection_file_materialize(
+            &SelectionFieldSources {
+                base_sha: "${{ inputs.base_sha }}",
+                head_sha: "${{ inputs.head_sha }}",
+                scope: "${{ inputs.scope }}",
+                units: units_source,
+                full_units: "${{ inputs.full_units }}",
+            },
+        ));
         render_ci_selection_end_marker(output);
         self.render_tool_provisioning_for_unit(output, lane, unit, cache_save);
         render_ci_tool_bootstrap_end_marker(output);
@@ -2276,7 +2296,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if runners != RunnerMode::Velnor {
             output.push_str(&workflow_runtime_artifact_upload());
         }
-        output.push_str(&workflow_selection_artifact_upload());
     }
 
     pub(crate) fn render_policy(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
@@ -2554,7 +2573,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         {
             let id = unit_job_id(lane, &unit.id);
             let lane_label = lane.display_name();
-            let needs = unit_needs(lane, unit, include_policy);
+            let needs = unit_needs(
+                lane,
+                unit,
+                include_policy,
+                self.velnor_rust_needs,
+                &self.units,
+            );
             let runner = self.runner_for_unit(lane, unit);
             let group = unit_group(unit.kind);
             let label = unit
@@ -2581,31 +2606,39 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
             self.render_unit_runtime(output, lane, unit);
             render_ci_runner_setup_end_marker(output);
-            output.push_str(&workflow_selection_artifact_download(None));
+            output.push_str(&workflow_selection_file_materialize(
+                &SelectionFieldSources {
+                    base_sha: "${{ needs.plan.outputs.base_sha }}",
+                    head_sha: "${{ needs.plan.outputs.head_sha }}",
+                    scope: "${{ needs.plan.outputs.scope }}",
+                    units: "${{ needs.plan.outputs.units }}",
+                    full_units: "${{ needs.plan.outputs.full_units }}",
+                },
+            ));
             render_ci_selection_end_marker(output);
             self.render_tool_provisioning(output, lane, unit, cache_save);
             render_ci_tool_bootstrap_end_marker(output);
-            let cargo_cache_restored =
-                if CacheBackend::Detected.lane_enables_actions_cache(lane, self, unit)
-                    && let Some(cache) = &unit.cache
-                {
-                    render_retained_output_cache_note(output, self, unit, cache);
-                    let (paths, key) = rendered_cache_values(cache);
-                    let cache_key = format!(
-                        "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                        unit.id
-                    );
-                    let _ = writeln!(
+            let cargo_cache_restored = if CacheBackend::Detected
+                .lane_enables_actions_cache(lane, self, unit)
+                && let Some(cache) = &unit.cache
+            {
+                render_retained_output_cache_note(output, self, unit, cache);
+                let (paths, key) = rendered_cache_values(cache);
+                let cache_key = format!(
+                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                    unit.id
+                );
+                let _ = writeln!(
                         output,
                         "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
                         verify_name,
                         self.pins.cache_restore,
                         unit.id,
                     );
-                    true
-                } else {
-                    false
-                };
+                true
+            } else {
+                false
+            };
             render_ci_cache_prep_end_marker(output);
             render_cargo_source_preparation(output, &[unit], &unit.id, false, cargo_cache_restored);
             render_ci_cargo_fetch_end_marker(output);

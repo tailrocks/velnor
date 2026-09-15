@@ -9,7 +9,7 @@ on:
       scope:
         required: true
         type: string
-      selection-artifact:
+      full_units:
         required: true
         type: string
       base_sha:
@@ -39,11 +39,25 @@ jobs:
       - name: Mark runner setup end
         if: always()
         run: echo "VELNOR_RUNNER_SETUP_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-      - name: Download Velnor CI selection
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ inputs.selection-artifact }}
-          path: .velnor-ci-selection
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=1\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+          } > .velnor-ci-selection/velnor-ci-selection
       - name: Mark selection transport end
         if: always()
         run: echo "VELNOR_SELECTION_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"

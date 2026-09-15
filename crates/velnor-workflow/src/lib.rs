@@ -263,6 +263,16 @@ impl RunnerMode {
     }
 }
 
+/// How Velnor-lane Rust unit jobs relate through GitHub Actions `needs:`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum VelnorRustNeeds {
+    /// Independent crate jobs start together; Cargo resolves prerequisites locally.
+    #[default]
+    Parallel,
+    /// Each crate job waits on its direct `depends_on` Rust unit jobs on Velnor.
+    DependencyClosure,
+}
+
 /// CLI intent, separated from filesystem and network boundaries for testing.
 #[expect(
     clippy::struct_excessive_bools,
@@ -736,6 +746,8 @@ pub struct ProjectConfig {
     /// Fallback lane selection for automatic static workflows that read
     /// `vars.VELNOR_AUTOMATIC_LANES`.
     pub(crate) automatic_lanes: String,
+    /// Whether Velnor-lane Rust unit jobs wait on their direct dependency jobs.
+    pub(crate) velnor_rust_needs: VelnorRustNeeds,
     /// Repository-local files the generated output owns verbatim, read from
     /// the declared sources at scan time.
     pub(crate) static_files: Vec<StaticFile>,
@@ -1477,6 +1489,16 @@ pub(crate) fn dispatch_runner_options(runners: RunnerMode) -> &'static [&'static
     }
 }
 
+pub(crate) fn parse_velnor_rust_needs(value: &str) -> Result<VelnorRustNeeds, GeneratorError> {
+    match value {
+        "parallel" => Ok(VelnorRustNeeds::Parallel),
+        "dependency-closure" => Ok(VelnorRustNeeds::DependencyClosure),
+        _ => Err(GeneratorError::usage(format!(
+            "[workflow] velnor_rust_needs must be one of: parallel, dependency-closure; found `{value}`"
+        ))),
+    }
+}
+
 pub(crate) fn validate_dispatch_runner_for_runners(
     runners: RunnerMode,
     default_dispatch_runner: &str,
@@ -1556,6 +1578,9 @@ fn apply_generation_config(
     if let Some(automatic_lanes) = generation.automatic_lanes() {
         validate_lane_selection(automatic_lanes, "[workflow] automatic_lanes")?;
         automatic_lanes.clone_into(&mut config.automatic_lanes);
+    }
+    if let Some(velnor_rust_needs) = generation.velnor_rust_needs() {
+        config.velnor_rust_needs = parse_velnor_rust_needs(velnor_rust_needs)?;
     }
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
@@ -3000,16 +3025,55 @@ pub(crate) fn lanes_support_unit_kind(lanes: RunnerMode, kind: UnitKind) -> bool
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn unit_needs(_lane: RunnerMode, unit: &Unit, include_policy: bool) -> Vec<String> {
-    // Cargo resolves and builds each unit's prerequisites itself. Keeping
-    // dependency jobs out of `needs` lets independent hosted and Velnor jobs
-    // start together; ci-required still aggregates every selected result.
+pub(crate) fn velnor_rust_dependency_needs(
+    lane: RunnerMode,
+    unit: &Unit,
+    velnor_rust_needs: VelnorRustNeeds,
+    units: &[Unit],
+) -> Vec<String> {
+    if lane != RunnerMode::Velnor
+        || velnor_rust_needs != VelnorRustNeeds::DependencyClosure
+        || unit.kind != UnitKind::Rust
+    {
+        return Vec::new();
+    }
+    unit.depends_on
+        .iter()
+        .filter_map(|dependency| {
+            units
+                .iter()
+                .find(|candidate| candidate.id == *dependency)
+                .and_then(|dependency_unit| {
+                    if dependency_unit.kind == UnitKind::Rust
+                        && lane_supports_unit_kind(lane, dependency_unit.kind)
+                    {
+                        Some(unit_job_id(lane, dependency))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn unit_needs(
+    lane: RunnerMode,
+    unit: &Unit,
+    include_policy: bool,
+    velnor_rust_needs: VelnorRustNeeds,
+    units: &[Unit],
+) -> Vec<String> {
     let mut needs = vec!["plan".to_owned()];
     if include_policy {
         needs.push("policy".to_owned());
     }
     needs.push(unit_group_job_id(unit));
+    needs.extend(velnor_rust_dependency_needs(
+        lane,
+        unit,
+        velnor_rust_needs,
+        units,
+    ));
     needs
 }
 
@@ -3103,18 +3167,44 @@ fn workflow_runtime_artifact_upload() -> String {
     )
 }
 
-pub(crate) fn workflow_selection_artifact_download(name: Option<&str>) -> String {
-    let name = name.unwrap_or("velnor-ci-selection");
-    format!(
-        "      - name: Download Velnor CI selection\n        uses: {}\n        with:\n          name: {name}\n          path: .velnor-ci-selection\n",
-        ActionPin::DownloadArtifact.reference()
-    )
+/// Selection-file field sources for one materialize step: already-rendered
+/// GitHub expressions such as `${{ inputs.base_sha }}` or
+/// `${{ needs.plan.outputs.units }}`.
+pub(crate) struct SelectionFieldSources<'a> {
+    pub(crate) base_sha: &'a str,
+    pub(crate) head_sha: &'a str,
+    pub(crate) scope: &'a str,
+    pub(crate) units: &'a str,
+    pub(crate) full_units: &'a str,
 }
 
-fn workflow_selection_artifact_upload() -> String {
+const WORKFLOW_SELECTION_FILE_MATERIALIZE_RUN: &str = r#"          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version={version}\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+          } > .velnor-ci-selection/velnor-ci-selection
+"#;
+
+/// Write the plan selection file from values the caller already has (plan
+/// outputs or reusable-workflow inputs) instead of an artifact
+/// upload/download round-trip. `run` consumes the same six-field format and
+/// keeps its fail-closed SHA/unit checks; transport can no longer skew the
+/// SHAs because the file and the job env render from the same sources.
+pub(crate) fn workflow_selection_file_materialize(sources: &SelectionFieldSources<'_>) -> String {
+    let run = WORKFLOW_SELECTION_FILE_MATERIALIZE_RUN
+        .replace("{version}", crate::runtime::SELECTION_FILE_VERSION);
     format!(
-        "      - name: Publish Velnor CI selection\n        uses: {}\n        with:\n          name: velnor-ci-selection\n          path: ${{{{ runner.temp }}}}/velnor-ci-selection\n          if-no-files-found: error\n          retention-days: 1\n",
-        ActionPin::UploadArtifact.reference()
+        "      - name: Materialize Velnor CI selection\n        shell: bash\n        env:\n          SELECTION_BASE_SHA: {}\n          SELECTION_HEAD_SHA: {}\n          SELECTION_SCOPE: {}\n          SELECTION_UNITS: {}\n          SELECTION_FULL_UNITS: {}\n        run: |\n{run}",
+        sources.base_sha,
+        sources.head_sha,
+        sources.scope,
+        sources.units,
+        sources.full_units,
     )
 }
 
@@ -3332,9 +3422,8 @@ fn generated_files_with_surface(
 fn builtin_generated_actions() -> BTreeMap<PathBuf, String> {
     let template = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("templates/report-velnor-ci-outcomes/action.yml");
-    let content = fs::read_to_string(&template).unwrap_or_else(|error| {
-        panic!("read {}: {error}", template.display())
-    });
+    let content = fs::read_to_string(&template)
+        .unwrap_or_else(|error| panic!("read {}: {error}", template.display()));
     let mut files = BTreeMap::new();
     files.insert(
         PathBuf::from(".github/actions/report-velnor-ci-outcomes/action.yml"),
@@ -5926,6 +6015,7 @@ mod tests {
             package_update_channels: None,
             velnor_runner_group: None,
             velnor_trusted_label: None,
+            velnor_rust_needs: VelnorRustNeeds::Parallel,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -9559,6 +9649,7 @@ channel = "stable"
             pull_request_on_velnor: false,
             default_dispatch_runner: DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: DEFAULT_AUTOMATIC_LANES.to_owned(),
+            velnor_rust_needs: VelnorRustNeeds::Parallel,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -10630,8 +10721,8 @@ channel = "stable"
             "scanned Rust unit",
         );
         config.units[rust_index].pinned_lockfile = true;
-        let workflow =
-            WorkflowIr::from_config(&config).render_nested_unit(&config.units[rust_index], WorkflowKind::Main);
+        let workflow = WorkflowIr::from_config(&config)
+            .render_nested_unit(&config.units[rust_index], WorkflowKind::Main);
         assert!(
             !workflow.contains("name: Restore \"Rust crate (fixture)\" cache"),
             "Velnor-only jobs must not emit redundant actions/cache restore"
@@ -10851,6 +10942,136 @@ channel = "stable"
         assert!(
             !kind.contains("export CARGO_NET_OFFLINE=true"),
             "kind jobs must not carry the union offline run prelude"
+        );
+    }
+
+    #[test]
+    fn cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles() {
+        let workspace_member = |id: &str, root: &str| Unit {
+            id: id.to_owned(),
+            label: format!("Rust crate ({id})"),
+            kind: UnitKind::Rust,
+            root: root.to_owned(),
+            pinned_lockfile: true,
+            watch: vec!["Cargo.lock".to_owned()],
+            pr_commands: vec!["cargo test --locked".to_owned()],
+            full_commands: vec!["cargo test --locked".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
+            depends_on: Vec::new(),
+            cache: Some(CacheSpec {
+                key_files: vec!["Cargo.lock".to_owned(), format!("{root}/Cargo.toml")],
+                paths: vec!["~/.cargo/registry".to_owned()],
+                purpose: CachePurpose::CargoSources,
+                mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
+            }),
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            workflow_file: None,
+            requires_trusted: false,
+            workspace_check: false,
+        };
+        let independent = Unit {
+            root: "crates/contract".to_owned(),
+            watch: vec!["crates/contract/Cargo.lock".to_owned()],
+            cache: Some(CacheSpec {
+                key_files: vec![
+                    "crates/contract/Cargo.lock".to_owned(),
+                    "crates/contract/Cargo.toml".to_owned(),
+                ],
+                paths: vec!["~/.cargo/registry".to_owned()],
+                purpose: CachePurpose::CargoSources,
+                mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
+            }),
+            ..workspace_member("rust-contract", "crates/contract")
+        };
+        let members = [
+            &workspace_member("rust-model", "crates/model"),
+            &workspace_member("rust-app", "crates/app"),
+            &independent,
+        ];
+        let config = ProjectConfig {
+            runners: RunnerMode::Velnor,
+            automatic: RunnerMode::Velnor,
+            velnor_labels: vec!["self-hosted".to_owned(), "velnor".to_owned()],
+            units: members.iter().map(|unit| (*unit).clone()).collect(),
+            ..header_fixture_config()
+        };
+        let workflow = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust, None);
+        assert!(
+            workflow.matches("cargo fetch --locked").count() >= 2,
+            "prep must fetch the workspace root and the independent lockfile tree"
+        );
+        assert!(
+            !workflow.contains("cd -- 'crates/model'\n          cargo fetch --locked"),
+            "workspace members must not fetch per crate: {workflow}"
+        );
+        assert!(
+            workflow.contains("cd -- 'crates/contract'\n          cargo fetch --locked"),
+            "independent lockfile trees keep their own fetch root"
+        );
+    }
+
+    #[test]
+    fn velnor_dependency_closure_adds_direct_depends_on_needs_edges() {
+        let rust_unit = |id: &str, depends_on: Vec<&str>| Unit {
+            id: id.to_owned(),
+            label: format!("Rust crate ({id})"),
+            kind: UnitKind::Rust,
+            root: format!("crates/{id}"),
+            pinned_lockfile: true,
+            watch: vec!["Cargo.lock".to_owned()],
+            pr_commands: vec!["cargo test --locked".to_owned()],
+            full_commands: vec!["cargo test --locked".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
+            depends_on: depends_on.into_iter().map(str::to_owned).collect(),
+            cache: Some(CacheSpec {
+                key_files: vec!["Cargo.lock".to_owned()],
+                paths: vec!["~/.cargo/registry".to_owned()],
+                purpose: CachePurpose::CargoSources,
+                mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
+            }),
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            workflow_file: None,
+            requires_trusted: false,
+            workspace_check: false,
+        };
+        let config = ProjectConfig {
+            runners: RunnerMode::Velnor,
+            automatic: RunnerMode::Velnor,
+            velnor_labels: vec!["self-hosted".to_owned(), "velnor".to_owned()],
+            velnor_rust_needs: VelnorRustNeeds::DependencyClosure,
+            units: vec![
+                rust_unit("rust-model", vec![]),
+                rust_unit("rust-client", vec!["rust-model"]),
+            ],
+            ..header_fixture_config()
+        };
+        let workflow = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust, None);
+        assert!(
+            workflow.contains("needs: [velnor-prepare-cargo-sources, velnor-rust-model]"),
+            "dependent crate jobs must wait on direct dependency unit jobs: {workflow}"
+        );
+        assert!(
+            workflow.contains("needs: [velnor-prepare-cargo-sources]"),
+            "root crate jobs still only need cargo prep"
+        );
+        assert!(
+            !workflow.contains("needs: [velnor-prepare-cargo-sources, velnor-rust-client]"),
+            "GitHub lane is absent and dependency edges must not invent reverse needs"
         );
     }
 
