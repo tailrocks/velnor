@@ -97,9 +97,7 @@
       "install_path": "apt only via https://velnor-apt.tailrocks.com/ (source tailrocks/velnor-apt)",
       "fleet_version_documented": "Velnor Runner/0.1.274 (protocol 2.337.0) as of 2026-09-13 fleet evidence",
       "sources": [
-        "fleet/ci-cd-cache-architecture-evidence.md",
-        "fleet/wp6-velnor-lane-capacity.md",
-        "fleet/policies/{tailrocks,jackin-project,ChainArgos}-desired-policy.json"
+        "config/fleet/policies/{tailrocks,jackin-project,ChainArgos}-desired-policy.json"
       ],
       "documented_limitations": [
         "Fleet still v0.1.274 until tagged velnor-runner published to velnor-apt and installed on sentry",

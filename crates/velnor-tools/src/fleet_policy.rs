@@ -789,12 +789,12 @@ pub struct FleetApplyArgs {
 #[derive(Debug, Clone, Args)]
 pub struct FleetGenerateArgs {
     /// Release-ref ledger to generate from (validated before any write).
-    #[arg(long, default_value = "fleet/release-refs.toml")]
+    #[arg(long, default_value = "config/fleet/release-refs.toml")]
     pub ledger: PathBuf,
     /// Absolute root-owned directory receiving `<org>-desired-policy.json`
     /// files through the dedicated root publisher boundary. Protection is
     /// against unprivileged/non-root writers subject to Unix DAC.
-    #[arg(long, default_value = "fleet/policies")]
+    #[arg(long, default_value = "config/fleet/policies")]
     pub out_dir: PathBuf,
 }
 
@@ -2772,7 +2772,7 @@ mod tests {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let path = Path::new(manifest)
             .join("../..")
-            .join("fleet/release-refs.toml");
+            .join("config/fleet/release-refs.toml");
         let ledger = ReleaseRefLedger::load(&path).expect("production ledger parses");
         assert_eq!(ledger.schema_version, 1);
         assert_eq!(ledger.entries.len(), 147);
@@ -3043,14 +3043,14 @@ mod tests {
     #[test]
     fn generate_reproduces_committed_snapshot_bytes() {
         let ledger =
-            ReleaseRefLedger::load(&repo_root().join("fleet/release-refs.toml")).expect("ledger");
+            ReleaseRefLedger::load(&repo_root().join("config/fleet/release-refs.toml")).expect("ledger");
         let policies = generate_policies_from_ledger(&ledger).expect("policies");
         let mut seen = BTreeSet::new();
         for policy in &policies {
             seen.insert(policy.organization.clone());
             let generated = format!("{}\n", policy.canonical_json().expect("canonical"));
             let snapshot = repo_root()
-                .join("fleet/policies")
+                .join("config/fleet/policies")
                 .join(format!("{}-desired-policy.json", policy.organization));
             let committed = fs::read_to_string(&snapshot)
                 .unwrap_or_else(|error| panic!("read {snapshot:?}: {error}"));
@@ -3074,7 +3074,7 @@ mod tests {
     #[test]
     fn generate_is_deterministic_across_runs() {
         let ledger =
-            ReleaseRefLedger::load(&repo_root().join("fleet/release-refs.toml")).expect("ledger");
+            ReleaseRefLedger::load(&repo_root().join("config/fleet/release-refs.toml")).expect("ledger");
         let first = generate_policies_from_ledger(&ledger).expect("first");
         let second = generate_policies_from_ledger(&ledger).expect("second");
         assert_eq!(first.len(), second.len());
@@ -3413,7 +3413,7 @@ mod tests {
     fn generate_second_run_leaves_current_files_untouched() {
         let dir = PolicyDir::new("idempotent");
         let args = FleetGenerateArgs {
-            ledger: repo_root().join("fleet/release-refs.toml"),
+            ledger: repo_root().join("config/fleet/release-refs.toml"),
             out_dir: dir.path.clone(),
         };
         fleet_generate(args.clone()).expect("first generate");
@@ -3873,7 +3873,7 @@ mod tests {
         fs::write(&stale, b"stale bytes\n").expect("seed stale org");
 
         let args = FleetGenerateArgs {
-            ledger: repo_root().join("fleet/release-refs.toml"),
+            ledger: repo_root().join("config/fleet/release-refs.toml"),
             out_dir: dir.path.clone(),
         };
         fleet_generate(args).expect("generate");
@@ -3913,7 +3913,7 @@ mod tests {
         }
 
         let args = FleetGenerateArgs {
-            ledger: repo_root().join("fleet/release-refs.toml"),
+            ledger: repo_root().join("config/fleet/release-refs.toml"),
             out_dir: dir.path.clone(),
         };
         fleet_generate(args).expect("generate");
@@ -3959,7 +3959,7 @@ mod tests {
         .expect("seed removed-org symlink");
 
         let args = FleetGenerateArgs {
-            ledger: repo_root().join("fleet/release-refs.toml"),
+            ledger: repo_root().join("config/fleet/release-refs.toml"),
             out_dir: dir.path.clone(),
         };
         let err = fleet_generate(args)
@@ -4003,7 +4003,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
 
         let args = FleetGenerateArgs {
-            ledger: repo_root().join("fleet/release-refs.toml"),
+            ledger: repo_root().join("config/fleet/release-refs.toml"),
             out_dir: dir.path.clone(),
         };
         let err = fleet_generate(args)
@@ -4020,7 +4020,7 @@ mod tests {
         fs::create_dir(&policy_directory).expect("seed policy-named directory");
 
         let args = FleetGenerateArgs {
-            ledger: repo_root().join("fleet/release-refs.toml"),
+            ledger: repo_root().join("config/fleet/release-refs.toml"),
             out_dir: dir.path.clone(),
         };
         let err = fleet_generate(args)

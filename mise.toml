@@ -122,12 +122,12 @@ run = "cargo deny check"
 
 # Plan 039 tooling-law closure: policy generation remains fully offline. The
 # Generated per-org desired-policy JSONs use VELNOR_FLEET_POLICY_OUT_DIR. The
-# repository default is fleet/policies/; the provisioned runtime uses its
+# repository default is config/fleet/policies/; the provisioned runtime uses its
 # absolute publisher directory. Generation is privileged; readers are
 # read-only and consume the same directory when the variable is set.
 [tasks.fleet-generate]
 description = "Regenerate policies through the provisioned root-owned publisher boundary"
-run = "set -eu; out_dir=\"${VELNOR_FLEET_POLICY_OUT_DIR:-}\"; [ -n \"$out_dir\" ] || { echo 'fleet-generate: set VELNOR_FLEET_POLICY_OUT_DIR to an absolute root-owned publisher directory' >&2; exit 2; }; case \"$out_dir\" in /*) ;; *) echo 'fleet-generate: VELNOR_FLEET_POLICY_OUT_DIR must be absolute' >&2; exit 2 ;; esac; cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir \"$out_dir\""
+run = "set -eu; out_dir=\"${VELNOR_FLEET_POLICY_OUT_DIR:-}\"; [ -n \"$out_dir\" ] || { echo 'fleet-generate: set VELNOR_FLEET_POLICY_OUT_DIR to an absolute root-owned publisher directory' >&2; exit 2; }; case \"$out_dir\" in /*) ;; *) echo 'fleet-generate: VELNOR_FLEET_POLICY_OUT_DIR must be absolute' >&2; exit 2 ;; esac; cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger config/fleet/release-refs.toml --out-dir \"$out_dir\""
 
 [tasks.fleet-publisher-acceptance]
 description = "Production acceptance: generate through the trusted root publisher boundary"
@@ -155,7 +155,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 echo "fleet-publisher-acceptance: checking euid=0, absolute namespace, root-owned/non-group-other-writable ancestors and entries, no-follow traversal, regular single-link policy files"
-cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir "$out_dir"
+cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger config/fleet/release-refs.toml --out-dir "$out_dir"
 echo "fleet-publisher-acceptance: passed production publisher path and publication checks for $out_dir"
 """
 
@@ -171,8 +171,8 @@ run = "cargo run -p velnor-tools --locked --quiet -- audit-ci --estate config/es
 description = "Read live desired/observed fleet state and print policy summary + sha256 digest per org (requires --ledger and GitHub credentials)"
 run = """
 set -eu
-ledger=fleet/release-refs.toml
-policy_dir="${VELNOR_FLEET_POLICY_OUT_DIR:-fleet/policies}"
+ledger=config/fleet/release-refs.toml
+policy_dir="${VELNOR_FLEET_POLICY_OUT_DIR:-config/fleet/policies}"
 case "$policy_dir" in /*) ;; *) policy_dir="$(pwd)/$policy_dir" ;; esac
 if [ ! -f "$ledger" ]; then
   echo "fleet plan: release-ref ledger '$ledger' not found" >&2
@@ -196,8 +196,8 @@ fi
 description = "Emit one '<org> -> <digest>' line per desired policy after live read-only planning (requires --ledger and GitHub credentials)"
 run = """
 set -eu
-ledger=fleet/release-refs.toml
-policy_dir="${VELNOR_FLEET_POLICY_OUT_DIR:-fleet/policies}"
+ledger=config/fleet/release-refs.toml
+policy_dir="${VELNOR_FLEET_POLICY_OUT_DIR:-config/fleet/policies}"
 case "$policy_dir" in /*) ;; *) policy_dir="$(pwd)/$policy_dir" ;; esac
 if [ ! -f "$ledger" ]; then
   echo "fleet digests: release-ref ledger '$ledger' not found" >&2

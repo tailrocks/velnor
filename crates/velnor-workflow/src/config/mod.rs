@@ -1576,7 +1576,7 @@ mod tests {
              default_branch = \"trunk\"\n\
              \n\
              [scan]\n\
-             exclude = [\"fleet/**\", \"docs/**\"]\n\
+             exclude = [\"config/fleet/**\", \"docs/**\"]\n\
              \n\
              [policy]\n\
              dco_required = true\n\

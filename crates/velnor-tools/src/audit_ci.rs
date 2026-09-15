@@ -661,7 +661,7 @@ fn checkout_remote_default(
     // repository trees. Any other tracked audit surface is read from its
     // verified index blob below, so sparse omission cannot become a false
     // negative or a hard failure.
-    let sparse_input = b"/*\n!/*/\n/.github/\n/docs/\n/scripts/\n/operational/\n/fleet/\n";
+    let sparse_input = b"/*\n!/*/\n/.github/\n/docs/\n/scripts/\n/operational/\n/config/fleet/\n";
     let sparse = Command::new("git")
         .current_dir(&path)
         .args(["sparse-checkout", "set", "--no-cone", "--stdin"])
@@ -1021,12 +1021,12 @@ fn audit_repo_profile(
 }
 
 /// Plan 039 Step 1 repository-local enforcement: when a checkout carries
-/// `fleet/release-refs.toml`, validate it against the ledger schema and require
+/// `config/fleet/release-refs.toml`, validate it against the ledger schema and require
 /// every generated `<org>-desired-policy.json` under the configured policy
-/// directory (default `fleet/policies/`) to be byte-current versus offline
+/// directory (default `config/fleet/policies/`) to be byte-current versus offline
 /// deterministic generation.
 fn audit_fleet_policy_surface(root: &Path) -> Result<Vec<Finding>> {
-    let ledger_path = root.join("fleet/release-refs.toml");
+    let ledger_path = root.join("config/fleet/release-refs.toml");
     if !ledger_path.is_file() {
         return Ok(Vec::new());
     }
@@ -1061,7 +1061,7 @@ fn audit_fleet_policy_surface(root: &Path) -> Result<Vec<Finding>> {
     for (stem, reason) in unreadable {
         findings.push(Finding::error(
             "fleet-policy-current",
-            &format!("fleet/policies/{stem}-desired-policy.json"),
+            &format!("config/fleet/policies/{stem}-desired-policy.json"),
             "$",
             format!("generated policy file is unreadable: {reason}"),
         ));
@@ -1071,7 +1071,7 @@ fn audit_fleet_policy_surface(root: &Path) -> Result<Vec<Finding>> {
 
 fn fleet_policy_directory(root: &Path, configured: Option<&Path>) -> Result<PathBuf> {
     let Some(path) = configured else {
-        return Ok(root.join("fleet/policies"));
+        return Ok(root.join("config/fleet/policies"));
     };
     if path.is_relative() {
         bail!(
@@ -1088,7 +1088,7 @@ fn fleet_policy_findings(
     ledger: Result<ReleaseRefLedger>,
     on_disk: &BTreeMap<String, String>,
 ) -> Vec<Finding> {
-    const LEDGER_FILE: &str = "fleet/release-refs.toml";
+    const LEDGER_FILE: &str = "config/fleet/release-refs.toml";
     let ledger = match ledger {
         Ok(ledger) => ledger,
         Err(error) => {
@@ -1131,7 +1131,7 @@ fn fleet_policy_findings(
     };
     let mut findings = Vec::new();
     for (organization, wanted) in &expected {
-        let relative = format!("fleet/policies/{organization}-desired-policy.json");
+        let relative = format!("config/fleet/policies/{organization}-desired-policy.json");
         let Some(content) = on_disk.get(organization) else {
             findings.push(Finding::error(
                 "fleet-policy-current",
@@ -1161,7 +1161,7 @@ fn fleet_policy_findings(
         if !expected.contains_key(organization) {
             findings.push(Finding::error(
                 "fleet-policy-extra",
-                &format!("fleet/policies/{organization}-desired-policy.json"),
+                &format!("config/fleet/policies/{organization}-desired-policy.json"),
                 "$",
                 format!(
                     "no ledger entries for organization '{organization}'; remove this stale generated policy"
@@ -4298,7 +4298,7 @@ jobs:
         assert_eq!(findings[0].rule, "fleet-policy-current");
         assert_eq!(
             findings[0].file,
-            "fleet/policies/tailrocks-desired-policy.json"
+            "config/fleet/policies/tailrocks-desired-policy.json"
         );
         assert!(findings[0]
             .message
@@ -4341,7 +4341,7 @@ jobs:
         let findings = fleet_policy_findings(Err(anyhow::anyhow!("boom")), &BTreeMap::new());
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, "fleet-policy-ledger");
-        assert_eq!(findings[0].file, "fleet/release-refs.toml");
+        assert_eq!(findings[0].file, "config/fleet/release-refs.toml");
         assert_eq!(findings[0].message, "boom");
         // The filesystem path validates before comparing anything.
         assert!(crate::fleet_policy::validate_ledger(&invalid)
@@ -4355,14 +4355,14 @@ jobs:
         let root = TestRepo::new();
         std::fs::create_dir_all(root.path.join("fleet")).unwrap();
         std::fs::write(
-            root.path.join("fleet/release-refs.toml"),
+            root.path.join("config/fleet/release-refs.toml"),
             "schema_version = 1\n[[entries\nowner = \"tailrocks\"\n",
         )
         .unwrap();
         let findings = audit_fleet_policy_surface(&root.path).expect("audit runs");
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, "fleet-policy-ledger");
-        assert_eq!(findings[0].file, "fleet/release-refs.toml");
+        assert_eq!(findings[0].file, "config/fleet/release-refs.toml");
         // The message names the parse failure class, not a synthetic error.
         assert!(
             findings[0].message.contains("parsing release-ref ledger"),
@@ -4385,7 +4385,7 @@ jobs:
 
         std::fs::create_dir_all(root.path.join("fleet")).unwrap();
         std::fs::write(
-            root.path.join("fleet/release-refs.toml"),
+            root.path.join("config/fleet/release-refs.toml"),
             "schema_version = 1\n\n[[entries]]\nowner = \"tailrocks\"\nrepository = \"ruxel\"\nworkflow_path = \".github/workflows/ci.yml\"\ngit_ref = \"refs/heads/main\"\nadmission_reason = \"test\"\napproving_change = \"test\"\nreview_state = \"approved\"\n",
         )
         .unwrap();
@@ -4402,9 +4402,9 @@ jobs:
         let root = Path::new("/checkout");
         assert_eq!(
             fleet_policy_directory(root, None).unwrap(),
-            PathBuf::from("/checkout/fleet/policies")
+            PathBuf::from("/checkout/config/fleet/policies")
         );
-        let error = fleet_policy_directory(root, Some(Path::new("fleet/policies")))
+        let error = fleet_policy_directory(root, Some(Path::new("config/fleet/policies")))
             .expect_err("publisher override must be absolute")
             .to_string();
         assert!(error.contains("VELNOR_FLEET_POLICY_OUT_DIR"), "{error}");

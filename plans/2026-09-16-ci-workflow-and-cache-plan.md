@@ -1,264 +1,502 @@
-# CI workflow restoration and cache reuse plan
+# CI workflow restoration and dual-lane cache plan
 
-Status: **approved direction** (pre-implementation).  
-Date: 2026-09-16.  
+Status: **approved direction** — goal-ready execution checklist.  
+Date: 2026-09-16 (updated: dual-lane cache policy).  
 Repository: `tailrocks/velnor`.  
-Related: PR [#867](https://github.com/tailrocks/velnor/pull/867), [`fleet/ci-cd-cache-architecture-evidence.md`](../fleet/ci-cd-cache-architecture-evidence.md).
+Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
+
+Related: PR [#867](https://github.com/tailrocks/velnor/pull/867).
 
 ---
 
-## 1. Why we are doing this
+## 0. Goal statement
 
-**Workflow structure:** Era C (#867) made lane visible but hid crates behind lane-first groups (`GitHub / Rust / rust-velnor-runner`). Operators cannot see which crate is building at a glance.
+Deliver CI where:
 
-**Cache reuse:** PRs must restore warm cache from main/nightly on every run. Parallel PRs must not bloat Actions storage. `merge_group` currently restores but never saves. Restoration must not invalidate cache keys or break Velnor prep ordering.
-
-**Verdict:** Implement **Option 3** — unit-first flat names + kind reusable files + parenthetical lane suffix when both lanes + shared `Control / Prepare Cargo`. Keep #867 both-lane contract (pairing, fork admission, `lane_compare --strict`).
+1. **Checks are unit-first** — `Rust · velnor-runner (GitHub)`, not `GitHub / Rust / rust-velnor-runner`.
+2. **Velnor lane never loses store warmth** — host-persistent cargo/mise/mbx with **50 GiB** budget; structural guarantee, not GHA key luck.
+3. **GitHub lane maximizes restore within platform limits** — 8 GiB internal budget below 10 GB platform cap; strict producer/consumer; prefix restore as normal warm path.
+4. **Outcomes are predictable** — observability distinguishes exact hit, prefix restore, host-warm, and cold per lane.
 
 ---
 
-## 2. Target end state
+## 1. Dual-lane cache philosophy
 
-### Checks sidebar (`runners = both`, PR)
+Velnor exists because **GitHub Actions cache is small, shared, and easy to evict**. The Velnor lane uses **host disk with bind mounts** — a different storage system entirely.
 
 ```
-Control / Planning
-Policy                          (main/nightly only)
-Control / Velnor admission      (fork guard)
-Rust · velnor-runner (GitHub)
-Rust · velnor-runner (Velnor)
-Rust · velnor-workflow (GitHub)
-… (one row per unit × lane, all kinds)
-Bun · velnor (GitHub)
-Docker · Docker (Velnor)
-Control / Prepare Cargo
-Control / Aggregate
-Control / Required
+┌─────────────────────────────────────────────────────────────────────────┐
+│  SAME cache keys per unit (unit.id, hashFiles) — lane-agnostic keys   │
+│  DIFFERENT transport + budget + retention per lane                      │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  GitHub lane                          Velnor lane
+  ───────────                          ───────────
+  Transport: GHA cache API             Transport: host bind mounts
+  Budget: 8 GiB (internal)             Budget: 50 GiB (host)
+  Platform cap: 10 GB                  Platform cap: host disk
+  Enforcer: maintenance.yml            Enforcer: velnorctl cache gc
+  mbx: backend github, objects         mbx: backend local
+  PR: restore-only                     PR: writes to host store (trust-scoped)
+  "Never miss": NOT achievable         "Never miss stores": achievable
 ```
 
-When `runners = github` or `runners = velnor` only: bare names (`Rust · velnor-runner`) with no `(GitHub)` / `(Velnor)` suffix.
+**Do not conflate the two budgets.** Raising Velnor to 50 GiB does **not** mean raising `RetentionPolicy.total_bytes` in `snapshot.rs` — that policy governs **GitHub Actions cache API only**.
 
-Acceptable PR1 check nesting: `Rust · velnor-runner (GitHub) / verify` (GitHub composes caller + inner job). Truly flat names (no `/`) are optional PR3 via composite actions.
+---
 
-### Cache behavior (after all work)
+## 2. Platform and budget reference
 
-| Event | Restore | Save trusted cache | Storage |
+### 2.1 GitHub Actions cache (GitHub lane only)
+
+| Fact | Value | Velnor policy |
+|---|---|---|
+| Default repo storage | **10 GB** | Internal budget **8 GiB** (~1.3 GiB headroom) |
+| Inactivity eviction | 7 days (`last_accessed_at`) | Cannot control; producers must refresh |
+| Over-limit eviction | Platform LRU | Why we stay below 10 GB internally |
+| Per-entry max | ~10 GiB | Class budgets stay under this |
+| PR writes | `refs/pull/N/merge` namespace only | velnor also blocks trusted saves on PR |
+| Fork PR | Cannot write default-branch scope | Restore only — platform rule |
+| Key max length | 512 chars | mbx hashFiles lists must fit |
+
+**Source:** `crates/velnor-workflow/src/primitives/snapshot.rs` → `RetentionPolicy::default_policy()`  
+**Enforcement:** `.github/workflows/maintenance.yml` → `cache-budget` daily 03:31 UTC
+
+#### GitHub internal class table (8 GiB — keep)
+
+| Class | Budget | Tier | Generation bound | Key markers |
+|---|---:|---|---:|---|
+| toolchain-seeds | 2 GiB | Protected | 0 | `velnor-rustup-`, `velnor-mold-` |
+| source-bundles | 1.5 GiB | Protected | 0 | `ci-*-rust-*`, `velnor-cargo-*` |
+| docker-seed | 1 GiB | Baseline | 1 | `velnor-docker-seed-` |
+| compiler-snapshots | 3.5 GiB | Rolling | **2** | `-mbx-v3-` |
+| **Total** | **8 GiB** | | | |
+
+- Producer window: 2 hours
+- Eviction: generation bound → class budget → global; protected never global-swept
+- PR cleanup: `prune-pr-cache` on PR close
+
+### 2.2 Velnor host storage (Velnor lane only)
+
+| Store class | Host path | Container mount | Default budget env |
 |---|---|---|---|
-| PR (same-repo) | All layers | No | Read-only |
-| PR (fork) | All layers | No | Read-only |
-| merge_group | All layers | Yes | Bounded |
-| push → main | All layers | Yes | Producer |
-| nightly | All layers | Yes | Producer + maintenance |
+| cargo registry/git | `/var/cache/velnor/v1/.../cargo/` | `~/.cargo/registry`, `~/.cargo/git` | `VELNOR_BUDGET_CARGO_BYTES` = 20 GiB |
+| mise | `.../mise/` | `/opt/mise/cache`, `/opt/mise/installs` | `VELNOR_BUDGET_MISE_BYTES` = 20 GiB |
+| mbx compiler | `.../compiler/mbx/` | `/var/cache/mbx` | `MBX_GC_MAX_TOTAL_SIZE` = **50 GiB** |
+| targets | `.../targets/` | mbx-managed | `VELNOR_BUDGET_TARGETS_BYTES` = 200 GiB |
+| actions-cache class | `.../caches/` | local tarball store | `VELNOR_BUDGET_CACHES_BYTES` = **50 GiB** |
+| hosted GHA emulator | `.../gha-cache/` | optional | `VELNOR_GHA_CACHE_BUDGET_BYTES` = 10 GiB |
 
-### Locked decisions
+**Defaults already at 50 GiB** for caches class and mbx total:
+
+```407:412:crates/velnorctl/src/runtime.rs
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_CACHES_BYTES",
+        default_value_t = 53_687_091_200u64
+    )]
+    pub budget_caches_bytes: u64,
+```
+
+```470:470:crates/velnor-runner/src/container.rs
+                ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
+```
+
+**Enforcement:** `velnorctl cache gc` on fleet hosts (operator-scheduled); disk-pressure reclaim at 2 GiB free floor.
+
+**Velnor lane CI behavior today (correct — preserve):**
+
+- `lane_enables_actions_cache` → **false** when all paths host-persistent (`cache.rs`)
+- mbx `backend: local` — no GHA I/O (`ir.rs`)
+- `Control / Prepare Cargo` warms shared cargo before parallel Rust jobs
+- Log: *"Cache paths live on Velnor host-persistent storage (always warm)"*
+
+---
+
+## 3. What "never miss cache" means per lane
+
+### Velnor lane — store layers (~100% achievable)
+
+| Layer | Target | Mechanism |
+|---|---|---|
+| cargo registry/git | **Always warm** after first populate | Host bind mounts survive jobs |
+| mise tools | **Always warm** | Host mounts + explicit install |
+| mbx objects | **Hit for unchanged source** | `backend: local`; WP6 evidence: 1651 hits, 0 B transfer |
+| mbx on source edit | Recompile, not store miss | Incremental compile — correct |
+| First run / new host | One-time cold | Acceptable |
+| Host GC at 50 GiB | Eviction possible | Monitor + schedule gc |
+
+**Velnor does not use GHA cache for host-persistent paths.** "Never miss" = mounts + prep + offline probe, not `cache-hit=true`.
+
+### GitHub lane — best-effort within platform (NOT 100%)
+
+| Scenario | Expected | Fix |
+|---|---|---|
+| PR, unchanged lockfile | rustup/cargo exact hit | Keep producers healthy |
+| PR, `.rs` change | mbx exact miss, **prefix restore** | By design; fix observability |
+| PR | Never saves trusted scope | By design (D7) |
+| Fork PR | Often cold for main keys | Platform limit — document |
+| Platform LRU / 7-day idle | Miss after eviction | main + nightly producers |
+| Compat digest rotation | Cold until main re-saves | Ensure main saves |
+| merge_group without save | Miss | WP-C1 |
+| mise PR writes | Budget pressure | WP-C2 |
+
+**Realistic GitHub target:** ≥95% warm on same-repo PR with stable lockfile; prefix mbx on source edits; cold only on toolchain/schema shifts or eviction.
+
+---
+
+## 4. Root causes — why GitHub lane "always misses"
+
+| ID | Root cause | Lane | Fix |
+|---|---|---|---|
+| RC-1 | PR restore-only consumer | GitHub | Keep; ensure producers |
+| RC-2 | Observability: prefix restore reports as miss | GitHub | Phase 5 |
+| RC-3 | `merge_group` never saves | GitHub | WP-C1 |
+| RC-4 | `trusted_cache` duplicated 6+ places | GitHub | WP-C1 |
+| RC-5 | mise writes on PR | GitHub | WP-C2 |
+| RC-6 | `rust-policy` freshness = `./**/*.rs` | Both keys | WP-C5 |
+| RC-7 | Live GHA account exceeded 8 GiB | GitHub | Phase 4 maintenance |
+| RC-8 | Plan conflated 8 GiB with Velnor | Docs | **Fixed in this plan** |
+| RC-9 | No scheduled `velnorctl cache gc` on fleet | Velnor | Phase 6 ops |
+| RC-10 | `cache-plan --check` not implemented | GitHub | Phase 4 |
+
+Velnor lane misses on GitHub account are **not applicable** — Velnor bypasses GHA for host-persistent paths.
+
+---
+
+## 5. Locked decisions
 
 | # | Decision |
 |---|---|
-| D1 | Unit-first names: `Rust · velnor-runner (GitHub)` / `(Velnor)` when `runners = both`; bare name when single lane |
-| D2 | Same naming rule for Rust, Bun, Docker, Docs, OpenTofu |
-| D3 | Keep **`Control / Prepare Cargo`** — one shared Velnor Cargo warmup, not per crate |
+| D1 | Unit-first check names with `(GitHub)`/`(Velnor)` suffix when `runners = both` |
+| D2 | Same naming rule for all unit kinds |
+| D3 | Keep **`Control / Prepare Cargo`** — Velnor-only shared warmup |
 | D4 | Keep #867 both-lane contract |
-| D5 | One aggregate caller per (unit, lane); kind reusable files kept (`ci-unit-*.yml`) |
-| D6 | Dependency-closure edges on aggregate `needs:`, not inner reusable `needs:` |
-| D7 | PR read-only for cache saves (fork safety + budget) |
-| D8 | Add `merge_group` to trusted save gate |
-| D9 | Cache keys unchanged on restoration — keyed on `unit.id`, not display names |
+| D5 | One aggregate caller per (unit, lane); kind reusable files kept |
+| D6 | Dependency-closure on aggregate `needs:` |
+| D7 | **GitHub lane:** PR read-only for trusted GHA saves |
+| D8 | **GitHub lane:** add `merge_group` to trusted save gate |
+| D9 | Cache keys keyed on `unit.id` — same keys both lanes; restoration must not change keys |
+| D10 | **GitHub lane budget: 8 GiB** internal (below 10 GB platform) — do not raise without measured overrun |
+| D11 | **Velnor lane budget: 50 GiB** host (`VELNOR_BUDGET_CACHES_BYTES`, `MBX_GC_MAX_TOTAL_SIZE`) |
+| D12 | **Separate retention systems** — never merge GHA `RetentionPolicy` with Velnor host GC |
+| D13 | Velnor lane: no GHA save steps for host-persistent paths |
+| D14 | Observability: exact / prefix / host-warm / cold — never fail CI on miss |
 
 ---
 
-## 3. What to do
+## 6. Target configuration (`.github-gen/velnor-workflow.toml`)
 
-### PR1 — Structure + cache core (single merge)
+```toml
+# Proposed — wire in Phase 6 schema work
+[cache.github]
+budget_bytes = 8589934592              # 8 GiB — GHA account only
+producer_window_seconds = 7200
+mbx_generation_bound = 2
 
-Ship workflow restoration and cache fixes together.
+[cache.velnor]
+budget_bytes = 53687091200             # 50 GiB — host store only
+producer_window_seconds = 86400        # longer protection on host
+mbx_generation_bound = 6               # more generations than GitHub (2)
 
-#### WP1 — Naming and aggregation
+# Lane-agnostic — keep
+[[declare]]
+primitive = "cache-contract"
+# backend = "detected" (default)
+```
 
-- [ ] Add `unit_job_display_name(unit, lane, runners)` in `lib.rs` — parenthetical suffix only when `runners = both`
-- [ ] Replace `kind_reusable_callers()` with per-(unit,lane) callers in `render_node_callers()`
-- [ ] Set caller `name` = `unit_job_display_name(...)`
-- [ ] Add `unit` + `lane` inputs to all kind reusables; each invocation renders **one** job keyed `verify`, **omit inner `name:`**
-- [ ] Caller job ids: `group-unit-{unit}-{lane}` (both) or `group-unit-{unit}` (single lane)
-- [ ] Regenerate `render_nodes_required()` for ~37 caller ids (was ~14)
+Until schema lands, Velnor 50 GiB is enforced via **fleet env** (`VELNOR_BUDGET_*`, `MBX_GC_MAX_TOTAL_SIZE`).
 
-#### WP2 — Control plane
+---
 
-- [ ] Keep `Control / Velnor admission`, `Control / Aggregate`, `Control / Required`
-- [ ] Rename `Control / Rust` → **`Control / Prepare Cargo`** (`group-rust-prepare-cargo`)
-- [ ] Velnor Rust unit callers `needs: [group-rust-prepare-cargo, …deps]`; GitHub-lane Rust callers do not
+## 7. GitHub lane stack (optimize within restrictions)
 
-#### WP3 — Dependency closure
+### Layers
 
-- [ ] Lift `velnor_rust_dependency_needs()` to aggregate caller ids (e.g. `Rust · velnor-client (Velnor)` waits for `Rust · velnor-model (Velnor)` at aggregate level)
-- [ ] Strip cross-unit `needs:` from inner reusables (single-job mode)
-- [ ] Skipped-tolerance on prep + dependency callers in `if:` conditions
+| Layer | Key | Restore | Save gate | Budget class |
+|---|---|---|---|---|
+| rustup | `velnor-rustup-{os}-{arch}-{hashFiles(toolchain)}` | Always | Trusted only | toolchain-seeds 2 GiB |
+| mold | `velnor-mold-2.42.0-{os}-{arch}` | Always | Trusted only | toolchain-seeds |
+| cargo | `ci-{os}-rust-{hashFiles(key_files)}` + prefix `ci-{os}-rust-` | Always | Trusted + miss | source-bundles 1.5 GiB |
+| mbx | `velnor-mbx-v3-{compat}-{os}-{arch}-{unit.id}-{dep}-{fresh}` + 2-tier prefix | Always | mbx action + trusted | compiler-snapshots 3.5 GiB, gen≤2 |
+| docker seed | `velnor-docker-seed-v3-…` | Always on PR | Trusted + export | docker-seed 1 GiB, gen≤1 |
+| mise | action-managed | Always | **Must gate off on PR** | unbudgeted — fix WP-C2 |
 
-#### WP4 — Contract tooling
+### Trusted save gate (target — single helper)
 
-- [ ] Update `lane_compare` regex for `(GitHub)` / `(Velnor)` suffix when both; bare name when single lane
-- [ ] Rewrite `lane_pairing.rs`, `velnor_first_ci.rs`, `synthetic_surface.rs`, shard tests
-- [ ] `release.rs`: `comparison_job_name` → `unit_job_display_name`
-- [ ] Regenerate `.github/workflows/*`
+```
+merge_group
+|| (push && ref == refs/heads/main)
+|| schedule
+|| (workflow_dispatch && ref == refs/heads/main)
+```
 
-#### WP-C0 — Cache-safe restoration (no new cache behavior)
+**Excludes:** all `pull_request` variants.
 
-- [ ] Render cache steps from `inputs.unit` → correct `CacheSpec`
-- [ ] Never put display names or caller ids in cache keys
-- [ ] Golden test: regen unchanged → identical cache keys + `hashFiles(...)` args per unit
+### Producer schedule
 
-#### WP-C1 — Trusted save gate + merge_group
+```
+nightly 03:17 UTC  →  warm producers
+maintenance 03:31  →  enforce 8 GiB budget
+main push          →  primary producer
+```
+
+---
+
+## 8. Velnor lane stack (50 GiB — maximize certainty)
+
+### Layers
+
+| Layer | Mechanism | GHA I/O |
+|---|---|---|
+| cargo registry/git | Host bind mounts | **None** |
+| mise | Host mounts + `mise install` | **None** |
+| mbx | `backend: local` | **None** |
+| rustup/mold | Image-baked | **None** |
+| Docker | Retained BuildKit on host | **None** (no seed transport) |
+| workspace | Per-job UUID checkout | N/A (not cached) |
+
+### Host budget allocation (50 GiB target)
+
+| Class | Proposed share | Env / mechanism |
+|---|---:|---|
+| mbx compiler stores | 30 GiB | `MBX_GC_MAX_TOTAL_SIZE=50GiB` (total cap); tune per-class in gc |
+| cargo + mise combined | 8 GiB | `VELNOR_BUDGET_CARGO_BYTES`, `VELNOR_BUDGET_MISE_BYTES` |
+| docker/buildkit accounted | 8 GiB | `HostCapacity` — docker subtracted from promisable |
+| headroom / artifacts overlap | 4 GiB | operator buffer |
+
+### Operational requirements
+
+- [ ] `velnorctl cache gc` scheduled on fleet (daily or weekly)
+- [ ] `velnorctl cache du` + `velnorctl storage status` in runbook
+- [ ] Alert when host available < 5 GiB
+- [ ] Do **not** enable `VELNOR_ACTIONS_CACHE_URL` unless non-persistent paths need it
+
+---
+
+## 9. Execution checklist — Phase 1: Generator core (PR1)
+
+### 9.1 Workflow structure (WP1–WP4)
+
+- [ ] Add `unit_job_display_name(unit, lane, runners)` in `lib.rs`
+- [ ] Replace `kind_reusable_callers()` with per-(unit,lane) callers
+- [ ] Add `unit` + `lane` inputs to all kind reusables; one job `verify`, omit inner `name:`
+- [ ] Regenerate `render_nodes_required()` for ~37 caller ids
+- [ ] Rename `Control / Rust` → `Control / Prepare Cargo`
+- [ ] Lift `velnor_rust_dependency_needs()` to aggregate `needs:`
+- [ ] Update `lane_compare`, rewrite tests, regen workflows
+
+### 9.2 GitHub lane cache fixes (WP-C0–C3)
 
 - [ ] Add `trusted_cache_save_expression(default_branch)` in `ir.rs`
-- [ ] Replace all inline trusted-cache literals (cargo, mold, rustup, Docker seed, release paths)
-- [ ] Include `merge_group` in save gate
-- [ ] Test: generated YAML save steps include `merge_group` in `if:`
+- [ ] Replace all 6+ inline `trusted_cache` literals (cargo, mold, rustup, docker, release)
+- [ ] Include `merge_group` in save gate; exclude `pull_request`
+- [ ] Verify mr-boxington saves on `merge_group`; bump pin if needed
+- [ ] Golden test: cache keys unchanged for fixed fixture
+- [ ] Test: restore always before checks on GitHub lane
+- [ ] Test: Velnor lane skips `actions/cache` when host-persistent
+- [ ] Test: Save `if:` includes `merge_group`, excludes `pull_request`
+- [ ] Gate mise `cache: true` on trusted events only (WP-C2)
+- [ ] Audit producer `actions: write` / `cache-mode` on main/nightly if saves fail
 
-#### WP-C3 — Restore-always contract tests
+### 9.3 Velnor lane cache preservation (WP-V0)
 
-- [ ] Every GitHub-lane job has restore steps (or documented Velnor host-persistent bypass)
-- [ ] No GitHub Rust job runs checks before restore steps
-- [ ] `Prepare Cargo sources` gated `if: steps.cache.outputs.cache-hit != 'true'`
+- [ ] Confirm `lane_enables_actions_cache` returns false for Velnor + host-persistent paths
+- [ ] Confirm mbx renders `backend: local` on Velnor lane (no GHA key transport)
+- [ ] Confirm `Control / Prepare Cargo` runs before Velnor Rust wave in both mode
+- [ ] Confirm Velnor jobs use offline cargo probe (not `cache-hit` gate)
+- [ ] Confirm Docker Velnor lane uses retained builder, no seed restore/save
+- [ ] Test: Velnor lane YAML has zero `actions/cache/save` for host-persistent units
 
-#### PR1 verification gate
+### 9.4 Phase 1 gate
 
-- [ ] `velnor-workflow --check` clean
-- [ ] `ci-policy.yml` green
-- [ ] `actionlint` green
-- [ ] All items in **§6 Verification checklist** for PR1 pass
-
----
-
-### PR1 tail — mise alignment (if needed)
-
-#### WP-C2 — Align mise-action with read-only PR policy
-
-- [ ] Gate mise saves with same `trusted_cache_save_expression`, or set `cache: false` on PR jobs
-- [ ] After 10 same-repo PR runs without main push, cache entry count does not grow from mise-only keys
+- [ ] `velnor-workflow --check` + policy + actionlint green
+- [ ] §16 verification Phase 1 items pass
 
 ---
 
-### PR2 — Docs + observability
+## 10. Execution checklist — Phase 2: Generated output audit
 
-#### WP5 — Operator docs
-
-- [ ] Update `content/docs/guides/execution.mdx` with hierarchy diagram
-- [ ] Grep org rulesets / dashboards for stale check names (`GitHub / Rust / …`)
-- [ ] Changelog for check name rename
-
-#### WP-C4 — Cache hit visibility
-
-- [ ] Emit structured `cache_hit: {rustup,mold,cargo,mbx}` in `VELNOR_CI_REPORT` / step summary
-- [ ] Warn on miss; do **not** fail CI on miss
-
-#### WP-C6 — Retention verification
-
-- [ ] Confirm daily `cache-budget` schedule active
-- [ ] Confirm `prune-pr-cache` on PR close
-- [ ] Confirm 8 GiB budget matches org limit
+- [ ] GitHub jobs: full restore stack (rustup → mbx → mold → cargo → checks → save gated)
+- [ ] Velnor jobs: no GHA cargo restore/save; mbx local; prep ordering correct
+- [ ] All Save steps use `trusted_cache_save_expression` (no inline drift)
+- [ ] `maintenance.yml`: schedule 03:31, `actions: write`, enforce 8 GiB
+- [ ] `nightly.yml`: schedule 03:17 (before maintenance)
 
 ---
 
-### PR3 — YAML size + optional flat names
+## 11. Execution checklist — Phase 3: Key churn (PR3)
 
-#### WP6 — Composite extraction
-
-- [ ] Extract shared steps into `.github/actions/velnor-ci-*` (generator-owned sources under `.github-gen/sources`)
-- [ ] Restore/save/`cache-hit` gates stay in **one job** when splitting steps
-- [ ] Re-measure shard boundaries; shard only when needed
-
-#### WP-C5 — Narrow rust-policy mbx freshness (optional)
-
-- [ ] Restrict policy freshness paths to policy-relevant files, not all `./**/*.rs`
-
-#### Optional
-
-- [ ] Inline aggregate jobs + composites for zero-`/`-suffix check names
+- [ ] Narrow `rust-policy` mbx freshness — drop `./**/*.rs`; use deny/audit configs
+- [ ] Add `deny.toml` / `audit.toml` to policy dep segment
+- [ ] Composite extraction; restore/save gates stay in one job
+- [ ] Re-measure shard budget
 
 ---
 
-## 4. What not to do
+## 12. Execution checklist — Phase 4: GitHub budget ops
 
-### Workflow structure
-
-- Do **not** revert to lane-first kind callers (`GitHub / Rust`, `Velnor / Rust`)
-- Do **not** revert to per-unit workflow **files** (50-file limit at monorepo scale)
-- Do **not** keep cross-crate `needs:` inside kind reusables when using per-unit callers (silently broken ordering)
-- Do **not** dual-publish old and new check names (no compatibility shim period)
-- Do **not** block PR1 on composite extraction (PR3)
-- Do **not** use matrix over units at aggregate level (skipped matrix legs clutter UI)
-- Do **not** drop #867 both-lane contract, fork admission, or `lane_compare --strict`
-- Do **not** duplicate `Control / Prepare Cargo` per crate or per lane
-- Do **not** require inner comparison jobs to equal bare `unit.id` (delete Era C rule)
-
-### Cache
-
-- Do **not** save trusted compiler snapshots from **PR** or **fork PR** (security + budget)
-- Do **not** add `pull_request` to the trusted save gate
-- Do **not** skip recompile when source files changed (freshness miss is correct)
-- Do **not** put `unit_job_display_name()` or caller id in cache keys
-- Do **not** split restore/save/`cache-hit` gates across jobs in PR3 composites
-- Do **not** fail CI on cache miss (miss is valid after lockfile/toolchain bump)
-- Do **not** assume merge SHA equals PR head for exact mbx keys (documented limitation; G1 partially mitigates)
-
-### Process
-
-- Do **not** hand-edit `.github/workflows/*` — all changes through `velnor-workflow` + regen
-- Do **not** guess runner protocol behavior — match `actions/runner` source of truth
+- [ ] Confirm org GHA cache limit (default 10 GB)
+- [ ] Keep `RetentionPolicy.total_bytes = 8589934592` unless org limit lower
+- [ ] Implement `cache-plan --check` OR remove from docs
+- [ ] Prove 7 consecutive daily `cache-budget` runs ≤ 8 GiB
+- [ ] Headroom warning when `headroom_bytes < 512 MiB`
+- [ ] Consider hard-fail `prune-pr-cache` on DELETE failure
+- [ ] merge_group: enable queue + save gate OR remove dead trigger
 
 ---
 
-## 5. Architecture reference
+## 13. Execution checklist — Phase 5: Observability (PR2)
 
-### Aggregation model (Option 3)
+- [ ] `VELNOR_CI_REPORT.cache_outcomes.{rustup,mold,cargo,mbx}` = `exact|prefix|cold`
+- [ ] Velnor lane reports `host_warm` for bypassed GHA layers
+- [ ] Step summary per unit job; warn on cold, never fail CI
+- [ ] Update `content/docs/guides/execution.mdx` — dual-lane diagram
+- [ ] Document GitHub producer/consumer vs Velnor host-persistent model
+- [ ] Document fork PR and platform 7-day eviction limits
 
-```
-CI / PR (aggregate)
-├─ Control / Planning
-├─ Policy
-├─ Control / Velnor admission
-├─ Rust · velnor-runner (GitHub)  ──► ci-unit-rust.yml  (unit + lane inputs)
-├─ Rust · velnor-runner (Velnor)   ──► ci-unit-rust.yml
-├─ … one caller per (unit, lane) when both, every kind
-├─ Control / Prepare Cargo        (Rust-only, Velnor runner)
-├─ Control / Aggregate
-└─ Control / Required
-```
+---
 
-Each `workflow_call` runs one job. Dependency-closure and prep ordering live on **aggregate `needs:`**.
+## 14. Execution checklist — Phase 6: Velnor host ops (50 GiB)
 
-### Naming helper
+### Fleet configuration
 
-```rust
-fn unit_job_display_name(unit: &Unit, lane: Option<RunnerMode>, runners: RunnerMode) -> String {
-    let base = sidebar_group_name(unit); // e.g. "Rust · velnor-runner"
-    match runners {
-        RunnerMode::Both => format!("{} ({})", base, lane.expect("both requires lane").display_name()),
-        RunnerMode::Github | RunnerMode::Velnor => base,
-    }
-}
-```
+- [ ] Set `VELNOR_BUDGET_CACHES_BYTES=53687091200` on fleet hosts (default already)
+- [ ] Confirm `MBX_GC_MAX_TOTAL_SIZE=50GiB` in job containers (default already)
+- [ ] Tune `VELNOR_BUDGET_CARGO_BYTES` / `VELNOR_BUDGET_MISE_BYTES` to disk capacity
+- [ ] Schedule `velnorctl cache gc --yes` (cron or systemd timer on sentry)
+- [ ] Run `velnorctl cache du --work-dir /var/lib/velnor/work` after gc; record baseline
 
-### GitHub platform limits (must preserve)
+### Schema wiring (generator)
 
-| Constraint | Limit | Mitigation |
+- [ ] Add `[cache.github]` and `[cache.velnor]` to `RepoGenerationConfig` (`config/mod.rs`)
+- [ ] `RetentionPolicy::from_config(&cache.github)` for `cache-plan`
+- [ ] Emit Velnor host policy artifact (JSON or `velnor.env` snippet) from generator
+- [ ] Golden test: adding `[cache.*]` does not change cache keys
+- [ ] Document Velnor policy in operator docs (`storage-and-resources.mdx`)
+
+### Monitoring
+
+- [ ] Alert when host disk available < 5 GiB
+- [ ] Track mbx hits/misses in phase reports (WP6 evidence format)
+- [ ] Prove consecutive Velnor jobs: mbx hits > 0, 0 B GHA transfer
+- [ ] Prove `cache du` total ≤ 50 GiB after sustained nightly load
+
+---
+
+## 15. What not to do
+
+### Workflow
+
+- [ ] Do not revert to lane-first kind callers
+- [ ] Do not revert to per-unit workflow files
+- [ ] Do not hand-edit `.github/workflows/*`
+
+### Cache — GitHub lane
+
+- [ ] Do not save trusted GHA snapshots from PR or fork PR
+- [ ] Do not add `pull_request` to trusted save gate
+- [ ] Do not raise GHA `RetentionPolicy` above 8 GiB without measured overrun + org limit check
+- [ ] Do not use `cache-matched-key` to skip `cargo fetch` (prefix may be stale lockfile)
+- [ ] Do not fail CI on cache miss
+
+### Cache — Velnor lane
+
+- [ ] Do not add GHA `actions/cache` save steps for host-persistent paths
+- [ ] Do not lower Velnor host budget below 50 GiB without disk constraint proof
+- [ ] Do not merge Velnor host stores into GHA `RetentionPolicy` / `maintenance.yml`
+- [ ] Do not enable hosted GHA cache emulator unless non-persistent paths require it
+
+### Cache — both lanes
+
+- [ ] Do not put display names in cache keys
+- [ ] Do not skip recompile when source changed
+- [ ] Do not split restore/save gates across composite jobs
+
+---
+
+## 16. Verification gates
+
+### Phase 1 — PR1 merge
+
+#### Workflow
+
+- [ ] Unit-first Checks sidebar; `lane_compare --strict` green
+- [ ] ≤50 reusable files; shard test passes
+- [ ] Fork admission + merge_group behavior correct
+
+#### GitHub lane cache
+
+- [ ] Golden keys unchanged
+- [ ] Restore before checks (automated)
+- [ ] PR: no save on `pull_request`; merge_group in save gate
+- [ ] Same-repo PR + stable lockfile: rustup/cargo exact hit
+- [ ] Parallel PRs: GHA entry count stable
+
+#### Velnor lane cache
+
+- [ ] Zero GHA cache I/O for host-persistent cargo/mbx
+- [ ] `Control / Prepare Cargo` ordering preserved
+- [ ] Consecutive Velnor jobs: cargo offline probe passes without fetch
+- [ ] mbx local hits > 0 on unchanged source (log evidence)
+
+### Phase 4 — GitHub budget
+
+- [ ] 7 daily maintenance runs: `total_bytes <= 8589934592`
+- [ ] `failed_evictions == 0`
+
+### Phase 6 — Velnor host
+
+- [ ] `velnorctl cache du` ≤ 50 GiB after load
+- [ ] Scheduled gc runs green
+- [ ] Host disk headroom ≥ 5 GiB under normal load
+
+### Manual smoke
+
+- [ ] PR GitHub: rustup/cargo hit on doc-only change
+- [ ] PR GitHub: mbx prefix restore on single-crate `.rs` change
+- [ ] PR Velnor: log shows host-persistent warm, no fetch
+- [ ] main push: GitHub save steps run
+
+---
+
+## 17. Files to change
+
+| Area | Path | Phase |
 |---|---|---|
-| Unique reusable workflow files per caller | 50 | One file per kind, not per unit |
-| Workflow file size | 500 KiB | Shard at ~480 KiB |
-| Jobs per workflow | 256 | ~39 callers today; safe to ~40 units |
+| Dual-lane config schema | `crates/velnor-workflow/src/config/mod.rs` | 6 |
+| GitHub retention | `crates/velnor-workflow/src/primitives/snapshot.rs` | 4, 6 |
+| Cache gates, lane render | `crates/velnor-workflow/src/primitives/ir.rs` | 1 |
+| Host-persistent bypass | `crates/velnor-workflow/src/primitives/cache.rs` | 1 (verify) |
+| cache-plan CLI | `crates/velnor-workflow/src/runtime.rs` | 4, 6 |
+| Maintenance template | `crates/velnor-workflow/src/primitives/release.rs` | 4 |
+| Host GC defaults | `crates/velnorctl/src/runtime.rs` | 6 (verify) |
+| mbx container limits | `crates/velnor-runner/src/container.rs` | 6 (verify) |
+| Operator docs | `content/docs/operations/storage-and-resources.mdx` | 5, 6 |
+| CI execution docs | `content/docs/guides/execution.mdx` | 5 |
+| Config | `.github-gen/velnor-workflow.toml` | 6 |
+| Generated workflows | `.github/workflows/*` | 1 (regen) |
 
-### Cache layers (GitHub lane, Rust)
+---
 
-| Layer | Transport | Restore on PR | Save on PR | Save on main |
-|---|---|---|---|---|
-| Rust toolchain | `actions/cache` → `~/.rustup` | Always | No | Yes |
-| Compile objects | `mr-boxington-action` v1.8.3 | Always | No | Yes |
-| mold linker | `actions/cache` | Always | No | Yes |
-| Cargo registry/git | `actions/cache` → `~/.cargo/*` | Always | No | Yes |
-| Mise tools | `mise-action cache: true` | Always | May save† | Yes |
+## 18. Delivery phases for `/goal`
 
-† Align with read-only PR policy in WP-C2.
+| Phase | Delivers | Gate |
+|---|---|---|
+| **1** | Workflow structure + GitHub cache fixes + Velnor bypass verified + regen | §16 Phase 1 |
+| **2** | Generated YAML audit (GitHub vs Velnor stacks) | §10 |
+| **3** | Key churn reduction (policy freshness, composites) | §11 |
+| **4** | GitHub 8 GiB budget proof + maintenance hardening | §16 Phase 4 |
+| **5** | Dual-lane observability + operator docs | §13, §16 |
+| **6** | Velnor 50 GiB fleet ops + config schema wiring | §14, §16 Phase 6 |
 
-**Key formats (must not change on restoration):**
+**Start Phase 1.** GitHub and Velnor cache work proceed in parallel within Phase 1 — same keys, different transport verification.
+
+---
+
+## 19. Architecture reference
+
+### Cache key formats (lane-agnostic — must not change on restoration)
 
 ```
 mbx:    velnor-mbx-v3-{12-hex-compat}-${{ runner.os }}-${{ runner.arch }}-{unit.id}-{dep-hashFiles}-{freshness-hashFiles}
@@ -268,120 +506,25 @@ mold:   velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
 docker: velnor-docker-seed-v3-{digest}-…-docker-{compat-hashFiles}-{context-hashFiles}
 ```
 
-### Velnor lane
+### Scale (runners = both)
 
-Host-persistent mounts for cargo, mbx, mise. `Control / Prepare Cargo` warms shared store before parallel Rust jobs. `CARGO_NET_OFFLINE` on checks.
-
-### Storage budget
-
-8 GiB total; daily `maintenance.yml` `cache-budget`; PR close prunes merge-ref namespace. Parallel PRs read shared entries; they do not multiply saves.
-
-### Scale (this repo, `runners = both`)
-
-| Metric | Era C (now) | After restoration |
+| Metric | Era C (now) | After Phase 1 |
 |---|---:|---:|
 | Verification units | 17 | 17 |
 | Top-level aggregate jobs | 15–16 | ~39 |
 | Unique reusable files | 5 | 5–6 |
-| `ci-required` needs entries | 13–14 | ~37 |
-| `ci-unit-rust.yml` size | ~321 KiB | Similar until PR3 dedup |
+| GitHub GHA budget | 8 GiB | 8 GiB |
+| Velnor host budget | 50 GiB (defaults exist) | 50 GiB (documented + gc scheduled) |
 
----
-
-## 6. Verification checklist
-
-Use this to confirm work is done correctly. Check off after PR1 unless marked PR2/PR3.
-
-### A. Workflow structure (PR1)
-
-- [ ] **Sidebar:** PR Checks list one row per unit × lane across all kinds (`Rust · velnor-runner (GitHub)`, `Docker · Docker (Velnor)`, …)
-- [ ] **Single lane:** With `runners = github` only, names have no `(GitHub)` suffix
-- [ ] **Lane compare:** `velnor-tools lane-compare --strict` passes on both-lane `workflow_dispatch`
-- [ ] **Limits:** ≤50 unique reusable files with 30+ synthetic Rust crates (`unique_reusable_calls_stay_under_github_limit`)
-- [ ] **Shard:** 32+ pad crates produce `ci-unit-rust-2.yml` with per-unit callers (not `group-rust-2-{github,velnor,control}`)
-- [ ] **Scale:** Adding a crate adds +2 aggregate callers when `both` (update `synthetic_surface.rs`)
-- [ ] **Dependency closure:** `velnor_rust_needs=dependency-closure` ordering preserved at aggregate level
-- [ ] **Prepare Cargo:** Velnor Rust callers `needs` prep; GitHub-lane Rust callers do not
-- [ ] **Fork PR:** `Control / Velnor admission` fails; GitHub-lane unit checks still run
-- [ ] **merge_group:** Both lanes run without admission job
-- [ ] **Release:** `release.yml` unit verify names use `unit_job_display_name` pattern
-- [ ] **Generator:** `velnor-workflow --check` clean after regen
-- [ ] **Policy:** `ci-policy.yml` green
-- [ ] **Lint:** `actionlint` green on generated workflows
-
-### B. Cache reuse (PR1)
-
-- [ ] **Golden keys:** Cache keys byte-identical to pre-restoration for fixed fixture repo
-- [ ] **Restore always:** No GitHub Rust job runs checks before restore steps (automated test)
-- [ ] **Restore blocks:** Every GitHub-lane job has `actions/cache/restore` or mbx setup (or Velnor bypass documented)
-- [ ] **PR restore hit:** Same-repo PR with unchanged lockfile shows `cache-hit` true for rustup/cargo in logs
-- [ ] **PR mbx:** mbx restore-keys hit (phase report or mbx log) on unchanged sources
-- [ ] **PR no save:** No trusted save step `if:` matches `pull_request`
-- [ ] **merge_group save:** Save steps include `merge_group` in `if:` (after WP-C1)
-- [ ] **main producer:** main push after merge runs save steps when `cache-hit != true`
-- [ ] **Parallel PRs:** Two parallel PRs both restore; cache entry count stable (no PR write growth)
-- [ ] **PR close:** `prune-pr-cache` deletes merge-ref entries
-- [ ] **Budget:** `maintenance.yml` cache-budget shows `total_bytes <= 8 GiB`
-- [ ] **Retention check:** `velnor-workflow cache-plan --check` matches live policy
-
-### C. Cache observability (PR2)
-
-- [ ] Step summary or `VELNOR_CI_REPORT` shows hit/miss per layer per unit
-- [ ] Daily cache-budget schedule confirmed active
-
-### D. YAML size (PR3)
-
-- [ ] `ci-unit-rust.yml` under shard budget after composite extraction
-- [ ] Restore/save gates still in single job per unit invocation
-
-### E. Manual smoke (post-PR1 on `tailrocks/velnor`)
-
-1. Open a PR with no Rust changes → confirm fast restore hits in Actions logs
-2. Open a PR changing one crate → confirm mbx prefix restore + recompile only affected crate
-3. Run `workflow_dispatch` with `runner=both` → confirm `lane_compare --strict` green
-4. Inspect Checks sidebar → confirm unit-first names, not `GitHub / Rust / …`
-
----
-
-## 7. Files to change
-
-| Area | Path | PR |
-|---|---|---|
-| Naming helper | `crates/velnor-workflow/src/lib.rs` | 1 |
-| Aggregation, cache gates | `crates/velnor-workflow/src/primitives/ir.rs` | 1 |
-| Release naming | `crates/velnor-workflow/src/primitives/release.rs` | 1 |
-| Policy freshness (optional) | `crates/velnor-workflow/src/primitives/snapshot.rs` | 3 |
-| Lane compare | `crates/velnor-tools/src/lane_compare.rs` | 1 |
-| Tests | `crates/velnor-workflow/tests/lane_pairing.rs`, `velnor_first_ci.rs`, `synthetic_surface.rs` | 1 |
-| Config | `.github-gen/velnor-workflow.toml` | 1 |
-| Generated output | `.github/workflows/*` | 1 (regen) |
-| Operator docs | `content/docs/guides/execution.mdx` | 2 |
-| Composites | `.github-gen/sources/`, `.github/actions/velnor-ci-*` | 3 |
-
-**Pass-through (no changes):** `velnor-runner` github_adapter, `velnor-control` query, `velnorctl get jobs`, branch rulesets (gate on `ci-required`, not leaf names).
-
----
-
-## 8. Risks and mitigations
+### Risks
 
 | Risk | Mitigation |
 |---|---|
-| Restoration breaks cache keys | WP-C0 golden tests |
-| Velnor cold/offline failures | Aggregate `needs:` + prep ordering |
-| merge_group never warms cache | WP-C1 |
-| Parallel PRs fill storage | PR read-only saves + merge-ref prune + 8 GiB retention |
-| `/ verify` suffix in Checks | Accept PR1; PR3 composites optional |
-| `ci-required` script size (~37 jobs) | Regenerate `render_nodes_required()`; test validation |
-| Trusted save expression drift | Single `trusted_cache_save_expression()` helper |
-
----
-
-## 9. Delivery summary
-
-| PR | Delivers | Blocks on |
-|---|---|---|
-| **PR1** | Unit-first names, per-(unit,lane) callers, dependency lift, merge_group saves, golden + restore tests, regen | — |
-| **PR2** | Docs, cache hit visibility, retention verification | PR1 |
-| **PR3** | Composite dedup, optional flat names, policy freshness | PR1 |
-
-**Next step:** Implement PR1 per §3 and verify with §6 sections A + B.
+| Conflating GHA 8 GiB with Velnor 50 GiB | Dual-lane sections in this plan (§1, §2) |
+| GitHub restoration breaks keys | WP-C0 golden tests |
+| Velnor cold/offline | Prep ordering + host mounts |
+| GitHub merge_group never warms | WP-C1 |
+| GitHub budget overrun | Daily maintenance + 8 GiB enforce |
+| Velnor disk full | 50 GiB gc + headroom alerts |
+| False "always miss" on GitHub | exact/prefix/cold observability |
+| False "miss" on Velnor | Report `host_warm` not GHA cache-hit |
