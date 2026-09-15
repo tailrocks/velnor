@@ -888,7 +888,8 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
 
 fn automatic_fits_runners(runners: &str, automatic: &str) -> bool {
     match (runners, automatic) {
-        ("both", _) => true,
+        ("both", "both") => true,
+        ("both", _) => false,
         (runners, automatic) => runners == automatic,
     }
 }
@@ -1715,13 +1716,16 @@ mod tests {
 
     #[test]
     fn workflow_automatic_must_be_a_subset_of_runners() {
-        let config = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"github\"\n",
+        let rejected = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"github\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "both+github automatic must be rejected",
         );
-        assert_eq!(config.automatic(), Some("github"));
-        must(
-            config.validate(&[], &[], &BTreeSet::new()),
-            "both+github automatic is valid",
+        assert!(
+            rejected.to_string().contains("[workflow] automatic"),
+            "{rejected}"
         );
 
         let both = config_for(

@@ -67,6 +67,11 @@ pub fn fixture_of_every_noun() -> Vec<AnyResource> {
             queued_ms: Some(DurationMs(4_200)),
             duration_ms: Some(DurationMs(96_500)),
             conclusion: Some("success".to_owned()),
+            host: Some("sentry".to_owned()),
+            instance: Some("primary".to_owned()),
+            slot: Some("slot-2".to_owned()),
+            runner: Some("velnor-sentry-2".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
         }),
         AnyResource::Run(Run {
             meta: meta("run-32714994603", Source::Github, &[]),

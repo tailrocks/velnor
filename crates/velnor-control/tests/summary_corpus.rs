@@ -87,6 +87,7 @@ fn summary(run_id: u64, attempt: u32) -> JobSummary {
         acquired_at: Some(at("2026-08-24T12:30:47Z")),
         slot_name: Some("slot-0".to_owned()),
         runner_name: Some("sentry.slot-0.runner_a".to_owned()),
+        execution_backend: Some("docker".to_owned()),
         trust_scope: Some("untrusted".to_owned()),
         trust_class: Some("fork-pr".to_owned()),
         resource_policy: Some("standard.v2".to_owned()),
@@ -123,6 +124,7 @@ fn inputs_of(summary: &JobSummary) -> NormalizedJob {
         acquired_at: summary.acquired_at(),
         slot_name: summary.slot_name().map(str::to_owned),
         runner_name: summary.runner_name().map(str::to_owned),
+        execution_backend: summary.execution_backend().map(str::to_owned),
         trust_scope: summary.trust_scope().map(str::to_owned),
         trust_class: summary.trust_class().map(str::to_owned),
         resource_policy: summary.resource_policy().map(str::to_owned),
@@ -190,6 +192,32 @@ fn persist_fetch_round_trip_and_idempotent_repersist() {
     // A different attempt is a distinct identity.
     store.persist_summary(&summary(42, 2)).unwrap();
     assert_eq!(store.job_summaries("sentry/main").unwrap().len(), 2);
+}
+
+#[test]
+fn later_persist_without_execution_backend_keeps_stored_isolation() {
+    let temp = TempDb::new("backend-coalesce");
+    let store = Store::open(&temp.path).unwrap();
+    store.upsert_instance(&instance("sentry/main")).unwrap();
+
+    let first = summary(42, 1);
+    store.persist_summary(&first).unwrap();
+    assert_eq!(first.execution_backend(), Some("docker"));
+
+    let mut later = inputs_of(&first);
+    later.execution_backend = None;
+    store
+        .persist_summary(&JobSummary::from_normalized(later).unwrap())
+        .unwrap();
+    assert_eq!(
+        store
+            .fetch_summary_by_job_uid("sentry/main", first.job_uid())
+            .unwrap()
+            .unwrap()
+            .execution_backend(),
+        Some("docker"),
+        "a later persist with None must not null a stored isolation fact"
+    );
 }
 
 #[test]
@@ -271,14 +299,15 @@ fn database_pages_and_columns_contain_no_secret_markers() {
         .prepare(
             "SELECT instance_slug, job_uid, repository, workflow, job_name, head_ref, head_sha,
                     trigger_event, queued_at, acquired_at, runner_name, trust_scope, trust_class,
-                    resource_policy, phase, conclusion, infrastructure_category, updated_at
+                    resource_policy, phase, conclusion, infrastructure_category, execution_backend,
+                    updated_at
              FROM jobs",
         )
         .unwrap();
     let mut rows = statement.query([]).unwrap();
     let mut inspected = 0;
     while let Some(row) = rows.next().unwrap() {
-        for column in 0..18 {
+        for column in 0..19 {
             let value: Option<String> = row.get(column).unwrap();
             if let Some(value) = value {
                 assert_no_markers(&value, "stored column");

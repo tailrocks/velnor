@@ -69,6 +69,11 @@ fn fixture_control_plane_success_run_renders_all_formats_sanitized() {
             queued_ms: Some(DurationMs(4_200)),
             duration_ms: Some(DurationMs(96_500)),
             conclusion: Some("success".to_owned()),
+            host: Some("sentry".to_owned()),
+            instance: Some("primary".to_owned()),
+            slot: Some("slot-2".to_owned()),
+            runner: Some("velnor-sentry-2".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
         }),
         AnyResource::RunnerRegistration(RunnerRegistration {
             meta: ResourceMeta::new("velnor-fixture-slot-1", Source::Github, at())
