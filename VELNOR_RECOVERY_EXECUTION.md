@@ -9,24 +9,24 @@ Operator contract (2026-09-15): finish only after this sequence is independently
 | # | Gate | Status |
 |---|---|---|
 | 1 | macOS-hosted Velnor executes real `tailrocks/velnor` GHA jobs (not GitHub-hosted substitution) | **PASS** — run `34894567066` job `104145226224` on `velnor-macos-recovery-slot-1` @ `363d727b`; Docker precreate + Policy job **Succeeded**. Repeated jobs PASS (slot lifecycle evidence). |
-| 2 | Merge **#809, #812, #814, #815** using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **NOT YET** — #809 run `34930642603` in progress; 8/17 Velnor on recovery slots; production-topology Velnor fail ~58s (setup, not compile). Operator must rebase #809 onto main/host fixes for full stack merge (agents cannot commit to #809). Do not merge. |
+| 2 | Merge **#809, #812, #814, #815** using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **NOT YET** — #809 run `34930642603` completed **FAILURE** (29 success, 3 fail, 5 cancelled). Root cause: `trust_scope` missing in `velnorctl` ConfigureArgs @ `466de1a6` (compile E0063 in rust-production-topology). GitHub lane passed. Operator must rebase #809. Do not merge. |
 | 3 | `main` fully green after the merge stack | **NOT YET** |
 | 4 | New release: Debian apt (`tailrocks/velnor-apt`) **and** Homebrew; artifacts install and operate | **NOT YET** — today Linux debs only; no Homebrew channel |
 | 5 | Deploy that verified release to Sentry (not a rescue build) | **NOT YET** — Sentry JIT wedge unchanged; do not deploy until gate 4 |
 | 6 | Sentry executes real repository jobs; all PRs green, `main` green, release process proven | **NOT YET** |
 
-## Live snapshot (2026-09-15 ~06:45 UTC)
+## Live snapshot (2026-09-15 ~07:40 UTC)
 
 | Item | Value |
 |---|---|
 | **main** | `701fbdd1` (#817). Not `ad5fc59d`. |
-| **PR #809** | OPEN — run `34930642603` in progress; 8/17 Velnor on recovery slots; production-topology Velnor fail ~58s (setup, not compile). Operator must rebase onto main/host fixes (agents cannot commit to #809). Do not merge. |
+| **PR #809** | OPEN — run `34930642603` completed **FAILURE** (29 success, 3 fail, 5 cancelled). Root cause: `trust_scope` missing in `velnorctl` ConfigureArgs @ `466de1a6` (compile E0063 in rust-production-topology). GitHub lane passed. Operator must rebase #809. Do not merge. |
 | **PR #812** | `4db23c0f` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
 | **PR #814** | `a67e4c28` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
 | **PR #815** | `e5049452` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
-| **PR #816** | Planning **PASS** on `e53bc60b` run `34939230446`; latest HEAD CI blocked by concurrency |
-| **Focused branch** | `origin/velnor-macos-host` @ `4628e602` — `4628e602` (slot PID fix), `e53bc60b` (project.toml fix), `94b02ab4` (trust_scope on host line), `9344ef3c` (host lifecycle controls), `ec96f089` (MBX cache isolation) |
-| **Host** | RELAUNCHED 07:35Z on fixed binary (PID 89135, runner `0d3f3df0…`, src `3f790584` incl. mbx fix): 7 ready + 5 executing = 12/12 accountable; new jobs healthy (cargo 100% CPU). Tip adds drain (`d1d12413`) + startup-prune (`4628e602`) + OCC idempotency (`acfd60b9`) — pick up at next idle restart, not urgent. |
+| **PR #816** | run `34941825231` **in_progress** on recovery slots (`f8efe282` merge SHA); 1 fail workflow-contract on dogfood; 5 jobs still running |
+| **Focused branch** | `origin/velnor-macos-host` @ `acfd60b9` — pending CI run `34942276019`; prior: `4628e602` (slot PID fix), `e53bc60b` (project.toml fix), `94b02ab4` (trust_scope on host line), `9344ef3c` (host lifecycle controls), `ec96f089` (MBX cache isolation) |
+| **Host** | 7/12 ready, 5 executing; `github_reachable` true |
 | **Lifecycle** | Root cause documented: `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
 | **Sentry** | JIT wedge unchanged; tailrocks fleet down. Do not deploy until gate 4. |
 
