@@ -21967,18 +21967,53 @@ runs:
         }
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn local_composite_unknown_nested_action_fails_admission_read_only() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
+
+        // The Contents-API admission source honors the hard
+        // `VELNOR_GITHUB_HTTP_TRANSPORT` selector and errors before any TCP
+        // connect when it is unset. Hold the process-wide transport-env lock
+        // shared with the async guard holders (the threaded harness runs them
+        // concurrently in this binary); the guard restores the prior value.
+        let transport_runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _transport_guard =
+            transport_runtime.block_on(crate::test_support::github_http_transport_env());
+        // SAFETY: the test holds the process-wide environment guard.
+        unsafe { std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native") };
 
         // Exercises the production Contents-API admission source end-to-end: a
         // local composite whose nested remote action is unknown must be rejected
         // read-only, before any executor/cache/service/container exists.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            // Bounded accept: if admission ever fails before connecting again,
+            // fail fast here instead of hanging `join()` forever.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            panic!(
+                                "fake GitHub Contents server timed out after 30s waiting for \
+                                 admission to connect; admission failed before its HTTP request"
+                            );
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("fake GitHub Contents server accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .unwrap();
             let mut request = [0_u8; 4096];
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);

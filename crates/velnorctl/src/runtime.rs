@@ -148,9 +148,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let command = rt::Command::Daemon(Box::new(legacy_args));
     init_telemetry(telemetry_dir(&command).as_deref());
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
-    let services = velnor_control::application::ApplicationServices::with_store(
-        Arc::clone(&store),
+    let services = velnor_control::application::ApplicationServices::with_store_and_api_instance(
+        &store,
         &operational_instance,
+        instance,
     )?;
     let api_state = crate::http::ApiState::from_services_for_instance(&services, instance);
     let control_listener = OwnedUnixListener::new(
