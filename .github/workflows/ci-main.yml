@@ -53,8 +53,6 @@ jobs:
       docker_matrix: ${{ steps.plan.outputs.docker_matrix }}
       docs_matrix: ${{ steps.plan.outputs.docs_matrix }}
       opentofu_matrix: ${{ steps.plan.outputs.opentofu_matrix }}
-      rust-2_matrix: ${{ steps.plan.outputs.rust-2_matrix }}
-      rust-3_matrix: ${{ steps.plan.outputs.rust-3_matrix }}
       rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
     steps:
       - name: Checkout
@@ -64,11 +62,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '643f33123abe01adee09662a366cb9a5d2b3c3bf' }}
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || 'f3fc75ad2c566f38c6f469aec2261d552331b3b7' }}
+=======
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '69f94748c331920b9411bbc227694988afebc78c' }}
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Select affected units
         id: plan
         env:
@@ -85,7 +101,13 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
+<<<<<<< HEAD
           EXPECTED_REVISION: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          EXPECTED_REVISION: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          EXPECTED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -98,7 +120,13 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+<<<<<<< HEAD
           name: velnor-workflow-runtime-643f33123abe01adee09662a366cb9a5d2b3c3bf-${{ runner.os }}-${{ runner.arch }}
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          name: velnor-workflow-runtime-f3fc75ad2c566f38c6f469aec2261d552331b3b7-${{ runner.os }}-${{ runner.arch }}
+=======
+          name: velnor-workflow-runtime-69f94748c331920b9411bbc227694988afebc78c-${{ runner.os }}-${{ runner.arch }}
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -137,7 +165,13 @@ jobs:
         with:
           backend: github
           version: 1.11.1
+<<<<<<< HEAD
           cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
           restore-keys: |
             velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -157,7 +191,13 @@ jobs:
             cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
+<<<<<<< HEAD
             --rev 643f33123abe01adee09662a366cb9a5d2b3c3bf \
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+            --rev f3fc75ad2c566f38c6f469aec2261d552331b3b7 \
+=======
+            --rev 69f94748c331920b9411bbc227694988afebc78c \
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -165,7 +205,13 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
+<<<<<<< HEAD
           VELNOR_WORKFLOW_POLICY_REVISION: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          VELNOR_WORKFLOW_POLICY_REVISION: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          VELNOR_WORKFLOW_POLICY_REVISION: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
   github-bun-velnor:
     name: "Bun · Bun package (velnor)"
@@ -180,6 +226,10 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      cache_paths: "~/.bun/install/cache"
+      cache_key_files: |
+        package.json
+        bun.lock
   velnor-bun-velnor:
     name: "Bun · Bun package (velnor)"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -193,6 +243,7 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      host_warm_layers: cargo
   github-docker:
     name: "Docker · Docker"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') }}
@@ -206,6 +257,17 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      cache_paths: ".velnor-docker-cache"
+      seed_compat: "9c97194a807b"
+      seed_dependency_files: |
+        Cargo.lock
+        Dockerfile
+        docker/build-mise.lock
+        docker/build-mise.toml
+        rust-toolchain.toml
+      seed_freshness_files: |
+        Cargo.lock
+        deny.toml
   velnor-docker:
     name: "Docker · Docker"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -219,6 +281,7 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      host_warm_layers: docker_seed
   github-docs:
     name: "Documentation · Documentation"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') }}
@@ -232,6 +295,10 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      cache_paths: "~/.npm"
+      cache_key_files: |
+        package-lock.json
+        bun.lock
   velnor-docs:
     name: "Documentation · Documentation"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -245,6 +312,7 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      host_warm_layers: cargo
   github-opentofu:
     name: "OpenTofu · OpenTofu"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') }}
@@ -258,6 +326,8 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      cache_paths: "~/.terraform.d/plugin-cache"
+      cache_key_files: "**/.terraform.lock.hcl"
   velnor-opentofu:
     name: "OpenTofu · OpenTofu"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -271,6 +341,7 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      host_warm_layers: cargo
   prepare-cargo:
     name: "Control / Prepare Cargo"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') }}
@@ -297,6 +368,26 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mbx_compat: "947413fdb95d"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        deny.toml
+      mbx_freshness_files: |
+        .cargo/audit.toml
+        .cargo/deny.toml
+        Cargo.lock
+        audit.toml
+        deny.toml
+      cargo_bin_tools: cargo-deny
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
   velnor-rust-policy:
     name: "Rust · Rust dependency policy"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -310,6 +401,8 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:EmbarkStudios/cargo-deny"
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-unit-collector:
     name: "Rust · unit-collector"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') }}
@@ -323,6 +416,33 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: ad16fc81795d
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        mise.lock
+        tools/unit-collector/**/*.rs
+        tools/unit-collector/benches/**
+        tools/unit-collector/examples/**
+        tools/unit-collector/src/**
+        tools/unit-collector/tests/**
+        tools/unit-collector/tests/fixtures/dependency-bump.jsonl
+        tools/unit-collector/tests/fixtures/fresh.jsonl
+        tools/unit-collector/tests/fixtures/touched-source.jsonl
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "tools/unit-collector"
+      cargo_net_offline: true
   velnor-rust-unit-collector:
     name: "Rust · unit-collector"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -336,6 +456,9 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-bench:
     name: "Rust · velnor-bench"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
@@ -349,6 +472,85 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: d779917f73e7
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        config/fleet/**
+        crates/velnor-bench/**/*.rs
+        crates/velnor-bench/benches/**
+        crates/velnor-bench/examples/**
+        crates/velnor-bench/src/**
+        crates/velnor-bench/tests/**
+        crates/velnor-control/**/*.rs
+        crates/velnor-control/benches/**
+        crates/velnor-control/examples/**
+        crates/velnor-control/src/**
+        crates/velnor-control/tests/**
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        crates/velnor-runner/**/*.rs
+        crates/velnor-runner/benches/**
+        crates/velnor-runner/build.rs
+        crates/velnor-runner/debian/postinst
+        crates/velnor-runner/debian/postrm
+        crates/velnor-runner/debian/preinst
+        crates/velnor-runner/debian/prerm
+        crates/velnor-runner/debian/velnor-control.slice
+        crates/velnor-runner/debian/velnor-controller@.service
+        crates/velnor-runner/debian/velnor-daemon.service
+        crates/velnor-runner/debian/velnor-daemon@.service
+        crates/velnor-runner/debian/velnor-doctor.service
+        crates/velnor-runner/debian/velnor-doctor@.service
+        crates/velnor-runner/debian/velnor-guardian.service
+        crates/velnor-runner/debian/velnor-job@.service
+        crates/velnor-runner/debian/velnor-jobs.slice
+        crates/velnor-runner/debian/velnor-runner.tmpfiles
+        crates/velnor-runner/debian/velnor-slot@.service
+        crates/velnor-runner/debian/velnor.env
+        crates/velnor-runner/examples/**
+        crates/velnor-runner/src/**
+        crates/velnor-runner/src/cache.rs
+        crates/velnor-runner/src/execution/mod.rs
+        crates/velnor-runner/src/executor.rs
+        crates/velnor-runner/src/leftover_disk.rs
+        crates/velnor-runner/src/node/complete.rs
+        crates/velnor-runner/src/node/guardian.rs
+        crates/velnor-runner/src/node/job.rs
+        crates/velnor-runner/src/node/slot.rs
+        crates/velnor-runner/src/release.rs
+        crates/velnor-runner/src/runner.rs
+        crates/velnor-runner/tests/**
+        crates/velnor-runner/tests/fixtures/backend-parity.yml
+        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.service
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
+        docker/job-mise.lock
+        docker/job-ubuntu.Dockerfile
+        microvm/**
+        microvm/kernel.config
+        microvm/manifest.json
+        microvm/pins.json
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-bench"
+      cargo_net_offline: true
   velnor-rust-velnor-bench:
     name: "Rust · velnor-bench"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -362,6 +564,9 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-client:
     name: "Rust · velnor-client"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
@@ -375,6 +580,37 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "5e23f22451d2"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/velnor-client/**/*.rs
+        crates/velnor-client/benches/**
+        crates/velnor-client/examples/**
+        crates/velnor-client/src/**
+        crates/velnor-client/tests/**
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-client"
+      cargo_net_offline: true
   velnor-rust-velnor-client:
     name: "Rust · velnor-client"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -388,6 +624,9 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-control:
     name: "Rust · velnor-control"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
@@ -401,6 +640,37 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "41ffe5cc6df5"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/velnor-control/**/*.rs
+        crates/velnor-control/benches/**
+        crates/velnor-control/examples/**
+        crates/velnor-control/src/**
+        crates/velnor-control/tests/**
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-control"
+      cargo_net_offline: true
   velnor-rust-velnor-control:
     name: "Rust · velnor-control"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -414,6 +684,9 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-model:
     name: "Rust · velnor-model"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') }}
@@ -427,6 +700,32 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "0cdf3f658900"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-model"
+      cargo_net_offline: true
   velnor-rust-velnor-model:
     name: "Rust · velnor-model"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -440,24 +739,14 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
-  prepare-cargo-2:
-    name: "Control / Prepare Cargo"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
-    with:
-      unit: rust-velnor-render
-      lane: control
-      selected_units: ${{ needs.plan.outputs.units }}
-      scope: ${{ needs.plan.outputs.scope }}
-      full_units: ${{ needs.plan.outputs.full_units }}
-      base_sha: ${{ needs.plan.outputs.base_sha }}
-      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-render:
     name: "Rust · velnor-render"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-render
       lane: github
@@ -466,11 +755,42 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "2e39b420a6ed"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        crates/velnor-render/**/*.rs
+        crates/velnor-render/benches/**
+        crates/velnor-render/examples/**
+        crates/velnor-render/src/**
+        crates/velnor-render/tests/**
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-render"
+      cargo_net_offline: true
   velnor-rust-velnor-render:
     name: "Rust · velnor-render"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo-2.result == 'success' || needs.prepare-cargo-2.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, policy, prepare-cargo-2, velnor-rust-velnor-model]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, policy, prepare-cargo, velnor-rust-velnor-model]
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-render
       lane: velnor
@@ -479,11 +799,14 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-runner:
     name: "Rust · velnor-runner"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-runner
       lane: github
@@ -492,11 +815,85 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: c9c99df41d5a
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        config/fleet/**
+        crates/velnor-control/**/*.rs
+        crates/velnor-control/benches/**
+        crates/velnor-control/examples/**
+        crates/velnor-control/src/**
+        crates/velnor-control/tests/**
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        crates/velnor-runner/**/*.rs
+        crates/velnor-runner/benches/**
+        crates/velnor-runner/build.rs
+        crates/velnor-runner/debian/postinst
+        crates/velnor-runner/debian/postrm
+        crates/velnor-runner/debian/preinst
+        crates/velnor-runner/debian/prerm
+        crates/velnor-runner/debian/velnor-control.slice
+        crates/velnor-runner/debian/velnor-controller@.service
+        crates/velnor-runner/debian/velnor-daemon.service
+        crates/velnor-runner/debian/velnor-daemon@.service
+        crates/velnor-runner/debian/velnor-doctor.service
+        crates/velnor-runner/debian/velnor-doctor@.service
+        crates/velnor-runner/debian/velnor-guardian.service
+        crates/velnor-runner/debian/velnor-job@.service
+        crates/velnor-runner/debian/velnor-jobs.slice
+        crates/velnor-runner/debian/velnor-runner.tmpfiles
+        crates/velnor-runner/debian/velnor-slot@.service
+        crates/velnor-runner/debian/velnor.env
+        crates/velnor-runner/examples/**
+        crates/velnor-runner/src/**
+        crates/velnor-runner/src/cache.rs
+        crates/velnor-runner/src/execution/mod.rs
+        crates/velnor-runner/src/executor.rs
+        crates/velnor-runner/src/leftover_disk.rs
+        crates/velnor-runner/src/node/complete.rs
+        crates/velnor-runner/src/node/guardian.rs
+        crates/velnor-runner/src/node/job.rs
+        crates/velnor-runner/src/node/slot.rs
+        crates/velnor-runner/src/release.rs
+        crates/velnor-runner/src/runner.rs
+        crates/velnor-runner/tests/**
+        crates/velnor-runner/tests/fixtures/backend-parity.yml
+        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.service
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
+        docker/job-mise.lock
+        docker/job-ubuntu.Dockerfile
+        microvm/**
+        microvm/kernel.config
+        microvm/manifest.json
+        microvm/pins.json
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-runner"
+      cargo_net_offline: true
   velnor-rust-velnor-runner:
     name: "Rust · velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo-2.result == 'success' || needs.prepare-cargo-2.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, policy, prepare-cargo-2, velnor-rust-velnor-control, velnor-rust-velnor-model]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, policy, prepare-cargo, velnor-rust-velnor-control, velnor-rust-velnor-model]
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-runner
       lane: velnor
@@ -505,11 +902,14 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-tools:
     name: "Rust · velnor-tools"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-tools
       lane: github
@@ -518,11 +918,49 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "15d708957f00"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        config/fleet/**
+        crates/velnor-client/**/*.rs
+        crates/velnor-client/benches/**
+        crates/velnor-client/examples/**
+        crates/velnor-client/src/**
+        crates/velnor-client/tests/**
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        crates/velnor-runner/src/manifest.rs
+        crates/velnor-tools/**/*.rs
+        crates/velnor-tools/benches/**
+        crates/velnor-tools/examples/**
+        crates/velnor-tools/src/**
+        crates/velnor-tools/tests/**
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-tools"
+      cargo_net_offline: true
   velnor-rust-velnor-tools:
     name: "Rust · velnor-tools"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo-2.result == 'success' || needs.prepare-cargo-2.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, policy, prepare-cargo-2, velnor-rust-velnor-client, velnor-rust-velnor-model]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, policy, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-model]
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-tools
       lane: velnor
@@ -531,11 +969,14 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-workflow:
     name: "Rust · velnor-workflow"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow
       lane: github
@@ -544,11 +985,96 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "434caa7ff878"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        Dockerfile
+        config/fleet/**
+        crates/velnor-control/**/*.rs
+        crates/velnor-control/benches/**
+        crates/velnor-control/examples/**
+        crates/velnor-control/src/**
+        crates/velnor-control/tests/**
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        crates/velnor-runner/**/*.rs
+        crates/velnor-runner/benches/**
+        crates/velnor-runner/build.rs
+        crates/velnor-runner/debian/postinst
+        crates/velnor-runner/debian/postrm
+        crates/velnor-runner/debian/preinst
+        crates/velnor-runner/debian/prerm
+        crates/velnor-runner/debian/velnor-control.slice
+        crates/velnor-runner/debian/velnor-controller@.service
+        crates/velnor-runner/debian/velnor-daemon.service
+        crates/velnor-runner/debian/velnor-daemon@.service
+        crates/velnor-runner/debian/velnor-doctor.service
+        crates/velnor-runner/debian/velnor-doctor@.service
+        crates/velnor-runner/debian/velnor-guardian.service
+        crates/velnor-runner/debian/velnor-job@.service
+        crates/velnor-runner/debian/velnor-jobs.slice
+        crates/velnor-runner/debian/velnor-runner.tmpfiles
+        crates/velnor-runner/debian/velnor-slot@.service
+        crates/velnor-runner/debian/velnor.env
+        crates/velnor-runner/examples/**
+        crates/velnor-runner/src/**
+        crates/velnor-runner/src/cache.rs
+        crates/velnor-runner/src/execution/mod.rs
+        crates/velnor-runner/src/executor.rs
+        crates/velnor-runner/src/leftover_disk.rs
+        crates/velnor-runner/src/node/complete.rs
+        crates/velnor-runner/src/node/guardian.rs
+        crates/velnor-runner/src/node/job.rs
+        crates/velnor-runner/src/node/slot.rs
+        crates/velnor-runner/src/release.rs
+        crates/velnor-runner/src/runner.rs
+        crates/velnor-runner/tests/**
+        crates/velnor-runner/tests/fixtures/backend-parity.yml
+        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.service
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
+        crates/velnor-workflow/**/*.rs
+        crates/velnor-workflow/README.md
+        crates/velnor-workflow/benches/**
+        crates/velnor-workflow/examples/**
+        crates/velnor-workflow/src/**
+        crates/velnor-workflow/src/runtime.rs
+        crates/velnor-workflow/templates/**
+        crates/velnor-workflow/templates/release-package-signer.yml
+        crates/velnor-workflow/tests/**
+        docker/build-mise.*
+        docker/job-mise.lock
+        docker/job-ubuntu.Dockerfile
+        microvm/**
+        microvm/kernel.config
+        microvm/manifest.json
+        microvm/pins.json
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-workflow"
+      cargo_net_offline: true
   velnor-rust-velnor-workflow:
     name: "Rust · velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo-2.result == 'success' || needs.prepare-cargo-2.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, policy, prepare-cargo-2, velnor-rust-velnor-runner]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, policy, prepare-cargo, velnor-rust-velnor-runner]
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow
       lane: velnor
@@ -557,11 +1083,14 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow-contract
       lane: github
@@ -570,11 +1099,36 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "2544c2ae90ab"
+      mbx_dependency_files: |
+        .cargo/**
+        crates/velnor-workflow-contract/Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/velnor-workflow-contract/**/*.rs
+        crates/velnor-workflow-contract/Cargo.lock
+        crates/velnor-workflow-contract/benches/**
+        crates/velnor-workflow-contract/examples/**
+        crates/velnor-workflow-contract/src/**
+        crates/velnor-workflow-contract/tests/**
+        mise.lock
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        crates/velnor-workflow-contract/Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnor-workflow-contract"
+      cargo_net_offline: true
   velnor-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo-2.result == 'success' || needs.prepare-cargo-2.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, policy, prepare-cargo-2]
-    uses: ./.github/workflows/ci-unit-rust-2.yml
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, policy, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow-contract
       lane: velnor
@@ -583,24 +1137,14 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
-  prepare-cargo-3:
-    name: "Control / Prepare Cargo"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-3.yml
-    with:
-      unit: rust-velnorctl
-      lane: control
-      selected_units: ${{ needs.plan.outputs.units }}
-      scope: ${{ needs.plan.outputs.scope }}
-      full_units: ${{ needs.plan.outputs.full_units }}
-      base_sha: ${{ needs.plan.outputs.base_sha }}
-      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnorctl:
     name: "Rust · velnorctl"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-3.yml
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnorctl
       lane: github
@@ -609,11 +1153,101 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "8123d20d5b6a"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        config/fleet/**
+        crates/velnor-client/**/*.rs
+        crates/velnor-client/benches/**
+        crates/velnor-client/examples/**
+        crates/velnor-client/src/**
+        crates/velnor-client/tests/**
+        crates/velnor-control/**/*.rs
+        crates/velnor-control/benches/**
+        crates/velnor-control/examples/**
+        crates/velnor-control/src/**
+        crates/velnor-control/tests/**
+        crates/velnor-model/**/*.rs
+        crates/velnor-model/benches/**
+        crates/velnor-model/examples/**
+        crates/velnor-model/src/**
+        crates/velnor-model/tests/**
+        crates/velnor-render/**/*.rs
+        crates/velnor-render/benches/**
+        crates/velnor-render/examples/**
+        crates/velnor-render/src/**
+        crates/velnor-render/tests/**
+        crates/velnor-runner/**/*.rs
+        crates/velnor-runner/benches/**
+        crates/velnor-runner/build.rs
+        crates/velnor-runner/debian/postinst
+        crates/velnor-runner/debian/postrm
+        crates/velnor-runner/debian/preinst
+        crates/velnor-runner/debian/prerm
+        crates/velnor-runner/debian/velnor-control.slice
+        crates/velnor-runner/debian/velnor-controller@.service
+        crates/velnor-runner/debian/velnor-daemon.service
+        crates/velnor-runner/debian/velnor-daemon@.service
+        crates/velnor-runner/debian/velnor-doctor.service
+        crates/velnor-runner/debian/velnor-doctor@.service
+        crates/velnor-runner/debian/velnor-guardian.service
+        crates/velnor-runner/debian/velnor-job@.service
+        crates/velnor-runner/debian/velnor-jobs.slice
+        crates/velnor-runner/debian/velnor-runner.tmpfiles
+        crates/velnor-runner/debian/velnor-slot@.service
+        crates/velnor-runner/debian/velnor.env
+        crates/velnor-runner/examples/**
+        crates/velnor-runner/src/**
+        crates/velnor-runner/src/cache.rs
+        crates/velnor-runner/src/execution/mod.rs
+        crates/velnor-runner/src/executor.rs
+        crates/velnor-runner/src/leftover_disk.rs
+        crates/velnor-runner/src/node/canary.rs
+        crates/velnor-runner/src/node/complete.rs
+        crates/velnor-runner/src/node/guardian.rs
+        crates/velnor-runner/src/node/job.rs
+        crates/velnor-runner/src/node/slot.rs
+        crates/velnor-runner/src/release.rs
+        crates/velnor-runner/src/runner.rs
+        crates/velnor-runner/tests/**
+        crates/velnor-runner/tests/fixtures/backend-parity.yml
+        crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.service
+        crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
+        crates/velnorctl/**/*.rs
+        crates/velnorctl/benches/**
+        crates/velnorctl/examples/**
+        crates/velnorctl/src/**
+        crates/velnorctl/tests/**
+        docker/job-mise.lock
+        docker/job-ubuntu.Dockerfile
+        microvm/**
+        microvm/kernel.config
+        microvm/manifest.json
+        microvm/pins.json
+        mise.lock
+        schemas/**
+        schemas/velnor.telemetry.v1.json
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/velnorctl"
+      cargo_net_offline: true
   velnor-rust-velnorctl:
     name: "Rust · velnorctl"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo-3.result == 'success' || needs.prepare-cargo-3.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, policy, prepare-cargo-3, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
-    uses: ./.github/workflows/ci-unit-rust-3.yml
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, policy, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnorctl
       lane: velnor
@@ -622,11 +1256,14 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-production-topology:
     name: "Rust · Rust production topology"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-unit-rust-3.yml
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-production-topology
       lane: github
@@ -635,11 +1272,32 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_runner: true
+      mbx_compat: ed95a0c30f51
+      mbx_dependency_files: |
+        Cargo.lock
+        Cargo.toml
+      mbx_freshness_files: |
+        ./**/*.rs
+        crates/velnor-runner/**
+        docker/**
+        microvm/**
+        mise.lock
+        scripts/check-release-feature-boundary.sh
+        scripts/test-check-release-feature-boundary.sh
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        Cargo.toml
+        Cargo.lock
+      cargo_root: "."
+      cargo_net_offline: true
   velnor-rust-production-topology:
     name: "Rust · Rust production topology"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo-3.result == 'success' || needs.prepare-cargo-3.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, policy, prepare-cargo-3]
-    uses: ./.github/workflows/ci-unit-rust-3.yml
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, policy, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-production-topology
       lane: velnor
@@ -648,10 +1306,12 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [plan, velnor-lane-admission, policy, github-bun-velnor, velnor-bun-velnor, github-docker, velnor-docker, github-docs, velnor-docs, github-opentofu, velnor-opentofu, prepare-cargo, github-rust-policy, velnor-rust-policy, github-rust-unit-collector, velnor-rust-unit-collector, github-rust-velnor-bench, velnor-rust-velnor-bench, github-rust-velnor-client, velnor-rust-velnor-client, github-rust-velnor-control, velnor-rust-velnor-control, github-rust-velnor-model, velnor-rust-velnor-model, prepare-cargo-2, github-rust-velnor-render, velnor-rust-velnor-render, github-rust-velnor-runner, velnor-rust-velnor-runner, github-rust-velnor-tools, velnor-rust-velnor-tools, github-rust-velnor-workflow, velnor-rust-velnor-workflow, github-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, prepare-cargo-3, github-rust-velnorctl, velnor-rust-velnorctl, github-rust-production-topology, velnor-rust-production-topology]
+    needs: [plan, velnor-lane-admission, policy, github-bun-velnor, velnor-bun-velnor, github-docker, velnor-docker, github-docs, velnor-docs, github-opentofu, velnor-opentofu, prepare-cargo, github-rust-policy, velnor-rust-policy, github-rust-unit-collector, velnor-rust-unit-collector, github-rust-velnor-bench, velnor-rust-velnor-bench, github-rust-velnor-client, velnor-rust-velnor-client, github-rust-velnor-control, velnor-rust-velnor-control, github-rust-velnor-model, velnor-rust-velnor-model, github-rust-velnor-render, velnor-rust-velnor-render, github-rust-velnor-runner, velnor-rust-velnor-runner, github-rust-velnor-tools, velnor-rust-velnor-tools, github-rust-velnor-workflow, velnor-rust-velnor-workflow, github-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-rust-velnorctl, velnor-rust-velnorctl, github-rust-production-topology, velnor-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1019,19 +1679,6 @@ jobs:
             esac
           fi
           if [[ "$selected" == *",rust-velnor-render,"* ]]; then
-            result="$(result_for_job prepare-cargo-2)"
-            if [[ "$result" != success ]]; then
-              echo "selected CI prerequisite prepare-cargo-2 did not pass: $result" >&2
-              exit 1
-            fi
-          else
-            result="$(result_for_job prepare-cargo-2)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI prerequisite prepare-cargo-2 failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnor-render,"* ]]; then
             result="$(result_for_job github-rust-velnor-render)"
             case "$result" in
               success) ;;
@@ -1194,19 +1841,6 @@ jobs:
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI job velnor-rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;
-            esac
-          fi
-          if [[ "$selected" == *",rust-velnorctl,"* ]]; then
-            result="$(result_for_job prepare-cargo-3)"
-            if [[ "$result" != success ]]; then
-              echo "selected CI prerequisite prepare-cargo-3 did not pass: $result" >&2
-              exit 1
-            fi
-          else
-            result="$(result_for_job prepare-cargo-3)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "unselected CI prerequisite prepare-cargo-3 failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then

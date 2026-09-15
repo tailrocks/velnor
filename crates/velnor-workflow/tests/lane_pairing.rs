@@ -489,15 +489,25 @@ jobs = ["github"]
         "explicit github opt-out must not emit a Velnor verify job: {swift:?}"
     );
     assert_eq!(job_name(&swift["verify-github"]), "GitHub");
+    // The collapsed job gates on the caller's `inputs.unit` membership, never
+    // on an enumeration of unit ids: the callee stays O(1) in units.
     assert!(
-        job_if(&swift["verify-github"]).contains(&format!("',{swift_id},'")),
-        "swift verify job must gate on the declared unit id"
+        job_if(&swift["verify-github"]).contains(
+            "contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit))"
+        ),
+        "swift verify job must gate on inputs.unit membership"
+    );
+    assert!(
+        !generated
+            .workflow("ci-unit-swift.yml")
+            .contains("inputs.unit == '"),
+        "swift verify steps must not guard on a unit identity"
     );
     assert!(
         generated
-            .workflow("ci-unit-swift.yml")
-            .contains(&format!("inputs.unit == '{swift_id}'")),
-        "swift verify steps must gate on the declared unit id"
+            .workflow("ci-pr.yml")
+            .contains(&format!("      unit: {swift_id}\n      lane: github")),
+        "the aggregate passes the declared unit to the swift reusable"
     );
     let pr = parse_jobs(&generated.workflow("ci-pr.yml"));
     assert!(

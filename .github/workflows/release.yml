@@ -55,11 +55,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -99,11 +117,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Restore "Bun package (velnor)" cache
@@ -136,11 +172,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Expose GitHub Actions runtime
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Set up Docker Buildx
@@ -168,11 +222,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Documentation cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -203,11 +275,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
@@ -243,11 +333,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -279,7 +387,7 @@ jobs:
         with:
           path: ~/.cargo/bin
           key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
-      - name: Set up cargo-deny
+      - name: Set up cargo bin tools
         if: ${{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
@@ -355,11 +463,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -446,7 +572,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="tools/unit-collector"
+          root='tools/unit-collector'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -475,11 +601,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -566,7 +710,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-bench"
+          root='crates/velnor-bench'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -595,11 +739,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -686,7 +848,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-client"
+          root='crates/velnor-client'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -715,11 +877,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -806,7 +986,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-control"
+          root='crates/velnor-control'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -835,11 +1015,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -926,7 +1124,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-model"
+          root='crates/velnor-model'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -955,11 +1153,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1046,7 +1262,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-render"
+          root='crates/velnor-render'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -1075,11 +1291,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1166,7 +1400,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-runner"
+          root='crates/velnor-runner'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -1195,11 +1429,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1286,7 +1538,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-tools"
+          root='crates/velnor-tools'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -1315,11 +1567,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1406,15 +1676,23 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-workflow"
+          root='crates/velnor-workflow'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
           cargo fetch --locked
+<<<<<<< HEAD
           install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-643f33123abe01adee09662a366cb9a5d2b3c3bf"
           if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
             cargo install --locked --git https://github.com/tailrocks/velnor --rev 643f33123abe01adee09662a366cb9a5d2b3c3bf --root "$install_root" velnor-workflow --bin velnor-workflow
           fi
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-f3fc75ad2c566f38c6f469aec2261d552331b3b7"
+          if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
+            cargo install --locked --git https://github.com/tailrocks/velnor --rev f3fc75ad2c566f38c6f469aec2261d552331b3b7 --root "$install_root" velnor-workflow --bin velnor-workflow
+          fi
+=======
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
@@ -1439,11 +1717,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1530,7 +1826,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-workflow-contract"
+          root='crates/velnor-workflow-contract'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -1559,11 +1855,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1650,7 +1964,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnorctl"
+          root='crates/velnorctl'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -1679,11 +1993,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1768,7 +2100,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root=.
+          root='.'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2022,7 +2354,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="tools/unit-collector"
+          root='tools/unit-collector'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2085,7 +2417,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-bench"
+          root='crates/velnor-bench'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2148,7 +2480,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-client"
+          root='crates/velnor-client'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2211,7 +2543,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-control"
+          root='crates/velnor-control'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2274,7 +2606,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-model"
+          root='crates/velnor-model'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2337,7 +2669,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-render"
+          root='crates/velnor-render'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2400,7 +2732,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-runner"
+          root='crates/velnor-runner'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2463,7 +2795,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-tools"
+          root='crates/velnor-tools'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2526,7 +2858,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-workflow"
+          root='crates/velnor-workflow'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2535,10 +2867,18 @@ jobs:
           else
             cargo fetch --locked
           fi
+<<<<<<< HEAD
           install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-643f33123abe01adee09662a366cb9a5d2b3c3bf"
           if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
             cargo install --locked --git https://github.com/tailrocks/velnor --rev 643f33123abe01adee09662a366cb9a5d2b3c3bf --root "$install_root" velnor-workflow --bin velnor-workflow
           fi
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-f3fc75ad2c566f38c6f469aec2261d552331b3b7"
+          if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
+            cargo install --locked --git https://github.com/tailrocks/velnor --rev f3fc75ad2c566f38c6f469aec2261d552331b3b7 --root "$install_root" velnor-workflow --bin velnor-workflow
+          fi
+=======
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
@@ -2593,7 +2933,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnor-workflow-contract"
+          root='crates/velnor-workflow-contract'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2656,7 +2996,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root="crates/velnorctl"
+          root='crates/velnorctl'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2715,7 +3055,7 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          root=.
+          root='.'
           if [[ "$root" != "." ]]; then
             cd -- "$root"
           fi
@@ -2764,11 +3104,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -3162,11 +3520,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3519,11 +3895,29 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
+<<<<<<< HEAD
         uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         with:
+<<<<<<< HEAD
           rev: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          rev: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          rev: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Set trusted workflow policy revision
+<<<<<<< HEAD
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f3fc75ad2c566f38c6f469aec2261d552331b3b7" >> "$GITHUB_ENV"
+=======
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=69f94748c331920b9411bbc227694988afebc78c" >> "$GITHUB_ENV"
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

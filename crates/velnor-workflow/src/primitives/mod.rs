@@ -452,6 +452,10 @@ pub(crate) struct RenderCtx<'a> {
     pub(crate) cache: &'a cache::ResolvedCache,
     /// The CI graph nodes contributed by the primitives rendered so far.
     pub(crate) nodes: &'a [GraphNode],
+    /// Per-unit pipeline contracts resolved by the primitives rendered so far.
+    /// The aggregate passes them to the kind-reusable callers so caller
+    /// `with:` values and callee step gates derive from one contract.
+    pub(crate) contracts: &'a BTreeMap<String, UnitContract>,
 }
 
 /// One render primitive of the CI surface.
@@ -726,6 +730,7 @@ pub(crate) fn generate(
                 &lanes,
                 &cache,
                 &[],
+                &BTreeMap::new(),
             ),
             &row.args(),
         )?;
@@ -758,6 +763,7 @@ pub(crate) fn generate(
                 &lanes,
                 &cache,
                 &nodes,
+                &contracts,
             ),
             &row.args(),
         )?;
@@ -854,6 +860,7 @@ fn ctx<'a>(
     lanes: &'a lanes::ResolvedLanes,
     cache: &'a cache::ResolvedCache,
     nodes: &'a [GraphNode],
+    contracts: &'a BTreeMap<String, UnitContract>,
 ) -> RenderCtx<'a> {
     RenderCtx {
         root,
@@ -867,6 +874,7 @@ fn ctx<'a>(
         lanes,
         cache,
         nodes,
+        contracts,
     }
 }
 

@@ -47,12 +47,11 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
             )));
         }
     }
-    let file = crate::nested_unit_workflow_file(unit);
     let nodes = vec![GraphNode::Unit {
         unit_id: unit.id.clone(),
-        job_id: crate::stack_group_job_id_for_file(&file),
+        job_id: crate::stack_group_job_id(unit.kind),
         name: crate::sidebar_group_name(unit),
-        file,
+        file: crate::nested_unit_workflow_file(unit),
     }];
     Ok(Rendered {
         nodes,

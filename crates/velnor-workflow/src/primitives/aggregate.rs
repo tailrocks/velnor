@@ -48,7 +48,10 @@ impl Primitive for UnitAggregation {
                 super::AFFECTED_PLAN
             )));
         }
-        let content = ctx.lanes.ir().render_nested(kind, ctx.nodes);
+        let content = ctx
+            .lanes
+            .ir()
+            .render_nested(kind, ctx.nodes, Some(ctx.contracts));
         Ok(Rendered {
             files: std::iter::once((
                 std::path::PathBuf::from(".github/workflows").join(file),

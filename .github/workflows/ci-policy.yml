@@ -39,7 +39,13 @@ jobs:
         with:
           backend: github
           version: 1.11.1
+<<<<<<< HEAD
           cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
           restore-keys: |
             velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -59,7 +65,13 @@ jobs:
             cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
+<<<<<<< HEAD
             --rev 643f33123abe01adee09662a366cb9a5d2b3c3bf \
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+            --rev f3fc75ad2c566f38c6f469aec2261d552331b3b7 \
+=======
+            --rev 69f94748c331920b9411bbc227694988afebc78c \
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -67,5 +79,11 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
+<<<<<<< HEAD
           VELNOR_WORKFLOW_POLICY_REVISION: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          VELNOR_WORKFLOW_POLICY_REVISION: f3fc75ad2c566f38c6f469aec2261d552331b3b7
+=======
+          VELNOR_WORKFLOW_POLICY_REVISION: 69f94748c331920b9411bbc227694988afebc78c
+>>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"

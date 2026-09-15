@@ -675,7 +675,6 @@ fn render_guest_payload_job(
                 "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
                 config.default_branch
             )),
-            None,
         );
         "cargo"
     } else {
@@ -1626,7 +1625,6 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
             config.default_branch
         )),
-        None,
     );
     let mut matrix = String::new();
     for target in &release.targets {
@@ -1833,7 +1831,6 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 false,
                 cargo_cache_restored,
                 skip_when_offline_ready,
-                cargo_cache_restored.then_some("cache"),
             );
             let cargo_offline = checks_env(unit);
             let _ = writeln!(
@@ -3007,7 +3004,6 @@ mod tests {
                 profile: None,
             }),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         }

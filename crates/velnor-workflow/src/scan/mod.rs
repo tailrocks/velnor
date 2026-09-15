@@ -175,7 +175,6 @@ pub(crate) fn unit(
         mise_tools: Vec::new(),
         toolchain: None,
         services: Vec::new(),
-        workflow_file: None,
         requires_trusted: false,
         workspace_check: false,
     }

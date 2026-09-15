@@ -19,12 +19,11 @@ use super::{
 };
 use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_setup, hosted_mold_setup,
-    is_prepare_cargo_caller_job_id, kind_reusable_lane_display_name, kind_unit_workflow_shard_file,
-    lane_supports_unit, nested_unit_workflow_file, prepare_cargo_caller_job_id_for_file,
-    rendered_cache_values, sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id,
-    unit_job_display_name, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
-    velnor_rust_dependency_needs, workflow_runtime_artifact_upload, workflow_runtime_download,
-    workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
+    kind_unit_workflow_file, lane_supports_unit, nested_unit_workflow_file,
+    prepare_cargo_caller_job_id, rendered_cache_values, sidebar_group_name, stack_group_job_id,
+    unit_group, unit_group_job_id, unit_job_display_name, unit_job_id, unit_needs, velnor_runner,
+    velnor_runner_group, velnor_rust_dependency_needs, workflow_runtime_artifact_upload,
+    workflow_runtime_download, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
     workflow_selection_file_materialize, workflow_setup_install_rev, yaml_scalar, CachePurpose,
     CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources,
     Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
@@ -33,8 +32,6 @@ use crate::{
 
 /// GitHub rejects reusable workflow files above this size.
 pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
-/// Leave headroom below GitHub's parsed reusable-workflow object limit (~240 KiB).
-const KIND_WORKFLOW_SHARD_BUDGET: usize = 120_000;
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
@@ -184,17 +181,21 @@ pub(crate) fn cargo_source_lockfile_key_files(unit: &Unit) -> Vec<String> {
     ]
 }
 
-fn cargo_source_cache_hash_expression(unit: &Unit) -> String {
-    let key_files = unit
-        .cache
+/// The files a unit's dependency-bundle cache key hashes, in `hashFiles`
+/// argument order.
+fn cargo_source_cache_key_files(unit: &Unit) -> Vec<String> {
+    unit.cache
         .as_ref()
         .filter(|cache| cache.purpose == CachePurpose::CargoSources)
         .map_or_else(
             || unit.cache.as_ref().map(|cache| cache.key_files.clone()),
             |_| Some(cargo_source_lockfile_key_files(unit)),
         )
-        .unwrap_or_default();
-    key_files
+        .unwrap_or_default()
+}
+
+fn cargo_source_cache_hash_expression(unit: &Unit) -> String {
+    cargo_source_cache_key_files(unit)
         .iter()
         .map(|path| format!("'{}'", path.replace('\'', "''")))
         .collect::<Vec<_>>()
@@ -344,15 +345,45 @@ fn snapshot_compatibility(
 /// prefixes, so the most recently saved compatible generation wins and an
 /// exact old generation can never shadow it.
 fn unit_snapshot(ir: &WorkflowIr, unit: &Unit, namespace: &str) -> (String, String) {
-    let members = closure_members(unit, &ir.units);
-    let dependency_inputs = snapshot_dependency_inputs(&members);
-    let dependency = freshness_expression(&dependency_inputs);
-    let facts = snapshot_compatibility(ir, unit, &dependency_inputs);
-    let class_prefix = snapshot_class_prefix(namespace, &facts.digest());
-    let state = freshness_expression(&snapshot_state_files(&members, unit));
+    let facts = unit_snapshot_facts(ir, unit);
+    let dependency = freshness_expression(&facts.dependency_files);
+    let class_prefix = snapshot_class_prefix(namespace, &facts.compatibility);
+    let state = freshness_expression(&facts.state_files);
     (
         snapshot_key(&class_prefix, &unit.id, &dependency, &state),
         snapshot_restore_keys(&class_prefix, &unit.id, &dependency),
+    )
+}
+
+/// The three unit-specific parts of a snapshot key, for callers that pass
+/// them through `workflow_call` inputs instead of rendering the literal key.
+fn unit_snapshot_facts(ir: &WorkflowIr, unit: &Unit) -> SnapshotFacts {
+    let members = closure_members(unit, &ir.units);
+    let dependency_files = snapshot_dependency_inputs(&members);
+    let compatibility = snapshot_compatibility(ir, unit, &dependency_files).digest();
+    SnapshotFacts {
+        compatibility,
+        dependency_files,
+        state_files: snapshot_state_files(&members, unit),
+    }
+}
+
+/// The snapshot key and restore prefixes a collapsed lane job renders: the
+/// same segment grammar as [`unit_snapshot`], with the unit id, compatibility
+/// digest, and both `hashFiles` lists read from the caller's inputs.
+fn input_snapshot(
+    namespace: &str,
+    compat_input: &str,
+    dependency_input: &str,
+    freshness_input: &str,
+) -> (String, String) {
+    let class_prefix = snapshot_class_prefix(namespace, &lane_input::expression(compat_input));
+    let unit = lane_input::expression("unit");
+    let dependency = lane_input::hash_files_expression(dependency_input);
+    let state = lane_input::hash_files_expression(freshness_input);
+    (
+        snapshot_key(&class_prefix, &unit, &dependency, &state),
+        snapshot_restore_keys(&class_prefix, &unit, &dependency),
     )
 }
 
@@ -424,29 +455,158 @@ pub(crate) fn render_phase_report_step(
     output: &mut String,
     job_display_name: &str,
     lane: RunnerMode,
-    unit: &Unit,
-    ir: &WorkflowIr,
-    step_id_prefix: Option<&str>,
+    facts: &CacheReportFacts,
 ) {
     output.push_str("      - name: Report phase timings and cache outcomes\n");
     output.push_str("        if: always()\n");
-    render_cache_outcome_report_env(output, lane, unit, ir, step_id_prefix);
+    render_cache_outcome_report_env(output, lane, facts);
     let _ = writeln!(
         output,
         "        uses: {VELNOR_CI_REPORT_ACTION}\n        with:\n          job_label: {job_display_name}"
     );
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "cache outcome env wiring stays colocated with the report step it feeds"
-)]
+/// One cache layer whose restore step outputs the post-checks report reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ReportedCacheLayer {
+    Rustup,
+    Mold,
+    Mbx,
+    CargoBundle,
+    DockerSeed,
+}
+
+impl ReportedCacheLayer {
+    /// The step id whose outputs carry the layer's primary and matched keys.
+    fn step_id(self) -> &'static str {
+        match self {
+            Self::Rustup => "rustup-toolchain",
+            Self::Mold => "mold-cache",
+            Self::Mbx => "mbx-cache",
+            Self::CargoBundle | Self::DockerSeed => "cache",
+        }
+    }
+
+    /// The `VELNOR_CACHE_<LAYER>_*` env prefix the report action reads.
+    fn env_prefix(self) -> &'static str {
+        match self {
+            Self::Rustup => "RUSTUP",
+            Self::Mold => "MOLD",
+            Self::Mbx => "MBX",
+            Self::CargoBundle => "CARGO",
+            Self::DockerSeed => "DOCKER_SEED",
+        }
+    }
+}
+
+/// Which cache layers the post-checks report reads step outputs for, and the
+/// host-warm layers a Velnor job declares. Derived from one unit for a literal
+/// job, or unioned over a kind's members for a collapsed lane job.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CacheReportFacts {
+    pub(crate) layers: BTreeSet<ReportedCacheLayer>,
+    /// The rendered `VELNOR_HOST_WARM_LAYERS` value on the Velnor lane.
+    pub(crate) host_warm_layers: Option<String>,
+}
+
+impl CacheReportFacts {
+    pub(crate) fn for_unit(lane: RunnerMode, unit: &Unit, ir: &WorkflowIr) -> Self {
+        let tools = WorkflowIr::tools_for_unit(unit, ir.mise_present, ir.mr_boxington);
+        let seed = unit
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.mutable_mount_seed);
+        if lane == RunnerMode::Velnor {
+            let layers = velnor_host_warm_layers(unit, ir);
+            return Self {
+                host_warm_layers: (!layers.is_empty()).then(|| layers.join(",")),
+                ..Self::default()
+            };
+        }
+        let mut layers = BTreeSet::new();
+        if !velnor_skips_pinned_rust_toolchain(lane) && unit.toolchain.is_some() {
+            layers.insert(ReportedCacheLayer::Rustup);
+        }
+        if tools.contains(&ToolRequirement::Mold) {
+            layers.insert(ReportedCacheLayer::Mold);
+        }
+        if tools.contains(&ToolRequirement::MrBoxington) {
+            layers.insert(ReportedCacheLayer::Mbx);
+        }
+        if unit.cache.as_ref().is_some_and(|cache| {
+            !cache.mutable_mount_seed
+                && CacheBackend::Detected.lane_enables_actions_cache(lane, ir, unit)
+        }) {
+            layers.insert(ReportedCacheLayer::CargoBundle);
+        }
+        if seed && lane == RunnerMode::Github {
+            layers.insert(ReportedCacheLayer::DockerSeed);
+        }
+        Self {
+            layers,
+            host_warm_layers: None,
+        }
+    }
+
+    /// The union over a collapsed lane job's members: a layer is reported
+    /// when any member restores it (a skipped step reports empty outputs), and
+    /// the host-warm list reads from its input when members differ.
+    fn union(members: &[Self]) -> Self {
+        let host_warm_layers = members
+            .iter()
+            .filter_map(|facts| facts.host_warm_layers.clone())
+            .collect::<BTreeSet<_>>();
+        let host_warm_layers = match host_warm_layers.len() {
+            0 => None,
+            1 if members.iter().all(|facts| facts.host_warm_layers.is_some()) => {
+                host_warm_layers.into_iter().next()
+            }
+            _ => Some(lane_input::expression(lane_input::HOST_WARM_LAYERS)),
+        };
+        Self {
+            layers: members
+                .iter()
+                .flat_map(|facts| facts.layers.iter().copied())
+                .collect(),
+            host_warm_layers,
+        }
+    }
+}
+
+/// The host-persistent layers a Velnor job expects warm on its runner.
+fn velnor_host_warm_layers(unit: &Unit, ir: &WorkflowIr) -> Vec<&'static str> {
+    let tools = WorkflowIr::tools_for_unit(unit, ir.mise_present, ir.mr_boxington);
+    let mut host_warm = Vec::<&'static str>::new();
+    if velnor_skips_pinned_rust_toolchain(RunnerMode::Velnor) && unit.toolchain.is_some() {
+        host_warm.push("rustup");
+    }
+    if tools.contains(&ToolRequirement::Mold) {
+        host_warm.push("mold");
+    }
+    if tools.contains(&ToolRequirement::MrBoxington) {
+        host_warm.push("mbx");
+    }
+    if unit
+        .cache
+        .as_ref()
+        .is_some_and(cache_is_velnor_host_persistent)
+    {
+        host_warm.push("cargo");
+    }
+    if unit
+        .cache
+        .as_ref()
+        .is_some_and(|cache| cache.mutable_mount_seed)
+    {
+        host_warm.push("docker_seed");
+    }
+    host_warm
+}
+
 fn render_cache_outcome_report_env(
     output: &mut String,
     lane: RunnerMode,
-    unit: &Unit,
-    ir: &WorkflowIr,
-    step_id_prefix: Option<&str>,
+    facts: &CacheReportFacts,
 ) {
     let lane_name = match lane {
         RunnerMode::Github | RunnerMode::Both => "github",
@@ -454,108 +614,37 @@ fn render_cache_outcome_report_env(
     };
     output.push_str("        env:\n");
     let _ = writeln!(output, "          VELNOR_CI_LANE: {lane_name}");
-    let tools = WorkflowIr::tools_for_unit(unit, ir.mise_present, ir.mr_boxington);
     if lane == RunnerMode::Velnor {
-        let mut host_warm = Vec::<&'static str>::new();
-        if velnor_skips_pinned_rust_toolchain(lane) && unit.toolchain.is_some() {
-            host_warm.push("rustup");
-        }
-        if tools.contains(&ToolRequirement::Mold) {
-            host_warm.push("mold");
-        }
-        if tools.contains(&ToolRequirement::MrBoxington) {
-            host_warm.push("mbx");
-        }
-        if unit
-            .cache
-            .as_ref()
-            .is_some_and(cache_is_velnor_host_persistent)
-        {
-            host_warm.push("cargo");
-        }
-        if unit
-            .cache
-            .as_ref()
-            .is_some_and(|cache| cache.mutable_mount_seed)
-        {
-            host_warm.push("docker_seed");
-        }
-        if !host_warm.is_empty() {
-            let _ = writeln!(
-                output,
-                "          VELNOR_HOST_WARM_LAYERS: {}",
-                host_warm.join(",")
-            );
+        if let Some(layers) = &facts.host_warm_layers {
+            let _ = writeln!(output, "          VELNOR_HOST_WARM_LAYERS: {layers}");
         }
         return;
     }
-    if !velnor_skips_pinned_rust_toolchain(lane) && unit.toolchain.is_some() {
+    for layer in &facts.layers {
+        let prefix = layer.env_prefix();
+        let step_id = layer.step_id();
+        if *layer == ReportedCacheLayer::Mbx {
+            let _ = writeln!(
+                output,
+                "          VELNOR_CACHE_{prefix}_HIT: {}",
+                step_output_expr(step_id, "cache-hit")
+            );
+            let _ = writeln!(
+                output,
+                "          VELNOR_CACHE_{prefix}_PRIMARY: {}",
+                step_output_expr(step_id, "cache-primary-key")
+            );
+            continue;
+        }
         let _ = writeln!(
             output,
-            "          VELNOR_CACHE_RUSTUP_PRIMARY: {}",
-            step_output_expr(step_id_prefix, "rustup-toolchain", "cache-primary-key")
+            "          VELNOR_CACHE_{prefix}_PRIMARY: {}",
+            step_output_expr(step_id, "cache-primary-key")
         );
         let _ = writeln!(
             output,
-            "          VELNOR_CACHE_RUSTUP_MATCHED: {}",
-            step_output_expr(step_id_prefix, "rustup-toolchain", "cache-matched-key")
-        );
-    }
-    if tools.contains(&ToolRequirement::Mold) {
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_MOLD_PRIMARY: {}",
-            step_output_expr(step_id_prefix, "mold-cache", "cache-primary-key")
-        );
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_MOLD_MATCHED: {}",
-            step_output_expr(step_id_prefix, "mold-cache", "cache-matched-key")
-        );
-    }
-    if tools.contains(&ToolRequirement::MrBoxington) {
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_MBX_HIT: {}",
-            step_output_expr(step_id_prefix, "mbx-cache", "cache-hit")
-        );
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_MBX_PRIMARY: {}",
-            step_output_expr(step_id_prefix, "mbx-cache", "cache-primary-key")
-        );
-    }
-    let uses_cargo_restore = unit.cache.as_ref().is_some_and(|cache| {
-        !cache.mutable_mount_seed
-            && CacheBackend::Detected.lane_enables_actions_cache(lane, ir, unit)
-    });
-    if uses_cargo_restore {
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_CARGO_PRIMARY: {}",
-            step_output_expr(step_id_prefix, "cache", "cache-primary-key")
-        );
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_CARGO_MATCHED: {}",
-            step_output_expr(step_id_prefix, "cache", "cache-matched-key")
-        );
-    }
-    if unit
-        .cache
-        .as_ref()
-        .is_some_and(|cache| cache.mutable_mount_seed)
-        && lane == RunnerMode::Github
-    {
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_DOCKER_SEED_PRIMARY: {}",
-            step_output_expr(step_id_prefix, "cache", "cache-primary-key")
-        );
-        let _ = writeln!(
-            output,
-            "          VELNOR_CACHE_DOCKER_SEED_MATCHED: {}",
-            step_output_expr(step_id_prefix, "cache", "cache-matched-key")
+            "          VELNOR_CACHE_{prefix}_MATCHED: {}",
+            step_output_expr(step_id, "cache-matched-key")
         );
     }
 }
@@ -650,6 +739,24 @@ fn checks_env_for_members(unit: &Unit, members: &[&Unit]) -> String {
     env
 }
 
+/// The checks env of a collapsed lane job. `CARGO_NET_OFFLINE` is a literal
+/// when every member agrees, and the `cargo_net_offline` input (which
+/// defaults to `false`, Cargo's own default) when members differ.
+fn collapsed_checks_env(offline: FeatureCoverage) -> String {
+    let mut env = String::new();
+    if offline.all {
+        env.push_str("\n          CARGO_NET_OFFLINE: \"true\"");
+    } else if offline.any {
+        let _ = write!(
+            env,
+            "\n          CARGO_NET_OFFLINE: {}",
+            lane_input::expression(lane_input::CARGO_NET_OFFLINE)
+        );
+    }
+    env.push_str(mise_auto_install_env());
+    env
+}
+
 fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
     let restricted = members
         .iter()
@@ -723,11 +830,8 @@ pub(crate) fn nextest_tool_id(lock_keys: &BTreeSet<String>) -> &'static str {
 /// repository's pin, install exactly that pin, and — when `save_gate` carries
 /// the step's `if:` body — save the result for the next run. Image-backed
 /// Velnor jobs intentionally bypass this helper because their pinned toolchain
-fn step_output_expr(prefix: Option<&str>, base: &str, field: &str) -> String {
-    format!(
-        "${{{{ steps.{}.outputs.{field} }}}}",
-        crate::qualified_step_id(prefix, base)
-    )
+fn step_output_expr(step_id: &str, field: &str) -> String {
+    format!("${{{{ steps.{step_id}.outputs.{field} }}}}")
 }
 
 /// is part of the runner image.
@@ -737,9 +841,8 @@ pub(crate) fn render_pinned_toolchain_steps(
     cache_save: &str,
     toolchain: &RustToolchain,
     save_gate: Option<&str>,
-    step_id_prefix: Option<&str>,
 ) {
-    let rustup_id = crate::qualified_step_id(step_id_prefix, "rustup-toolchain");
+    let rustup_id = "rustup-toolchain";
     let (paths, key_files) = rendered_cache_values(&CacheSpec {
         key_files: vec![
             "rust-toolchain.toml".to_owned(),
@@ -895,6 +998,16 @@ fn render_velnor_mise_install(output: &mut String, unit: &Unit, lock_keys: &BTre
     );
 }
 
+/// The Velnor-lane mise install for a collapsed lane job: the tool ids arrive
+/// space-separated through the `mise_tools` input and are split as shell words.
+fn render_velnor_mise_install_from_input(output: &mut String) {
+    let _ = writeln!(
+        output,
+        "      - name: Install declared Mise tools\n        env:\n          MISE_TOOLS: {}\n        run: |\n          set -euo pipefail\n          read -ra tools <<<\"$MISE_TOOLS\"\n          mise --yes install \"${{tools[@]}}\"",
+        lane_input::expression(lane_input::MISE_TOOLS)
+    );
+}
+
 /// Refuse a unit that needs nextest while the root lock pins neither spelling
 /// of the runner: rendering either id would emit `install_args` the runner's
 /// own lock check rejects. An absent lock (empty keys) cannot prove the gap,
@@ -948,16 +1061,14 @@ pub(crate) fn render_cargo_source_preparation(
     runtime_unit_id: bool,
     skip_on_cache_hit: bool,
     skip_when_offline_ready: bool,
-    cache_step_id: Option<&str>,
 ) {
     if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
         return;
     }
     let cache_hit_gate = if skip_on_cache_hit {
-        let cache_step_id = cache_step_id.unwrap_or("cache");
-        format!("        if: ${{{{ steps.{cache_step_id}.outputs.cache-hit != 'true' }}}}\n")
+        "        if: ${{ steps.cache.outputs.cache-hit != 'true' }}\n"
     } else {
-        String::new()
+        ""
     };
     if !runtime_unit_id {
         let Some(active) = members.iter().find(|member| member.id == unit_id) else {
@@ -966,35 +1077,24 @@ pub(crate) fn render_cargo_source_preparation(
         if !cargo_network_is_restricted(active) {
             return;
         }
-        let root = yaml_scalar(&active.root);
+        // A shell word, not a YAML scalar: the value lands inside `run:`.
+        let root = crate::shell_quote(&active.root);
         let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
-        let prefetch = if unit_runs_workflow_plain_check(active) {
-            crate::render_pinned_policy_prefetch_bash(crate::VELNOR_POLICY_WORKFLOW_REV)
-        } else {
-            String::new()
-        };
         let _ = write!(
             output,
-            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}{prefetch}",
+            "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:{}\n        run: |\n          set -euo pipefail\n          root={root}\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}",
             preparation_env()
         );
         return;
     }
-    let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
     let mut cases = String::new();
     for member in members {
         if cargo_network_is_restricted(member) {
-            let prefetch = if unit_runs_workflow_plain_check(member) {
-                crate::render_pinned_policy_prefetch_bash(crate::VELNOR_POLICY_WORKFLOW_REV)
-            } else {
-                String::new()
-            };
-            let _ = write!(
+            let _ = writeln!(
                 cases,
-                "            {id})\n              root={root}\n              if [[ \"$root\" != \".\" ]]; then\n                cd -- \"$root\"\n              fi\n{fetch_body}{prefetch}\n              ;;\n",
-                id = crate::shell_quote(&member.id),
-                root = crate::shell_quote(&member.root),
-                prefetch = prefetch,
+                "            {}) root={} ;;",
+                crate::shell_quote(&member.id),
+                crate::shell_quote(&member.root)
             );
         } else {
             // deny/audit/publish resolve their own inputs; skip fetch.
@@ -1005,15 +1105,12 @@ pub(crate) fn render_cargo_source_preparation(
             );
         }
     }
+    let fetch_body = render_cargo_fetch_body(skip_when_offline_ready);
     let _ = write!(
         output,
-        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac",
+        "      - name: Prepare Cargo sources\n{cache_hit_gate}        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}",
         preparation_env()
     );
-}
-
-fn unit_runs_workflow_plain_check(unit: &Unit) -> bool {
-    unit_commands(unit).any(|command| command.contains("--plain --check"))
 }
 
 fn render_cargo_fetch_body(skip_when_offline_ready: bool) -> String {
@@ -1022,6 +1119,40 @@ fn render_cargo_fetch_body(skip_when_offline_ready: bool) -> String {
     } else {
         "          cargo fetch --locked\n".to_owned()
     }
+}
+
+/// The `cargo fetch --locked` step of a collapsed lane job: the manifest root
+/// arrives through the `cargo_root` input, and the warm-store skip is either a
+/// literal decision every member shares or a per-unit input the script reads.
+fn render_cargo_source_preparation_from_input(
+    output: &mut String,
+    gate: Option<&str>,
+    skip_when_warm: FeatureCoverage,
+) {
+    let mut env = format!(
+        "\n          CARGO_FETCH_ROOT: {}",
+        lane_input::expression(lane_input::CARGO_ROOT)
+    );
+    let fetch_body = if skip_when_warm.all {
+        render_cargo_fetch_body(true)
+    } else if skip_when_warm.any {
+        let _ = write!(
+            env,
+            "\n          CARGO_FETCH_SKIP_WHEN_WARM: {}",
+            lane_input::expression(lane_input::CARGO_FETCH_SKIP_WHEN_WARM)
+        );
+        "          if [[ \"$CARGO_FETCH_SKIP_WHEN_WARM\" == true ]] && cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then\n            echo \"Cargo sources warm; skipping fetch\"\n          else\n            cargo fetch --locked\n          fi\n".to_owned()
+    } else {
+        render_cargo_fetch_body(false)
+    };
+    env.push_str(&preparation_env());
+    let gate = gate.map_or_else(String::new, |gate| {
+        format!("        if: ${{{{ {gate} }}}}\n")
+    });
+    let _ = write!(
+        output,
+        "      - name: Prepare Cargo sources\n{gate}        env:{env}\n        run: |\n          set -euo pipefail\n          root=\"$CARGO_FETCH_ROOT\"\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n{fetch_body}"
+    );
 }
 
 /// Unique manifest roots that need `cargo fetch --locked` for `members`.
@@ -1172,26 +1303,51 @@ const MUTABLE_MOUNT_SEED_FILES: &[&str] =
 /// `velnor-cache-seed` stage with. The image copies out of the context into
 /// its cache mounts only when a mount is empty, so a retained builder keeps
 /// its warm state and a fresh builder starts from the restored one.
-fn render_mutable_mount_seed_restore(
-    output: &mut String,
-    ir: &WorkflowIr,
-    unit: &Unit,
-    step_id_prefix: Option<&str>,
-) {
+fn render_mutable_mount_seed_restore(output: &mut String, ir: &WorkflowIr, unit: &Unit) {
     let Some(cache) = unit.cache.as_ref() else {
         return;
     };
     let (paths, _) = rendered_cache_values(cache);
     let (key, restore_keys) = unit_snapshot(ir, unit, DOCKER_SEED_SNAPSHOT_NAMESPACE);
-    let cache_step_id = crate::qualified_step_id(step_id_prefix, "cache");
+    render_seed_restore_steps(output, ir, &paths, &key, &restore_keys, &checks_env(unit));
+}
+
+/// The seed restore for a collapsed lane job: paths and the three snapshot
+/// segments come from the caller's inputs.
+fn render_mutable_mount_seed_restore_from_input(
+    output: &mut String,
+    ir: &WorkflowIr,
+    checks_env: &str,
+) {
+    let (key, restore_keys) = input_snapshot(
+        DOCKER_SEED_SNAPSHOT_NAMESPACE,
+        lane_input::SEED_COMPAT,
+        lane_input::SEED_DEPENDENCY_FILES,
+        lane_input::SEED_FRESHNESS_FILES,
+    );
+    let paths = format!(
+        "            {}",
+        lane_input::expression(lane_input::CACHE_PATHS)
+    );
+    render_seed_restore_steps(output, ir, &paths, &key, &restore_keys, checks_env);
+}
+
+fn render_seed_restore_steps(
+    output: &mut String,
+    ir: &WorkflowIr,
+    paths: &str,
+    key: &str,
+    restore_keys: &str,
+    checks_env: &str,
+) {
     let _ = writeln!(
         output,
-        "      - name: Restore Docker build seed\n        id: {cache_step_id}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}\n          restore-keys: |\n            {restore_keys}",
+        "      - name: Restore Docker build seed\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}\n          restore-keys: |\n            {restore_keys}",
         ir.pins.cache_restore
     );
     let _ = writeln!(
         output,
-        "      - name: Prepare Docker build seed context\n        env:{}
+        "      - name: Prepare Docker build seed context\n        env:{checks_env}
         run: |
           set -euo pipefail
           mkdir -p {MUTABLE_MOUNT_HOST_DIR}/seed
@@ -1200,8 +1356,7 @@ fn render_mutable_mount_seed_restore(
             du -sh {MUTABLE_MOUNT_HOST_DIR}/seed/*
           else
             echo \"Docker build seed empty: the build starts from cold cache mounts\"
-          fi",
-        checks_env(unit)
+          fi"
     );
 }
 
@@ -1216,7 +1371,48 @@ fn render_mutable_mount_seed_collection(
     ir: &WorkflowIr,
     unit: &Unit,
     cache_save: bool,
-    cache_step_id: &str,
+) {
+    let save = (cache_save && unit.cache.is_some()).then(|| {
+        let (paths, _) = unit
+            .cache
+            .as_ref()
+            .map(rendered_cache_values)
+            .unwrap_or_default();
+        let (key, _) = unit_snapshot(ir, unit, DOCKER_SEED_SNAPSHOT_NAMESPACE);
+        (paths, key)
+    });
+    render_seed_collection_steps(output, ir, &checks_env(unit), save.as_ref());
+}
+
+/// The seed collection for a collapsed lane job: the save key reads the same
+/// inputs the restore step keyed on.
+fn render_mutable_mount_seed_collection_from_input(
+    output: &mut String,
+    ir: &WorkflowIr,
+    checks_env: &str,
+    cache_save: bool,
+) {
+    let save = cache_save.then(|| {
+        let (key, _) = input_snapshot(
+            DOCKER_SEED_SNAPSHOT_NAMESPACE,
+            lane_input::SEED_COMPAT,
+            lane_input::SEED_DEPENDENCY_FILES,
+            lane_input::SEED_FRESHNESS_FILES,
+        );
+        let paths = format!(
+            "            {}",
+            lane_input::expression(lane_input::CACHE_PATHS)
+        );
+        (paths, key)
+    });
+    render_seed_collection_steps(output, ir, checks_env, save.as_ref());
+}
+
+fn render_seed_collection_steps(
+    output: &mut String,
+    ir: &WorkflowIr,
+    checks_env: &str,
+    save: Option<&(String, String)>,
 ) {
     let trusted_cache = trusted_cache_save_expression(&ir.default_branch);
     let required_files = MUTABLE_MOUNT_SEED_FILES
@@ -1247,16 +1443,14 @@ fn render_mutable_mount_seed_collection(
           rm -rf \"{MUTABLE_MOUNT_HOST_DIR}/export\"
           echo \"Docker build seed updated:\"
           du -sh \"{MUTABLE_MOUNT_HOST_DIR}\"/seed/*",
-        checks_env(unit),
+        checks_env,
         MUTABLE_MOUNT_SEED_FILES[MUTABLE_MOUNT_SEED_FILES.len() - 1]
     );
-    if cache_save && let Some(cache) = unit.cache.as_ref() {
-        let (paths, _) = rendered_cache_values(cache);
-        let (key, _) = unit_snapshot(ir, unit, DOCKER_SEED_SNAPSHOT_NAMESPACE);
+    if let Some((paths, key)) = save {
         let _ = writeln!(
             output,
             "      - name: Save Docker build seed\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
-            dependency_bundle_cache_save_if_for_step(&ir.default_branch, cache_step_id),
+            dependency_bundle_cache_save_if(&ir.default_branch),
             ir.pins.cache_save
         );
     }
@@ -1538,12 +1732,9 @@ fn aggregate_triggers(
     }
 }
 
-fn kind_matrix_output_from_file(file: &str) -> String {
-    let stem = file
-        .strip_prefix("ci-unit-")
-        .and_then(|value| value.strip_suffix(".yml"))
-        .unwrap_or("unit");
-    format!("{stem}_matrix")
+/// The plan output that carries one kind's selected-unit matrix.
+fn kind_matrix_output(kind: UnitKind) -> String {
+    format!("{}_matrix", kind.id_prefix())
 }
 
 /// Read a plan matrix output from `NEEDS_JSON`.
@@ -1562,11 +1753,7 @@ fn kind_from_unit_workflow_file(file: &str) -> Option<UnitKind> {
     let stem = file
         .strip_prefix("ci-unit-")
         .and_then(|value| value.strip_suffix(".yml"))?;
-    let kind = stem
-        .rsplit_once('-')
-        .filter(|(_, suffix)| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
-        .map_or(stem, |(kind, _)| kind);
-    match kind {
+    match stem {
         "rust" => Some(UnitKind::Rust),
         "gradle" => Some(UnitKind::Gradle),
         "node" => Some(UnitKind::Node),
@@ -1587,6 +1774,264 @@ struct UnitLaneCaller {
     name: String,
     lane: &'static str,
     file: String,
+    /// The per-unit `workflow_call` inputs this caller supplies to the kind
+    /// reusable: every unit-specific literal the collapsed lane job reads
+    /// through `inputs.*` instead of carrying one step block per unit.
+    inputs: Vec<(&'static str, String)>,
+}
+
+/// The `workflow_call` inputs a kind reusable reads per-unit facts from.
+///
+/// GitHub loads a called workflow once per caller into one template-memory
+/// budget, so the callee must be O(1) in the number of units: every value that
+/// differs between two units of a kind travels through one of these inputs and
+/// the callee renders its step block exactly once per lane job. The caller and
+/// the callee derive both sides from [`LaneStepFacts`], so they can never name
+/// a different set of inputs.
+pub(crate) mod lane_input {
+    /// Space-separated mise tool ids the lane installs for the unit.
+    pub(crate) const MISE_TOOLS: &str = "mise_tools";
+    /// `true` when the hosted lane needs the mise task runner without tools.
+    pub(crate) const MISE_RUNNER: &str = "mise_runner";
+    /// The Mr. Boxington snapshot compatibility digest.
+    pub(crate) const MBX_COMPAT: &str = "mbx_compat";
+    /// Newline-separated `hashFiles` patterns of the snapshot dependency segment.
+    pub(crate) const MBX_DEPENDENCY_FILES: &str = "mbx_dependency_files";
+    /// Newline-separated `hashFiles` patterns of the snapshot freshness segment.
+    pub(crate) const MBX_FRESHNESS_FILES: &str = "mbx_freshness_files";
+    /// Comma-separated `taiki-e/install-action` tools.
+    pub(crate) const CARGO_BIN_TOOLS: &str = "cargo_bin_tools";
+    /// The kind toolchain version (`bun-version`).
+    pub(crate) const TOOL_VERSION: &str = "tool_version";
+    /// The Node package-lock path `setup-node` keys its cache on.
+    pub(crate) const NODE_CACHE_DEPENDENCY_PATH: &str = "node_cache_dependency_path";
+    /// Newline-separated actions-cache paths (dependency bundle or Docker seed).
+    pub(crate) const CACHE_PATHS: &str = "cache_paths";
+    /// Newline-separated `hashFiles` patterns of the dependency bundle key.
+    pub(crate) const CACHE_KEY_FILES: &str = "cache_key_files";
+    /// The Docker build seed snapshot compatibility digest.
+    pub(crate) const SEED_COMPAT: &str = "seed_compat";
+    /// Newline-separated `hashFiles` patterns of the seed dependency segment.
+    pub(crate) const SEED_DEPENDENCY_FILES: &str = "seed_dependency_files";
+    /// Newline-separated `hashFiles` patterns of the seed freshness segment.
+    pub(crate) const SEED_FRESHNESS_FILES: &str = "seed_freshness_files";
+    /// The manifest root `cargo fetch --locked` runs in; empty skips the fetch.
+    pub(crate) const CARGO_ROOT: &str = "cargo_root";
+    /// `true` when a warm host store lets the fetch step skip itself.
+    pub(crate) const CARGO_FETCH_SKIP_WHEN_WARM: &str = "cargo_fetch_skip_when_warm";
+    /// `CARGO_NET_OFFLINE` for the checks step; defaults to `false`.
+    pub(crate) const CARGO_NET_OFFLINE: &str = "cargo_net_offline";
+    /// Comma-separated host-warm layers the Velnor lane reports.
+    pub(crate) const HOST_WARM_LAYERS: &str = "host_warm_layers";
+
+    /// Every per-unit input, in declaration order.
+    pub(crate) const ALL: &[&str] = &[
+        MISE_TOOLS,
+        MISE_RUNNER,
+        MBX_COMPAT,
+        MBX_DEPENDENCY_FILES,
+        MBX_FRESHNESS_FILES,
+        CARGO_BIN_TOOLS,
+        TOOL_VERSION,
+        NODE_CACHE_DEPENDENCY_PATH,
+        CACHE_PATHS,
+        CACHE_KEY_FILES,
+        SEED_COMPAT,
+        SEED_DEPENDENCY_FILES,
+        SEED_FRESHNESS_FILES,
+        CARGO_ROOT,
+        CARGO_FETCH_SKIP_WHEN_WARM,
+        CARGO_NET_OFFLINE,
+        HOST_WARM_LAYERS,
+    ];
+
+    /// The inputs declared as `type: boolean`. Callers pass them unquoted so
+    /// the caller-side type check agrees with the declaration, and an omitted
+    /// flag reads as `false`. Every other input is a string that reads as
+    /// "absent" when empty.
+    pub(crate) fn is_flag(name: &str) -> bool {
+        matches!(
+            name,
+            MISE_RUNNER | CARGO_FETCH_SKIP_WHEN_WARM | CARGO_NET_OFFLINE
+        )
+    }
+
+    /// The `workflow_call` declaration lines of one optional input.
+    pub(crate) fn declaration(name: &str) -> String {
+        if is_flag(name) {
+            format!("      {name}:\n        required: false\n        type: boolean\n        default: false")
+        } else {
+            format!("      {name}:\n        required: false\n        type: string\n        default: \"\"")
+        }
+    }
+
+    /// `${{ inputs.<name> }}`.
+    pub(crate) fn expression(name: &str) -> String {
+        format!("${{{{ inputs.{name} }}}}")
+    }
+
+    /// `${{ hashFiles(inputs.<name>) }}`: the runner joins every `hashFiles`
+    /// argument with a newline before globbing, so one newline-separated input
+    /// hashes exactly what the literal `hashFiles('a', 'b')` form hashes.
+    pub(crate) fn hash_files_expression(name: &str) -> String {
+        format!("${{{{ hashFiles(inputs.{name}) }}}}")
+    }
+
+    /// The step gate for a feature only some units of the kind carry.
+    pub(crate) fn present_gate(name: &str) -> String {
+        if is_flag(name) {
+            format!("inputs.{name}")
+        } else {
+            format!("inputs.{name} != ''")
+        }
+    }
+}
+
+/// The snapshot identity of one unit on one namespace, split into the parts
+/// a caller passes through inputs: the compatibility digest, the dependency
+/// inputs, and the freshness (state) inputs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SnapshotFacts {
+    pub(crate) compatibility: String,
+    pub(crate) dependency_files: Vec<String>,
+    pub(crate) state_files: Vec<String>,
+}
+
+/// The per-unit facts one collapsed lane job reads through `workflow_call`
+/// inputs. Built once per (unit, lane) by [`WorkflowIr::unit_lane_facts`]; the
+/// caller turns it into `with:` values and the callee unions it over the
+/// kind's members to decide which steps exist and which need a presence gate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LaneStepFacts {
+    pub(crate) mise_tools: Vec<String>,
+    pub(crate) mise_runner: bool,
+    pub(crate) mbx: Option<SnapshotFacts>,
+    pub(crate) cargo_bin_tools: Vec<String>,
+    pub(crate) tool_version: Option<String>,
+    pub(crate) node_cache_dependency_path: Option<String>,
+    /// Dependency bundle: cache paths and key files.
+    pub(crate) bundle: Option<(Vec<String>, Vec<String>)>,
+    /// Docker mutable mount seed: cache paths and snapshot identity.
+    pub(crate) seed: Option<(Vec<String>, SnapshotFacts)>,
+    pub(crate) cargo_root: Option<String>,
+    pub(crate) cargo_fetch_skip_when_warm: bool,
+    pub(crate) cargo_net_offline: bool,
+    pub(crate) host_warm_layers: Vec<&'static str>,
+}
+
+impl LaneStepFacts {
+    /// The `with:` values a caller passes: one entry per non-empty fact.
+    pub(crate) fn input_values(&self) -> Vec<(&'static str, String)> {
+        let mut values = Vec::new();
+        if !self.mise_tools.is_empty() {
+            values.push((lane_input::MISE_TOOLS, self.mise_tools.join(" ")));
+        }
+        if self.mise_runner {
+            values.push((lane_input::MISE_RUNNER, "true".to_owned()));
+        }
+        if let Some(mbx) = &self.mbx {
+            values.push((lane_input::MBX_COMPAT, mbx.compatibility.clone()));
+            values.push((
+                lane_input::MBX_DEPENDENCY_FILES,
+                mbx.dependency_files.join("\n"),
+            ));
+            values.push((lane_input::MBX_FRESHNESS_FILES, mbx.state_files.join("\n")));
+        }
+        if !self.cargo_bin_tools.is_empty() {
+            values.push((lane_input::CARGO_BIN_TOOLS, self.cargo_bin_tools.join(",")));
+        }
+        if let Some(version) = &self.tool_version {
+            values.push((lane_input::TOOL_VERSION, version.clone()));
+        }
+        if let Some(path) = &self.node_cache_dependency_path {
+            values.push((lane_input::NODE_CACHE_DEPENDENCY_PATH, path.clone()));
+        }
+        if let Some((paths, key_files)) = &self.bundle {
+            values.push((lane_input::CACHE_PATHS, paths.join("\n")));
+            values.push((lane_input::CACHE_KEY_FILES, key_files.join("\n")));
+        }
+        if let Some((paths, seed)) = &self.seed {
+            values.push((lane_input::CACHE_PATHS, paths.join("\n")));
+            values.push((lane_input::SEED_COMPAT, seed.compatibility.clone()));
+            values.push((
+                lane_input::SEED_DEPENDENCY_FILES,
+                seed.dependency_files.join("\n"),
+            ));
+            values.push((
+                lane_input::SEED_FRESHNESS_FILES,
+                seed.state_files.join("\n"),
+            ));
+        }
+        if let Some(root) = &self.cargo_root {
+            values.push((lane_input::CARGO_ROOT, root.clone()));
+        }
+        if self.cargo_fetch_skip_when_warm {
+            values.push((lane_input::CARGO_FETCH_SKIP_WHEN_WARM, "true".to_owned()));
+        }
+        if self.cargo_net_offline {
+            values.push((lane_input::CARGO_NET_OFFLINE, "true".to_owned()));
+        }
+        if !self.host_warm_layers.is_empty() {
+            values.push((
+                lane_input::HOST_WARM_LAYERS,
+                self.host_warm_layers.join(","),
+            ));
+        }
+        values
+    }
+}
+
+/// How many members of a collapsed lane job carry one feature: none (the
+/// steps are not rendered), all (rendered without a gate), or some (rendered
+/// behind an input presence gate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FeatureCoverage {
+    any: bool,
+    all: bool,
+}
+
+impl FeatureCoverage {
+    fn over(facts: &[LaneStepFacts], predicate: impl Fn(&LaneStepFacts) -> bool) -> Self {
+        let count = facts.iter().filter(|facts| predicate(facts)).count();
+        Self {
+            any: count > 0,
+            all: count == facts.len() && !facts.is_empty(),
+        }
+    }
+
+    /// The `if:` gate the feature's steps need, or `None` when every member
+    /// carries it.
+    fn gate(self, input: &str) -> Option<String> {
+        (self.any && !self.all).then(|| lane_input::present_gate(input))
+    }
+}
+
+/// Render `with:` entries for a reusable-workflow caller: scalars inline,
+/// multi-line values as literal block scalars.
+fn render_caller_inputs(inputs: &[(&str, String)]) -> String {
+    let mut output = String::new();
+    for (name, value) in inputs {
+        if value.contains('\n') {
+            let _ = writeln!(output, "      {name}: |");
+            for line in value.lines() {
+                let _ = writeln!(output, "        {line}");
+            }
+        } else if lane_input::is_flag(name) {
+            let _ = writeln!(output, "      {name}: {value}");
+        } else {
+            let _ = writeln!(output, "      {name}: {}", yaml_scalar(value));
+        }
+    }
+    // The caller block ends without a trailing newline, like the `with:` map
+    // above it; the surrounding `writeln!` supplies the terminator.
+    while output.ends_with('\n') {
+        output.pop();
+    }
+    if output.is_empty() {
+        output
+    } else {
+        format!("\n{output}")
+    }
 }
 
 /// Membership test a kind-reusable job uses instead of `inputs.unit ==`.
@@ -1800,7 +2245,12 @@ impl WorkflowIr {
     /// required check that validates every one of them. Rendering is a pure
     /// function of the nodes, so a unit the declared surface does not cover
     /// simply has no caller and no required-check branch.
-    pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
+    pub(crate) fn render_nested(
+        &self,
+        kind: WorkflowKind,
+        nodes: &[GraphNode],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
             kind,
@@ -1832,7 +2282,7 @@ impl WorkflowIr {
             nodes,
             &mut output,
             kind != WorkflowKind::PullRequest,
-            kind == WorkflowKind::PullRequest,
+            contracts,
         );
         if kind == WorkflowKind::Nightly {
             self.render_nodes_required(nodes, &mut output, true, "nightly-required", true);
@@ -1930,8 +2380,16 @@ impl WorkflowIr {
         }
     }
 
-    fn unit_lane_callers(&self, unit: &Unit, file: &str) -> Vec<UnitLaneCaller> {
-        let contract = self.default_unit_contract(unit, true);
+    /// The (unit, lane) callers of one unit. The `with:` values come from the
+    /// same per-unit facts the collapsed callee gates on, derived from the
+    /// unit's resolved contract.
+    fn unit_lane_callers(
+        &self,
+        unit: &Unit,
+        file: &str,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> Vec<UnitLaneCaller> {
+        let contract = self.contract_for(unit, contracts);
         contract
             .lanes
             .iter()
@@ -1942,6 +2400,9 @@ impl WorkflowIr {
                 name: unit_job_display_name(unit, job.lane, self.runners),
                 lane: job.lane.as_str(),
                 file: file.to_owned(),
+                inputs: self
+                    .unit_lane_facts(unit, &contract, job.lane)
+                    .input_values(),
             })
             .collect()
     }
@@ -1976,11 +2437,10 @@ impl WorkflowIr {
         conditions.push(format!(
             "contains(format(',{{0}},', needs.plan.outputs.units), ',{sample_unit},')"
         ));
-        let job_id = prepare_cargo_caller_job_id_for_file(file);
         let _ = writeln!(
             output,
             "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      lane: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
-            job_id,
+            prepare_cargo_caller_job_id(),
             crate::control_job_name("Prepare Cargo"),
             conditions.join(" && "),
             needs.join(", "),
@@ -1994,7 +2454,6 @@ impl WorkflowIr {
         caller: &UnitLaneCaller,
         include_policy: bool,
         extra_needs: &[String],
-        read_only_cache: bool,
     ) {
         let lane = if caller.lane == "github" {
             RunnerMode::Github
@@ -2004,21 +2463,18 @@ impl WorkflowIr {
         let Some(unit) = self.units.iter().find(|unit| unit.id == caller.unit_id) else {
             return;
         };
-        // PR triggers already default to read-only cache. Explicit cache-mode on
-        // reusable-workflow callers rejects callees that declare cache saves at
-        // validation time, so rely on the platform default instead.
-        let cache_mode = "";
-        let _ = read_only_cache;
+        let unit = self
+            .units
+            .iter()
+            .find(|unit| unit.id == caller.unit_id)
+            .expect("unit");
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
         }
         append_unique_needs(&mut needs, extra_needs.iter().cloned());
         if lane == RunnerMode::Velnor && self.kind_file_needs_prepare_cargo(&caller.file) {
-            append_unique_needs(
-                &mut needs,
-                [prepare_cargo_caller_job_id_for_file(&caller.file)],
-            );
+            append_unique_needs(&mut needs, [prepare_cargo_caller_job_id().to_owned()]);
         }
         append_unique_needs(
             &mut needs,
@@ -2032,10 +2488,10 @@ impl WorkflowIr {
             conditions.push("needs.policy.result == 'success'".to_owned());
         }
         if lane == RunnerMode::Velnor && self.kind_file_needs_prepare_cargo(&caller.file) {
-            let prep_job = prepare_cargo_caller_job_id_for_file(&caller.file);
-            conditions.push(format!(
-                "(needs.{prep_job}.result == 'success' || needs.{prep_job}.result == 'skipped')"
-            ));
+            conditions.push(
+                "(needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped')"
+                    .to_owned(),
+            );
         }
         for dependency in
             velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units)
@@ -2055,7 +2511,7 @@ impl WorkflowIr {
         }
         let _ = writeln!(
             output,
-            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]{cache_mode}\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      lane: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
+            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      lane: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}{}",
             caller.job_id,
             yaml_scalar(&caller.name),
             conditions.join(" && "),
@@ -2063,6 +2519,7 @@ impl WorkflowIr {
             caller.file,
             yaml_scalar(&caller.unit_id),
             caller.lane,
+            render_caller_inputs(&caller.inputs),
         );
     }
 
@@ -2073,7 +2530,7 @@ impl WorkflowIr {
         nodes: &[GraphNode],
         output: &mut String,
         include_policy: bool,
-        read_only_cache: bool,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
         let mut prepare_cargo_files = BTreeSet::new();
         let mut previous_velnor_caller: Option<String> = None;
@@ -2086,7 +2543,7 @@ impl WorkflowIr {
             {
                 Self::render_prepare_cargo_caller(output, file, unit_id, include_policy);
             }
-            for caller in self.unit_lane_callers(unit, file) {
+            for caller in self.unit_lane_callers(unit, file, contracts) {
                 let extra_needs = if self.runners == RunnerMode::Velnor
                     && self.velnor_serial_stack_groups
                     && caller.lane == "velnor"
@@ -2095,13 +2552,7 @@ impl WorkflowIr {
                 } else {
                     Vec::new()
                 };
-                self.render_unit_lane_caller(
-                    output,
-                    &caller,
-                    include_policy,
-                    &extra_needs,
-                    read_only_cache,
-                );
+                self.render_unit_lane_caller(output, &caller, include_policy, &extra_needs);
                 if caller.lane == "velnor" {
                     previous_velnor_caller = Some(caller.job_id.clone());
                 }
@@ -2135,12 +2586,12 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                caller_jobs.push((
-                    prepare_cargo_caller_job_id_for_file(file),
-                    unit_id.to_owned(),
-                ));
+                caller_jobs.push((prepare_cargo_caller_job_id().to_owned(), unit_id.to_owned()));
             }
-            for caller in self.unit_lane_callers(unit, file) {
+            // The required check needs only the caller job ids; the lane set
+            // (not the per-unit inputs) decides them, so the default contract
+            // suffices here.
+            for caller in self.unit_lane_callers(unit, file, None) {
                 caller_jobs.push((caller.job_id, caller.unit_id));
             }
         }
@@ -2202,39 +2653,47 @@ impl WorkflowIr {
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         for (job_id, unit_id) in &caller_jobs {
-            if is_prepare_cargo_caller_job_id(job_id) {
+            if job_id == prepare_cargo_caller_job_id() {
                 let _ = writeln!(
                     output,
                     "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$result\" != success ]]; then\n              echo \"selected CI prerequisite {job_id} did not pass: $result\" >&2\n              exit 1\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI prerequisite {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
                 );
                 continue;
             }
+            // A Velnor lane job legitimately skips on fork pull requests (the
+            // admission gate withholds self-hosted runners), so only that lane
+            // accepts `skipped` under `FORK_PR`. The hosted lane never has a
+            // legitimate skip for a selected unit, so it renders the strict
+            // branch alone: a shell conditional must not embed a rendered
+            // boolean literal (`[[ ... && false ]]` is a non-empty string test).
+            // A trust-gated Velnor job is skipped whenever the trusted runner
+            // is offline, so its selected verdict accepts `skipped` outright.
             let velnor_job = job_id.starts_with("velnor-");
-            if velnor_job {
-                let accept_skip = self
+            let trust_gated_skip = velnor_job
+                && self
                     .units
                     .iter()
                     .find(|unit| unit.id == *unit_id)
                     .is_some_and(|unit| {
                         self.trust_gated_velnor_job_skipped(RunnerMode::Velnor, unit)
                     });
-                if accept_skip {
-                    let _ = writeln!(
-                        output,
-                        "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-                    );
-                } else {
-                    let _ = writeln!(
-                        output,
-                        "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-                    );
-                }
+            let selected_verdict = if trust_gated_skip {
+                format!(
+                    "            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
+                )
+            } else if velnor_job {
+                format!(
+                    "            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi"
+                )
             } else {
-                let _ = writeln!(
-                    output,
-                    "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-                );
-            }
+                format!(
+                    "            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
+                )
+            };
+            let _ = writeln!(
+                output,
+                "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n{selected_verdict}\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+            );
         }
         if check_name == "ci-required" {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
@@ -2374,146 +2833,76 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         )
     }
 
+    /// The `workflow_call` header of a kind reusable: the graph inputs every
+    /// caller passes plus every per-unit input. The per-unit set is declared
+    /// in full for every kind, so a caller can pass a unit's facts without
+    /// knowing which of them the callee's collapsed block resolved to a
+    /// literal: GitHub rejects a `with:` key the callee does not declare.
     fn render_kind_units_header(kind: UnitKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n      lane:\n        required: true\n        type: string\n\njobs:",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n      lane:\n        required: true\n        type: string",
             yaml_scalar(unit_group(kind))
         );
+        for name in lane_input::ALL {
+            let _ = writeln!(output, "{}", lane_input::declaration(name));
+        }
+        output.push_str("\njobs:\n");
         output
     }
 
-    /// One reusable workflow for every unit of `kind`. Callers pass `unit` and
-    /// `lane` through `workflow_call` inputs; the reusable holds one collapsed
-    /// `verify` job. When the rendered surface exceeds GitHub's byte limit,
-    /// units are packed into additional shard files.
-    pub(crate) fn render_kind_unit_workflows(
+    /// One reusable workflow for every unit of `kind`. Callers pass `unit`,
+    /// `lane`, and the unit's per-unit inputs through `workflow_call`; the
+    /// reusable holds one collapsed step block per lane job, so its size does
+    /// not grow with the number of units of the kind. GitHub loads the callee
+    /// once per caller into one template-memory budget, which is why the
+    /// callee must stay O(1) in units.
+    ///
+    /// # Errors
+    /// Returns a usage error when members of the kind disagree on a fact the
+    /// collapsed job renders literally (the Rust toolchain pin, the kind-level
+    /// tools, or the cache-save policy).
+    pub(crate) fn render_kind_unit_workflow(
         &self,
         kind: UnitKind,
         contracts: Option<&BTreeMap<String, UnitContract>>,
-    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    ) -> Result<Option<(String, String)>, GeneratorError> {
         let members = self
             .units
             .iter()
             .filter(|unit| unit.kind == kind)
             .collect::<Vec<_>>();
-        let mut files = BTreeMap::new();
-        let mut assignments = BTreeMap::new();
         if members.is_empty() {
-            return (files, assignments);
+            return Ok(None);
         }
-        let header = Self::render_kind_units_header(kind);
-        let mut shard_index = 0_usize;
-        let mut current_file = kind_unit_workflow_shard_file(kind, shard_index);
-        let mut current = header.clone();
-        let mut shard_members: Vec<&Unit> = Vec::new();
-        for unit in &members {
-            let mut trial = shard_members.clone();
-            trial.push(unit);
-            let mut trial_body = header.clone();
-            self.append_lane_cargo_prep_jobs(&mut trial_body, &trial, contracts);
-            self.render_collapsed_kind_verify_job(&mut trial_body, &trial, contracts);
-            if !shard_members.is_empty() && trial_body.len() > KIND_WORKFLOW_SHARD_BUDGET {
-                self.flush_kind_workflow_shard(
-                    kind,
-                    &header,
-                    &shard_members,
-                    contracts,
-                    &mut current,
-                    &current_file,
-                    &mut files,
-                    &mut assignments,
-                );
-                shard_index += 1;
-                current_file = kind_unit_workflow_shard_file(kind, shard_index);
-                shard_members.clear();
-            }
-            shard_members.push(unit);
-        }
-        self.flush_kind_workflow_shard(
-            kind,
-            &header,
-            &shard_members,
-            contracts,
-            &mut current,
-            &current_file,
-            &mut files,
-            &mut assignments,
-        );
-        (files, assignments)
+        let mut output = Self::render_kind_units_header(kind);
+        self.append_lane_cargo_prep_jobs(&mut output, &members, contracts);
+        self.render_collapsed_kind_verify_job(&mut output, &members, contracts)?;
+        Ok(Some((kind_unit_workflow_file(kind), output)))
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "shard flush carries every output artifact the kind workflow split owns"
-    )]
-    fn flush_kind_workflow_shard(
+    fn contract_for(
         &self,
-        kind: UnitKind,
-        header: &str,
-        members: &[&Unit],
+        unit: &Unit,
         contracts: Option<&BTreeMap<String, UnitContract>>,
-        current: &mut String,
-        filename: &str,
-        files: &mut BTreeMap<String, String>,
-        assignments: &mut BTreeMap<String, String>,
-    ) {
-        let _ = kind;
-        if members.is_empty() {
-            return;
-        }
-        current.clear();
-        current.push_str(header);
-        self.append_lane_cargo_prep_jobs(current, members, contracts);
-        self.render_collapsed_kind_verify_job(current, members, contracts);
-        for member in members {
-            assignments.insert(member.id.clone(), filename.to_owned());
-        }
-        files.insert(filename.to_owned(), std::mem::take(current));
+    ) -> UnitContract {
+        contracts
+            .and_then(|contracts| contracts.get(&unit.id))
+            .cloned()
+            .unwrap_or_else(|| self.default_unit_contract(unit, true))
     }
 
-    fn collapsed_lane_gate(
-        &self,
-        members: &[&Unit],
-        contracts: Option<&BTreeMap<String, UnitContract>>,
-        lane: RunnerMode,
-    ) -> Option<String> {
-        let active_units = members
-            .iter()
-            .filter(|unit| {
-                let contract = contracts
-                    .and_then(|contracts| contracts.get(&unit.id))
-                    .cloned()
-                    .unwrap_or_else(|| self.default_unit_contract(unit, true));
-                contract
-                    .lanes
-                    .iter()
-                    .any(|job| job.lane == lane && lane_supports_unit(lane, unit))
-            })
-            .map(|unit| unit.id.as_str())
-            .collect::<Vec<_>>();
-        if active_units.is_empty() {
-            return None;
-        }
-        let unit_gate = if active_units.len() == 1 {
-            reusable_selected_unit_selector(active_units[0])
-        } else {
-            format!(
-                "({})",
-                active_units
-                    .iter()
-                    .map(|unit_id| reusable_selected_unit_selector(unit_id))
-                    .collect::<Vec<_>>()
-                    .join(" || ")
-            )
-        };
-        Some(format!(
-            "inputs.lane == '{}' && {} && ({})",
+    /// The job gate of a collapsed lane job: the lane the caller selected, the
+    /// unit's membership in the plan's selection, and the lane's event
+    /// admission. Membership is a single `contains` over `inputs.unit`, never
+    /// an enumeration of the kind's units.
+    fn collapsed_lane_gate(&self, lane: RunnerMode) -> String {
+        format!(
+            "inputs.lane == '{}' && contains(format(',{{0}},', inputs.selected_units), format(',{{0}},', inputs.unit)) && ({})",
             lane.as_str(),
-            unit_gate,
             self.lane_event_expression(lane)
-        ))
+        )
     }
 
     fn collapsed_timeout_minutes(
@@ -2544,10 +2933,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .iter()
             .copied()
             .filter(|unit| {
-                let contract = contracts
-                    .and_then(|contracts| contracts.get(&unit.id))
-                    .cloned()
-                    .unwrap_or_else(|| self.default_unit_contract(unit, true));
+                let contract = self.contract_for(unit, contracts);
                 let active = contract
                     .lanes
                     .iter()
@@ -2557,14 +2943,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .collect()
     }
 
+    /// Render the collapsed lane jobs of one kind: one job per (lane, trust)
+    /// class that has members.
     fn render_collapsed_kind_verify_job(
         &self,
         output: &mut String,
         members: &[&Unit],
         contracts: Option<&BTreeMap<String, UnitContract>>,
-    ) {
+    ) -> Result<(), GeneratorError> {
         if members.is_empty() {
-            return;
+            return Ok(());
         }
         let github_members =
             self.collapsed_lane_members(members, contracts, RunnerMode::Github, None);
@@ -2577,8 +2965,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Github,
                 "verify-github",
                 RunnerMode::Github.display_name(),
-                &runs_on,
-            );
+                self.runner_for(RunnerMode::Github),
+            )?;
         }
         let velnor_plain =
             self.collapsed_lane_members(members, contracts, RunnerMode::Velnor, Some(false));
@@ -2593,8 +2981,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Velnor,
                 "verify-velnor",
                 RunnerMode::Velnor.display_name(),
-                &runs_on,
-            );
+                self.runner_for(RunnerMode::Velnor),
+            )?;
         }
         if !velnor_trusted.is_empty() {
             let sample = velnor_trusted[0];
@@ -2606,14 +2994,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 RunnerMode::Velnor,
                 "verify-velnor-trusted",
                 RunnerMode::Velnor.display_name(),
-                &runs_on,
-            );
+                self.runner_for_unit(RunnerMode::Velnor, sample),
+            )?;
         }
+        Ok(())
     }
 
+    /// One collapsed lane job: the job header, the shared runner setup, and
+    /// exactly one step block that reads every unit-specific value from the
+    /// caller's inputs.
     #[expect(
         clippy::too_many_arguments,
-        reason = "collapsed verify jobs carry lane identity, gate, and runner placement together"
+        reason = "the job identity (lane, id, display name, runner) is passed explicitly per lane job"
     )]
     fn render_collapsed_lane_verify_job(
         &self,
@@ -2623,16 +3015,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         lane: RunnerMode,
         job_id: &str,
         display_name: &str,
-        runs_on: &str,
-    ) {
-        let Some(mut gate) = self.collapsed_lane_gate(members, contracts, lane) else {
-            return;
-        };
+        runs_on: String,
+    ) -> Result<(), GeneratorError> {
+        let mut gate = self.collapsed_lane_gate(lane);
         let mut display_name = display_name.to_owned();
-        if lane == RunnerMode::Velnor
-            && let Some(unit) = members
-                .iter()
-                .find(|unit| self.trust_gated_velnor_job_skipped(lane, unit))
+        // P0-6: a trust-gated Velnor lane with no online trusted runner fails
+        // closed (`&& false`) and says so in its name, instead of queueing
+        // forever and holding the aggregate's concurrency slot.
+        if let Some(unit) = members
+            .iter()
+            .find(|unit| self.trust_gated_velnor_job_skipped(lane, unit))
         {
             if let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref() {
                 let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
@@ -2670,27 +3062,419 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             },
         ));
         render_ci_selection_end_marker(output);
-        for unit in members {
-            let contract = contracts
-                .and_then(|contracts| contracts.get(&unit.id))
-                .cloned()
-                .unwrap_or_else(|| self.default_unit_contract(unit, true));
-            for job in &contract.lanes {
-                if job.lane == lane && lane_supports_unit(lane, unit) {
-                    let guard = format!("inputs.unit == '{}'", unit.id);
-                    self.render_lane_job_for_input(
-                        output,
-                        *job,
-                        unit,
-                        &contract,
-                        None,
-                        members,
-                        Some(guard.as_str()),
-                        true,
-                    );
-                }
+        self.render_collapsed_lane_steps(output, lane, members, contracts)?;
+        output.push('\n');
+        Ok(())
+    }
+
+    /// The per-unit facts of one (unit, lane) pair. This is the single source
+    /// both sides of the `workflow_call` boundary derive from: the caller's
+    /// `with:` values and the callee's step gates.
+    pub(crate) fn unit_lane_facts(
+        &self,
+        unit: &Unit,
+        contract: &UnitContract,
+        lane: RunnerMode,
+    ) -> LaneStepFacts {
+        let github_lane = lane == RunnerMode::Github;
+        let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        let mise_tools = if github_lane {
+            if tools.contains(&ToolRequirement::Mise) {
+                mise_tool_ids(unit, &self.mise_lock_keys)
+            } else {
+                Vec::new()
+            }
+        } else if self.mise_present {
+            velnor_mise_install_tool_ids(unit, &self.mise_lock_keys)
+        } else {
+            Vec::new()
+        };
+        let mise_runner = github_lane
+            && tools.contains(&ToolRequirement::Mise)
+            && mise_tools.is_empty()
+            && commands_invoke_mise(unit);
+        let mbx = (github_lane && tools.contains(&ToolRequirement::MrBoxington))
+            .then(|| unit_snapshot_facts(self, unit));
+        let cargo_bin_tools = if github_lane {
+            self.cargo_bin_tools(&tools)
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let tool_version = (github_lane && tools.contains(&ToolRequirement::Bun))
+            .then(|| unit.tool_version.clone())
+            .flatten();
+        let node_cache_dependency_path = (github_lane && tools.contains(&ToolRequirement::Node))
+            .then(|| {
+                unit.cache.as_ref().and_then(|cache| {
+                    cache
+                        .key_files
+                        .iter()
+                        .find(|path| path.ends_with("package-lock.json"))
+                        .cloned()
+                })
+            })
+            .flatten();
+        let seed = (contract.mutable_mount_seed && github_lane)
+            .then(|| {
+                unit.cache
+                    .as_ref()
+                    .map(|cache| (cache.paths.clone(), unit_snapshot_facts(self, unit)))
+            })
+            .flatten();
+        let bundle = if seed.is_none()
+            && contract.cache.lane_enables_actions_cache(lane, self, unit)
+            && let Some(cache) = &unit.cache
+        {
+            Some((cache.paths.clone(), cargo_source_cache_key_files(unit)))
+        } else {
+            None
+        };
+        let skip_cargo_fetch = cargo_network_is_restricted(unit)
+            && lane == RunnerMode::Velnor
+            && self.runners == RunnerMode::Both;
+        let cargo_root =
+            (cargo_network_is_restricted(unit) && !skip_cargo_fetch).then(|| unit.root.clone());
+        let cargo_fetch_skip_when_warm = cargo_root.is_some()
+            && lane == RunnerMode::Velnor
+            && unit
+                .cache
+                .as_ref()
+                .is_some_and(cache_is_velnor_host_persistent);
+        LaneStepFacts {
+            mise_tools,
+            mise_runner,
+            mbx,
+            cargo_bin_tools,
+            tool_version,
+            node_cache_dependency_path,
+            bundle,
+            seed,
+            cargo_root,
+            cargo_fetch_skip_when_warm,
+            cargo_net_offline: cargo_network_is_restricted(unit),
+            host_warm_layers: if lane == RunnerMode::Velnor {
+                velnor_host_warm_layers(unit, self)
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Whether the collapsed lane job renders the cargo-fetch phase at all:
+    /// mirrors the literal lane job, which renders the phase (fetch step and
+    /// marker) unless both-mode moved the fetch to the lane prep job.
+    fn collapsed_renders_cargo_fetch_phase(&self, unit: &Unit, lane: RunnerMode) -> bool {
+        !(cargo_network_is_restricted(unit)
+            && lane == RunnerMode::Velnor
+            && self.runners == RunnerMode::Both)
+    }
+
+    /// The single step block of a collapsed lane job. Every unit-specific
+    /// value is an `inputs.*` reference; a feature only some members carry
+    /// renders behind an input presence gate.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the collapsed step block keeps the complete lane contract together, in step order"
+    )]
+    fn render_collapsed_lane_steps(
+        &self,
+        output: &mut String,
+        lane: RunnerMode,
+        members: &[&Unit],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> Result<(), GeneratorError> {
+        let github_lane = lane == RunnerMode::Github;
+        let member_contracts = members
+            .iter()
+            .map(|unit| self.contract_for(unit, contracts))
+            .collect::<Vec<_>>();
+        let facts = members
+            .iter()
+            .zip(&member_contracts)
+            .map(|(unit, contract)| self.unit_lane_facts(unit, contract, lane))
+            .collect::<Vec<_>>();
+        let kind = members[0].kind;
+        let disagreement = |what: &str| {
+            GeneratorError::usage(format!(
+                "collapsed {} lane job for {} units cannot render one step block: members disagree on {what}",
+                lane.as_str(),
+                kind.label(),
+            ))
+        };
+        let cache_save = {
+            let saves = members
+                .iter()
+                .zip(&member_contracts)
+                .map(|(_, contract)| {
+                    contract.cache_save
+                        && contract
+                            .lanes
+                            .iter()
+                            .any(|job| job.lane == lane && job.cache_save)
+                })
+                .collect::<BTreeSet<_>>();
+            if saves.len() > 1 {
+                return Err(disagreement("the cache-save policy"));
+            }
+            saves.into_iter().next().unwrap_or(false)
+        };
+        let toolchain = {
+            let pins = members
+                .iter()
+                .map(|unit| unit.toolchain.clone())
+                .collect::<Vec<_>>();
+            if pins.iter().any(|pin| pin != &pins[0]) {
+                return Err(disagreement("the Rust toolchain pin"));
+            }
+            pins.into_iter().next().flatten()
+        };
+        let kind_tools = {
+            let per_member = members
+                .iter()
+                .map(|unit| {
+                    Self::tools_for_unit(unit, self.mise_present, self.mr_boxington)
+                        .into_iter()
+                        .filter(|tool| {
+                            !matches!(
+                                tool,
+                                ToolRequirement::Mise
+                                    | ToolRequirement::Nextest
+                                    | ToolRequirement::CargoDeny
+                                    | ToolRequirement::CargoAudit
+                            )
+                        })
+                        .collect::<BTreeSet<_>>()
+                })
+                .collect::<Vec<_>>();
+            if per_member.iter().any(|tools| tools != &per_member[0]) {
+                return Err(disagreement("the kind-level tool set"));
+            }
+            per_member.into_iter().next().unwrap_or_default()
+        };
+        let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
+            prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
+        };
+
+        // Tool provisioning, in the literal lane job's order.
+        let mise_tools = FeatureCoverage::over(&facts, |facts| !facts.mise_tools.is_empty());
+        if !github_lane && mise_tools.any {
+            let mut block = String::new();
+            render_velnor_mise_install_from_input(&mut block);
+            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
+        }
+        if !velnor_skips_pinned_rust_toolchain(lane)
+            && let Some(toolchain) = &toolchain
+        {
+            self.render_rust_toolchain_steps(output, toolchain, cache_save);
+        }
+        if github_lane && mise_tools.any {
+            let trusted = trusted_cache_save_expression(&self.default_branch);
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: Set up Mise tools\n        uses: {}\n        with:\n          install_args: {}\n          cache: true\n          cache_save: ${{{{ {trusted} }}}}",
+                self.pins.mise,
+                lane_input::expression(lane_input::MISE_TOOLS)
+            );
+            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
+        }
+        let mise_runner = FeatureCoverage::over(&facts, |facts| facts.mise_runner);
+        if github_lane && mise_runner.any {
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false",
+                self.pins.mise
+            );
+            output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER));
+        }
+        if kind_tools.contains(&ToolRequirement::MrBoxington) {
+            if github_lane {
+                let (cache_key, restore_keys) = input_snapshot(
+                    UNIT_SNAPSHOT_NAMESPACE,
+                    lane_input::MBX_COMPAT,
+                    lane_input::MBX_DEPENDENCY_FILES,
+                    lane_input::MBX_FRESHNESS_FILES,
+                );
+                self.render_mbx_github_step(output, &cache_key, &restore_keys);
+            } else {
+                self.render_mbx_local_step(output);
             }
         }
+        if github_lane && kind_tools.contains(&ToolRequirement::Bun) {
+            let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
+            if versioned.any {
+                let mut block = String::new();
+                let _ = writeln!(
+                    block,
+                    "      - name: Set up Bun\n        uses: {}\n        with:\n          bun-version: {}",
+                    self.pins.bun,
+                    lane_input::expression(lane_input::TOOL_VERSION)
+                );
+                output.push_str(&gated(block, versioned, lane_input::TOOL_VERSION));
+            }
+            if !versioned.all {
+                let gate = versioned
+                    .any
+                    .then(|| format!("inputs.{} == ''", lane_input::TOOL_VERSION));
+                let block = format!(
+                    "      - name: Set up Bun\n        uses: {}\n",
+                    self.pins.bun
+                );
+                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+            }
+        }
+        if github_lane && kind_tools.contains(&ToolRequirement::Node) {
+            let cached =
+                FeatureCoverage::over(&facts, |facts| facts.node_cache_dependency_path.is_some());
+            if cached.any {
+                let mut block = String::new();
+                self.render_node_step(
+                    &mut block,
+                    Some(&lane_input::expression(
+                        lane_input::NODE_CACHE_DEPENDENCY_PATH,
+                    )),
+                );
+                output.push_str(&gated(
+                    block,
+                    cached,
+                    lane_input::NODE_CACHE_DEPENDENCY_PATH,
+                ));
+            }
+            if !cached.all {
+                let gate = cached
+                    .any
+                    .then(|| format!("inputs.{} == ''", lane_input::NODE_CACHE_DEPENDENCY_PATH));
+                let mut block = String::new();
+                self.render_node_step(&mut block, None);
+                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+            }
+        }
+        let cargo_bin = FeatureCoverage::over(&facts, |facts| !facts.cargo_bin_tools.is_empty());
+        if github_lane && cargo_bin.any {
+            let mut block = String::new();
+            self.render_cargo_bin_tool_steps(
+                &mut block,
+                &lane_input::expression(lane_input::CARGO_BIN_TOOLS),
+                cache_save,
+            );
+            output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS));
+        }
+        self.render_kind_level_tool_steps(output, lane, &kind_tools, cache_save);
+        render_ci_tool_bootstrap_end_marker(output);
+
+        // Cache preparation.
+        let checks_offline = FeatureCoverage::over(&facts, |facts| facts.cargo_net_offline);
+        let checks_env = collapsed_checks_env(checks_offline);
+        let seed = FeatureCoverage::over(&facts, |facts| facts.seed.is_some());
+        let bundle = FeatureCoverage::over(&facts, |facts| facts.bundle.is_some());
+        if seed.any {
+            let mut block = String::new();
+            render_mutable_mount_seed_restore_from_input(&mut block, self, &checks_env);
+            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
+        }
+        if bundle.any {
+            for unit in members {
+                if let Some(cache) = &unit.cache {
+                    render_retained_output_cache_note(output, self, unit, cache);
+                }
+            }
+            let (cache_key, restore_prefix) = format_cargo_bundle_cache_key(
+                kind.id_prefix(),
+                &format!("inputs.{}", lane_input::CACHE_KEY_FILES),
+            );
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: Restore unit cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n            {}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
+                self.pins.cache_restore,
+                lane_input::expression(lane_input::CACHE_PATHS),
+            );
+            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
+        }
+        render_ci_cache_prep_end_marker(output);
+
+        // Cargo source preparation.
+        let fetch_phase = members
+            .iter()
+            .any(|unit| self.collapsed_renders_cargo_fetch_phase(unit, lane));
+        if fetch_phase {
+            let fetch = FeatureCoverage::over(&facts, |facts| facts.cargo_root.is_some());
+            if fetch.any {
+                let mut conditions = Vec::new();
+                if let Some(gate) = fetch.gate(lane_input::CARGO_ROOT) {
+                    conditions.push(gate);
+                }
+                if bundle.any {
+                    // A restored dependency bundle skips the fetch; a member
+                    // without a bundle has no `cache` step and fetches always.
+                    let hit = "steps.cache.outputs.cache-hit != 'true'";
+                    if bundle.all || !seed.any {
+                        conditions.push(hit.to_owned());
+                    } else {
+                        conditions.push(format!(
+                            "(inputs.{} == '' || {hit})",
+                            lane_input::CACHE_KEY_FILES
+                        ));
+                    }
+                }
+                let skip_when_warm =
+                    FeatureCoverage::over(&facts, |facts| facts.cargo_fetch_skip_when_warm);
+                let gate = (!conditions.is_empty()).then(|| conditions.join(" && "));
+                render_cargo_source_preparation_from_input(output, gate.as_deref(), skip_when_warm);
+            }
+            render_ci_cargo_fetch_end_marker(output);
+        }
+
+        // Verification.
+        let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
+        let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+        let _ = writeln!(
+            output,
+            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+        );
+
+        // Cache collection.
+        if seed.any {
+            let mut block = String::new();
+            render_mutable_mount_seed_collection_from_input(
+                &mut block,
+                self,
+                &checks_env,
+                cache_save,
+            );
+            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
+        }
+        if cache_save && github_lane && bundle.any {
+            let (cache_key, _) = format_cargo_bundle_cache_key(
+                kind.id_prefix(),
+                &format!("inputs.{}", lane_input::CACHE_KEY_FILES),
+            );
+            let mut block = String::new();
+            let _ = writeln!(
+                block,
+                "      - name: Save unit cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n            {}\n          key: {cache_key}",
+                dependency_bundle_cache_save_if(&self.default_branch),
+                self.pins.cache_save,
+                lane_input::expression(lane_input::CACHE_PATHS),
+            );
+            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
+        }
+        render_ci_cleanup_end_marker(output);
+        let report = members
+            .iter()
+            .map(|unit| CacheReportFacts::for_unit(lane, unit, self))
+            .collect::<Vec<_>>();
+        render_phase_report_step(
+            output,
+            &lane_input::expression("unit"),
+            lane,
+            &CacheReportFacts::union(&report),
+        );
+        Ok(())
     }
 
     fn append_lane_cargo_prep_jobs(
@@ -2713,12 +3497,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .cache
             .as_ref()
             .is_some_and(cache_is_velnor_host_persistent);
-        let mut fetch_script = render_cargo_fetch_roots_script(&roots, skip_when_offline_ready);
-        if members.iter().copied().any(unit_runs_workflow_plain_check) {
-            fetch_script.push_str(&crate::render_pinned_policy_prefetch_bash(
-                crate::VELNOR_POLICY_WORKFLOW_REV,
-            ));
-        }
+        let fetch_script = render_cargo_fetch_roots_script(&roots, skip_when_offline_ready);
         // Only Velnor runners share persistent Cargo stores between jobs.
         // GitHub-hosted jobs must fetch into their own ephemeral workspace.
         for lane in [RunnerMode::Velnor] {
@@ -2791,17 +3570,20 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
-    /// Legacy entry point returning one unsplit kind workflow.
+    /// The kind reusable's content, for tests that assert on its body.
     #[cfg(test)]
+    #[expect(
+        clippy::panic,
+        reason = "test helper: a render error is a test failure"
+    )]
     pub(crate) fn render_kind_units(
         &self,
         kind: UnitKind,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> String {
-        self.render_kind_unit_workflows(kind, contracts)
-            .0
-            .into_values()
-            .next()
+        self.render_kind_unit_workflow(kind, contracts)
+            .unwrap_or_else(|error| panic!("render {} kind reusable: {error}", kind.label()))
+            .map(|(_, content)| content)
             .unwrap_or_default()
     }
 
@@ -2839,7 +3621,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         contract: &UnitContract,
         members: &[&Unit],
     ) {
-        self.render_lane_job_for_input(output, job, unit, contract, None, members, None, false);
+        self.render_lane_job_for_input(output, job, unit, contract, None, members);
     }
 
     #[expect(
@@ -2855,143 +3637,103 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         contract: &UnitContract,
         input_unit: Option<&str>,
         members: &[&Unit],
-        step_guard: Option<&str>,
-        steps_only: bool,
     ) {
         let lane = job.lane;
-        let step_if = |extra: Option<&str>| -> String {
-            let mut parts = Vec::new();
-            if let Some(guard) = step_guard {
-                parts.push(guard.to_owned());
-            }
-            if let Some(extra) = extra {
-                parts.push(extra.to_owned());
-            }
-            if parts.is_empty() {
-                String::new()
-            } else {
-                format!("        if: ${{{{ {} }}}}\n", parts.join(" && "))
-            }
-        };
         let id = input_unit.map_or_else(
             || lane.as_str().to_owned(),
             |unit_id| unit_job_id(lane, unit_id),
         );
         let cache_save = job.cache_save && contract.cache_save;
-        let step_id_prefix = steps_only.then(|| format!("{}-", unit.id));
-        let step_id_prefix_ref = step_id_prefix.as_deref();
-        let report_label = if input_unit.is_some() || steps_only {
+        let report_label = if input_unit.is_some() {
             unit.id.clone()
         } else {
             lane.display_name().to_owned()
         };
-        let name = if steps_only {
-            kind_reusable_lane_display_name()
-        } else {
-            self.trusted_unit_display_name(lane, unit, report_label.clone())
-        };
+        let name = self.trusted_unit_display_name(lane, unit, report_label.clone());
         // Both-mode prep and dependency closure live on aggregate callers (D6).
-        let uses_lane_cargo_prep = !steps_only
-            && input_unit.is_some()
+        let uses_lane_cargo_prep = input_unit.is_some()
             && lane == RunnerMode::Velnor
             && cargo_network_is_restricted(unit)
             && !members.is_empty()
             && self.runners != RunnerMode::Both;
-        let skip_cargo_fetch = steps_only
-            && cargo_network_is_restricted(unit)
-            && lane == RunnerMode::Velnor
-            && self.runners == RunnerMode::Both;
-        if !steps_only {
-            if self.trust_gated_velnor_job_skipped(lane, unit)
-                && let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref()
-            {
-                let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
-            }
-            let _ = writeln!(output, "  {id}:\n    name: {}", yaml_scalar(&name));
-            let lane_gate = self.lane_event_expression(lane);
-            let gate = input_unit.map_or(lane_gate.clone(), |unit_id| {
-                format!(
-                    "inputs.lane == '{}' && {} && ({lane_gate})",
-                    lane.as_str(),
-                    reusable_selected_unit_selector(unit_id)
-                )
-            });
-            let gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
-            let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
-            let mut needs = Vec::new();
-            if uses_lane_cargo_prep {
-                needs.push(format!("{}-prepare-cargo-sources", lane.as_str()));
-            }
-            if self.runners != RunnerMode::Both {
-                append_unique_needs(
-                    &mut needs,
-                    velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units),
-                );
-            }
-            if !needs.is_empty() {
-                let _ = writeln!(output, "    needs: [{}]", needs.join(", "));
-            }
-            let _ = writeln!(output, "    runs-on: {}", self.runner_for_unit(lane, unit));
-            if input_unit.is_some() {
-                self.render_job_env(output, lane, unit);
-            }
-            let _ = writeln!(output, "    timeout-minutes: {}", contract.timeout_minutes);
-            Self::render_job_services(output, unit);
-            output.push_str("    steps:\n");
-            render_ci_job_started_marker(output);
-            let _ = write!(
-                output,
-                "      - name: Checkout\n{}        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
-                step_if(None),
-                self.pins.checkout
-            );
-            if lane == RunnerMode::Velnor {
-                output.push('\n');
-                output.push_str("      - name: Velnor runner identity\n");
-                output.push_str(&step_if(None));
-                render_velnor_runner_identity_step(output);
-            }
-            self.render_unit_runtime(output, lane, unit);
-            render_ci_runner_setup_end_marker(output);
-            let units_source =
-                input_unit.map_or("${{ inputs.units }}", |_| "${{ inputs.selected_units }}");
-            output.push_str(&workflow_selection_file_materialize(
-                &SelectionFieldSources {
-                    base_sha: "${{ inputs.base_sha }}",
-                    head_sha: "${{ inputs.head_sha }}",
-                    scope: "${{ inputs.scope }}",
-                    units: units_source,
-                    full_units: "${{ inputs.full_units }}",
-                },
-            ));
-            render_ci_selection_end_marker(output);
+        if self.trust_gated_velnor_job_skipped(lane, unit)
+            && let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref()
+        {
+            let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
         }
-        let mut fragment = String::new();
-        let write_target: &mut String = if steps_only { &mut fragment } else { output };
-        self.render_tool_provisioning_for_unit(
-            write_target,
-            lane,
-            unit,
-            cache_save,
-            step_id_prefix_ref,
+        let _ = writeln!(output, "  {id}:\n    name: {}", yaml_scalar(&name));
+        let lane_gate = self.lane_event_expression(lane);
+        let gate = input_unit.map_or(lane_gate.clone(), |unit_id| {
+            format!(
+                "inputs.lane == '{}' && {} && ({lane_gate})",
+                lane.as_str(),
+                reusable_selected_unit_selector(unit_id)
+            )
+        });
+        let gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
+        let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
+        let mut needs = Vec::new();
+        if uses_lane_cargo_prep {
+            needs.push(format!("{}-prepare-cargo-sources", lane.as_str()));
+        }
+        if self.runners != RunnerMode::Both {
+            append_unique_needs(
+                &mut needs,
+                velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units),
+            );
+        }
+        if !needs.is_empty() {
+            let _ = writeln!(output, "    needs: [{}]", needs.join(", "));
+        }
+        let _ = writeln!(output, "    runs-on: {}", self.runner_for_unit(lane, unit));
+        if input_unit.is_some() {
+            self.render_job_env(output, lane, unit);
+        }
+        let _ = writeln!(output, "    timeout-minutes: {}", contract.timeout_minutes);
+        Self::render_job_services(output, unit);
+        output.push_str("    steps:\n");
+        render_ci_job_started_marker(output);
+        let _ = write!(
+            output,
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
+            self.pins.checkout
         );
-        render_ci_tool_bootstrap_end_marker(write_target);
+        if lane == RunnerMode::Velnor {
+            output.push('\n');
+            output.push_str("      - name: Velnor runner identity\n");
+            render_velnor_runner_identity_step(output);
+        }
+        self.render_unit_runtime(output, lane, unit);
+        render_ci_runner_setup_end_marker(output);
+        let units_source =
+            input_unit.map_or("${{ inputs.units }}", |_| "${{ inputs.selected_units }}");
+        output.push_str(&workflow_selection_file_materialize(
+            &SelectionFieldSources {
+                base_sha: "${{ inputs.base_sha }}",
+                head_sha: "${{ inputs.head_sha }}",
+                scope: "${{ inputs.scope }}",
+                units: units_source,
+                full_units: "${{ inputs.full_units }}",
+            },
+        ));
+        render_ci_selection_end_marker(output);
+        self.render_tool_provisioning(output, lane, unit, cache_save);
+        render_ci_tool_bootstrap_end_marker(output);
         let seed = contract.mutable_mount_seed;
-        let cache_step_id = crate::qualified_step_id(step_id_prefix_ref, "cache");
         let skip_fetch_on_cache_hit = if seed && lane == RunnerMode::Github {
-            render_mutable_mount_seed_restore(write_target, self, unit, step_id_prefix_ref);
+            render_mutable_mount_seed_restore(output, self, unit);
             false
         } else if contract.cache.lane_enables_actions_cache(lane, self, unit)
             && let Some(cache) = &unit.cache
         {
-            render_retained_output_cache_note(write_target, self, unit, cache);
+            render_retained_output_cache_note(output, self, unit, cache);
             let (paths, _) = rendered_cache_values(cache);
             let id_segment = unit.kind.id_prefix();
             let hash = cargo_source_cache_hash_expression(unit);
             let (cache_key, restore_prefix) = format_cargo_bundle_cache_key(id_segment, &hash);
             let _ = writeln!(
-                write_target,
-                "      - name: Restore {} cache\n        id: {cache_step_id}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
+                output,
+                "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
                 yaml_scalar(&unit.label),
                 self.pins.cache_restore,
             );
@@ -2999,24 +3741,23 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         } else {
             false
         };
-        render_ci_cache_prep_end_marker(write_target);
-        let runtime_unit_id = input_unit.is_none() && !steps_only;
-        if !uses_lane_cargo_prep && !skip_cargo_fetch {
+        render_ci_cache_prep_end_marker(output);
+        let runtime_unit_id = input_unit.is_none();
+        if !uses_lane_cargo_prep {
             let skip_when_offline_ready = lane == RunnerMode::Velnor
                 && unit
                     .cache
                     .as_ref()
                     .is_some_and(cache_is_velnor_host_persistent);
             render_cargo_source_preparation(
-                write_target,
+                output,
                 members,
                 &unit.id,
                 runtime_unit_id,
                 skip_fetch_on_cache_hit,
                 skip_when_offline_ready,
-                skip_fetch_on_cache_hit.then_some(cache_step_id.as_str()),
             );
-            render_ci_cargo_fetch_end_marker(write_target);
+            render_ci_cargo_fetch_end_marker(output);
         }
         let unit_id_value =
             input_unit.map_or_else(|| "${{ inputs.unit }}".to_owned(), ToOwned::to_owned);
@@ -3033,19 +3774,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let _ = writeln!(
-            write_target,
+            output,
             "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{offline_prelude}{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
             yaml_scalar(&unit.label),
             checks_env,
         );
         if seed && lane == RunnerMode::Github {
-            render_mutable_mount_seed_collection(
-                write_target,
-                self,
-                unit,
-                cache_save,
-                &cache_step_id,
-            );
+            render_mutable_mount_seed_collection(output, self, unit, cache_save);
         } else if cache_save
             && lane == RunnerMode::Github
             && contract.cache.lane_enables_actions_cache(lane, self, unit)
@@ -3056,27 +3791,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let hash = cargo_source_cache_hash_expression(unit);
             let (cache_key, _) = format_cargo_bundle_cache_key(id_segment, &hash);
             let _ = writeln!(
-                write_target,
+                output,
                 "      - name: Save {} cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
                 yaml_scalar(&unit.label),
-                dependency_bundle_cache_save_if_for_step(&self.default_branch, &cache_step_id),
+                dependency_bundle_cache_save_if(&self.default_branch),
                 self.pins.cache_save
             );
         }
-        render_ci_cleanup_end_marker(write_target);
+        render_ci_cleanup_end_marker(output);
         render_phase_report_step(
-            write_target,
+            output,
             &yaml_scalar(&report_label),
             lane,
-            unit,
-            self,
-            step_id_prefix_ref,
+            &CacheReportFacts::for_unit(lane, unit, self),
         );
-        if steps_only {
-            output.push_str(&prefix_step_block_with_if(&fragment, step_guard));
-        } else {
-            write_target.push('\n');
-        }
+        output.push('\n');
     }
 
     fn render_job_env(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
@@ -3243,9 +3972,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ];
         let mut matrices = BTreeSet::new();
         for unit in &self.units {
-            matrices.insert(kind_matrix_output_from_file(&nested_unit_workflow_file(
-                unit,
-            )));
+            matrices.insert(kind_matrix_output(unit.kind));
         }
         for name in matrices {
             outputs.push(format!(
@@ -3622,7 +4349,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 false,
                 cargo_cache_restored,
                 skip_when_offline_ready,
-                cargo_cache_restored.then_some("cache"),
             );
             render_ci_cargo_fetch_end_marker(output);
             let base_sha = self.base_sha_expression();
@@ -3660,7 +4386,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 );
             }
             render_ci_cleanup_end_marker(output);
-            render_phase_report_step(output, &job_name, lane, unit, self, None);
+            render_phase_report_step(
+                output,
+                &job_name,
+                lane,
+                &CacheReportFacts::for_unit(lane, unit, self),
+            );
             output.push('\n');
         }
     }
@@ -3803,22 +4534,53 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output: &mut String,
         toolchain: &RustToolchain,
         cache_save: bool,
-        step_id_prefix: Option<&str>,
     ) {
         // Unit lanes run on push, schedule, and workflow_dispatch, so the
         // trusted gate is the full default-branch set. Surfaces with a
         // narrower trigger set pass their own gate.
         let trusted_cache = trusted_cache_save_expression(&self.default_branch);
-        let rustup_id = crate::qualified_step_id(step_id_prefix, "rustup-toolchain");
-        let save_gate = cache_save
-            .then(|| format!("({trusted_cache}) && steps.{rustup_id}.outputs.cache-hit != 'true'"));
+        let save_gate = cache_save.then(|| {
+            format!("({trusted_cache}) && steps.rustup-toolchain.outputs.cache-hit != 'true'")
+        });
         render_pinned_toolchain_steps(
             output,
             self.pins.cache_restore,
             self.pins.cache_save,
             toolchain,
             save_gate.as_deref(),
-            step_id_prefix,
+        );
+    }
+
+    /// The cargo-bin tools a hosted lane installs through the pinned
+    /// install-action, in step order.
+    fn cargo_bin_tools(&self, tools: &BTreeSet<ToolRequirement>) -> Vec<&'static str> {
+        [
+            (!self.mise_present && tools.contains(&ToolRequirement::Nextest))
+                .then_some("cargo-nextest"),
+            tools
+                .contains(&ToolRequirement::CargoDeny)
+                .then_some("cargo-deny"),
+            tools
+                .contains(&ToolRequirement::CargoAudit)
+                .then_some("cargo-audit"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The single cargo-bin install step: restore the shared `~/.cargo/bin`
+    /// toolchain cache, then install every listed tool through one pinned
+    /// install-action invocation (the action accepts a comma-separated list).
+    fn render_cargo_bin_tool_steps(&self, output: &mut String, tool_list: &str, cache_save: bool) {
+        output.push_str(&hosted_cargo_bin_toolchain_setup(
+            &self.default_branch,
+            cache_save,
+        ));
+        let _ = writeln!(
+            output,
+            "      - name: Set up cargo bin tools\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: {tool_list}\n          fallback: none",
+            self.pins.rust_tool
         );
     }
 
@@ -3829,19 +4591,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         unit: &Unit,
         cache_save: bool,
     ) {
-        self.render_tool_provisioning_for_unit(output, lane, unit, cache_save, None);
-    }
-
-    fn render_tool_provisioning_for_unit(
-        &self,
-        output: &mut String,
-        lane: RunnerMode,
-        unit: &Unit,
-        cache_save: bool,
-        step_id_prefix: Option<&str>,
-    ) {
-        let mbx_id = crate::qualified_step_id(step_id_prefix, "mbx-cache");
-        let cargo_bin_id = crate::qualified_step_id(step_id_prefix, "cargo-bin-toolchain");
         // The Velnor job image is the toolchain boundary for self-hosted jobs.
         // Hosted setup actions either are not admitted by Velnor or would
         // redundantly download tools already pinned in that image. Keep
@@ -3859,7 +4608,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if !velnor_skips_pinned_rust_toolchain(lane)
             && let Some(toolchain) = &unit.toolchain
         {
-            self.render_rust_toolchain_steps(output, toolchain, cache_save, step_id_prefix);
+            self.render_rust_toolchain_steps(output, toolchain, cache_save);
         }
         if github_lane && tools.contains(&ToolRequirement::Mise) {
             // The Rust toolchain is never a mise tool: the scan refuses a
@@ -3901,22 +4650,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 // immutable exact hit — and an exact hit (same sources,
                 // snapshot already saved) writes nothing.
                 let (cache_key, restore_keys) = unit_snapshot(self, unit, UNIT_SNAPSHOT_NAMESPACE);
-                let _ = writeln!(
-                    output,
-                    "      - name: Set up Mr. Boxington\n        id: {mbx_id}\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
-                    self.pins.mr_boxington
-                );
+                self.render_mbx_github_step(output, &cache_key, &restore_keys);
             } else {
-                // Velnor lane: the job image pins Mr. Boxington and the runner
-                // mounts its host-persistent local store, so the local backend
-                // reuses it with no download and no cache transport. The
-                // version is deliberately omitted: pinning one would force a
-                // release download on every job instead of reusing PATH mbx.
-                let _ = writeln!(
-                    output,
-                    "      - name: Set up Mr. Boxington\n        id: {mbx_id}\n        uses: {}\n        with:\n          backend: local",
-                    self.pins.mr_boxington
-                );
+                self.render_mbx_local_step(output);
             }
         }
         if github_lane && tools.contains(&ToolRequirement::Bun) {
@@ -3935,69 +4671,70 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
         }
         if github_lane && tools.contains(&ToolRequirement::Node) {
-            let cache_manager = "npm";
             let cache_dependency_path = unit.cache.as_ref().and_then(|cache| {
                 cache
                     .key_files
                     .iter()
                     .find(|path| path.ends_with("package-lock.json"))
             });
-            let cache_options = cache_dependency_path.map_or_else(
-                || "\n          package-manager-cache: false".to_owned(),
-                |path| {
-                    format!(
-                        "\n          cache: {cache_manager}\n          cache-dependency-path: {}",
-                        yaml_scalar(path)
-                    )
-                },
-            );
-            let _ = writeln!(
-                output,
-                "      - name: Set up Node.js\n        uses: {}\n        with:\n          node-version: lts/*{cache_options}",
-                self.pins.node
-            );
+            match cache_dependency_path {
+                Some(path) => self.render_node_step(output, Some(&yaml_scalar(path))),
+                None => self.render_node_step(output, None),
+            }
         }
-        let install_action_tools = [
-            (!self.mise_present && tools.contains(&ToolRequirement::Nextest))
-                .then_some("cargo-nextest"),
-            tools
-                .contains(&ToolRequirement::CargoDeny)
-                .then_some("cargo-deny"),
-            tools
-                .contains(&ToolRequirement::CargoAudit)
-                .then_some("cargo-audit"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let install_action_tools = self.cargo_bin_tools(&tools);
         if github_lane && !install_action_tools.is_empty() {
-            output.push_str(&hosted_cargo_bin_toolchain_setup(
-                &self.default_branch,
-                cache_save,
-                step_id_prefix,
-            ));
+            self.render_cargo_bin_tool_steps(output, &install_action_tools.join(","), cache_save);
         }
-        if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_present {
-            let _ = writeln!(
-                output,
-                "      - name: Set up cargo-nextest\n        if: ${{{{ steps.{cargo_bin_id}.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
-                self.pins.rust_tool
-            );
-        }
-        if github_lane && tools.contains(&ToolRequirement::CargoDeny) {
-            let _ = writeln!(
-                output,
-                "      - name: Set up cargo-deny\n        if: ${{{{ steps.{cargo_bin_id}.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
-                self.pins.rust_tool
-            );
-        }
-        if github_lane && tools.contains(&ToolRequirement::CargoAudit) {
-            let _ = writeln!(
-                output,
-                "      - name: Set up cargo-audit\n        if: ${{{{ steps.{cargo_bin_id}.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
-                self.pins.rust_tool
-            );
-        }
+        self.render_kind_level_tool_steps(output, lane, &tools, cache_save);
+    }
+
+    fn render_mbx_github_step(&self, output: &mut String, cache_key: &str, restore_keys: &str) {
+        let _ = writeln!(
+            output,
+            "      - name: Set up Mr. Boxington\n        id: mbx-cache\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
+            self.pins.mr_boxington
+        );
+    }
+
+    /// Velnor lane: the job image pins Mr. Boxington and the runner mounts
+    /// its host-persistent local store, so the local backend reuses it with
+    /// no download and no cache transport. The version is deliberately
+    /// omitted: pinning one would force a release download on every job
+    /// instead of reusing PATH mbx.
+    fn render_mbx_local_step(&self, output: &mut String) {
+        let _ = writeln!(
+            output,
+            "      - name: Set up Mr. Boxington\n        id: mbx-cache\n        uses: {}\n        with:\n          backend: local",
+            self.pins.mr_boxington
+        );
+    }
+
+    /// `cache_dependency_path` is the rendered YAML scalar (a literal or an
+    /// `inputs.*` expression) of the lockfile the npm cache keys on.
+    fn render_node_step(&self, output: &mut String, cache_dependency_path: Option<&str>) {
+        let cache_options = cache_dependency_path.map_or_else(
+            || "\n          package-manager-cache: false".to_owned(),
+            |path| format!("\n          cache: npm\n          cache-dependency-path: {path}"),
+        );
+        let _ = writeln!(
+            output,
+            "      - name: Set up Node.js\n        uses: {}\n        with:\n          node-version: lts/*{cache_options}",
+            self.pins.node
+        );
+    }
+
+    /// The tool steps that depend only on the unit kind and repository
+    /// facts, never on one unit's values: Gradle, sccache, mold, Docker
+    /// Buildx, `OpenTofu`, and Homebrew.
+    fn render_kind_level_tool_steps(
+        &self,
+        output: &mut String,
+        lane: RunnerMode,
+        tools: &BTreeSet<ToolRequirement>,
+        cache_save: bool,
+    ) {
+        let github_lane = lane == RunnerMode::Github;
         if github_lane && tools.contains(&ToolRequirement::Gradle) {
             let _ = writeln!(
                 output,
@@ -4013,11 +4750,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
         if github_lane && tools.contains(&ToolRequirement::Mold) {
-            output.push_str(&hosted_mold_setup(
-                &self.default_branch,
-                cache_save,
-                step_id_prefix,
-            ));
+            output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
         }
         if github_lane && tools.contains(&ToolRequirement::DockerBuildx) {
             let _ = writeln!(

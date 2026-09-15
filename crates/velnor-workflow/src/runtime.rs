@@ -182,8 +182,6 @@ struct CiUnit {
     tool_version: Option<String>,
     #[serde(default)]
     cache: Option<Cache>,
-    #[serde(default)]
-    workflow_file: Option<String>,
     /// A workspace-wide Rust verification gate. Its watch paths may stay
     /// narrow; affected Rust changes select it explicitly to preserve the
     /// workspace coverage without broadening every topology match.
@@ -790,15 +788,7 @@ fn write_kind_matrices(
 }
 
 fn unit_matrix_output(unit: &CiUnit) -> String {
-    let kind = unit.kind.as_str();
-    let workflow = unit
-        .workflow_file
-        .as_deref()
-        .map_or_else(|| format!("ci-unit-{kind}.yml"), str::to_owned);
-    workflow
-        .strip_prefix("ci-unit-")
-        .and_then(|value| value.strip_suffix(".yml"))
-        .map_or_else(|| format!("{kind}_matrix"), |stem| format!("{stem}_matrix"))
+    format!("{}_matrix", unit.kind.as_str())
 }
 
 fn scope_for_event() -> Result<Option<String>, GeneratorError> {
@@ -1035,7 +1025,6 @@ mod runner_lane_tests {
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
-            workflow_file: None,
             workspace_check: false,
         };
         assert_eq!(
@@ -1072,7 +1061,6 @@ mod runner_lane_tests {
                 depends_on: Vec::new(),
                 tool_version: None,
                 cache: None,
-                workflow_file: None,
                 workspace_check: false,
             },
             CiUnit {
@@ -1088,7 +1076,6 @@ mod runner_lane_tests {
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
-                workflow_file: None,
                 workspace_check: false,
             },
             CiUnit {
@@ -1104,7 +1091,6 @@ mod runner_lane_tests {
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
-                workflow_file: None,
                 workspace_check: false,
             },
             CiUnit {
@@ -1120,7 +1106,6 @@ mod runner_lane_tests {
                 depends_on: vec!["changed".to_owned()],
                 tool_version: None,
                 cache: None,
-                workflow_file: None,
                 workspace_check: false,
             },
         ];
@@ -3148,7 +3133,7 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
     let without_lane = strip_inputs_lane_selector(value);
     let value = without_lane.unwrap_or(value);
-    strip_inputs_unit_selector(value)
+    strip_inputs_unit_membership_selector(value)
         .or_else(|| strip_selected_units_selector(value))
         .or_else(|| strip_combined_selected_units_selector(value))
         .or(without_lane)
@@ -3167,14 +3152,14 @@ fn strip_inputs_lane_selector(value: &str) -> Option<&str> {
     Some(&rest[separator + "'&&".len()..])
 }
 
-fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
-    let value = value.strip_prefix("inputs.unit=='")?;
-    let separator = value.find("'&&(")?;
-    let unit = &value[..separator];
-    if !is_unit_id(unit) {
-        return None;
-    }
-    value[separator + "'&&(".len()..].strip_suffix(')')
+/// Peel the collapsed kind-reusable membership selector: the job runs for
+/// the caller's `inputs.unit` when the plan selected it. The selector names
+/// no unit id, so the callee stays O(1) in the kind's units; the remaining
+/// expression must still be a trusted event gate.
+fn strip_inputs_unit_membership_selector(value: &str) -> Option<&str> {
+    const SELECTOR: &str =
+        "contains(format(',{0},',inputs.selected_units),format(',{0},',inputs.unit))&&(";
+    value.strip_prefix(SELECTOR)?.strip_suffix(')')
 }
 
 fn strip_selected_units_selector(value: &str) -> Option<&str> {
@@ -4106,7 +4091,6 @@ mod tests {
             depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
             tool_version: None,
             cache: None,
-            workflow_file: None,
             workspace_check: false,
         };
         CiConfig {
@@ -4537,7 +4521,6 @@ workspace_check = true
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
-            workflow_file: None,
             workspace_check: false,
         };
         CiConfig {
@@ -4750,7 +4733,6 @@ workspace_check = true
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
-            workflow_file: None,
             workspace_check: false,
         };
         assert_eq!(
@@ -4868,7 +4850,6 @@ workspace_check = true
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
-            workflow_file: None,
             workspace_check: false,
         };
         let mut config = selection_config();
@@ -5515,7 +5496,7 @@ name: Velnor kind reusable
 on: workflow_call
 jobs:
   verify:
-    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
     runs-on: [self-hosted, example-runner]
     steps:
       - run: true
@@ -5598,7 +5579,7 @@ on:
   workflow_call:
 jobs:
   verify:
-    if: ${{{{ inputs.unit == 'rust-policy' && ({gate}) }}}}
+    if: ${{{{ contains(format(',{{0}},', inputs.selected_units), format(',{{0}},', inputs.unit)) && ({gate}) }}}}
     runs-on: {runner}
     steps:
       - run: true
@@ -5754,7 +5735,7 @@ name: Velnor lanes reusable
 on: workflow_call
 jobs:
   verify:
-    if: ${{ inputs.unit == 'rust-policy' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both')))) }}
     runs-on: [self-hosted, example-velnor]
     steps:
       - run: true
@@ -5906,7 +5887,7 @@ jobs:
         let root = policy_fixture("inline-velnor-dispatch", &workflow, "velnor")?;
         assert!(run_policy(root)?);
 
-        let unit_gate = "    if: ${{ inputs.unit == 'rust-policy' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}\n";
+        let unit_gate = "    if: ${{ contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}\n";
         let workflow = format!(
             "name: Velnor unit policy\non: workflow_call\njobs:\n{}",
             crate::inline_policy_job_for_lane(

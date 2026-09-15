@@ -540,11 +540,6 @@ pub struct Unit {
     /// before steps; commands consume them at the scanned host/port.
     #[serde(skip_serializing)]
     pub(crate) services: Vec<UnitService>,
-    /// The reusable workflow shard that owns this unit when a kind workflow
-    /// exceeds GitHub's byte limit. Omitted when the unit uses the canonical
-    /// kind file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) workflow_file: Option<String>,
     /// Whether this unit's Velnor jobs require a trusted runner. Generation
     /// time only, like the trusted label itself: the rendered `runs-on`
     /// carries the decision, and pinned Planning runtimes must never see a
@@ -923,9 +918,6 @@ impl ProjectConfig {
             }
             if let Some(version) = &unit.tool_version {
                 write_toml_string(&mut output, "tool_version", version);
-            }
-            if let Some(workflow_file) = &unit.workflow_file {
-                write_toml_string(&mut output, "workflow_file", workflow_file);
             }
             if let Some(cache) = &unit.cache {
                 output.push_str("[unit.cache]\n");
@@ -1808,7 +1800,6 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             mise_tools: row.mise_tools().unwrap_or_default().to_vec(),
             toolchain: None,
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: row.requires_trusted(),
             workspace_check: row.workspace_check(),
         });
@@ -2204,53 +2195,19 @@ pub(crate) fn unit_job_display_name(unit: &Unit, lane: RunnerMode, runners: Runn
     sidebar_group_name(unit)
 }
 
-/// Inner kind-reusable job name: trailing `GitHub` or `Velnor` segment (D1).
-pub(crate) fn kind_reusable_lane_display_name() -> String {
-    github_expression("inputs.lane == 'github' && 'GitHub' || 'Velnor'")
-}
-
 /// Aggregate caller that invokes a kind reusable with `lane: control`.
 pub(crate) fn prepare_cargo_caller_job_id() -> &'static str {
     "prepare-cargo"
 }
 
-/// One prepare-cargo caller per kind shard file; the base shard keeps `prepare-cargo`.
-pub(crate) fn prepare_cargo_caller_job_id_for_file(file: &str) -> String {
-    let stem = file.strip_suffix(".yml").unwrap_or(file);
-    if let Some((_, shard)) = stem.rsplit_once('-')
-        && shard.chars().all(|c| c.is_ascii_digit())
-    {
-        return format!("prepare-cargo-{shard}");
-    }
-    prepare_cargo_caller_job_id().to_owned()
-}
-
-pub(crate) fn is_prepare_cargo_caller_job_id(job_id: &str) -> bool {
-    job_id == prepare_cargo_caller_job_id()
-        || job_id
-            .strip_prefix("prepare-cargo-")
-            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
-}
-
 pub(crate) fn nested_unit_workflow_file(unit: &Unit) -> String {
-    unit.workflow_file
-        .clone()
-        .unwrap_or_else(|| kind_unit_workflow_file(unit.kind))
+    kind_unit_workflow_file(unit.kind)
 }
 
 /// One reusable workflow per unit kind. GitHub allows 50 unique reusable
 /// workflow files per caller; a monorepo with one file per unit exceeds that.
 pub(crate) fn kind_unit_workflow_file(kind: UnitKind) -> String {
     format!("ci-unit-{}.yml", kind.id_prefix())
-}
-
-/// A shard file for a kind workflow that exceeded GitHub's byte limit.
-pub(crate) fn kind_unit_workflow_shard_file(kind: UnitKind, shard_index: usize) -> String {
-    if shard_index == 0 {
-        kind_unit_workflow_file(kind)
-    } else {
-        format!("ci-unit-{}-{}.yml", kind.id_prefix(), shard_index + 1)
-    }
 }
 
 fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
@@ -2375,7 +2332,6 @@ pub(crate) fn render_pinned_toolchain_fill(
             ActionPin::CacheSave.reference(),
             &toolchain,
             None,
-            None,
         );
         // Preview builds run only from trusted pushes to the default branch, so
         // that — and nothing broader — is what may save the toolchain cache.
@@ -2389,7 +2345,6 @@ pub(crate) fn render_pinned_toolchain_fill(
                 "{} && steps.rustup-toolchain.outputs.cache-hit != 'true'",
                 primitives::default_branch_push_cache_save_expression(&config.default_branch)
             )),
-            None,
         );
         template
             .replace(
@@ -3143,18 +3098,10 @@ fn velnor_concurrency_group_expression(config: &ProjectConfig) -> Option<String>
     }
 }
 
+/// The aggregate caller job for one kind reusable: `ci-unit-rust.yml` →
+/// `group-rust`.
 pub(crate) fn stack_group_job_id(kind: UnitKind) -> String {
-    stack_group_job_id_for_file(&kind_unit_workflow_file(kind))
-}
-
-/// The aggregate caller job for one kind workflow file, including shard files
-/// such as `ci-unit-rust-2.yml` → `group-rust-2`.
-pub(crate) fn stack_group_job_id_for_file(file: &str) -> String {
-    let stem = file
-        .strip_prefix("ci-unit-")
-        .and_then(|value| value.strip_suffix(".yml"))
-        .unwrap_or("unit");
-    format!("group-{stem}")
+    format!("group-{}", kind.id_prefix())
 }
 
 pub(crate) fn unit_group_job_id(unit: &Unit) -> String {
@@ -3371,11 +3318,25 @@ pub(crate) fn github_expression(expression: &str) -> String {
     format!("${{{{ {expression} }}}}")
 }
 
+/// Render a string as a YAML scalar that a YAML 1.1/1.2 reader resolves as a
+/// string. Plain spelling is kept only for words that cannot resolve to
+/// another type: a value the reader would type as a boolean (`true`, `no`,
+/// `off`), a null (`null`, `~`), or a number (a leading digit, sign, or dot)
+/// is double-quoted, so a `workflow_call` string input never receives a
+/// boolean or a number and a unit id is never re-typed.
 pub(crate) fn yaml_scalar(value: &str) -> String {
-    if value
+    let plain_characters = value
         .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
-    {
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'));
+    let typed_word = matches!(
+        value.to_ascii_lowercase().as_str(),
+        "true" | "false" | "yes" | "no" | "on" | "off" | "y" | "n" | "null" | "~"
+    );
+    let numeric_shape = value
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_digit() || matches!(first, '-' | '.'));
+    if !value.is_empty() && plain_characters && !typed_word && !numeric_shape {
         value.to_owned()
     } else {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
@@ -3480,20 +3441,8 @@ pub(crate) fn workflow_selection_file_materialize(sources: &SelectionFieldSource
     )
 }
 
-/// Qualify a step id when multiple units share one job (collapsed verify).
-pub(crate) fn qualified_step_id(prefix: Option<&str>, base: &str) -> String {
-    match prefix {
-        Some(prefix) => format!("{prefix}{base}"),
-        None => base.to_owned(),
-    }
-}
-
-pub(crate) fn hosted_mold_setup(
-    default_branch: &str,
-    cache_save: bool,
-    step_id_prefix: Option<&str>,
-) -> String {
-    let mold_id = qualified_step_id(step_id_prefix, "mold-cache");
+pub(crate) fn hosted_mold_setup(default_branch: &str, cache_save: bool) -> String {
+    let mold_id = "mold-cache";
     let mut output = format!(
         "      - name: Restore mold {MOLD_VERSION} cache\n        id: {mold_id}\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n      - name: Set up mold {MOLD_VERSION}\n        shell: bash\n        env:\n          MOLD_VERSION: {MOLD_VERSION}\n        run: |\n          set -euo pipefail\n          case \"$(uname -m)\" in\n            x86_64) mold_arch=x86_64; expected='{MOLD_X86_64_SHA256}' ;;\n            aarch64) mold_arch=aarch64; expected='{MOLD_AARCH64_SHA256}' ;;\n            *) echo \"unsupported mold architecture: $(uname -m)\" >&2; exit 1 ;;\n          esac\n          cache_dir=\"$HOME/.cache/velnor/mold/$MOLD_VERSION\"\n          archive=\"$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n          mkdir -p \"$cache_dir\"\n          if [[ ! -s \"$archive\" ]]; then\n            temporary=\"$archive.download\"\n            trap 'rm -f \"$temporary\"' EXIT\n            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \\\n              --output \"$temporary\" \\\n              \"https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n            printf '%s  %s\\n' \"$expected\" \"$temporary\" | sha256sum --check --strict\n            mv \"$temporary\" \"$archive\"\n            trap - EXIT\n          fi\n          printf '%s  %s\\n' \"$expected\" \"$archive\" | sha256sum --check --strict\n          if [[ \"$(id -u)\" -eq 0 ]]; then\n            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          else\n            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            sudo ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          fi\n          mold --version | grep -F \"$MOLD_VERSION\"\n",
         ActionPin::CacheRestore.reference()
@@ -3511,12 +3460,8 @@ pub(crate) fn hosted_mold_setup(
 
 /// Restore and save `~/.cargo/bin` for hosted jobs that provision policy and
 /// test tools through `taiki-e/install-action` instead of mise.
-pub(crate) fn hosted_cargo_bin_toolchain_setup(
-    default_branch: &str,
-    cache_save: bool,
-    step_id_prefix: Option<&str>,
-) -> String {
-    let cargo_bin_id = qualified_step_id(step_id_prefix, "cargo-bin-toolchain");
+pub(crate) fn hosted_cargo_bin_toolchain_setup(default_branch: &str, cache_save: bool) -> String {
+    let cargo_bin_id = "cargo-bin-toolchain";
     let mut output = format!(
         "      - name: Restore cargo bin toolchain\n        id: {cargo_bin_id}\n        uses: {}\n        with:\n          path: ~/.cargo/bin\n          key: velnor-cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('mise.lock', 'mise.toml') }}}}\n",
         ActionPin::CacheRestore.reference()
@@ -3636,9 +3581,9 @@ fn generated_files_with_surface(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
-    let mut config = config.clone();
-    let initial = WorkflowIr::from_config(&config);
-    primitives::validate_cache_transports(&initial)?;
+    let config = config.clone();
+    let workflow = WorkflowIr::from_config(&config);
+    primitives::validate_cache_transports(&workflow)?;
     // The toolchain contract is a generation precondition, checked here so no
     // rendering path — scanned or declared — can emit a Rust job without a
     // pin or a release matrix the pin does not declare.
@@ -3658,40 +3603,25 @@ fn generated_files_with_surface(
             .map(|unit| unit.kind)
             .collect::<BTreeSet<_>>()
         {
-            let (kind_files, assignments) =
-                initial.render_kind_unit_workflows(kind, surface.map(|surface| &surface.contracts));
-            for (unit_id, workflow_file) in assignments {
-                if let Some(unit) = config.units.iter_mut().find(|unit| unit.id == unit_id) {
-                    unit.workflow_file = Some(workflow_file);
-                }
+            let Some((filename, content)) = workflow
+                .render_kind_unit_workflow(kind, surface.map(|surface| &surface.contracts))?
+            else {
+                continue;
+            };
+            if content.len() > primitives::GITHUB_WORKFLOW_BYTE_LIMIT {
+                return Err(GeneratorError::usage(format!(
+                    "rendered `{filename}` is {} bytes, above GitHub's {}-byte workflow limit",
+                    content.len(),
+                    primitives::GITHUB_WORKFLOW_BYTE_LIMIT
+                )));
             }
-            for (filename, content) in kind_files {
-                if content.len() > primitives::GITHUB_WORKFLOW_BYTE_LIMIT {
-                    return Err(GeneratorError::usage(format!(
-                        "rendered `{filename}` is {} bytes, above GitHub's {}-byte workflow limit",
-                        content.len(),
-                        primitives::GITHUB_WORKFLOW_BYTE_LIMIT
-                    )));
-                }
-                files.insert(PathBuf::from(".github/workflows").join(filename), content);
-            }
+            files.insert(PathBuf::from(".github/workflows").join(filename), content);
         }
     }
-    let workflow = WorkflowIr::from_config(&config);
     files.insert(PathBuf::from(".github/ci/project.toml"), config.toml());
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
-        // Declared aggregates render before kind workflows are packed into
-        // shard files, so their callers still name only `ci-unit-rust.yml`.
-        // Re-render them from the assigned units so every `ci-unit-*.yml`
-        // shard gets a group-* caller and a ci-required need.
-        let surface_aggregates_predates_shards = matches!(
-            workflow_file.as_str(),
-            "ci-pr.yml" | "ci-pull-request.yml" | "ci-main.yml" | "nightly.yml"
-        );
-        if !surface_aggregates_predates_shards
-            && let Some(content) = surface.and_then(|surface| surface.files.get(&path))
-        {
+        if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
             files.insert(path, content.clone());
             continue;
         }
@@ -3763,7 +3693,7 @@ fn report_velnor_ci_outcomes_action_template() -> String {
 // `generated_files` stay a pure dispatch table over renderers.
 
 fn generated_ci_pr(workflow: &WorkflowIr) -> String {
-    workflow.render_nested(WorkflowKind::PullRequest, &legacy_plan(workflow))
+    workflow.render_nested(WorkflowKind::PullRequest, &legacy_plan(workflow), None)
 }
 
 /// The graph the legacy renderer composes itself — the plan job plus one node
@@ -3777,15 +3707,17 @@ fn legacy_plan(workflow: &WorkflowIr) -> Vec<crate::primitives::GraphNode> {
         workflow.runners == RunnerMode::Velnor,
     );
     let mut nodes = vec![crate::primitives::GraphNode::Plan { job }];
-    nodes.extend(workflow.units.iter().map(|unit| {
-        let file = nested_unit_workflow_file(unit);
-        crate::primitives::GraphNode::Unit {
-            unit_id: unit.id.clone(),
-            job_id: stack_group_job_id_for_file(&file),
-            name: sidebar_group_name(unit),
-            file,
-        }
-    }));
+    nodes.extend(
+        workflow
+            .units
+            .iter()
+            .map(|unit| crate::primitives::GraphNode::Unit {
+                unit_id: unit.id.clone(),
+                job_id: stack_group_job_id(unit.kind),
+                name: sidebar_group_name(unit),
+                file: nested_unit_workflow_file(unit),
+            }),
+    );
     nodes
 }
 
@@ -3798,7 +3730,7 @@ fn generated_release_package_signer() -> String {
 }
 
 fn generated_ci_main(workflow: &WorkflowIr) -> String {
-    workflow.render_nested(WorkflowKind::Main, &legacy_plan(workflow))
+    workflow.render_nested(WorkflowKind::Main, &legacy_plan(workflow), None)
 }
 
 fn generated_nightly(workflow: &WorkflowIr) -> String {
@@ -4509,13 +4441,6 @@ fn policy_install_root(revision: &str) -> PathBuf {
         .join(format!("velnor-workflow-policy-{revision}"))
 }
 
-/// Online prefetch for D19 `--check` when verification runs with `CARGO_NET_OFFLINE`.
-pub(crate) fn render_pinned_policy_prefetch_bash(revision: &str) -> String {
-    format!(
-        "          install_root=\"${{RUNNER_TEMP:-${{TMPDIR:-/tmp}}}}/velnor-workflow-policy-{revision}\"\n          if [[ ! -x \"$install_root/bin/velnor-workflow\" ]]; then\n            cargo install --locked --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} --rev {revision} --root \"$install_root\" velnor-workflow --bin velnor-workflow\n          fi\n",
-    )
-}
-
 fn run_installed_policy(root: &Path, revision: &str) -> Result<(), GeneratorError> {
     let install_root = policy_install_root(revision);
     let binary = install_root.join("bin").join("velnor-workflow");
@@ -4526,26 +4451,24 @@ fn run_installed_policy(root: &Path, revision: &str) -> Result<(), GeneratorErro
                 install_root.display()
             ))
         })?;
-        let mut install = Command::new("cargo");
-        install.args([
-            "install",
-            "--locked",
-            "--git",
-            VELNOR_WORKFLOW_INSTALL_GIT_URL,
-            "--rev",
-            revision,
-            "--root",
-        ]);
-        install.arg(&install_root);
-        install.args(["velnor-workflow", "--bin", "velnor-workflow"]);
-        if env::var("CARGO_NET_OFFLINE").is_ok_and(|value| value == "true") {
-            install.arg("--offline");
-        }
-        let status = install.status().map_err(|error| {
-            GeneratorError::usage(format!(
-                "install velnor-workflow at pinned revision {revision}: {error}"
-            ))
-        })?;
+        let status = Command::new("cargo")
+            .args([
+                "install",
+                "--locked",
+                "--git",
+                VELNOR_WORKFLOW_INSTALL_GIT_URL,
+                "--rev",
+                revision,
+                "--root",
+            ])
+            .arg(&install_root)
+            .args(["velnor-workflow", "--bin", "velnor-workflow"])
+            .status()
+            .map_err(|error| {
+                GeneratorError::usage(format!(
+                    "install velnor-workflow at pinned revision {revision}: {error}"
+                ))
+            })?;
         if !status.success() {
             return Err(GeneratorError::usage(format!(
                 "install velnor-workflow at pinned revision {revision} failed"
@@ -7099,33 +7022,6 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_trust_gated_docker_lane_skips_when_trusted_runner_is_unavailable() {
-        let (mut config, index) = both_runner_docker_config();
-        config.velnor_trusted_label = Some("example-trusted".to_owned());
-        config.velnor_trusted_runner_available = Some(false);
-        config.units[index].requires_trusted = true;
-        let (files, _) =
-            WorkflowIr::from_config(&config).render_kind_unit_workflows(UnitKind::Docker, None);
-        let rendered = must_some(files.values().next(), "docker kind reusable workflow");
-        assert!(
-            rendered.contains("verify-velnor-trusted:"),
-            "docker Velnor lane must use the trusted collapsed verify job: {rendered}"
-        );
-        assert!(
-            rendered.contains("Velnor trusted runner unavailable:"),
-            "skip reason must be visible in generated YAML: {rendered}"
-        );
-        assert!(
-            rendered.contains("&& false"),
-            "trust-gated collapsed Velnor job must fail closed when no runner is available: {rendered}"
-        );
-        assert!(
-            rendered.contains("skipped (no online example-trusted runner)"),
-            "job name must carry the skip reason: {rendered}"
-        );
-    }
-
-    #[test]
     fn trust_gated_velnor_docker_skip_is_accepted_by_ci_required() {
         let (mut config, index) = both_runner_docker_config();
         config.velnor_trusted_label = Some("example-trusted".to_owned());
@@ -7588,9 +7484,9 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .iter()
             .any(|command| command.contains("mbx nextest run") && !command.contains("--locked")));
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
-        assert!(workflow.contains("name: Set up cargo-nextest"));
-        assert!(workflow.contains("tool: nextest"));
-        assert!(workflow.contains("name: Set up cargo-deny"));
+        assert!(workflow.contains("name: Set up cargo bin tools"));
+        assert!(workflow.contains("tool: cargo-nextest\n"));
+        assert!(workflow.contains("tool: cargo-deny\n"));
         let policy_unit = must_some(
             rust_units.iter().find(|unit| unit.id == "rust-policy"),
             "Rust policy unit",
@@ -7738,7 +7634,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });
@@ -7761,7 +7656,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });
@@ -7784,7 +7678,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mise_tools: Vec::new(),
             toolchain: Some(toolchain),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });
@@ -9313,49 +9206,28 @@ channel = "stable"
             crate::generated_files(&scanned.config),
             "generate workflow files",
         );
-        let rust_unit_workflows = generated
-            .iter()
-            .filter(|(path, _)| {
-                path.file_name().is_some_and(|name| {
-                    name.to_str().is_some_and(|name| {
-                        name.starts_with("ci-unit-rust")
-                            && Path::new(name)
-                                .extension()
-                                .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
-                    })
-                })
-            })
-            .map(|(_, content)| content.as_str())
-            .collect::<Vec<_>>();
-        assert!(
-            !rust_unit_workflows.is_empty(),
-            "Rust kind reusable shards must be generated"
+        let ci_units = must_some(
+            generated.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "Rust unit workflow",
         );
         assert!(
-            rust_unit_workflows
-                .iter()
-                .any(|workflow| workflow.contains("  verify-github:")),
-            "Rust kind reusable must keep a collapsed GitHub verify job"
+            ci_units.contains("  verify-github:"),
+            "Rust kind reusable must keep a collapsed GitHub verify job: {ci_units}"
         );
         assert!(
-            rust_unit_workflows
-                .iter()
-                .any(|workflow| workflow.contains("  verify-velnor:")),
-            "Rust kind reusable must keep a collapsed Velnor verify job"
+            ci_units.contains("  verify-velnor:"),
+            "Rust kind reusable must keep a collapsed Velnor verify job: {ci_units}"
         );
-        let rust_units_surface = rust_unit_workflows.join("\n");
-        for unit in scanned
-            .config
-            .units
-            .iter()
-            .filter(|unit| unit.kind == UnitKind::Rust)
-        {
-            let id = &unit.id;
-            assert!(
-                rust_units_surface.contains(&format!("inputs.unit == '{id}'")),
-                "native verification unit lost its collapsed lane guard: {id}"
-            );
-        }
+        assert!(
+            !ci_units.contains("inputs.unit == '"),
+            "the collapsed lane jobs must not guard steps by unit identity: {ci_units}"
+        );
+        assert!(
+            ci_units.contains(
+                "contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit))"
+            ),
+            "the collapsed lane jobs gate on the selected unit through inputs.unit: {ci_units}"
+        );
         let ci_pr = must_some(
             generated.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
             "ci-pr workflow",
@@ -9506,6 +9378,31 @@ channel = "stable"
             mutable_mount_seed: true,
         });
         (config, index)
+    }
+
+    #[test]
+    fn collapsed_trust_gated_docker_lane_skips_when_trusted_runner_is_unavailable() {
+        let (mut config, index) = both_runner_docker_config();
+        config.velnor_trusted_label = Some("example-trusted".to_owned());
+        config.velnor_trusted_runner_available = Some(false);
+        config.units[index].requires_trusted = true;
+        let rendered = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Docker, None);
+        assert!(
+            rendered.contains("verify-velnor-trusted:"),
+            "docker Velnor lane must use the trusted collapsed verify job: {rendered}"
+        );
+        assert!(
+            rendered.contains("Velnor trusted runner unavailable:"),
+            "skip reason must be visible in generated YAML: {rendered}"
+        );
+        assert!(
+            rendered.contains("&& false"),
+            "trust-gated collapsed Velnor job must fail closed when no runner is available: {rendered}"
+        );
+        assert!(
+            rendered.contains("skipped (no online example-trusted runner)"),
+            "job name must carry the skip reason: {rendered}"
+        );
     }
 
     #[test]
@@ -9871,40 +9768,6 @@ channel = "stable"
     }
 
     #[test]
-    fn generated_config_keeps_unit_workflow_file_outside_cache_table() {
-        let mut config = scanned_fixture(RunnerMode::Github);
-        let unit = must_some(
-            config.units.iter_mut().find(|unit| unit.cache.is_some()),
-            "fixture must include a cached unit",
-        );
-        let unit_id = unit.id.clone();
-        unit.workflow_file = Some("ci-unit-bun.yml".to_owned());
-
-        let parsed: toml::Value = must(toml::from_str(&config.toml()), "parse generated config");
-        let serialized_unit = must_some(
-            parsed
-                .get("unit")
-                .and_then(toml::Value::as_array)
-                .and_then(|units| {
-                    units.iter().find(|candidate| {
-                        candidate.get("id").and_then(toml::Value::as_str) == Some(unit_id.as_str())
-                    })
-                }),
-            "serialized unit is missing",
-        );
-        assert_eq!(
-            serialized_unit
-                .get("workflow_file")
-                .and_then(toml::Value::as_str),
-            Some("ci-unit-bun.yml")
-        );
-        assert!(serialized_unit
-            .get("cache")
-            .and_then(|cache| cache.get("workflow_file"))
-            .is_none());
-    }
-
-    #[test]
     fn required_checks_bulk_load_needs_without_per_job_expressions() {
         const GITHUB_EXPRESSION_LIMIT: usize = 21_000;
 
@@ -9912,8 +9775,8 @@ channel = "stable"
         let generator = WorkflowIr::from_config(&config);
         let workflows = [
             generator.render(WorkflowKind::Main),
-            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
-            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator)),
+            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
+            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator), None),
         ];
 
         for workflow in &workflows {
@@ -9969,7 +9832,7 @@ channel = "stable"
         }
         let large_generator = WorkflowIr::from_config(&large_config);
         let large_workflow =
-            large_generator.render_nested(WorkflowKind::Main, &legacy_plan(&large_generator));
+            large_generator.render_nested(WorkflowKind::Main, &legacy_plan(&large_generator), None);
         let required_block = must_some(
             large_workflow
                 .split_once("  ci-required:\n")
@@ -10008,7 +9871,7 @@ channel = "stable"
     fn plan_matrix_jq_compiles_and_defaults_a_missing_key() {
         let config = scanned_fixture(RunnerMode::Both);
         let generator = WorkflowIr::from_config(&config);
-        let workflow = generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator));
+        let workflow = generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None);
         assert!(
             !workflow.contains(r#"// \"[]\""#),
             "jq empty default must not be over-escaped inside single quotes"
@@ -10492,10 +10355,10 @@ channel = "stable"
     }
 
     #[test]
-    fn rust_kind_shards_get_aggregate_group_callers() {
+    fn rust_kind_reusable_size_is_independent_of_unit_count() {
         let scanned = must(
             scan_target(&fixture_root(), RunnerMode::Both, "main"),
-            "scan fixture for rust shard callers",
+            "scan fixture for rust kind reusable sizing",
         );
         let mut config = scanned.config;
         config.velnor_labels = FIXTURE_LABELS
@@ -10510,54 +10373,62 @@ channel = "stable"
                 .cloned(),
             "fixture rust unit",
         );
-        // KIND_WORKFLOW_SHARD_BUDGET is 120 KiB; each both-lane rust unit is
-        // roughly 15 KiB. Thirty extra units overflow into ci-unit-rust-2.yml.
+        let baseline = must(
+            generated_files_with_surface(&config, None),
+            "generate the baseline surface",
+        );
+        let baseline_rust = must_some(
+            baseline.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "baseline rust kind reusable",
+        );
+        // GitHub loads the callee once per caller into one template-memory
+        // budget, so the callee must not grow with the kind's unit count.
         for index in 0..32 {
             let mut unit = rust.clone();
-            unit.id = format!("rust-shard-pad{index:02}");
-            unit.label = format!("Rust crate (shard-pad{index:02})");
+            unit.id = format!("rust-pad{index:02}");
+            unit.label = format!("Rust crate (pad{index:02})");
             config.units.push(unit);
         }
-        let surface = must(
-            crate::primitives::generate(
-                &fixture_root(),
-                &scanned.shape,
-                &config,
-                scanned.generation.as_ref(),
-            ),
-            "render surface before shard assignment",
+        let padded = must(
+            generated_files_with_surface(&config, None),
+            "generate the padded surface",
         );
-        config.units.clone_from(&surface.units);
-        let files = must(
-            generated_files_with_surface(&config, Some(&surface)),
-            "generate after shard assignment",
+        let padded_rust = must_some(
+            padded.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "padded rust kind reusable",
         );
         assert!(
-            files.contains_key(&PathBuf::from(".github/workflows/ci-unit-rust-2.yml")),
-            "padding must emit a second rust shard so this locks the caller bug"
+            !padded.contains_key(&PathBuf::from(".github/workflows/ci-unit-rust-2.yml")),
+            "kind reusables are never sharded"
+        );
+        assert!(
+            !padded_rust.contains("inputs.unit == '"),
+            "the collapsed lane jobs must not guard steps by unit identity"
+        );
+        // The prepare-cargo job gate enumerates the restricted units (one
+        // expression); every step block is rendered once per lane job.
+        let growth = padded_rust.len().saturating_sub(baseline_rust.len());
+        assert!(
+            growth < 32 * 256,
+            "the kind reusable grew by {growth} bytes for 32 extra units; the step blocks must not be per unit"
         );
         for name in ["ci-pr.yml", "ci-main.yml"] {
             let workflow = must_some(
-                files.get(&PathBuf::from(".github/workflows").join(name)),
+                padded.get(&PathBuf::from(".github/workflows").join(name)),
                 name,
             );
             assert!(
-                workflow.contains("uses: ./.github/workflows/ci-unit-rust-2.yml"),
-                "{name} must invoke ci-unit-rust-2.yml:\n{workflow}"
+                workflow.contains("  github-rust-pad00:")
+                    && workflow.contains("  velnor-rust-pad00:"),
+                "{name} must declare per-(unit,lane) callers for the padded units:\n{workflow}"
             );
             assert!(
-                workflow.contains("github-rust-shard-pad")
-                    && workflow.contains("velnor-rust-shard-pad"),
-                "{name} must declare per-(unit,lane) callers for shard-2 units:\n{workflow}"
+                !workflow.contains("ci-unit-rust-2.yml"),
+                "{name} must call the single rust kind reusable:\n{workflow}"
             );
             assert!(
-                workflow.contains("github-rust-shard-pad00")
-                    && workflow.contains("velnor-rust-shard-pad00"),
-                "{name} ci-required must need shard-2 unit callers:\n{workflow}"
-            );
-            assert!(
-                workflow.contains("rust-2_matrix"),
-                "{name} plan must expose rust-2_matrix:\n{workflow}"
+                workflow.contains("rust_matrix"),
+                "{name} plan must expose rust_matrix:\n{workflow}"
             );
         }
     }
@@ -10573,8 +10444,8 @@ channel = "stable"
             config.automatic.as_str()
         );
         for aggregate in [
-            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator)),
-            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
+            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
             generator.render(WorkflowKind::Main),
         ] {
             assert!(aggregate.contains(&consumer), "{aggregate}");
@@ -10588,8 +10459,8 @@ channel = "stable"
             let config = scanned_fixture(runners);
             let generator = WorkflowIr::from_config(&config);
             for aggregate in [
-                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator)),
-                generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None),
+                generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None),
             ] {
                 assert!(!aggregate.contains("VELNOR_LANES"), "{aggregate}");
             }
@@ -10700,7 +10571,6 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         };
@@ -10930,14 +10800,6 @@ channel = "stable"
     }
 
     #[test]
-    fn pinned_policy_prefetch_installs_the_velnor_workflow_package() {
-        let bash = render_pinned_policy_prefetch_bash("abc123");
-        assert!(bash.contains(&format!("--git {VELNOR_WORKFLOW_INSTALL_GIT_URL}")));
-        assert!(bash.contains("--rev abc123"));
-        assert!(bash.contains("velnor-workflow --bin velnor-workflow"));
-    }
-
-    #[test]
     fn both_runner_policy_entrypoint_stays_on_hosted_runner() {
         let policy = generated_ci_policy(&scanned_fixture(RunnerMode::Both));
         assert!(policy.contains("runs-on: ubuntu-24.04"));
@@ -10979,9 +10841,10 @@ channel = "stable"
         assert!(nightly.contains("gh workflow run ci-main.yml"));
         assert!(nightly.contains("name: \"Control / Dispatch ci-main\""));
 
-        let nested_main = generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator));
+        let nested_main =
+            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator), None);
         let nested_nightly =
-            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator));
+            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator), None);
         assert!(nested_main.contains("cancel-in-progress: false"));
         assert!(nested_nightly.contains("cancel-in-progress: false"));
         assert!(nested_nightly.contains("name: \"Control / Nightly aggregate\""));
@@ -11017,7 +10880,7 @@ channel = "stable"
                 "PR triggers must not carry the dead merge_group trigger: {pr}"
             );
             let nested =
-                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator));
+                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None);
             assert!(
                 !nested.contains("merge_group:"),
                 "the nested PR render must omit merge_group too: {nested}"
@@ -11063,7 +10926,7 @@ channel = "stable"
             "a velnor-only surface has no github lane to validate the merge queue: {velnor_pr}"
         );
         let velnor_nested =
-            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator));
+            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator), None);
         assert!(
             !velnor_nested.contains("merge_group:\n"),
             "the nested velnor-only PR render skips merge_group too: {velnor_nested}"
@@ -11962,7 +11825,7 @@ channel = "stable"
             "PR aggregate must not declare cache-mode on reusable-workflow callers; \
              pull_request already defaults to read-only cache access"
         );
-        let main = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir));
+        let main = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
         assert!(
             !main.contains("cache-mode: read"),
             "main producers must not declare read-only cache mode"
@@ -12018,7 +11881,6 @@ channel = "stable"
             mise_tools: vec!["node".to_owned()],
             toolchain: rust.toolchain.clone(),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });
@@ -12134,14 +11996,18 @@ channel = "stable"
                 continue;
             }
             covered_kinds.insert(kind);
-            let (files, _) = ir.render_kind_unit_workflows(kind, None);
-            for (file, workflow) in files {
-                for (job_id, body) in velnor_lane_job_bodies(&workflow) {
-                    assert!(
-                        !body.contains("actions/cache"),
-                        "{file} job {job_id} ({kind:?}) must not emit actions/cache on the Velnor lane"
-                    );
-                }
+            let (file, workflow) = must_some(
+                must(
+                    ir.render_kind_unit_workflow(kind, None),
+                    "render kind reusable",
+                ),
+                "kind with members renders a reusable",
+            );
+            for (job_id, body) in velnor_lane_job_bodies(&workflow) {
+                assert!(
+                    !body.contains("actions/cache"),
+                    "{file} job {job_id} ({kind:?}) must not emit actions/cache on the Velnor lane"
+                );
             }
         }
         for kind in scanned
@@ -12274,7 +12140,6 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain,
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });
@@ -12380,27 +12245,65 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain,
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });
-        let kind = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust, None);
+        let ir = WorkflowIr::from_config(&config);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
         assert!(
             !kind.contains("unknown unit for cargo fetch"),
             "kind jobs with fixed unit ids must not carry the union fetch case: {kind}"
         );
         assert!(kind.contains("          cargo fetch --locked"));
+        // The callee renders one step block per lane job: the per-unit facts
+        // (cargo-bin tools, the offline restriction) are inputs the callers
+        // supply, gated on presence where members differ.
         assert!(
-            kind.contains("tool: cargo-deny"),
-            "kind reusable must provision cargo-deny for the policy member"
+            kind.contains("tool: ${{ inputs.cargo_bin_tools }}"),
+            "kind reusable must provision cargo-bin tools from the caller's input"
         );
         assert!(
-            kind.contains("CARGO_NET_OFFLINE: \"true\""),
-            "restricted kind jobs bake offline env per unit"
+            kind.contains("if: ${{ inputs.cargo_bin_tools != '' }}"),
+            "the cargo-bin step is gated on the input when only some members need it"
+        );
+        assert!(
+            kind.contains("CARGO_NET_OFFLINE: ${{ inputs.cargo_net_offline }}"),
+            "mixed restriction reads the offline flag from the caller"
+        );
+        assert!(
+            !kind.contains("inputs.unit == '"),
+            "kind jobs must not guard steps by unit identity"
         );
         assert!(
             !kind.contains("export CARGO_NET_OFFLINE=true"),
             "kind jobs must not carry the union offline run prelude"
+        );
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &legacy_plan(&ir), None);
+        let policy_caller = must_some(
+            pr.find("  github-rust-dependency-policy:"),
+            "policy caller job",
+        );
+        let policy_block = &pr[policy_caller
+            ..pr[policy_caller..]
+                .find("\n  velnor-")
+                .or_else(|| pr[policy_caller..].find("\n  ci-required:"))
+                .map_or(pr.len(), |end| policy_caller + end)];
+        assert!(
+            policy_block.contains("cargo_bin_tools: cargo-deny"),
+            "the policy caller passes its cargo-bin tools: {policy_block}"
+        );
+        assert!(
+            !policy_block.contains("cargo_net_offline"),
+            "deny resolves its own inputs, so its caller leaves the offline flag at the default: {policy_block}"
+        );
+        let restricted_caller = must_some(
+            pr.find(&format!("  github-{}:", config.units[rust_index].id)),
+            "restricted caller job",
+        );
+        assert!(
+            pr[restricted_caller..].contains("cargo_net_offline: true"),
+            "the restricted caller passes the offline flag: {}",
+            &pr[restricted_caller..]
         );
     }
 
@@ -12431,7 +12334,6 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         };
@@ -12519,7 +12421,6 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         };
@@ -12535,7 +12436,7 @@ channel = "stable"
             ..header_fixture_config()
         };
         let ir = WorkflowIr::from_config(&config);
-        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir));
+        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
         let job_needs = |job: &str| {
             let start = must_some(
                 workflow.find(&format!("  {job}:\n")),
@@ -12617,7 +12518,6 @@ channel = "stable"
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check,
         };
@@ -12671,7 +12571,7 @@ channel = "stable"
             ..header_fixture_config()
         };
         let ir = WorkflowIr::from_config(&config);
-        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir));
+        let workflow = ir.render_nested(WorkflowKind::Main, &legacy_plan(&ir), None);
         let job_needs = |job: &str| {
             let start = must_some(
                 workflow.find(&format!("  {job}:\n")),
@@ -12753,7 +12653,6 @@ channel = "stable"
                     mise_tools: Vec::new(),
                     toolchain: None,
                     services: Vec::new(),
-                    workflow_file: None,
                     requires_trusted: false,
                     workspace_check: false,
                 },
@@ -12776,7 +12675,6 @@ channel = "stable"
                     mise_tools: Vec::new(),
                     toolchain: None,
                     services: Vec::new(),
-                    workflow_file: None,
                     requires_trusted: false,
                     workspace_check: false,
                 },
@@ -12786,6 +12684,7 @@ channel = "stable"
         let pr = WorkflowIr::from_config(&config).render_nested(
             WorkflowKind::PullRequest,
             &legacy_plan(&WorkflowIr::from_config(&config)),
+            None,
         );
         assert!(
             pr.contains(

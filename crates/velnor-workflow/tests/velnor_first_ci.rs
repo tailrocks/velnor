@@ -26,36 +26,6 @@ impl Generated {
     fn workflow(&self, name: &str) -> String {
         fs::read_to_string(self.output.join(".github/workflows").join(name)).unwrap()
     }
-
-    fn rust_unit_workflows(&self) -> BTreeSet<(String, String)> {
-        fs::read_dir(self.output.join(".github/workflows"))
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("ci-unit-rust")
-                            && Path::new(name)
-                                .extension()
-                                .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
-                    })
-            })
-            .map(|path| {
-                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                let content = fs::read_to_string(path).unwrap();
-                (name, content)
-            })
-            .collect()
-    }
-}
-
-fn count_kind_rust_callers(workflow: &str) -> usize {
-    workflow
-        .lines()
-        .filter(|line| line.contains("uses: ./.github/workflows/ci-unit-rust"))
-        .count()
 }
 
 fn unique_dir(name: &str) -> PathBuf {
@@ -674,13 +644,22 @@ fn velnor_lane_installs_declared_mise_tools() {
         unit.contains("Install declared Mise tools"),
         "Velnor lane must install lockfile tools: {unit}"
     );
+    // The tool list is a per-unit fact: the callee installs exactly the
+    // caller's `mise_tools` input, split as shell words.
     assert!(
-        unit.contains("mise --yes install aqua:nextest-rs/nextest/cargo-nextest"),
-        "Velnor lane must install only unit-scoped tools: {unit}"
+        unit.contains("MISE_TOOLS: ${{ inputs.mise_tools }}")
+            && unit.contains("mise --yes install \"${tools[@]}\""),
+        "Velnor lane must install the caller's unit-scoped tools: {unit}"
     );
     assert!(
         !unit.contains("mise --yes install\n"),
         "Velnor lane must not install the whole root manifest: {unit}"
+    );
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(
+        pr.contains("      lane: velnor\n")
+            && pr.contains("mise_tools: \"aqua:nextest-rs/nextest/cargo-nextest\""),
+        "the Velnor caller passes the unit's lockfile tools: {pr}"
     );
 }
 
@@ -690,16 +669,14 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     write_rust_fixture(&root, 2);
     let generated = generate(&root);
     let workflow = generated.workflow("ci-unit-rust.yml");
-    for unit in ["rust-crate00", "rust-crate01"] {
-        assert!(
-            workflow.contains(&format!("inputs.unit == '{unit}'")),
-            "{unit} must gate its collapsed verify steps"
-        );
-        assert!(
-            workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"),
-            "{unit} must bind CI_UNIT_ID from the caller's unit input"
-        );
-    }
+    assert!(
+        !workflow.contains("inputs.unit == '"),
+        "the collapsed verify steps must not be guarded by unit identity"
+    );
+    assert!(
+        workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"),
+        "the checks step binds CI_UNIT_ID from the caller's unit input"
+    );
     assert!(workflow.contains("unit:\n        required: true"));
     assert!(workflow.contains("  verify-github:"));
     assert!(workflow.contains("  verify-velnor:"));
@@ -717,8 +694,9 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
         .and_then(|(_, body)| body.split_once("\n  verify-velnor:\n"))
         .map_or("", |(body, _)| body);
     assert!(
-        github_job.contains("Restore \"Rust crate (crate00)\" cache"),
-        "GitHub jobs must retain their per-job Cargo cache: {github_job}"
+        github_job.contains("Restore unit cache")
+            && github_job.contains("hashFiles(inputs.cache_key_files)"),
+        "GitHub jobs must retain their per-job Cargo cache keyed on the caller's files: {github_job}"
     );
     assert!(
         github_job.contains("Prepare Cargo sources") && github_job.contains("cargo fetch --locked"),
@@ -749,7 +727,9 @@ fn kind_reusable_caller_is_one_call_per_kind() {
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
     assert!(
-        count_kind_rust_callers(&pr) >= 16,
+        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
+            .count()
+            >= 16,
         "each selected (unit, lane) gets its own caller: {pr}"
     );
     assert!(pr.contains("  prepare-cargo:\n    name: \"Control / Prepare Cargo\""));
@@ -791,35 +771,26 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     let root = unique_dir("linear-jobs");
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
-    let shards = generated.rust_unit_workflows();
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert_eq!(unit.matches("  verify-github:").count(), 1);
+    assert_eq!(unit.matches("  verify-velnor:").count(), 1);
     assert!(
-        !shards.is_empty(),
-        "rust kind reusable must emit at least one shard file"
+        !unit.contains("inputs.unit == '"),
+        "the collapsed steps are rendered once, not once per unit"
     );
-    for (_, unit) in &shards {
-        assert_eq!(unit.matches("  verify-github:").count(), 1);
-        assert_eq!(unit.matches("  verify-velnor:").count(), 1);
-    }
-    let combined = shards
-        .iter()
-        .map(|(_, content)| content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    assert_eq!(unit.matches("- name: Run unit checks").count(), 2);
+    let pr = generated.workflow("ci-pr.yml");
     for index in 0..8 {
         assert!(
-            combined.contains(&format!("inputs.unit == 'rust-crate{index:02}'")),
-            "each unit must gate its collapsed steps"
+            pr.contains(&format!("      unit: rust-crate{index:02}\n")),
+            "each unit gets its own caller"
         );
     }
-    let pr = generated.workflow("ci-pr.yml");
-    let prepare_cargo_callers = pr
-        .lines()
-        .filter(|line| {
-            line.strip_prefix("  ")
-                .is_some_and(|job| job.starts_with("prepare-cargo"))
-        })
-        .count();
-    assert_eq!(count_kind_rust_callers(&pr), 8 * 2 + prepare_cargo_callers);
+    assert_eq!(
+        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
+            .count(),
+        17
+    );
 }
 
 #[test]
@@ -869,13 +840,17 @@ units = ["rust-crate01"]
 
     let generated = generate(&root);
     let workflow = generated.workflow("ci-unit-rust.yml");
-    assert!(workflow.contains("inputs.unit == 'rust-crate00'"));
     assert!(
         workflow.contains("timeout-minutes: 45"),
-        "collapsed verify uses the shard's max declared timeout"
+        "collapsed verify uses the kind's max declared timeout"
     );
-    assert!(workflow.contains("inputs.unit == 'rust-crate01'"));
-    assert!(!workflow.contains("inputs.unit == 'rust-crate00' && inputs.lane == 'velnor'"));
+    assert!(!workflow.contains("inputs.unit == '"));
+    // The github-only contract keeps rust-crate00 off the Velnor lane: it
+    // gets a GitHub caller and no Velnor caller.
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(pr.contains("  github-rust-crate00:"));
+    assert!(!pr.contains("  velnor-rust-crate00:"));
+    assert!(pr.contains("  velnor-rust-crate01:"));
 }
 
 #[test]
@@ -899,7 +874,7 @@ fn unique_reusable_calls_stay_under_github_limit() {
     );
     assert!(
         calls.iter().all(|file| file.starts_with("ci-unit-rust")),
-        "rust units must stay on kind shards, not per-unit files: {calls:?}"
+        "rust units must call the single kind reusable, not per-unit files: {calls:?}"
     );
     assert!(calls.contains("ci-unit-rust.yml"));
     assert!(pr.contains("contains(format(',{0},', needs.plan.outputs.units), ',rust-crate"));
