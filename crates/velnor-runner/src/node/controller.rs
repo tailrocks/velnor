@@ -2169,7 +2169,16 @@ async fn recover_one_orphaned_job(
                                     row.job_id == job.job_id && row.generation == job.generation
                                 })
                         {
-                            abandon_if_budget_spent(args, journal, &row)?;
+                            // A spent budget abandons the row and restores the
+                            // slot to Ready. The dead worker's containers must
+                            // not strand behind that Ready slot.
+                            if abandon_if_budget_spent(args, journal, &row)? {
+                                teardown_orphaned_job_containers(
+                                    &job.job_id.0,
+                                    docker_backend,
+                                    docker,
+                                );
+                            }
                         }
                         return Ok(());
                     }
@@ -4556,6 +4565,274 @@ mod tests {
                 .iter()
                 .all(|job| job.job_id != JobId("job-1".to_owned())),
             "JobWorkerLost must remove the job row"
+        );
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
+            .unwrap();
+        assert_eq!(slot.phase, SlotPhase2::Ready);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A marker+creds recovery whose completion is remotely accepted removes
+    /// the job row, so the slot returns to Ready through the row-gone branch.
+    /// The dead worker's containers must still be torn down on that path.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn stale_recovery_marker_success_tears_down_containers_before_ready() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/jobs/1/completejob"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let run_service_url = format!("{}/jobs/1", server.uri());
+        let (dir, mut journal) = stale_running_job_fixture("marker-success", Some("docker"));
+        // Marker cleanup releases the durable storage reservation through
+        // the process-wide sink, which the daemon installs at startup.
+        crate::ops::init_at("test-instance".to_owned(), Some(&dir.join("state.db"))).unwrap();
+        let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        std::fs::write(
+            slot_dir.join("in-flight-job.json"),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": "job-1",
+                "run_service_url": run_service_url,
+                "billing_owner_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        config::save(
+            &slot_dir,
+            &config::StoredRunnerConfig {
+                settings: config::RunnerSettings {
+                    github_url: "https://github.com/tailrocks/fixture".to_owned(),
+                    server_url: None,
+                    server_url_v2: None,
+                    pool_id: Some(7),
+                    pool_name: Some("velnor".to_owned()),
+                    agent_id: Some(7),
+                    agent_name: "slot-1".to_owned(),
+                    labels: vec!["velnor".to_owned()],
+                    use_v2_flow: true,
+                    ephemeral: true,
+                    disable_update: true,
+                },
+                credentials: Some(config::StoredCredentials {
+                    scheme: config::CredentialScheme::OAuthAccessToken,
+                    data: json!({ "token": "token" }),
+                }),
+            },
+        )
+        .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        let listing =
+            "job-cid\tjob-1\tjob-1\trunning\nguest-cid\tguest-sidecar\tjob-1\texited\n".to_string();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+            move |docker_args: &[String]| {
+                recorded.lock().unwrap().push(docker_args.to_vec());
+                if docker_args.first().is_some_and(|command| command == "ps") {
+                    return Ok(listing.clone());
+                }
+                Ok(String::new())
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            crate::docker_lease::list_owned_containers_state_args("job-1")
+        );
+        assert_eq!(
+            calls[1],
+            crate::docker_lease::force_remove_container_args(&[
+                "guest-cid".to_string(),
+                "job-cid".to_string()
+            ])
+        );
+        assert_eq!(calls.len(), 2);
+        server.verify().await;
+
+        let state = journal.load_state().unwrap();
+        assert!(
+            state
+                .jobs
+                .iter()
+                .all(|job| job.job_id != JobId("job-1".to_owned())),
+            "the accepted completion must remove the job row"
+        );
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
+            .unwrap();
+        assert_eq!(slot.phase, SlotPhase2::Ready);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A replay failure with a spent durable budget abandons the row and
+    /// restores the slot to Ready. The dead worker's containers must be torn
+    /// down on that abandon path, not stranded behind Ready. Replay fails on
+    /// the missing outbox payload before any network, so no mock is needed.
+    #[tokio::test]
+    async fn stale_recovery_budget_spent_abandon_tears_down_containers() {
+        let (dir, mut journal) = stale_running_job_fixture("budget-spent", Some("docker"));
+        let job_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        assert!(
+            !journal
+                .apply(Event::JobTerminalResult {
+                    job_id: job_id.clone(),
+                    generation,
+                    conclusion: "success".to_owned(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let payload_sha256 = velnor_control::journal::payload_checksum(b"payload");
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job_id.clone(),
+                    generation,
+                    payload_sha256,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionSendStarted {
+                    job_id: job_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        for _ in 0..velnor_control::journal::MAX_COMPLETION_ATTEMPTS {
+            assert!(
+                !journal
+                    .apply(Event::CompletionAttemptFailed {
+                        job_id: job_id.clone(),
+                        generation,
+                        permanent: false,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+        let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        std::fs::write(
+            slot_dir.join("in-flight-job.json"),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": "job-1",
+                "run_service_url": "https://example.invalid/run-service",
+                "billing_owner_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        config::save(
+            &slot_dir,
+            &config::StoredRunnerConfig {
+                settings: config::RunnerSettings {
+                    github_url: "https://github.com/tailrocks/fixture".to_owned(),
+                    server_url: None,
+                    server_url_v2: None,
+                    pool_id: Some(7),
+                    pool_name: Some("velnor".to_owned()),
+                    agent_id: Some(7),
+                    agent_name: "slot-1".to_owned(),
+                    labels: vec!["velnor".to_owned()],
+                    use_v2_flow: true,
+                    ephemeral: true,
+                    disable_update: true,
+                },
+                credentials: None,
+            },
+        )
+        .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        let listing =
+            "job-cid\tjob-1\tjob-1\trunning\nguest-cid\tguest-sidecar\tjob-1\texited\n".to_string();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+            move |docker_args: &[String]| {
+                recorded.lock().unwrap().push(docker_args.to_vec());
+                if docker_args.first().is_some_and(|command| command == "ps") {
+                    return Ok(listing.clone());
+                }
+                Ok(String::new())
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            crate::docker_lease::list_owned_containers_state_args("job-1")
+        );
+        assert_eq!(
+            calls[1],
+            crate::docker_lease::force_remove_container_args(&[
+                "guest-cid".to_string(),
+                "job-cid".to_string()
+            ])
+        );
+        assert_eq!(calls.len(), 2);
+
+        let state = journal.load_state().unwrap();
+        assert!(
+            state
+                .jobs
+                .iter()
+                .all(|job| job.job_id != JobId("job-1".to_owned())),
+            "the abandonment must remove the job row"
+        );
+        assert!(
+            journal.pending_outbox().unwrap().is_empty(),
+            "the abandonment must clear the pending outbox row"
         );
         let slot = state
             .slots
