@@ -1985,12 +1985,11 @@ impl WorkflowIr {
             .iter()
             .find(|unit| unit.id == caller.unit_id)
             .expect("unit");
-        // PR callers grant read-only cache access to reusable unit workflows.
-        let cache_mode = if read_only_cache {
-            "\n    cache-mode: read"
-        } else {
-            ""
-        };
+        // PR triggers already default to read-only cache. Explicit cache-mode on
+        // reusable-workflow callers rejects callees that declare cache saves at
+        // validation time, so rely on the platform default instead.
+        let cache_mode = "";
+        let _ = read_only_cache;
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
