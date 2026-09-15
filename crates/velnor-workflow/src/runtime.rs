@@ -234,10 +234,15 @@ impl CiUnit {
         if self.workspace_check {
             return true;
         }
-        [&self.github_pr_commands, &self.github_full_commands, &self.velnor_pr_commands, &self.velnor_full_commands]
-            .into_iter()
-            .flatten()
-            .any(|command| command.contains("cargo check --workspace"))
+        [
+            &self.github_pr_commands,
+            &self.github_full_commands,
+            &self.velnor_pr_commands,
+            &self.velnor_full_commands,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|command| command.contains("cargo check --workspace"))
     }
 }
 
