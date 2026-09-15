@@ -28,7 +28,10 @@ pull GHCR or copy Sentry caches. Export `GITHUB_TOKEN` for the Dockerfile
 runners only and refuses organization URLs so recovery cannot join
 `velnor-trusted`. Export `GITHUB_TOKEN`; never pass a token as a flag.
 When `VELNOR_STORAGE_ROOT` is unset, `host start` uses a user-owned prefix
-(`~/Library/Application Support/velnor` on macOS) instead of `/var`.
+instead of `/var`: `~/.velnor-store` on macOS (a short dot-directory, because
+`~/Library/Application Support/velnor/run/velnor/<name>/control.sock` overflows
+the 104-byte Unix socket path limit) and `~/.local/state/velnor` on Linux.
+See `content/docs/guides/macos-host.mdx` for the full host guide.
 Slot and job children exec `velnor-runner` beside `velnorctl` (or hidden
 `velnorctl slot` / `velnorctl job` if that binary is missing).
 Linux container jobs on macOS stay Linux jobs. `--pr` prints scheduling
