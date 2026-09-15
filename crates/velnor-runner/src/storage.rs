@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result};
@@ -179,6 +180,54 @@ pub fn prefer_canonical_or_existing_legacy(canonical: PathBuf, legacy: PathBuf) 
         canonical
     } else {
         legacy
+    }
+}
+
+/// Mount a read-through overlay when `lower` exists: writes go to `upper`,
+/// reads fall through to `lower`. Returns `upper` unchanged when overlay is
+/// unavailable or `lower` is absent (D18 PR-scope warm start).
+pub fn prepare_read_through_overlay(
+    overlay_dir: &Path,
+    upper: &Path,
+    lower: &Path,
+) -> Result<PathBuf> {
+    fs::create_dir_all(upper).with_context(|| format!("create upper store {}", upper.display()))?;
+    if !lower.exists() {
+        return Ok(upper.to_path_buf());
+    }
+    let work = overlay_dir.join("work");
+    let merged = overlay_dir.join("merged");
+    fs::create_dir_all(&work)
+        .with_context(|| format!("create overlay workdir {}", work.display()))?;
+    fs::create_dir_all(&merged)
+        .with_context(|| format!("create overlay merged mount {}", merged.display()))?;
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lower.display(),
+        upper.display(),
+        work.display()
+    );
+    let status = Command::new("mount")
+        .arg("-t")
+        .arg("overlay")
+        .arg("overlay")
+        .arg("-o")
+        .arg(options)
+        .arg(&merged)
+        .status()
+        .context("mount read-through store overlay")?;
+    if status.success() {
+        Ok(merged)
+    } else {
+        Ok(upper.to_path_buf())
+    }
+}
+
+/// Best-effort unmount of every merged overlay path recorded on the container
+/// spec at job teardown (D18).
+pub fn teardown_store_overlays(container: &crate::container::JobContainerSpec) {
+    for merged in &container.store_overlay_mounts {
+        let _ = Command::new("umount").arg(merged).status();
     }
 }
 

@@ -707,10 +707,12 @@ pub static ACTIONS: &[ActionCapability] = &[
     ActionCapability {
         repository: "tailrocks/velnor",
         adapter: ActionAdapter::Composite,
-        allowed_refs: &[allowed(
-            "7fa4a0731ee8bedc5b02d90507d6dbe8b719153a",
-            "hosted runtime source pin",
-        )],
+        allowed_refs: &[
+            allowed(
+                "643f33123abe01adee09662a366cb9a5d2b3c3bf",
+                "hosted runtime source pin",
+            ),
+        ],
         allowed_subpaths: &[".github/actions/setup-velnor-workflow"],
         inputs: &[InputRule::Any("rev")],
         notes: "first-party composite; release jobs install the pinned workflow runtime with a rev-only input surface",

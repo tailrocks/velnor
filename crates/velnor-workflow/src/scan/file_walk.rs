@@ -10,6 +10,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use super::{RepositoryShape, ScanContext};
 use crate::{parent_path, GeneratorError};
 
+/// Generator-owned artifacts must not feed back into the next scan pass.
+const GENERATOR_OWNED_SCAN_FILES: &[&str] = &["config/fleet/velnor-host.env"];
+
 pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
@@ -34,7 +37,9 @@ pub(crate) fn repository_files(
         files
     };
     let excludes = exclude_set(exclude)?;
-    files.retain(|file| !excludes.is_match(file));
+    files.retain(|file| {
+        !excludes.is_match(file) && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
+    });
     files.sort();
     Ok(files)
 }

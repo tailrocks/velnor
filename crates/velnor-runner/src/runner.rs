@@ -7177,6 +7177,7 @@ async fn handle_job_request(
     // container spec, and the executor all enforce it.
     let admitted_trust = crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope);
     let effective_trust_scope = admitted_trust.effective_scope().to_owned();
+    let read_through_scope = admitted_trust.read_through_scope().map(str::to_owned);
     forensics.lifecycle(&format!(
         "job admitted job_id={} trust={} admitted_scope={} pool_scope={}",
         job.job_id,
@@ -7820,6 +7821,7 @@ async fn handle_job_request(
         let slot_count = args.slot_count;
         let node_action_image = args.node_action_image.clone();
         let effective_trust_scope = effective_trust_scope.clone();
+        let read_through_scope = read_through_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
         let daemon_id = args
@@ -7851,6 +7853,7 @@ async fn handle_job_request(
                 &node_action_image,
                 &admission_graph,
                 &effective_trust_scope,
+                read_through_scope.as_deref(),
                 &run_service_url,
                 billing_owner_id,
                 &job_to_execute,
@@ -9876,6 +9879,7 @@ fn execute_script_job(
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
+    read_through_scope: Option<&str>,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -9902,6 +9906,7 @@ fn execute_script_job(
         node_action_image,
         admission_graph,
         effective_trust_scope,
+        read_through_scope,
         run_service_url,
         billing_owner_id,
         job,
@@ -10012,6 +10017,7 @@ fn execute_microvm_script_job(
         node_action_image,
         "microvm".into(),
         effective_trust_scope,
+        None,
     )?;
     if container.mount_docker_socket {
         return Err(microvm_capability_error(
@@ -10400,6 +10406,7 @@ fn execute_script_job_inner(
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
+    read_through_scope: Option<&str>,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -10486,6 +10493,7 @@ fn execute_script_job_inner(
         node_action_image,
         daemon_id,
         effective_trust_scope,
+        read_through_scope,
     )?;
     let identity = identity_from_agent_name(runner_name);
     crate::github_adapter::push_runner_identity_env(&mut container.env, &identity);
@@ -16916,6 +16924,7 @@ mod tests {
             "",
             "daemon".into(),
             &admitted_scope,
+            None,
         )
         .unwrap();
 
@@ -24843,6 +24852,9 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             store_trust_scope: "trusted".to_owned(),
+            store_read_through_scope: None,
+            store_overlay_mounts: Vec::new(),
+            prepared_cargo_store: None,
             mbx_store_host: None,
             sccache_store_host: None,
         }

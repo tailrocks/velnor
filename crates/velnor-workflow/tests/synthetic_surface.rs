@@ -4,8 +4,9 @@
 //! different shapes, a Bun package, a root Dockerfile, and Markdown docs. It
 //! pins two properties: one unit kind is exactly one reusable workflow file,
 //! and nothing about the repository's name, path, or unit ids is known to the
-//! renderer. Units of a kind fan out through the plan matrix so GitHub's
-//! unique-reusable-workflow limit is not a function of unit count.
+//! renderer. Units of a kind share one kind reusable while aggregate callers
+//! fan out per (unit, lane) so GitHub's unique-reusable-workflow limit stays a
+//! function of kind count, not unit count.
 
 #![expect(
     clippy::unwrap_used,
@@ -213,14 +214,13 @@ fn adding_a_crate_reuses_the_kind_reusable_and_adds_a_unit() {
         .collect::<Vec<_>>();
     assert_eq!(added, Vec::<String>::new());
     assert_eq!(after.unit_ids().len(), before_units.len() + 1);
-    // Kind reusable already exists; adding a crate does not add a unique
-    // reusable workflow call.
+    // Kind reusable already exists; adding a crate adds one caller per lane.
     let growth = after
         .workflow("ci-pr.yml")
         .matches("uses: ./.github/workflows/")
         .count()
         - before_callers;
-    assert_eq!(growth, 0);
+    assert_eq!(growth, 2);
 
     // Removing a crate removes exactly what adding it added.
     fs::remove_dir_all(root.join("crates/delta")).unwrap();

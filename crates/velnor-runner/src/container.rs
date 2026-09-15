@@ -220,6 +220,14 @@ pub struct JobContainerSpec {
     /// the lease side and the mount side instead of collapsing to `untrusted`
     /// on one of them.
     pub store_trust_scope: String,
+    /// Trusted scope read through beneath [`Self::store_trust_scope`] for PR
+    /// jobs on trusted pools (D18). Absent for single-namespace stores.
+    pub store_read_through_scope: Option<String>,
+    /// Merged overlay mount points to unmount at job teardown.
+    pub store_overlay_mounts: Vec<PathBuf>,
+    /// Overlay-resolved Cargo store root when [`Self::prepare_store_overlays`]
+    /// ran; otherwise [`start_args`] resolves directly.
+    pub(crate) prepared_cargo_store: Option<PathBuf>,
     /// Docker-only Mr Boxington store. `None` for MicroVM jobs.
     pub mbx_store_host: Option<PathBuf>,
     /// Docker-only explicit sccache action store.
@@ -254,6 +262,53 @@ const MBX_CONTAINER_EXEC_PATH: &str =
     "/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 impl JobContainerSpec {
+    /// Resolve a trust-scoped store root, layering `store_read_through_scope`
+    /// beneath `store_trust_scope` when configured (D18).
+    pub(crate) fn overlay_aware_store<F>(&mut self, class: &str, resolve: F) -> PathBuf
+    where
+        F: Fn(&Path, &str) -> PathBuf,
+    {
+        let upper = resolve(&self.temp_host, self.store_trust_scope.as_str());
+        let Some(lower_scope) = self.store_read_through_scope.as_deref() else {
+            return upper;
+        };
+        let lower = resolve(&self.temp_host, lower_scope);
+        let overlay_dir = self
+            .temp_host
+            .join("_store-overlay")
+            .join(sanitize_store_key(class));
+        match crate::storage::prepare_read_through_overlay(&overlay_dir, &upper, &lower) {
+            Ok(merged) if merged != upper => {
+                self.store_overlay_mounts.push(merged.clone());
+                merged
+            }
+            Ok(merged) => merged,
+            Err(error) => {
+                tracing::warn!(
+                    class,
+                    ?error,
+                    "read-through store overlay unavailable; using PR scope only"
+                );
+                upper
+            }
+        }
+    }
+
+    /// Prepare read-through store overlays for PR-scoped jobs (D18). No-op
+    /// when [`Self::store_read_through_scope`] is absent.
+    pub fn prepare_store_overlays(&mut self) {
+        if self.store_read_through_scope.is_none() {
+            return;
+        }
+        self.prepared_cargo_store = Some(self.overlay_aware_store("cargo", cargo_store_host));
+    }
+
+    fn cargo_store_mount_root(&self) -> PathBuf {
+        self.prepared_cargo_store
+            .clone()
+            .unwrap_or_else(|| cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()))
+    }
+
     /// The tightest valid `--cpus` limit declared by the operator
     /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or workflow createOptions.
     fn declared_container_cpus(&self) -> Option<f64> {
@@ -466,6 +521,8 @@ impl JobContainerSpec {
                 ("CARGO_TARGET_DIR", target_root.as_str()),
                 ("MBX_GC_AUTO", "true"),
                 ("MBX_GC_MAX_SIZE", "20GiB"),
+                ("MBX_GC_INCREMENTAL_MAX_SIZE", "20GiB"),
+                ("MBX_GC_INCREMENTAL_MAX_AGE", "30d"),
                 ("MBX_TARGET_MAX_SIZE", "30GiB"),
                 ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
             ]);
@@ -562,6 +619,21 @@ impl JobContainerSpec {
                 &self.playwright_browser_store_host(),
                 "/github/home/.cache/ms-playwright",
             ),
+            // Package-manager download caches are not workspace output. Persist
+            // them per trust/repository so bun, npm, and OpenTofu jobs stay warm
+            // without hitting the hosted actions cache from self-hosted runners.
+            "-v".into(),
+            self.mount_arg(
+                &self.bun_install_cache_store_host(),
+                "/github/home/.bun/install/cache",
+            ),
+            "-v".into(),
+            self.mount_arg(&self.npm_cache_store_host(), "/github/home/.npm"),
+            "-v".into(),
+            self.mount_arg(
+                &self.terraform_plugin_cache_store_host(),
+                "/github/home/.terraform.d/plugin-cache",
+            ),
             // Share immutable Cargo downloads and indexes across the daemon,
             // but keep extracted registry sources and git checkouts in the
             // job home. Separate containers can otherwise race while creating
@@ -569,19 +641,17 @@ impl JobContainerSpec {
             // lock does not serialize that mutation across container jobs).
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
-                    .join("registry/cache"),
+                &self.cargo_store_mount_root().join("registry/cache"),
                 "/github/home/.cargo/registry/cache",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
-                    .join("registry/index"),
+                &self.cargo_store_mount_root().join("registry/index"),
                 "/github/home/.cargo/registry/index",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("git/db"),
+                &self.cargo_store_mount_root().join("git/db"),
                 "/github/home/.cargo/git/db",
             ),
             // $CARGO_HOME/bin holds executable proxies on PATH, so it is
@@ -1264,6 +1334,12 @@ impl JobContainerSpec {
             ("tools", self.tools_host.clone()),
             ("workflow", workflow_host(&self.temp_host)),
             ("Playwright store", self.playwright_browser_store_host()),
+            ("Bun install cache", self.bun_install_cache_store_host()),
+            ("npm cache", self.npm_cache_store_host()),
+            (
+                "OpenTofu plugin cache",
+                self.terraform_plugin_cache_store_host(),
+            ),
             (
                 "Cargo registry cache",
                 cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
@@ -1583,13 +1659,37 @@ impl JobContainerSpec {
     }
 
     fn playwright_browser_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host("playwright", ".cache/ms-playwright")
+    }
+
+    fn bun_install_cache_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host("bun-install-cache", ".bun/install/cache")
+    }
+
+    fn npm_cache_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host("npm", ".npm")
+    }
+
+    fn terraform_plugin_cache_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host(
+            "terraform-plugin-cache",
+            ".terraform.d/plugin-cache",
+        )
+    }
+
+    fn repository_scoped_home_cache_store_host(
+        &self,
+        store_leaf: &str,
+        home_relative: &str,
+    ) -> PathBuf {
         self.repository_store_key().map_or_else(
-            || self.home_host.join(".cache/ms-playwright"),
+            || self.home_host.join(home_relative),
             |repository| {
-                playwright_browser_store_host(
+                repository_scoped_home_cache_store_host(
                     &self.temp_host,
                     self.store_trust_scope.as_str(),
                     &repository,
+                    store_leaf,
                 )
             },
         )
@@ -2010,6 +2110,44 @@ pub(crate) fn playwright_browser_store_host(
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "playwright")
+}
+
+pub(crate) fn bun_install_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "bun-install-cache")
+}
+
+pub(crate) fn npm_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "npm")
+}
+
+pub(crate) fn terraform_plugin_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    repository_scoped_home_cache_store_host(
+        temp_host,
+        trust_scope,
+        repository,
+        "terraform-plugin-cache",
+    )
+}
+
+fn repository_scoped_home_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+    store_leaf: &str,
+) -> PathBuf {
     let root = crate::storage::cache_class_path(
         &daemon_store_root(temp_host),
         trust_scope,
@@ -2018,7 +2156,7 @@ pub(crate) fn playwright_browser_store_host(
     );
     crate::storage::append_legacy_trust(root, trust_scope)
         .join(sanitize_store_key(repository))
-        .join("playwright")
+        .join(store_leaf)
 }
 
 /// Resolve the daemon-shared store root from a job temp dir
@@ -2194,6 +2332,9 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             store_trust_scope: "trusted".to_owned(),
+            store_read_through_scope: None,
+            store_overlay_mounts: Vec::new(),
+            prepared_cargo_store: None,
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
         }
@@ -2708,6 +2849,21 @@ mod tests {
             &args,
             &job.playwright_browser_store_host(),
             "/github/home/.cache/ms-playwright"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.bun_install_cache_store_host(),
+            "/github/home/.bun/install/cache"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.npm_cache_store_host(),
+            "/github/home/.npm"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.terraform_plugin_cache_store_host(),
+            "/github/home/.terraform.d/plugin-cache"
         ));
         assert!(has_mount(
             &args,

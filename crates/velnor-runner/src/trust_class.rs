@@ -169,6 +169,11 @@ impl TrustClass {
 pub struct AdmittedTrust {
     class: TrustClass,
     effective_scope: String,
+    /// When set, persistent stores mount a read-through overlay with this
+    /// scope as the lower (trusted) layer and [`effective_scope`] as the upper
+    /// (write) layer. Same-repo PR jobs on trusted pools use `pr` over
+    /// `trusted` so PR writes never reach trusted stores (D18).
+    read_through_scope: Option<String>,
 }
 
 impl AdmittedTrust {
@@ -181,12 +186,12 @@ impl AdmittedTrust {
     /// part of the binding, not a step a call site can forget.
     #[must_use]
     pub fn narrow(class: TrustClass, pool_scope: &str) -> Self {
-        let effective_scope = class
-            .admitted_scope(crate::trust_scope::normalize_scope(pool_scope))
-            .to_owned();
+        let pool = crate::trust_scope::normalize_scope(pool_scope);
+        let (effective_scope, read_through_scope) = store_scopes_for_class(class, pool, None);
         Self {
             class,
             effective_scope,
+            read_through_scope,
         }
     }
 
@@ -197,7 +202,15 @@ impl AdmittedTrust {
     /// hand-assembled pair production cannot produce.
     #[must_use]
     pub fn admit(job: &AgentJobRequestMessage, pool_scope: &str) -> Self {
-        Self::narrow(TrustClass::derive(job), pool_scope)
+        let class = TrustClass::derive(job);
+        let pool = crate::trust_scope::normalize_scope(pool_scope);
+        let event = event_name(job);
+        let (effective_scope, read_through_scope) = store_scopes_for_class(class, pool, event);
+        Self {
+            class,
+            effective_scope,
+            read_through_scope,
+        }
     }
 
     /// The derived class this binding narrows.
@@ -212,6 +225,33 @@ impl AdmittedTrust {
     pub fn effective_scope(&self) -> &str {
         &self.effective_scope
     }
+
+    /// Trusted scope layered beneath [`Self::effective_scope`] for read-through
+    /// store mounts. Absent when the job uses a single store namespace.
+    #[must_use]
+    pub fn read_through_scope(&self) -> Option<&str> {
+        self.read_through_scope.as_deref()
+    }
+}
+
+/// Map a job class and pool ceiling to the store write scope and optional
+/// read-through lower scope (D18).
+fn store_scopes_for_class(
+    class: TrustClass,
+    pool_scope: &str,
+    event: Option<&str>,
+) -> (String, Option<String>) {
+    let base = class.admitted_scope(pool_scope).to_owned();
+    if class == TrustClass::Trusted
+        && pool_scope.eq_ignore_ascii_case(crate::trust_scope::TRUSTED)
+        && event.is_some_and(is_pull_request_event)
+    {
+        return (
+            crate::trust_scope::PR_STORE_SCOPE.to_owned(),
+            Some(crate::trust_scope::TRUSTED.to_owned()),
+        );
+    }
+    (base, None)
 }
 
 /// `pull_request` prefix length: `pull_request`, `pull_request_target`,
@@ -1203,6 +1243,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn same_repo_pull_request_on_trusted_pool_uses_pr_store_with_read_through() {
+        let job = signal_job(
+            variables("pull_request", "octo/base"),
+            Some(json!({
+                "event_name": "pull_request",
+                "repository": "octo/base",
+                "event": pull_request_event("octo/base", 1, 1),
+            })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        let admitted = AdmittedTrust::admit(&job, "trusted");
+        assert_eq!(admitted.class(), TrustClass::Trusted);
+        assert_eq!(
+            admitted.effective_scope(),
+            crate::trust_scope::PR_STORE_SCOPE
+        );
+        assert_eq!(
+            admitted.read_through_scope(),
+            Some(crate::trust_scope::TRUSTED)
+        );
     }
 
     #[test]

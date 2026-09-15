@@ -1,25 +1,28 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	0563237288d53633
-scan	e4c10780dad5587c
-generator	41
+config	f02255a0a780701a
+scan	a675c6ae1a8ec857
+generator	44
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
-.github/actions/report-velnor-ci-outcomes/action.yml	b6d1fd4a90eecb12
-.github/actions/setup-velnor-workflow/action.yml	064226f4449355d7
-.github/ci/project.toml	9282e02bd015fe01
+.github/actions/report-velnor-ci-outcomes/action.yml	5fc0e415658c5fb4
+.github/actions/setup-velnor-workflow/action.yml	9aa9c8647f90b8a4
+.github/ci/project.toml	41943c97d2b918c7
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	ee759c825349c145
-.github/workflows/ci-policy.yml	d6c6b65b0056c378
-.github/workflows/ci-pr.yml	a19b2f39aa751824
+.github/workflows/ci-main.yml	e44a83ec098b54dd
+.github/workflows/ci-policy.yml	1e53e583be8cef2b
+.github/workflows/ci-pr.yml	7fda23e19e7548ee
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-.github/workflows/ci-unit-bun.yml	4f70d338e83e81ca
-.github/workflows/ci-unit-docker.yml	b0ef2406602fa861
-.github/workflows/ci-unit-docs.yml	6126bec46355b749
-.github/workflows/ci-unit-opentofu.yml	1b9eb9a893016e34
-.github/workflows/ci-unit-rust.yml	902bd09315350ac9
-.github/workflows/maintenance.yml	9ad2f7a32e7fc07a
-.github/workflows/nightly.yml	47049ed4a16c9a83
-.github/workflows/preview.yml	43d93ca5c41721fc
-.github/workflows/release.yml	8c627747a53b1184
+.github/workflows/ci-unit-bun.yml	d31a22d09b6acda0
+.github/workflows/ci-unit-docker.yml	1a38c0df181295a7
+.github/workflows/ci-unit-docs.yml	8b8e1e3d6d51ecda
+.github/workflows/ci-unit-opentofu.yml	83fc254b4fb2a730
+.github/workflows/ci-unit-rust-2.yml	30d0cd907a475366
+.github/workflows/ci-unit-rust-3.yml	3245806048b72675
+.github/workflows/ci-unit-rust.yml	b50e527bee52689d
+.github/workflows/maintenance.yml	4eae4e3b5f9b80bc
+.github/workflows/nightly.yml	2057397bf0480d73
+.github/workflows/preview.yml	4ae72a778bc23ff6
+.github/workflows/release.yml	c94f2153e7fc18fe
+config/fleet/velnor-host.env	d14b419216449423

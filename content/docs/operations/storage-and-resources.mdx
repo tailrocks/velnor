@@ -35,9 +35,28 @@ cannot delete a store a job is using. `docker` declares none: Velnor never
 reclaims Docker's storage by scope, but the host budget must account for it,
 because it consumes the same filesystem.
 
-Stores resolve to the daemon-shared work root, never to a per-slot root. A
-per-slot path is lifted to the shared root by construction, so slots share one
-warm cache rather than fragmenting it.
+Stores resolve under `VELNOR_STORAGE_ROOT` when set, otherwise through the
+systemd state directory and XDG defaults documented in
+[Configuration](/reference/configuration). The daemon-shared work root holds
+cross-slot warm data; slot-scoped paths (mbx object/target trees, mise
+installs, stable workspaces) lift to that root by construction so affinity
+matters but the catalog stays singular.
+
+| Store | Shared across slots | Scoped by |
+| --- | --- | --- |
+| Cargo registry cache/index + git db | yes (trust scope) | repository id |
+| mise download cache | yes (trust scope) | repository id |
+| mise installs + per-version binaries | per slot | trust + repository |
+| mbx cache + managed targets | per slot | trust + repository |
+| actions-cache / gha-cache emulator | per host | repository + key |
+| artifacts | per run | workflow run id |
+
+Operator GC for reclaimable Velnor-owned classes is
+`velnorctl cache --work-dir DIR gc --yes`, typically on a systemd timer after
+baseline measurement with
+`velnorctl cache du`. That reclaims UUID workspaces and orphaned images under
+the 2 GiB admission floor; it does not delete live leases. BuildKit and Docker
+image storage remain operator-managed on trusted docker hosts.
 
 ## The host budget
 
@@ -98,13 +117,27 @@ collection inside it; Velnor supplies the limits:
 ```text
 MBX_GC_AUTO=true
 MBX_GC_MAX_SIZE=20GiB
+MBX_GC_INCREMENTAL_MAX_SIZE=20GiB
+MBX_GC_INCREMENTAL_MAX_AGE=30d
 MBX_TARGET_MAX_SIZE=30GiB
 MBX_GC_MAX_TOTAL_SIZE=50GiB
 ```
 
 These operate inside Velnor's host disk accounting; they do not increase host
 capacity. Cargo registry and Git source persistence are separate stores and are
-unaffected by Mr Boxington's GC.
+unaffected by Mr Boxington's GC. The combined 50 GiB cap applies **per slot**
+mbx directory (`MBX_GC_MAX_TOTAL_SIZE`), not once for the whole host.
+
+## GitHub lane cache budget (separate)
+
+The GitHub lane uses the platform `actions/cache` service, not Velnor host
+stores. Generated maintenance enforces an internal **8 GiB** class table under
+the platform's default **10 GB** repository cap; idle entries are evicted after
+**seven days** regardless of Velnor policy. Producers on the default branch
+refresh trusted snapshots; consumers on pull requests restore only. Prefix
+restore (matched restore-key, primary key miss) is an expected warm path, not
+a failure. Do not raise Velnor host budgets when GitHub entries are cold—the
+lanes are independent.
 
 ## Disk pressure
 

@@ -32,10 +32,11 @@ use crate::{
 };
 
 pub(crate) use ir::{
-    checks_env, config_snapshot_identity, render_cargo_source_preparation,
-    render_pinned_toolchain_steps, render_retained_output_cache_note,
-    render_velnor_runner_identity_step, validate_nextest_tools_are_locked, WorkflowIr,
-    WorkflowKind, GITHUB_WORKFLOW_BYTE_LIMIT,
+    checks_env, config_snapshot_identity, default_branch_push_cache_save_expression,
+    render_cargo_source_preparation, render_pinned_toolchain_steps,
+    render_retained_output_cache_note, render_velnor_runner_identity_step,
+    trusted_cache_save_expression, validate_nextest_tools_are_locked, WorkflowIr, WorkflowKind,
+    GITHUB_WORKFLOW_BYTE_LIMIT,
 };
 
 #[cfg(test)]
@@ -256,13 +257,14 @@ pub(crate) fn validate_cache_transports_for_unit(
 /// about persistence — exactly the cold-build state this contract exists to
 /// remove — so the declared commands must prove both directions of the
 /// lifecycle: the hosted full build consumes the seed and extracts the updated
-/// state, and no untrusted pull-request build extracts anything.
+/// state, hosted pull-request builds may consume the restored seed, and no
+/// untrusted pull-request build extracts anything.
 ///
 /// # Errors
 /// Returns a usage error when the seed rides a non-Docker unit, when the
 /// hosted full commands never inject the seed or never extract the export, or
-/// when a pull-request or self-hosted command references the injection
-/// context the generator never restores on that lane.
+/// when a self-hosted command references the seed context or any pull-request
+/// command references the export target.
 pub(crate) fn validate_mutable_mount_seed(unit: &Unit) -> Result<(), GeneratorError> {
     let Some(cache) = &unit.cache else {
         return Ok(());
@@ -309,28 +311,34 @@ pub(crate) fn validate_mutable_mount_seed(unit: &Unit) -> Result<(), GeneratorEr
             unit.id
         )));
     }
-    for (lane, commands) in [
+    for (lane, commands, allow_injection) in [
         (
             "hosted pull-request",
             lane_commands(unit.github_pr_commands.as_deref(), &unit.pr_commands),
+            true,
         ),
         (
             "self-hosted",
             lane_commands(unit.velnor_full_commands.as_deref(), &unit.full_commands),
+            false,
         ),
         (
             "self-hosted pull-request",
             lane_commands(unit.velnor_pr_commands.as_deref(), &unit.pr_commands),
+            false,
         ),
     ] {
-        if commands
-            .iter()
-            .any(|command| command.contains(&injection) || command.contains(&extraction))
-        {
+        if commands.iter().any(|command| command.contains(&extraction)) {
             return Err(GeneratorError::usage(format!(
-                "unit `{}` runs `{lane}` commands that reference the mutable mount seed context \
-                 or export target; the generator restores and collects the seed on the hosted \
-                 full lane only, so those commands would fail on a directory that is never there",
+                "unit `{}` runs `{lane}` commands that reference the mutable mount seed export \
+                 target; extraction is restricted to trusted hosted full builds",
+                unit.id
+            )));
+        }
+        if !allow_injection && commands.iter().any(|command| command.contains(&injection)) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` runs `{lane}` commands that reference the mutable mount seed context; \
+                 the generator restores and injects the seed on the hosted lane only",
                 unit.id
             )));
         }

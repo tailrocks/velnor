@@ -7,7 +7,7 @@ Execution records for the fleet migration. Not generator input. Not user documen
 - `capability-matrix.md` — A/B/C/D mapping per discovered responsibility
 - `decision-log.md` — verified decisions
 - `evidence/` — SHAs, PR URLs, run URLs
-- `fleet/` — per-repository matrix
+- `config/fleet/` — release ledger and desired policy snapshots
 - `retirement/` — deletion audit
 
 Verified state only. No optimistic checkboxes.
