@@ -523,6 +523,10 @@ impl<'a> GuestDockerTeardown<'a> {
                 self.network.clone(),
                 "--label".to_owned(),
                 label.clone(),
+                "--label".to_owned(),
+                format!("{JOB_ID_LABEL}={job_name}"),
+                "--label".to_owned(),
+                format!("{DAEMON_ID_LABEL}={}", plan.daemon_id),
             ]);
             if !service.network_alias.is_empty() {
                 args.pair("--network-alias", service.network_alias.clone());
@@ -551,6 +555,10 @@ impl<'a> GuestDockerTeardown<'a> {
                 self.network.clone(),
                 "--label".to_owned(),
                 label.clone(),
+                "--label".to_owned(),
+                format!("{JOB_ID_LABEL}={job_name}"),
+                "--label".to_owned(),
+                format!("{DAEMON_ID_LABEL}={}", plan.daemon_id),
             ]);
             // Job environment carries the workflow's secrets. It goes to a
             // mode-0600 env file, never to argv.
@@ -1715,6 +1723,25 @@ mod tests {
         assert!(job_args
             .windows(2)
             .any(|w| w == ["--name", "velnor-job-run_42_unsafe"]));
+        let container_calls: Vec<_> = runner
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.windows(2).any(|w| w == ["--name", "pg"])
+                    || args
+                        .windows(2)
+                        .any(|w| w == ["--name", "velnor-job-run_42_unsafe"])
+            })
+            .collect();
+        assert_eq!(container_calls.len(), 2, "{:#?}", runner.calls);
+        for (_, args) in container_calls {
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["--label", "velnor.job-id=velnor-job-run_42_unsafe"]));
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["--label", "velnor.daemon-id=test-daemon"]));
+        }
         assert!(!runner
             .calls
             .iter()
