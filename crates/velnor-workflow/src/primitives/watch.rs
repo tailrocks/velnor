@@ -27,11 +27,10 @@ impl Primitive for WatchGraph {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &["runtime_inputs", "watch", "docker_closure"]
+        &["watch", "docker_closure"]
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        let runtime_inputs = args.strings("runtime_inputs")?.unwrap_or_default();
         let additions = args.unit_strings(ctx, "watch")?.unwrap_or_default();
         let closure = args.strings("docker_closure")?.unwrap_or_default();
         let docker_watch = docker_watch_paths(
@@ -122,7 +121,6 @@ impl Primitive for WatchGraph {
                 }
                 UnitKind::Gradle | UnitKind::Node | UnitKind::Swift | UnitKind::Homebrew => {}
             }
-            watch.extend(runtime_inputs.iter().cloned());
             if let Some(paths) = additions.get(&unit.id) {
                 watch.extend(
                     paths

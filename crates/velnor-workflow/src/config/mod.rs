@@ -191,6 +191,15 @@ struct WorkflowSection {
     /// `depends_on` Rust unit jobs on the Velnor lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     velnor_rust_needs: Option<String>,
+    /// When set and `runners = "velnor"`, every generated Velnor-lane aggregate
+    /// and policy workflow shares this concurrency group so a single recovery
+    /// host admits one run at a time across pull requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_concurrency_group: Option<String>,
+    /// When true and `runners = "velnor"`, aggregate stack-group callers chain
+    /// through `needs:` instead of fanning out from `plan` in parallel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_serial_stack_groups: Option<bool>,
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -599,6 +608,16 @@ impl RepoGenerationConfig {
     pub(crate) fn velnor_rust_needs(&self) -> Option<&str> {
         self.workflow.velnor_rust_needs.as_deref()
     }
+
+    /// The declared repository-scoped Velnor runner concurrency group.
+    pub(crate) fn velnor_concurrency_group(&self) -> Option<&str> {
+        self.workflow.velnor_concurrency_group.as_deref()
+    }
+
+    /// Whether aggregate stack groups serialize on the Velnor lane.
+    pub(crate) fn velnor_serial_stack_groups(&self) -> Option<bool> {
+        self.workflow.velnor_serial_stack_groups
+    }
     /// The declared profile label.
     pub(crate) fn profile(&self) -> Option<&str> {
         self.workflow.profile.as_deref()
@@ -917,6 +936,9 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     }
     if let Some(value) = workflow.velnor_rust_needs.as_deref() {
         crate::parse_velnor_rust_needs(value)?;
+    }
+    if let Some(value) = workflow.velnor_concurrency_group.as_deref() {
+        crate::validate_config_text(value, "[workflow] velnor_concurrency_group")?;
     }
     if let (Some(runners), Some(default_dispatch_runner)) = (
         workflow.runners.as_deref(),

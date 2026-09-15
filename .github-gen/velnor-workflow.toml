@@ -27,6 +27,10 @@ velnor_trusted_label = "velnor-host-docker"
 # Restore velnor-trusted after Sentry org fleet is healthy.
 pull_request_on_velnor = true
 velnor_rust_needs = "dependency-closure"
+# Single-slot macOS recovery host: one admitted run across PRs/workflows.
+velnor_concurrency_group = "velnor-${{ github.repository }}"
+# Avoid five stack groups fanning out immediately after plan on one slot.
+velnor_serial_stack_groups = true
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 # Release contract: typed native publisher + rolling preview. Guest-seed
@@ -154,7 +158,6 @@ file = "nightly.yml"
 primitive = "watch-graph"
 
 [declare.args]
-runtime_inputs = ["crates/velnor-workflow/src/runtime.rs"]
 docker_closure = [
   "rust-velnor-runner",
   "rust-velnorctl",
@@ -172,7 +175,6 @@ docker_closure = [
 "rust-velnor-runner" = [
   ".github-gen/velnor-workflow.toml",
   "microvm/**",
-  "tools/unit-collector/**",
   "fleet/**",
 ]
 "rust-velnorctl" = ["microvm/**"]
@@ -211,7 +213,7 @@ id = "rust-production-topology"
 label = "Rust production topology"
 kind = "rust"
 root = "."
-watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-runner/**", "crates/velnor-workflow/src/runtime.rs", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "scripts/check-release-feature-boundary.sh", "scripts/test-check-release-feature-boundary.sh"]
+watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-runner/**", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "scripts/check-release-feature-boundary.sh", "scripts/test-check-release-feature-boundary.sh"]
 workspace_check = true
 ci_tasks = ["test-release-feature-boundary", "test-release-boundary-script"]
 pinned_lockfile = true

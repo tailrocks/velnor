@@ -29,7 +29,7 @@ on:
 
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: velnor-${{ github.repository }}
   cancel-in-progress: true
 
 permissions:
@@ -65,7 +65,6 @@ jobs:
           CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
-          VELNOR_SELECTION_FILE: ${{ runner.temp }}/velnor-ci-selection
         run: |
           set -euo pipefail
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
@@ -85,7 +84,7 @@ jobs:
   group-docker:
     name: "Docker / Images"
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.docker_matrix != '[]' }}
-    needs: [plan]
+    needs: [plan, group-bun]
     uses: ./.github/workflows/ci-unit-docker.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
@@ -96,7 +95,7 @@ jobs:
   group-docs:
     name: Documentation
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.docs_matrix != '[]' }}
-    needs: [plan]
+    needs: [plan, group-docker]
     uses: ./.github/workflows/ci-unit-docs.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
@@ -107,7 +106,7 @@ jobs:
   group-opentofu:
     name: OpenTofu
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.opentofu_matrix != '[]' }}
-    needs: [plan]
+    needs: [plan, group-docs]
     uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
@@ -118,7 +117,7 @@ jobs:
   group-rust:
     name: Rust
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.rust_matrix != '[]' }}
-    needs: [plan]
+    needs: [plan, group-opentofu]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       selected_units: ${{ needs.plan.outputs.units }}
