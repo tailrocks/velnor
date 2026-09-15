@@ -850,13 +850,13 @@ impl ProjectConfig {
             if let Some(version) = &unit.tool_version {
                 write_toml_string(&mut output, "tool_version", version);
             }
+            if let Some(workflow_file) = &unit.workflow_file {
+                write_toml_string(&mut output, "workflow_file", workflow_file);
+            }
             if let Some(cache) = &unit.cache {
                 output.push_str("[unit.cache]\n");
                 write_toml_array(&mut output, "key_files", &cache.key_files);
                 write_toml_array(&mut output, "paths", &cache.paths);
-            }
-            if let Some(workflow_file) = &unit.workflow_file {
-                write_toml_string(&mut output, "workflow_file", workflow_file);
             }
         }
         output
