@@ -2511,7 +2511,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .map(|unit| {
                 contracts
                     .and_then(|contracts| contracts.get(&unit.id))
-                    .map_or(DEFAULT_UNIT_TIMEOUT_MINUTES, |contract| contract.timeout_minutes)
+                    .map_or(DEFAULT_UNIT_TIMEOUT_MINUTES, |contract| {
+                        contract.timeout_minutes
+                    })
             })
             .max()
             .unwrap_or(DEFAULT_UNIT_TIMEOUT_MINUTES)
@@ -2617,13 +2619,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             && let Some(unit) = members
                 .iter()
                 .find(|unit| self.trust_gated_velnor_job_skipped(lane, unit))
-            {
-                if let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref() {
-                    let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
-                }
-                gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
-                display_name = self.trusted_unit_display_name(lane, unit, display_name);
+        {
+            if let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref() {
+                let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
             }
+            gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
+            display_name = self.trusted_unit_display_name(lane, unit, display_name);
+        }
         let display_name = yaml_scalar(&display_name);
         let _ = writeln!(
             output,
@@ -2698,11 +2700,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .as_ref()
             .is_some_and(cache_is_velnor_host_persistent);
         let mut fetch_script = render_cargo_fetch_roots_script(&roots, skip_when_offline_ready);
-        if members
-            .iter()
-            .copied()
-            .any(unit_runs_workflow_plain_check)
-        {
+        if members.iter().copied().any(unit_runs_workflow_plain_check) {
             fetch_script.push_str(&crate::render_pinned_policy_prefetch_bash(
                 crate::VELNOR_POLICY_WORKFLOW_REV,
             ));

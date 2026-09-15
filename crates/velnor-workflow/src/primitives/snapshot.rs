@@ -444,9 +444,9 @@ impl RetentionPolicy {
                 .classes
                 .iter_mut()
                 .find(|class| class.id == "compiler-snapshots")
-            {
-                class.generation_bound = bound;
-            }
+        {
+            class.generation_bound = bound;
+        }
         policy
     }
 }

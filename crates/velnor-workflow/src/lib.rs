@@ -80,7 +80,7 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-pub(crate) const VELNOR_POLICY_WORKFLOW_REV: &str = "284f109157fe37bcf7bedbbe4f0f2d5c55c460dc";
+pub(crate) const VELNOR_POLICY_WORKFLOW_REV: &str = "f3fc75ad2c566f38c6f469aec2261d552331b3b7";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
@@ -90,7 +90,7 @@ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // PRs; anything older fails dispatch/schedule planning or poisons macOS
 // builds with the Linux mold link arg. Bump after publishing a Velnor commit
 // that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "284f109157fe37bcf7bedbbe4f0f2d5c55c460dc";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "f3fc75ad2c566f38c6f469aec2261d552331b3b7";
 const MR_BOXINGTON_VERSION: &str = "1.11.1";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
@@ -4500,7 +4500,8 @@ fn repository_head_revision(root: &Path) -> Result<String, GeneratorError> {
 
 fn policy_install_root(revision: &str) -> PathBuf {
     env::var_os("RUNNER_TEMP")
-        .or_else(|| env::var_os("TMPDIR")).map_or_else(env::temp_dir, PathBuf::from)
+        .or_else(|| env::var_os("TMPDIR"))
+        .map_or_else(env::temp_dir, PathBuf::from)
         .join(format!("velnor-workflow-policy-{revision}"))
 }
 
