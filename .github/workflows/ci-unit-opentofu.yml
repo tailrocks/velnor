@@ -134,7 +134,7 @@ jobs:
           fi
       - name: Restore OpenTofu cache
         if: ${{ inputs.unit == 'opentofu' }}
-        id: cache
+        id: opentofu-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -202,7 +202,7 @@ jobs:
           fi
           exit $rc
       - name: Save OpenTofu cache
-        if: ${{ inputs.unit == 'opentofu' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.unit == 'opentofu' && (always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.opentofu-cache.outputs.cache-hit != 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -224,8 +224,8 @@ jobs:
         if: ${{ inputs.unit == 'opentofu' && (always()) }}
         env:
           VELNOR_CI_LANE: github
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.opentofu-cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.opentofu-cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: opentofu

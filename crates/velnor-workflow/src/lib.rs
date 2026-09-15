@@ -2356,6 +2356,7 @@ pub(crate) fn render_pinned_toolchain_fill(
             ActionPin::CacheSave.reference(),
             &toolchain,
             None,
+            None,
         );
         // Preview builds run only from trusted pushes to the default branch, so
         // that — and nothing broader — is what may save the toolchain cache.
@@ -2369,6 +2370,7 @@ pub(crate) fn render_pinned_toolchain_fill(
                 "{} && steps.rustup-toolchain.outputs.cache-hit != 'true'",
                 primitives::default_branch_push_cache_save_expression(&config.default_branch)
             )),
+            None,
         );
         template
             .replace(
@@ -3457,16 +3459,29 @@ pub(crate) fn workflow_selection_file_materialize(sources: &SelectionFieldSource
     )
 }
 
-pub(crate) fn hosted_mold_setup(default_branch: &str, cache_save: bool) -> String {
+/// Qualify a step id when multiple units share one job (collapsed verify).
+pub(crate) fn qualified_step_id(prefix: Option<&str>, base: &str) -> String {
+    match prefix {
+        Some(prefix) => format!("{prefix}{base}"),
+        None => base.to_owned(),
+    }
+}
+
+pub(crate) fn hosted_mold_setup(
+    default_branch: &str,
+    cache_save: bool,
+    step_id_prefix: Option<&str>,
+) -> String {
+    let mold_id = qualified_step_id(step_id_prefix, "mold-cache");
     let mut output = format!(
-        "      - name: Restore mold {MOLD_VERSION} cache\n        id: mold-cache\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n      - name: Set up mold {MOLD_VERSION}\n        shell: bash\n        env:\n          MOLD_VERSION: {MOLD_VERSION}\n        run: |\n          set -euo pipefail\n          case \"$(uname -m)\" in\n            x86_64) mold_arch=x86_64; expected='{MOLD_X86_64_SHA256}' ;;\n            aarch64) mold_arch=aarch64; expected='{MOLD_AARCH64_SHA256}' ;;\n            *) echo \"unsupported mold architecture: $(uname -m)\" >&2; exit 1 ;;\n          esac\n          cache_dir=\"$HOME/.cache/velnor/mold/$MOLD_VERSION\"\n          archive=\"$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n          mkdir -p \"$cache_dir\"\n          if [[ ! -s \"$archive\" ]]; then\n            temporary=\"$archive.download\"\n            trap 'rm -f \"$temporary\"' EXIT\n            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \\\n              --output \"$temporary\" \\\n              \"https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n            printf '%s  %s\\n' \"$expected\" \"$temporary\" | sha256sum --check --strict\n            mv \"$temporary\" \"$archive\"\n            trap - EXIT\n          fi\n          printf '%s  %s\\n' \"$expected\" \"$archive\" | sha256sum --check --strict\n          if [[ \"$(id -u)\" -eq 0 ]]; then\n            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          else\n            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            sudo ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          fi\n          mold --version | grep -F \"$MOLD_VERSION\"\n",
+        "      - name: Restore mold {MOLD_VERSION} cache\n        id: {mold_id}\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n      - name: Set up mold {MOLD_VERSION}\n        shell: bash\n        env:\n          MOLD_VERSION: {MOLD_VERSION}\n        run: |\n          set -euo pipefail\n          case \"$(uname -m)\" in\n            x86_64) mold_arch=x86_64; expected='{MOLD_X86_64_SHA256}' ;;\n            aarch64) mold_arch=aarch64; expected='{MOLD_AARCH64_SHA256}' ;;\n            *) echo \"unsupported mold architecture: $(uname -m)\" >&2; exit 1 ;;\n          esac\n          cache_dir=\"$HOME/.cache/velnor/mold/$MOLD_VERSION\"\n          archive=\"$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n          mkdir -p \"$cache_dir\"\n          if [[ ! -s \"$archive\" ]]; then\n            temporary=\"$archive.download\"\n            trap 'rm -f \"$temporary\"' EXIT\n            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \\\n              --output \"$temporary\" \\\n              \"https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n            printf '%s  %s\\n' \"$expected\" \"$temporary\" | sha256sum --check --strict\n            mv \"$temporary\" \"$archive\"\n            trap - EXIT\n          fi\n          printf '%s  %s\\n' \"$expected\" \"$archive\" | sha256sum --check --strict\n          if [[ \"$(id -u)\" -eq 0 ]]; then\n            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          else\n            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            sudo ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          fi\n          mold --version | grep -F \"$MOLD_VERSION\"\n",
         ActionPin::CacheRestore.reference()
     );
     if cache_save {
         let trusted = primitives::trusted_cache_save_expression(default_branch);
         let _ = writeln!(
             output,
-            "      - name: Save mold {MOLD_VERSION} cache\n        if: ({trusted}) && steps.mold-cache.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}",
+            "      - name: Save mold {MOLD_VERSION} cache\n        if: ({trusted}) && steps.{mold_id}.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}",
             ActionPin::CacheSave.reference()
         );
     }
@@ -3475,16 +3490,21 @@ pub(crate) fn hosted_mold_setup(default_branch: &str, cache_save: bool) -> Strin
 
 /// Restore and save `~/.cargo/bin` for hosted jobs that provision policy and
 /// test tools through `taiki-e/install-action` instead of mise.
-pub(crate) fn hosted_cargo_bin_toolchain_setup(default_branch: &str, cache_save: bool) -> String {
+pub(crate) fn hosted_cargo_bin_toolchain_setup(
+    default_branch: &str,
+    cache_save: bool,
+    step_id_prefix: Option<&str>,
+) -> String {
+    let cargo_bin_id = qualified_step_id(step_id_prefix, "cargo-bin-toolchain");
     let mut output = format!(
-        "      - name: Restore cargo bin toolchain\n        id: cargo-bin-toolchain\n        uses: {}\n        with:\n          path: ~/.cargo/bin\n          key: velnor-cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('mise.lock', 'mise.toml') }}}}\n",
+        "      - name: Restore cargo bin toolchain\n        id: {cargo_bin_id}\n        uses: {}\n        with:\n          path: ~/.cargo/bin\n          key: velnor-cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('mise.lock', 'mise.toml') }}}}\n",
         ActionPin::CacheRestore.reference()
     );
     if cache_save {
         let trusted = primitives::trusted_cache_save_expression(default_branch);
         let _ = writeln!(
             output,
-            "      - name: Save cargo bin toolchain\n        if: ({trusted}) && steps.cargo-bin-toolchain.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: ~/.cargo/bin\n          key: velnor-cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('mise.lock', 'mise.toml') }}}}",
+            "      - name: Save cargo bin toolchain\n        if: ({trusted}) && steps.{cargo_bin_id}.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: ~/.cargo/bin\n          key: velnor-cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('mise.lock', 'mise.toml') }}}}",
             ActionPin::CacheSave.reference()
         );
     }
