@@ -708,9 +708,10 @@ fn validate_remove_target_selectors(globals: &GlobalArgs) -> Result<(), CommandE
     Ok(())
 }
 
+/// Control client for query/mutation commands. The global `--repo` is a
+/// command input for repository-scoped verbs (`host start`, `workflow check`,
+/// `run dispatch`), not a query filter, so the v1 query API rejects it here.
 fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, CommandError> {
-    use velnor_control::config::ContextStore;
-
     if globals.repo.is_some() {
         return Err(CommandError::new(
             ExitClass::Usage,
@@ -718,6 +719,26 @@ fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, 
             "global --repo is not supported by the v1 query API",
         ));
     }
+    endpoint_client_for(globals)
+}
+
+/// The repository named by the global `--repo OWNER/NAME` selector, required.
+fn required_repo(globals: &GlobalArgs) -> Result<&str, CommandError> {
+    match globals.repo.as_deref().map(str::trim) {
+        Some(repo) if repo.contains('/') => Ok(repo),
+        _ => Err(CommandError::new(
+            ExitClass::Usage,
+            "repo.required",
+            "pass --repo OWNER/NAME",
+        )),
+    }
+}
+
+/// Control client resolved from context/instance selection only.
+fn endpoint_client_for(
+    globals: &GlobalArgs,
+) -> Result<velnor_client::UnixControlClient, CommandError> {
+    use velnor_control::config::ContextStore;
 
     let contexts = context_store()?.list()?;
     let (endpoint, context_selected) = if let Some(context_name) = &globals.context {
@@ -767,14 +788,31 @@ fn validate_context_instance(
     Ok(())
 }
 
-fn client_query(args: &commands::ResourceQueryArgs) -> velnor_client::ResourceQuery {
-    velnor_client::ResourceQuery {
-        selector: args.selector.clone(),
-        field_selector: args.field_selector.clone(),
+/// Build the wire query from the global filters plus per-command pagination.
+///
+/// The control API accepts `since` only as an RFC 3339 instant, so the parsed
+/// global [`Since`] (absolute or relative) is resolved against now here; a
+/// relative bound that cannot be represented is a usage error, never an
+/// approximation.
+fn client_query(
+    globals: &GlobalArgs,
+    args: &commands::ResourceQueryArgs,
+) -> Result<velnor_client::ResourceQuery, CommandError> {
+    let since = globals
+        .since
+        .map(|since| since.resolve(velnor_model::Timestamp::now()))
+        .transpose()
+        .map_err(|error| CommandError::new(ExitClass::Usage, "since.invalid", error.to_string()))?
+        .map(|instant| instant.to_rfc3339())
+        .transpose()
+        .map_err(|error| CommandError::new(ExitClass::Usage, "since.invalid", error.to_string()))?;
+    Ok(velnor_client::ResourceQuery {
+        selector: globals.selector.clone(),
+        field_selector: globals.field_selector.clone(),
         page_token: args.page_token.clone(),
-        since: args.since.clone(),
+        since,
         limit: args.limit,
-    }
+    })
 }
 
 fn render_resources(
@@ -824,9 +862,8 @@ async fn execute_explain(
 
 async fn execute_get(globals: &GlobalArgs, args: commands::GetArgs) -> Result<(), CommandError> {
     let (resource, query) = get_target(args);
-    let page = client_for(globals)?
-        .get_resources(resource, &client_query(&query))
-        .await?;
+    let query = client_query(globals, &query)?;
+    let page = client_for(globals)?.get_resources(resource, &query).await?;
     render_resources(globals, &page.resources)
 }
 
@@ -927,7 +964,7 @@ async fn execute_events(
     globals: &GlobalArgs,
     args: commands::EventsArgs,
 ) -> Result<(), CommandError> {
-    let query = client_query(&args.query);
+    let query = client_query(globals, &args.query)?;
     let page = client_for(globals)?.get_resources("events", &query).await?;
     render_resources(globals, &page.resources)
 }
@@ -1151,13 +1188,11 @@ async fn execute_workflow(
     globals: &GlobalArgs,
     args: commands::WorkflowArgs,
 ) -> Result<(), CommandError> {
-    let info = client_for(globals)?.info().await?;
+    let repo = required_repo(globals)?;
+    let info = endpoint_client_for(globals)?.info().await?;
     match args.command {
         commands::WorkflowCommand::Check(args) => {
-            if !args.repo.contains('/')
-                || args.reference.trim().is_empty()
-                || args.workflow.trim().is_empty()
-            {
+            if args.reference.trim().is_empty() || args.workflow.trim().is_empty() {
                 return Err(CommandError::new(
                     ExitClass::Usage,
                     "workflow.invalid",
@@ -1166,7 +1201,7 @@ async fn execute_workflow(
             }
             print_json(serde_json::json!({
                 "valid": true,
-                "repo": args.repo,
+                "repo": repo,
                 "ref": args.reference,
                 "workflow": args.workflow,
                 "apiVersion": info.api_version,
@@ -1784,5 +1819,85 @@ mod tests {
         let envelope = serde_json::to_string(&error.envelope()).expect("envelope JSON");
         assert!(envelope.contains(&missing), "{envelope}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every clap definition error (duplicate ids across global and local
+    /// arguments, conflicting attributes, missing value parsers) is a runtime
+    /// panic in the shipped binary. `debug_assert` walks the complete command
+    /// tree, so a definition mistake anywhere fails here, not in production.
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    /// `debug_assert` validates each command in isolation, so it cannot see
+    /// the one definition error clap only detects at parse time: a local
+    /// argument whose id equals a `global = true` argument of an ancestor.
+    /// The global is propagated into the subcommand's matches under that id
+    /// and the local typed accessor then panics ("Mismatch between definition
+    /// and access"). Walk the tree and refuse any such shadowing.
+    #[test]
+    fn no_local_argument_shadows_a_global_argument() {
+        fn walk(
+            command: &clap::Command,
+            inherited: &[String],
+            path: &str,
+            failures: &mut Vec<String>,
+        ) {
+            let mut globals = inherited.to_vec();
+            for arg in command.get_arguments() {
+                let id = arg.get_id().to_string();
+                if inherited.contains(&id) {
+                    failures.push(format!(
+                        "{path}: local argument `{id}` shadows a global one"
+                    ));
+                }
+                if arg.is_global_set() && !globals.contains(&id) {
+                    globals.push(id);
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(
+                    sub,
+                    &globals,
+                    &format!("{path} {}", sub.get_name()),
+                    failures,
+                );
+            }
+        }
+        let root = Cli::command();
+        let mut failures = Vec::new();
+        walk(&root, &[], root.get_name(), &mut failures);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The exact invocation that panicked on Sentry: the global `--since`
+    /// was also declared on the `get` resource query with a different type.
+    #[test]
+    fn get_jobs_with_global_since_parses_and_resolves_to_rfc3339() {
+        let cli =
+            Cli::try_parse_from(["velnorctl", "get", "jobs", "--since", "1h", "--limit", "5"])
+                .expect("get jobs --since must parse");
+        let Command::Get(args) = cli.command else {
+            panic!("expected get");
+        };
+        let (resource, query) = get_target(args);
+        assert_eq!(resource, "jobs");
+        let wire = client_query(&cli.globals, &query).expect("query");
+        assert_eq!(wire.limit, Some(5));
+        let since = wire.since.expect("since is forwarded");
+        let instant = velnor_model::Timestamp::parse(&since).expect("RFC 3339 wire form");
+        let age_seconds = velnor_model::Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            - instant.as_offset_datetime().unix_timestamp();
+        assert!(
+            (3540..=3660).contains(&age_seconds),
+            "relative --since must resolve to roughly one hour ago, got {since}"
+        );
+
+        let cli = Cli::try_parse_from(["velnorctl", "--since", "1h", "get", "jobs"])
+            .expect("global --since before the subcommand must parse");
+        assert!(cli.globals.since.is_some());
     }
 }

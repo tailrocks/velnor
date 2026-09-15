@@ -38,7 +38,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     crate::ensure_native_github_http_transport();
     ensure_dev_canonical_storage()?;
     ensure_dev_service_binary()?;
-    let url = resolve_repo_url(&args)?;
+    let url = resolve_repo_url(globals.repo.as_deref(), args.url.as_deref())?;
     if github_pat().is_none() {
         return Err(CommandError::new(
             ExitClass::Usage,
@@ -798,8 +798,8 @@ fn read_host_health(name: &str) -> Option<String> {
     Some(pairs.collect::<Vec<_>>().join(" "))
 }
 
-fn resolve_repo_url(args: &HostStartArgs) -> Result<String, CommandError> {
-    let raw = match (args.url.as_deref(), args.repo.as_deref()) {
+fn resolve_repo_url(repo: Option<&str>, url: Option<&str>) -> Result<String, CommandError> {
+    let raw = match (url, repo) {
         (Some(url), _) => url.trim().to_owned(),
         (None, Some(repo)) => format!("https://github.com/{}", repo.trim().trim_matches('/')),
         (None, None) => format!("https://github.com/{DEFAULT_REPO}"),
@@ -1345,32 +1345,10 @@ mod tests {
 
     #[test]
     fn default_and_repo_urls_are_repository_scoped() {
-        let default = resolve_repo_url(&HostStartArgs {
-            repo: None,
-            url: None,
-            name: None,
-            slots: 1,
-            pr: None,
-            work_dir: None,
-            config_dir: None,
-            docker_host_work_dir: None,
-            docker_image: None,
-        })
-        .expect("default repo");
+        let default = resolve_repo_url(None, None).expect("default repo");
         assert_eq!(default, "https://github.com/tailrocks/velnor");
 
-        let named = resolve_repo_url(&HostStartArgs {
-            repo: Some("tailrocks/velnor".into()),
-            url: None,
-            name: None,
-            slots: 1,
-            pr: None,
-            work_dir: None,
-            config_dir: None,
-            docker_host_work_dir: None,
-            docker_image: None,
-        })
-        .expect("named repo");
+        let named = resolve_repo_url(Some("tailrocks/velnor"), None).expect("named repo");
         assert_eq!(named, "https://github.com/tailrocks/velnor");
     }
 
@@ -1501,25 +1479,14 @@ mod tests {
 
     #[test]
     fn org_urls_are_refused() {
-        let error = resolve_repo_url(&HostStartArgs {
-            repo: None,
-            url: Some("https://github.com/tailrocks".into()),
-            name: None,
-            slots: 1,
-            pr: None,
-            work_dir: None,
-            config_dir: None,
-            docker_host_work_dir: None,
-            docker_image: None,
-        })
-        .expect_err("org URL");
+        let error =
+            resolve_repo_url(None, Some("https://github.com/tailrocks")).expect_err("org URL");
         assert_eq!(error.reason, "host.org_scope_refused");
     }
 
     #[test]
     fn default_config_dir_is_isolated_per_host_name() {
         let args = HostStartArgs {
-            repo: None,
             url: None,
             name: None,
             slots: 1,
@@ -1540,7 +1507,6 @@ mod tests {
     #[test]
     fn explicit_config_dir_is_unchanged() {
         let args = HostStartArgs {
-            repo: None,
             url: None,
             name: None,
             slots: 1,
