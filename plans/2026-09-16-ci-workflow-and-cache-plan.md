@@ -909,7 +909,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Clippy clean (`velnor-workflow --all-targets -D warnings`) | V | local `cargo clippy -p velnor-workflow --all-targets -- -D warnings` exit 0 |
 | Prefetch bash drops redundant `cd` (no duplicate workspace hop) | V | `lib.rs:4508-4511`; regen `ci-unit-rust-2.yml` single `cd -- "$GITHUB_WORKSPACE"` before install |
 | Pins @ `f3fc75a` / D19 @ `28b528d8` | V | `lib.rs:83,93`; `manifest.rs:712`; release golden digests; `cargo test -p velnor-workflow` 455 passed |
-| §16 `ci-required` / policy green / 3× main green | P | awaiting CI run on `81104ba8` |
+| §16 `ci-required` / policy green / 3× main green | P | run 35036454380: docker skip OK; ci-required failed `velnor-rust-policy` (fleet admission); fmt fix @ `b6f7f5e2` |
 
 #### Rev 10 delta @ `81104ba8` (2026-09-16)
 
@@ -918,3 +918,6 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | ci-required accepts trust-gated Velnor docker skip | V | `ir.rs:3658-3660,2212-2230`; run 35035084210 root cause `velnor-docker skipped`; `trust_gated_velnor_docker_skip_is_accepted_by_ci_required` |
 | lane_pairing clippy format_push_string | V | `92305dd2` `write!` fix in `lane_pairing.rs:468` |
 | Pins @ `643f3312` / D19 @ `81104ba8` | V | `lib.rs:83,93`; `cargo test -p velnor-workflow` 456 passed |
+| Run 35036454380 trust-gated docker in aggregate | V | `velnor-docker: skipped` accepted; no `velnor-docker did not pass: skipped` |
+| Run 35036454380 velnor-workflow GitHub | P→V | fmt drift `lib.rs:7140`; fixed @ `b6f7f5e2` |
+| Run 35036454380 Velnor admission failures | P | 4/31 Velnor jobs: `operational store rejected the sanitized admission row` (`runner.rs:7266`); fleet ops |
