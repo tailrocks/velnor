@@ -25,8 +25,8 @@ Operator contract (2026-09-15): finish only after this sequence is independently
 | **PR #814** | `a67e4c28` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
 | **PR #815** | `e5049452` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
 | **PR #816** | CLOSED unmerged. Not the integration PR. |
-| **PR #819** | OPEN — branch integration PR; live head was `e698be6b` at the 10:27:57Z refresh; current branch has since advanced to `0d0e98b1`. Policy run `34957693289` was in progress; CI run `34957302203` was on `b417128c`; run `34957694681` was pending. Refresh after current push. |
-| **Focused branch** | `origin/velnor-macos-host` @ `0d0e98b1`; commits include `e698be6b` generator timing/warm-store changes and `0d0e98b1` runner lifecycle hardening. |
+| **PR #819** | OPEN — branch integration PR @ `61323943`; current CI `34959036397` and policy `34959036101` are pending. Prior policy `34958556160` @ `0d0e98b1` was in progress at refresh; prior CI `34958556507` was queued. |
+| **Focused branch** | `origin/velnor-macos-host` @ `61323943`; implementation `0d0e98b1` plus signed execution-record refresh `61323943`. |
 | **Host** | 15 online / 4 busy at 10:27:57Z; active jobs included slots 4, 5, 6, and 10; GitHub API reports OS `unknown`, labels prove Velnor-hosted capacity. |
 | **Lifecycle** | Verified local tests cover exclusive in-flight leases, persisted waiter ownership, teardown-before-release, fail-closed marker scans, orphan cleanup, output spill/reconnect, and repeated slot reuse. |
 | **Sentry** | JIT wedge unchanged; tailrocks fleet down. Do not deploy until gate 4. |
@@ -68,9 +68,10 @@ Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redund
 | #812 `4db23c0f` / #814 `a67e4c28` / #815 `e5049452` | DCO pass; `ci-required` fail | latest completed runs |
 | #816 run `34939230446` @ `e53bc60b` | historical (PR CLOSED unmerged) | Planning **PASS** then; not current integration |
 | #816 run `34930408749` | historical (PR CLOSED unmerged) | bootstrap/setup pattern (superseded) |
-| #819 ci-pr `34957694681` @ `e698be6b` | historical at 10:27:57Z | pending then; refresh current head `0d0e98b1` |
+| #819 ci-pr `34959036397` @ `61323943` | pending | current CI at refresh; policy `34959036101` pending |
+| #819 ci-pr `34958556507` @ `0d0e98b1` | queued | superseded by current head |
 | Host lifecycle | root cause documented | `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
-| `velnor-macos-host` | `0d0e98b1` | `ed8a4864` admission fences; `dd1e024b` OCC lifecycle; `e144f4c3` drain-hint Result handling; `e698be6b` generated timing/warm-store probes; `0d0e98b1` container lifetime, lease, teardown, orphan-reclaim, output-stream hardening |
+| `velnor-macos-host` | `61323943` | `ed8a4864` admission fences; `dd1e024b` OCC lifecycle; `e144f4c3` drain-hint Result handling; `e698be6b` generated timing/warm-store probes; `0d0e98b1` container lifetime, lease, teardown, orphan-reclaim, output-stream hardening; `61323943` signed live-state record |
 | Sentry tailrocks | fleet down | JIT wedge, 0/8 registered after 15:11 restart |
 
 ## Decisions
@@ -129,7 +130,7 @@ repo-scoped runner that is not in `velnor-trusted`.
 
 ## Next
 
-1. Mac host relaunched on fixed binary (07:35Z) — 12/12 accountable, jobs flowing; re-run failed jobs on #809/#819 and watch to green. Next idle restart picks up drain/prune/OCC. Refresh #819 after `0d0e98b1` CI starts.
+1. Mac host relaunched on fixed binary (07:35Z) — 12/12 accountable, jobs flowing; re-run failed jobs on #809/#819 and watch to green. Next idle restart picks up drain/prune/OCC. Watch #819 runs `34959036397` / `34959036101` to conclusion.
 2. Operator rebase #809 onto main/host fixes (agents cannot commit to #809); watch run `34930642603` to green.
 3. Gate 2 **NOT YET** until `ci-required` green + recovery Velnor-lane proof. Do not merge #809. Integration PR is **#819** (#816 closed unmerged).
 4. Do not deploy Sentry (JIT wedge unchanged; gate 5 blocked).
