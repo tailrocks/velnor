@@ -368,6 +368,29 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Return whether the controller still owes an observation for the exact
+    /// desired-state version. Same-state mutations are real operations even
+    /// when the projection already has the requested observed value; without
+    /// this query they remain accepted forever.
+    pub fn lifecycle_operation_pending(
+        &self,
+        instance_slug: &str,
+        desired_state: &str,
+        resource_version: u64,
+    ) -> StoreResult<bool> {
+        let conn = self.lock_conn()?;
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM lifecycle_operations
+             WHERE instance_slug = ?1
+               AND desired_state = ?2
+               AND resource_version = ?3
+               AND phase COLLATE NOCASE = 'accepted'",
+            params![instance_slug, desired_state, resource_version as i64],
+            |row| row.get(0),
+        )?;
+        Ok(pending != 0)
+    }
+
     /// Atomically persist lifecycle intent, desired state, and idempotency.
     ///
     /// Returns the prior operation with `false` for a replay, or the newly
@@ -3342,6 +3365,44 @@ mod lifecycle_tests {
         assert!(fresh);
         assert_eq!(rewritten.observed_state, "ready");
         assert_eq!(rewritten.resource_version, 3);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn lifecycle_operation_pending_matches_only_the_exact_same_state_version() {
+        let (directory, store) = open_observed_store("same-state-pending");
+        seed_instance(&store, "primary");
+        let request = LifecycleOperationRequest {
+            instance_slug: "primary".to_owned(),
+            idempotency_key: "repeat-resume".to_owned(),
+            operation_id: "operation-repeat-resume".to_owned(),
+            kind: "resume".to_owned(),
+            target: "primary".to_owned(),
+            reason: "same state".to_owned(),
+            desired_state: "ready".to_owned(),
+            desired_slots: None,
+            expected_version: None,
+            created_at: Timestamp::now(),
+        };
+        let (accepted, fresh) = store
+            .record_lifecycle_operation(&request)
+            .expect("record same-state operation");
+        assert!(fresh);
+        assert!(store
+            .lifecycle_operation_pending("primary", "ready", accepted.resource_version)
+            .expect("read pending operation"));
+        assert!(!store
+            .lifecycle_operation_pending("primary", "cordoned", accepted.resource_version)
+            .expect("wrong desired state is not pending"));
+        assert!(!store
+            .lifecycle_operation_pending("primary", "ready", accepted.resource_version + 1)
+            .expect("wrong version is not pending"));
+        store
+            .record_lifecycle_observed("primary", "ready", accepted.resource_version)
+            .expect("observe same-state operation");
+        assert!(!store
+            .lifecycle_operation_pending("primary", "ready", accepted.resource_version)
+            .expect("completed operation is not pending"));
         let _ = std::fs::remove_dir_all(directory);
     }
 

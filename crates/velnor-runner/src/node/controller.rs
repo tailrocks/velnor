@@ -696,21 +696,49 @@ fn drain_edge(journal: &mut Journal, lifecycle: Option<&ActiveLifecycle>) {
             ),
         }
     }
-    if let (Some(lifecycle), Some(fresh)) = (lifecycle, fresh)
-        && fresh.observed != "draining"
-        && let Err(error) = lifecycle.store.record_lifecycle_observed(
-            &lifecycle.instance,
-            "draining",
-            fresh.version,
-        )
-    {
-        // A version conflict cannot surface here: it converges inside the
-        // store call. Only IO and missing-row failures land here.
-        eprintln!(
-            "forensics.lifecycle event=drain-observed-unrecorded instance={} error={error}",
-            lifecycle.instance
-        );
+    if let (Some(lifecycle), Some(fresh)) = (lifecycle, fresh) {
+        let observation_needed = if fresh.observed != "draining" {
+            true
+        } else {
+            match lifecycle_observation_needed(lifecycle, &fresh) {
+                Ok(needed) => needed,
+                Err(error) => {
+                    eprintln!(
+                        "forensics.lifecycle event=drain-observation-pending-unreadable instance={} error={error}",
+                        lifecycle.instance
+                    );
+                    false
+                }
+            }
+        };
+        if observation_needed
+            && let Err(error) = lifecycle.store.record_lifecycle_observed(
+                &lifecycle.instance,
+                "draining",
+                fresh.version,
+            )
+        {
+            // A version conflict cannot surface here: it converges inside the
+            // store call. Only IO and missing-row failures land here.
+            eprintln!(
+                "forensics.lifecycle event=drain-observed-unrecorded instance={} error={error}",
+                lifecycle.instance
+            );
+        }
     }
+}
+
+fn lifecycle_observation_needed(
+    lifecycle: &ActiveLifecycle,
+    fresh: &velnor_control::lifecycle::LifecycleState,
+) -> anyhow::Result<bool> {
+    if fresh.observed != fresh.desired {
+        return Ok(true);
+    }
+    lifecycle
+        .store
+        .lifecycle_operation_pending(&lifecycle.instance, &fresh.desired, fresh.version)
+        .map_err(|error| anyhow::anyhow!("read pending lifecycle observation: {error}"))
 }
 
 /// Reconcile lifecycle desired state into the local admission boundary before
@@ -735,12 +763,15 @@ fn reconcile_lifecycle_admission(
         .service
         .desired_fresh(&lifecycle.instance)
         .map_err(|error| anyhow::anyhow!("read lifecycle desired state: {error}"))?;
+    let observation_needed = lifecycle_observation_needed(lifecycle, &fresh)?;
     match fresh.desired.as_str() {
         "ready" => {
             journal
-                .clear_admission_blocked()
+                .clear_admission_blocked_if(
+                    state.admission_blocked.then_some(state.admission_version),
+                )
                 .map_err(|error| anyhow::anyhow!("clear lifecycle admission fence: {error}"))?;
-            if fresh.observed != "ready"
+            if observation_needed
                 && let Err(error) = lifecycle.store.record_lifecycle_observed(
                     &lifecycle.instance,
                     "ready",
@@ -757,7 +788,7 @@ fn reconcile_lifecycle_admission(
             journal
                 .set_admission_blocked(fresh.version)
                 .map_err(|error| anyhow::anyhow!("set lifecycle admission fence: {error}"))?;
-            if fresh.observed != "cordoned"
+            if observation_needed
                 && let Err(error) = lifecycle.store.record_lifecycle_observed(
                     &lifecycle.instance,
                     "cordoned",
@@ -3553,6 +3584,31 @@ mod tests {
             .unwrap();
         assert_eq!(observed.desired_state, "cordoned");
         assert_eq!(observed.observed_state, "cordoned");
+
+        // A repeated Cordon is a new accepted operation even though the
+        // projection is already cordoned. Reconciliation must observe it so
+        // the operation cannot remain accepted forever.
+        let repeated = lifecycle
+            .service
+            .mutate(MutationRequest {
+                kind: MutationKind::Cordon,
+                target: "primary".to_owned(),
+                reason: "repeat cordon test".to_owned(),
+                idempotency_key: "repeat-cordon-admission-test".to_owned(),
+                expected_version: Some(observed.resource_version),
+                scale_to: None,
+            })
+            .unwrap();
+        reconcile_lifecycle_admission(&mut journal, Some(&lifecycle)).unwrap();
+        let repeated_phase: String = rusqlite::Connection::open(dir.join("state.db"))
+            .unwrap()
+            .query_row(
+                "SELECT phase FROM lifecycle_operations WHERE operation_id = ?1",
+                [repeated.operation_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repeated_phase, "completed");
 
         let fresh = lifecycle.service.desired_fresh("primary").unwrap();
         lifecycle

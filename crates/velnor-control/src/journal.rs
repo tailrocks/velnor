@@ -1811,7 +1811,8 @@ impl Journal {
 
     /// Latch a soft admission fence at `version`. Unlike drain, this keeps
     /// the daemon alive and lets in-flight jobs finish; all new registration,
-    /// permits, and acquisitions are rejected until `clear_admission_blocked`.
+    /// permits, and acquisitions are rejected until
+    /// `clear_admission_blocked_if` observes and clears this version.
     /// The version never regresses across retries.
     ///
     /// # Errors
@@ -1848,16 +1849,28 @@ impl Journal {
         Ok(true)
     }
 
-    /// Clear a soft admission fence. Idempotent and independent from the
-    /// process-exit drain marker.
+    /// Clear a soft admission fence only if the marker still has the version
+    /// observed by the caller. The compare-and-delete closes the race where
+    /// a concurrent cordon could otherwise be erased after the caller's
+    /// read and before an unconditional delete.
     ///
     /// # Errors
     /// SQLite write failures.
-    pub fn clear_admission_blocked(&mut self) -> StoreResult<bool> {
+    pub fn clear_admission_blocked_if(
+        &mut self,
+        expected_version: Option<u64>,
+    ) -> StoreResult<bool> {
+        let Some(expected_version) = expected_version else {
+            return Ok(false);
+        };
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let removed = transaction.execute("DELETE FROM meta WHERE key = 'admission'", [])? > 0;
+        let expected = format!("blocked:{expected_version}");
+        let removed = transaction.execute(
+            "DELETE FROM meta WHERE key = 'admission' AND value = ?1",
+            params![expected],
+        )? > 0;
         transaction.commit()?;
         Ok(removed)
     }
@@ -1872,23 +1885,41 @@ pub struct DrainState {
     pub version: u64,
 }
 
+/// Why a durable drain marker could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainStateReadError {
+    /// The journal could not be opened or queried.
+    Unavailable,
+    /// The marker exists but is not a valid `requested:{version}` value.
+    Malformed,
+}
+
 /// Read the latched drain marker with a throwaway read-only connection.
 ///
 /// One `SELECT` on `meta` with a zero busy timeout: slot and daemon poll
-/// boundaries call this and must never block on a writer's lock. Any failure
-/// (missing file, lock contention, corrupt payload) is `None`, never an
-/// error: readers treat an unreadable marker as no drain order.
+/// boundaries call this and must never block on a writer's lock. An unreadable
+/// existing journal is an error, not an absent marker: admission callers must
+/// fail closed instead of treating corruption or lock contention as permission
+/// to run.
 #[must_use]
-pub fn read_drain_state(path: &Path) -> Option<DrainState> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    conn.busy_timeout(Duration::ZERO).ok()?;
-    let value: String = conn
+pub fn read_drain_state(path: &Path) -> Result<Option<DrainState>, DrainStateReadError> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| DrainStateReadError::Unavailable)?;
+    conn.busy_timeout(Duration::ZERO)
+        .map_err(|_| DrainStateReadError::Unavailable)?;
+    let value: Option<String> = conn
         .query_row("SELECT value FROM meta WHERE key = 'drain'", [], |row| {
             row.get(0)
         })
         .optional()
-        .ok()??;
-    parse_drain_value(&value)
+        .map_err(|_| DrainStateReadError::Unavailable)?;
+    value
+        .map(|value| {
+            parse_drain_value(&value)
+                .ok_or(DrainStateReadError::Malformed)
+                .map(Some)
+        })
+        .unwrap_or(Ok(None))
 }
 
 /// Parse one `meta[drain]` value (`requested:{version}`).
@@ -3385,8 +3416,8 @@ mod tests {
                 .unwrap()
                 .rejected
         );
-        assert!(journal.clear_admission_blocked().unwrap());
-        assert!(!journal.clear_admission_blocked().unwrap());
+        assert!(journal.clear_admission_blocked_if(Some(3)).unwrap());
+        assert!(!journal.clear_admission_blocked_if(Some(3)).unwrap());
         assert!(!journal.materialized_state().unwrap().admission_blocked);
         assert_eq!(read_admission_state(&dir.join("journal.db")).unwrap(), None);
         assert!(
@@ -3401,6 +3432,24 @@ mod tests {
                 })
                 .unwrap()
                 .rejected
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn admission_fence_compare_and_delete_preserves_a_newer_concurrent_fence() {
+        let (dir, mut journal) = open_tmp("admission-fence-cas");
+        assert!(journal.set_admission_blocked(3).unwrap());
+        assert!(!journal.clear_admission_blocked_if(Some(2)).unwrap());
+        assert_eq!(
+            read_admission_state(&dir.join("journal.db")).unwrap(),
+            Some(AdmissionState { version: 3 })
+        );
+        assert!(journal.set_admission_blocked(4).unwrap());
+        assert!(!journal.clear_admission_blocked_if(Some(3)).unwrap());
+        assert_eq!(
+            read_admission_state(&dir.join("journal.db")).unwrap(),
+            Some(AdmissionState { version: 4 })
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3498,29 +3547,32 @@ mod tests {
         let state = journal.materialized_state().unwrap();
         assert!(!state.drain_active);
         assert_eq!(state.drain_version, 0);
-        assert_eq!(read_drain_state(&dir.join("journal.db")), None);
+        assert_eq!(read_drain_state(&dir.join("journal.db")), Ok(None));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn read_drain_state_returns_none_on_missing_locked_or_corrupt() {
+    fn read_drain_state_distinguishes_absent_from_unreadable_or_corrupt() {
         let missing = std::env::temp_dir().join(format!(
             "velnor-journal-drain-missing-{}-{}",
             std::process::id(),
             unix_now()
         ));
         let _ = std::fs::remove_file(&missing);
-        assert_eq!(read_drain_state(&missing), None);
+        assert!(matches!(
+            read_drain_state(&missing),
+            Err(DrainStateReadError::Unavailable)
+        ));
 
         let (dir, mut journal) = open_tmp("drain-read-none");
         assert!(journal.set_drain(5).unwrap());
         let path = dir.join("journal.db");
         assert_eq!(
             read_drain_state(&path),
-            Some(DrainState {
+            Ok(Some(DrainState {
                 active: true,
                 version: 5
-            })
+            }))
         );
 
         // A writer holding an exclusive lock makes the zero-timeout read
@@ -3539,19 +3591,38 @@ mod tests {
         }
         let blocker = Connection::open(&locked_path).unwrap();
         blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        assert_eq!(read_drain_state(&locked_path), None);
+        assert!(matches!(
+            read_drain_state(&locked_path),
+            Err(DrainStateReadError::Unavailable)
+        ));
         blocker.execute_batch("ROLLBACK").unwrap();
         assert_eq!(
             read_drain_state(&locked_path),
-            Some(DrainState {
+            Ok(Some(DrainState {
                 active: true,
                 version: 11
-            })
+            }))
         );
 
         let garbage = dir.join("garbage.db");
         std::fs::write(&garbage, b"not a sqlite database").unwrap();
-        assert_eq!(read_drain_state(&garbage), None);
+        assert!(matches!(
+            read_drain_state(&garbage),
+            Err(DrainStateReadError::Unavailable)
+        ));
+        let malformed = dir.join("malformed.db");
+        let malformed_journal = Journal::open(&malformed).unwrap();
+        malformed_journal
+            .conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('drain', 'corrupt')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            read_drain_state(&malformed),
+            Err(DrainStateReadError::Malformed)
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
