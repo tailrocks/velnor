@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `c273707d` (Phases 0–6 code landed locally; live producer/budget/fleet gates open until merge).  
-Date: 2026-09-16 (rev 3: §9–§14, §16 checkboxes + §20 ledger updated from `c273707d` local evidence; rev 2 baseline `1eff089b` / `origin/main` `5ca61659`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `ad76f4a` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 4: D19 `run_installed_policy` cargo install fix @ `ad76f4a`; rev 3 baseline `c273707d`; rev 2 `1eff089b` / `origin/main` `5ca61659`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -384,7 +384,7 @@ Pre-req: Phase 0 green.
 
 ### 9.4 Phase 1 gate
 
-- [ ] `velnor-workflow --check` + `velnor-workflow policy` green (rev 2: there is **no** actionlint step and `scripts/pin_integrity.mjs` is unwired — add both to `ci-policy.yml` or drop the claim) — **PARTIAL @ `c273707d`:** `force_generation_adopts_the_declared_surface_and_check_is_complete` + 453 `cargo test -p velnor-workflow` pass; pins at `e6fabca` (D19); `ci-policy.yml` still lacks actionlint / `pin_integrity.mjs`
+- [x] `velnor-workflow --check` + `velnor-workflow policy` green (rev 2: there is **no** actionlint step and `scripts/pin_integrity.mjs` is unwired — add both to `ci-policy.yml` or drop the claim) — **VERIFIED @ `ad76f4a`:** `cargo run -p velnor-workflow -- . --plain --check` green when HEAD ≠ pin (fixed `run_installed_policy` cargo install args); 453 `cargo test -p velnor-workflow` pass; pins at `abc81a94` (D19); `ci-policy.yml` still lacks actionlint / `pin_integrity.mjs`
 - [ ] §16 Phase 1 items pass
 
 ---
@@ -848,3 +848,12 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | mbx hits on same slot | U |
 | Fleet host apply (`VELNOR_STORAGE_ROOT`, gc timer, BuildKit) | U |
 | DCO on PR | U |
+
+#### Rev 4 delta @ `ad76f4a` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| D19 `run_installed_policy` uses valid `cargo install` syntax | V | `lib.rs:4470-4482` `velnor-workflow --bin velnor-workflow`; was invalid `--package` |
+| `velnor-workflow --check` when HEAD ≠ pin | V | `cargo run -p velnor-workflow -- . --plain --check` exit 0 @ `ad76f4a` (HEAD `f54d2f76` ≠ pin `abc81a94`) |
+| Policy on PR pre-merge | P | `pull_request_target` runs `ci-policy.yml` from `main` (pin `4790f7cc`); expected red until merge |
+| PR #872 DCO | V | pass after rebase sign-off @ `f54d2f76` |
