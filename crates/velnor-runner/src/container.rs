@@ -433,8 +433,9 @@ impl JobContainerSpec {
     fn append_rust_acceleration(&self, command: &mut DockerCommand) -> io::Result<()> {
         if let Some(host) = &self.mbx_store_host {
             command.pair("-v", self.mount_arg(host, "/var/cache/mbx"));
+            let cache_dir = self.mbx_cache_container_dir();
             command.envs([
-                ("MBX_CACHE_DIR", "/var/cache/mbx"),
+                ("MBX_CACHE_DIR", cache_dir.as_str()),
                 ("MBX_TARGET_ROOT", "/var/cache/mbx/targets"),
                 ("MBX_GC_AUTO", "true"),
                 ("MBX_GC_MAX_SIZE", "20GiB"),
@@ -1392,6 +1393,43 @@ impl JobContainerSpec {
         }
     }
 
+    /// Container-side mbx cache dir: a per-slot subdir of the shared mount.
+    ///
+    /// Every job container mounts the same host store at `/var/cache/mbx`, and
+    /// mbx takes its registrar flock(EX) then a per-hash lease flock(EX) with
+    /// no timeouts. Every container runs mbx as the same pid, so all of them
+    /// serialize on one `registrar.lock` while the holder blocks on the shared
+    /// lease file — an observed cross-container ABBA deadlock (1 holder + N
+    /// waiters, 0% CPU, jobs hang to the GitHub timeout). Each slot therefore
+    /// gets a disjoint `slots/slot-N` subdir — the same `slots/<slot>`
+    /// precedent as the mise installs mount — which relocates mbx's registrar,
+    /// leases, and checkouts (`MBX_CACHE_DIR` → `cache_dir` →
+    /// `cache_dir/incremental`). The mount itself is unchanged, so the store
+    /// root stays shared and each slot's cache stays warm across its own jobs.
+    /// Without a slot identity (a non-production temp layout) the subdir
+    /// isolates per job name instead of falling back to the shared root.
+    pub(crate) fn mbx_cache_container_dir(&self) -> String {
+        format!("/var/cache/mbx/slots/{}", self.mbx_slot_key())
+    }
+
+    /// Host-side path of this job's mbx cache subdir, created before start.
+    /// `None` exactly when the mbx store is disabled (explicit sccache mode).
+    pub(crate) fn mbx_cache_store_host(&self) -> Option<PathBuf> {
+        self.mbx_store_host
+            .as_ref()
+            .map(|store| store.join("slots").join(self.mbx_slot_key()))
+    }
+
+    fn mbx_slot_key(&self) -> String {
+        slot_store_key(&self.temp_host).unwrap_or_else(|| {
+            eprintln!(
+                "forensics.lifecycle: mbx cache isolated per job: no runner slot identity under {}",
+                self.temp_host.display()
+            );
+            sanitize_store_key(&self.name)
+        })
+    }
+
     /// Persistent per-version mise binary store for this job's trust/repository
     /// scope. Without a repository identity the store stays job-ephemeral, so
     /// persistence is never granted to an unidentified job.
@@ -2119,12 +2157,12 @@ mod tests {
 
     #[test]
     fn default_job_mounts_only_mbx_with_bounded_gc() {
-        let job = spec();
+        let job = slotted_spec("mbx-default-gc");
         let mbx_store = job.mbx_store_host.clone().unwrap();
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
         assert!(args.contains(&format!("{}:/var/cache/mbx", mbx_store.display())));
-        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
         assert!(!args.contains(&"MBX_DISABLE=1".into()));
@@ -2138,7 +2176,7 @@ mod tests {
 
     #[test]
     fn daemon_acceleration_environment_follows_trusted_container_options() {
-        let mut job = spec();
+        let mut job = slotted_spec("mbx-policy-order");
         job.options = vec!["-e".into(), "MBX_CACHE_DIR=/untrusted-override".into()];
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
@@ -2148,7 +2186,7 @@ mod tests {
             .unwrap();
         let policy_index = args
             .iter()
-            .position(|arg| arg == "MBX_CACHE_DIR=/var/cache/mbx")
+            .position(|arg| arg == "MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1")
             .unwrap();
         assert!(policy_index > override_index);
     }
@@ -2513,7 +2551,7 @@ mod tests {
 
     #[test]
     fn builds_start_container_args_with_mounts() {
-        let job = spec();
+        let job = slotted_spec("start-container-mounts");
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
 
@@ -2590,7 +2628,7 @@ mod tests {
         assert!(has_read_only_mount(&args, &job.actions_host, "/__a"));
         assert!(!has_mount(&args, &job.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
-        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
@@ -2699,6 +2737,92 @@ mod tests {
             first.mise_executable_store_host(),
             other_slot.mise_executable_store_host()
         );
+    }
+
+    #[test]
+    fn mbx_cache_is_warm_per_slot_but_isolated_between_slots() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut same_slot = spec();
+        same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        let mut other_slot = spec();
+        other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+
+        // Same slot, successive jobs: one warm subdir. Different slots:
+        // disjoint subdirs, so mbx's registrar/lease flocks never cross.
+        assert_eq!(
+            first.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-3"
+        );
+        assert_eq!(
+            same_slot.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-3"
+        );
+        assert_eq!(
+            other_slot.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-4"
+        );
+
+        // Mount/env consistency: the shared mount is unchanged, and each env
+        // value names the mounted subdir the host pre-creates for that slot.
+        // (Each fixture owns its temp root, so expectations derive per spec.)
+        for (job, slot) in [
+            (&first, "slot-3"),
+            (&same_slot, "slot-3"),
+            (&other_slot, "slot-4"),
+        ] {
+            let store = job.mbx_store_host.clone().unwrap();
+            assert_eq!(
+                job.mbx_cache_store_host().unwrap(),
+                store.join("slots").join(slot)
+            );
+        }
+
+        // Materializing the command writes an env file, so root the argv half
+        // of the assertion in a real directory.
+        let job = slotted_spec("mbx-slot-argv");
+        let store = job.mbx_store_host.clone().unwrap();
+        let args = rendered(&job.start_args().unwrap());
+        assert!(args.contains(&format!("{}:/var/cache/mbx", store.display())));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
+        // Managed targets stay on the shared root: they serialize on
+        // cargo-lock files, not on mbx's registrar/lease flock pair.
+        assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets".into()));
+    }
+
+    #[test]
+    fn mbx_cache_without_slot_identity_isolates_per_job() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/job-a/temp".into();
+        let mut second = spec();
+        second.name = "velnor-job-2".into();
+        second.temp_host = "/var/lib/velnor/work/job-b/temp".into();
+
+        // No `slot-N` segment: isolate per job name, never share the root.
+        assert_eq!(
+            first.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/velnor-job-1"
+        );
+        assert_eq!(
+            second.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/velnor-job-2"
+        );
+        let store = first.mbx_store_host.clone().unwrap();
+        assert_eq!(
+            first.mbx_cache_store_host().unwrap(),
+            store.join("slots/velnor-job-1")
+        );
+    }
+
+    #[test]
+    fn mbx_cache_subdir_is_absent_when_the_store_is_disabled() {
+        let mut job = slotted_spec("mbx-slot-disabled");
+        job.mbx_store_host = None;
+        job.sccache_store_host = Some(PathBuf::from("/var/cache/sccache"));
+        assert_eq!(job.mbx_cache_store_host(), None);
+        let args = rendered(&job.start_args().unwrap());
+        assert!(!args.iter().any(|arg| arg.starts_with("MBX_CACHE_DIR=")));
+        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
     }
 
     #[test]
