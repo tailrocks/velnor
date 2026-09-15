@@ -7096,6 +7096,33 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_trust_gated_docker_lane_skips_when_trusted_runner_is_unavailable() {
+        let (mut config, index) = both_runner_docker_config();
+        config.velnor_trusted_label = Some("example-trusted".to_owned());
+        config.velnor_trusted_runner_available = Some(false);
+        config.units[index].requires_trusted = true;
+        let (files, _) =
+            WorkflowIr::from_config(&config).render_kind_unit_workflows(UnitKind::Docker, None);
+        let rendered = must_some(files.values().next(), "docker kind reusable workflow");
+        assert!(
+            rendered.contains("verify-velnor-trusted:"),
+            "docker Velnor lane must use the trusted collapsed verify job: {rendered}"
+        );
+        assert!(
+            rendered.contains("Velnor trusted runner unavailable:"),
+            "skip reason must be visible in generated YAML: {rendered}"
+        );
+        assert!(
+            rendered.contains("&& false"),
+            "trust-gated collapsed Velnor job must fail closed when no runner is available: {rendered}"
+        );
+        assert!(
+            rendered.contains("skipped (no online example-trusted runner)"),
+            "job name must carry the skip reason: {rendered}"
+        );
+    }
+
+    #[test]
     fn trusted_project_toml_round_trips_through_the_pinned_runtime() {
         let root = configured_repository("trusted-runtime-roundtrip", None);
         let id = scanned_rust_unit_id(&root);
