@@ -1107,7 +1107,7 @@ fn kind_matrix_output_from_file(file: &str) -> String {
 /// escape away from `// \"[]\"`, which jq rejects.
 pub(crate) fn jq_read_plan_matrix(matrix_key: &str) -> String {
     format!(
-        "matrix=\"$(jq -r --arg key '{matrix_key}' --arg empty '[]' '.plan.outputs[$key] // $empty' <<<\"$NEEDS_JSON\")\""
+        r#"matrix="$(jq -r --arg key '{matrix_key}' --arg empty '[]' '.plan.outputs[$key] // $empty' <<<"$NEEDS_JSON")""#
     )
 }
 
