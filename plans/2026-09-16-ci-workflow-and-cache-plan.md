@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `ad76f4a` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 4: D19 `run_installed_policy` cargo install fix @ `ad76f4a`; rev 3 baseline `c273707d`; rev 2 `1eff089b` / `origin/main` `5ca61659`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `9c1211d7` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 5: collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -857,3 +857,12 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | `velnor-workflow --check` when HEAD ≠ pin | V | `cargo run -p velnor-workflow -- . --plain --check` exit 0 @ `ad76f4a` (HEAD `f54d2f76` ≠ pin `abc81a94`) |
 | Policy on PR pre-merge | P | `pull_request_target` runs `ci-policy.yml` from `main` (pin `4790f7cc`); expected red until merge |
 | PR #872 DCO | V | pass after rebase sign-off @ `f54d2f76` |
+
+#### Rev 5 delta @ `9c1211d7` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| PR CI instant-fail (0 jobs) root cause | V | orphan `Set up Velnor workflow runtime` step with only `if:` in `verify-github` (`ir.rs:2524` pre-fix); actionlint `syntax-check` |
+| Collapsed verify runtime bootstrap | V | `render_unit_runtime` in `render_collapsed_lane_verify_job`; actionlint clean on all `ci-unit-*.yml` |
+| Pins @ `8decfeeb` (D19) | V | `lib.rs:83,93`; generated runtime artifact names updated |
+| `cargo test -p velnor-workflow` | V | 453 passed @ `9c1211d7` |
