@@ -2235,8 +2235,11 @@ fn has_safe_runner_gate(
     if has_trusted_runner_gate(condition) {
         return true;
     }
-    velnor_policy.pull_request_on_velnor
-        && is_generated_velnor_pr_gate(condition, &velnor_policy.default_branch)
+    // Dual-lane automatic Velnor jobs admit same-repository pull_request plus
+    // the default-branch push/schedule/dispatch (and merge_group when emitted).
+    // That generated shape is trusted even when the advisory checkout lacks
+    // `.github/ci/project.toml` and only carries `.github-gen`.
+    is_generated_velnor_pr_gate(condition, &velnor_policy.default_branch)
         && is_static_self_hosted_runner(job, velnor_policy)
 }
 
@@ -2267,73 +2270,112 @@ fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+fn toml_string_array(
+    value: Option<&toml::Value>,
+    field: &str,
+) -> Result<Vec<String>, GeneratorError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    value
+        .as_array()
+        .ok_or_else(|| GeneratorError::usage(format!("{field} must be an array")))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| GeneratorError::usage(format!("{field} must contain only strings")))
+        })
+        .collect()
+}
+
+fn toml_string(value: Option<&toml::Value>, field: &str) -> Result<Option<String>, GeneratorError> {
+    value
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| GeneratorError::usage(format!("{field} must be a string")))
+        })
+        .transpose()
+}
+
+fn toml_bool(value: Option<&toml::Value>, field: &str) -> Result<Option<bool>, GeneratorError> {
+    value
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| GeneratorError::usage(format!("{field} must be a boolean")))
+        })
+        .transpose()
+}
+
 fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
     let path = root.join(DEFAULT_CONFIG);
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(VelnorPolicyContract::default());
-        }
+    let runtime = match fs::read_to_string(&path) {
+        Ok(content) => Some(toml::from_str::<toml::Value>(&content).map_err(|error| {
+            GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
+        })?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(GeneratorError::io("read workflow config", &path, &error)),
     };
-    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
-        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
-    })?;
-    let runtime_workflow = value.get("workflow").and_then(toml::Value::as_table);
-    let labels = runtime_workflow
-        .and_then(|workflow| workflow.get("velnor_labels"))
-        .map(|labels| {
-            labels
-                .as_array()
-                .ok_or_else(|| GeneratorError::usage("[workflow] velnor_labels must be an array"))?
-                .iter()
-                .map(|label| {
-                    label.as_str().map(str::to_owned).ok_or_else(|| {
-                        GeneratorError::usage("[workflow] velnor_labels must contain only strings")
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
+    let generation = generation_workflow(root)?;
+    if runtime.is_none() && generation.is_none() {
+        return Ok(VelnorPolicyContract::default());
+    }
+    let runtime_workflow = runtime
+        .as_ref()
+        .and_then(|value| value.get("workflow"))
+        .and_then(toml::Value::as_table);
+    let generation_workflow = generation.as_ref().and_then(toml::Value::as_table);
+    let mut labels = toml_string_array(
+        runtime_workflow.and_then(|workflow| workflow.get("velnor_labels")),
+        "[workflow] velnor_labels",
+    )?;
+    if labels.is_empty() {
+        labels = toml_string_array(
+            generation_workflow.and_then(|workflow| workflow.get("velnor_labels")),
+            "[workflow] velnor_labels",
+        )?;
+    }
+    let group = toml_string(
+        generation_workflow.and_then(|workflow| workflow.get("velnor_runner_group")),
+        "[workflow] velnor_runner_group",
+    )?;
+    let pull_request_on_velnor = toml_bool(
+        generation_workflow.and_then(|workflow| workflow.get("pull_request_on_velnor")),
+        "[workflow] pull_request_on_velnor",
+    )?
+    .unwrap_or(false);
+    let velnor_trusted_label = toml_string(
+        generation_workflow.and_then(|workflow| workflow.get("velnor_trusted_label")),
+        "[workflow] velnor_trusted_label",
+    )?;
+    let runners = runtime
+        .as_ref()
+        .and_then(|value| value.get("runners"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            generation_workflow
+                .and_then(|workflow| workflow.get("runners"))
+                .and_then(toml::Value::as_str)
         })
-        .transpose()?
-        .unwrap_or_default();
-    let generation_workflow = generation_workflow(root)?;
-    let generation_workflow = generation_workflow.as_ref().and_then(toml::Value::as_table);
-    let group = generation_workflow
-        .and_then(|workflow| workflow.get("velnor_runner_group"))
-        .map(|group| {
-            group.as_str().map(str::to_owned).ok_or_else(|| {
-                GeneratorError::usage("[workflow] velnor_runner_group must be a string")
-            })
+        .unwrap_or_default()
+        .to_owned();
+    let default_branch = runtime
+        .as_ref()
+        .and_then(|value| value.get("default_branch"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            generation_workflow
+                .and_then(|workflow| workflow.get("default_branch"))
+                .and_then(toml::Value::as_str)
         })
-        .transpose()?;
-    let pull_request_on_velnor = generation_workflow
-        .and_then(|workflow| workflow.get("pull_request_on_velnor"))
-        .map(|enabled| {
-            enabled.as_bool().ok_or_else(|| {
-                GeneratorError::usage("[workflow] pull_request_on_velnor must be a boolean")
-            })
-        })
-        .transpose()?
-        .unwrap_or(false);
-    let velnor_trusted_label = generation_workflow
-        .and_then(|workflow| workflow.get("velnor_trusted_label"))
-        .map(|label| {
-            label.as_str().map(str::to_owned).ok_or_else(|| {
-                GeneratorError::usage("[workflow] velnor_trusted_label must be a string")
-            })
-        })
-        .transpose()?;
+        .unwrap_or("main")
+        .to_owned();
     let policy = VelnorPolicyContract {
-        runners: value
-            .get("runners")
-            .and_then(toml::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        default_branch: value
-            .get("default_branch")
-            .and_then(toml::Value::as_str)
-            .unwrap_or("main")
-            .to_owned(),
+        runners,
+        default_branch,
         velnor_labels: labels,
         velnor_runner_group: group,
         velnor_trusted_label,
@@ -2383,14 +2425,21 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     let automatic = format!(
         "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
     );
+    let automatic_merge_group = format!(
+        "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||github.event_name=='merge_group'||(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
+    );
     let explicit_dispatch = format!(
         "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
     let default_dispatch = format!(
         "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
     );
-    value == format!("{automatic}||{explicit_dispatch}")
-        || value == format!("{automatic}||{default_dispatch}")
+    [automatic.as_str(), automatic_merge_group.as_str()]
+        .into_iter()
+        .any(|automatic| {
+            value == format!("{automatic}||{explicit_dispatch}")
+                || value == format!("{automatic}||{default_dispatch}")
+        })
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -2526,14 +2575,7 @@ fn inspect_mapping(
                 failures.record(path, "pull_request_target is forbidden");
             }
             "uses" => inspect_uses(value, path, failures),
-            "runs-on" => inspect_runner(
-                value,
-                path,
-                matrix,
-                trusted_gate,
-                velnor_policy,
-                failures,
-            ),
+            "runs-on" => inspect_runner(value, path, matrix, trusted_gate, velnor_policy, failures),
             _ => inspect_yaml_value(
                 value,
                 path,
@@ -5001,6 +5043,54 @@ jobs:
     }
 
     #[test]
+    fn policy_accepts_generated_pr_gates_from_generation_config_alone() -> Result<(), Box<dyn Error>>
+    {
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
+        let root = policy_fixture(
+            "velnor-pr-generation-only",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "github",
+        )?;
+        std::fs::remove_dir_all(root.join(".github/ci"))?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            format!(
+                "schema = 1\n\n[workflow]\nrunners = \"both\"\ndefault_branch = \"main\"\nvelnor_labels = [{toml_labels}]\npull_request_on_velnor = true\n"
+            ),
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-unit-rust.yml"),
+            format!(
+                r"
+name: rust
+on:
+  workflow_call:
+jobs:
+  velnor-rust-policy:
+    if: ${{{{ contains(format(',{{0}},', inputs.selected_units), ',rust-policy,') && ({gate}) }}}}
+    runs-on: [{yaml_labels}]
+    steps:
+      - run: true
+",
+            ),
+        )?;
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION);
+        assert!(
+            result.is_ok(),
+            "generation-only dual-lane fixture rejected: {result:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn policy_accepts_the_both_mode_lanes_dispatch_gate() -> Result<(), Box<dyn Error>> {
         // Both-mode aggregates name the manual lane selector `lanes`; the
         // gate shape is the generated one, only the input spelling differs.
@@ -5612,8 +5702,8 @@ jobs:
     }
 
     #[test]
-    fn policy_accepts_trusted_label_suffix_and_combined_unit_selectors() -> Result<(), Box<dyn Error>>
-    {
+    fn policy_accepts_trusted_label_suffix_and_combined_unit_selectors(
+    ) -> Result<(), Box<dyn Error>> {
         let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
         let trusted_label = "velnor-host-docker";
         let toml_labels = crate::estate::approved_velnor_runner_labels()
