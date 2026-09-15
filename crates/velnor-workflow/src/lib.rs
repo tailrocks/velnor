@@ -3747,6 +3747,10 @@ fn builtin_generated_actions() -> BTreeMap<PathBuf, String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::panic,
+    reason = "test fixture reads must fail loudly with the missing path"
+)]
 fn report_velnor_ci_outcomes_action_template() -> String {
     let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml");
@@ -9287,7 +9291,10 @@ channel = "stable"
             .filter(|(path, _)| {
                 path.file_name().is_some_and(|name| {
                     name.to_str().is_some_and(|name| {
-                        name.starts_with("ci-unit-rust") && name.ends_with(".yml")
+                        name.starts_with("ci-unit-rust")
+                            && Path::new(name)
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
                     })
                 })
             })
@@ -10881,9 +10888,11 @@ channel = "stable"
         assert!(policy.contains(&format!("--git {VELNOR_WORKFLOW_INSTALL_GIT_URL}")));
         assert!(policy.contains("--locked"));
         assert!(policy.contains("--rev abc123"));
-        let install_command = &policy[policy
-            .find("env -u RUSTC_WRAPPER")
-            .expect("install clears inherited build controls")..];
+        let install_offset = must_some(
+            policy.find("env -u RUSTC_WRAPPER"),
+            "install clears inherited build controls",
+        );
+        let install_command = &policy[install_offset..];
         assert!(install_command.starts_with(
             "env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS"
         ));
@@ -11073,23 +11082,6 @@ channel = "stable"
         String::new()
     }
 
-    /// The `if:` gate of the first velnor lane job in a rendered unit
-    /// surface, located by job header so the github gate beside it cannot
-    /// leak into the assertion.
-    fn velnor_lane_gate(surface: &str) -> String {
-        let mut in_velnor = false;
-        for line in surface.lines() {
-            if line.starts_with("  ") && !line.starts_with("   ") {
-                in_velnor = line.starts_with("  velnor:") || line.starts_with("  velnor-");
-                continue;
-            }
-            if in_velnor && line.trim_start().starts_with("if: ") {
-                return line.to_owned();
-            }
-        }
-        String::new()
-    }
-
     #[test]
     fn policy_checks_dash_uses_and_ignores_yaml_block_content() {
         let root = temporary_repository("policy-uses");
@@ -11220,7 +11212,7 @@ channel = "stable"
         let mut config = scanned_fixture(RunnerMode::Both);
         config.automatic = RunnerMode::Velnor;
         config.pull_request_on_velnor = true;
-        let error = generated_files(&config).expect_err("both + automatic=velnor");
+        let error = must_fail(generated_files(&config), "both + automatic=velnor");
         assert!(
             error.to_string().contains("automatic") && error.to_string().contains("both"),
             "runners=both must reject automatic=velnor: {error}"
@@ -11231,7 +11223,7 @@ channel = "stable"
     fn both_with_automatic_github_is_rejected() {
         let mut config = scanned_fixture(RunnerMode::Both);
         config.automatic = RunnerMode::Github;
-        let error = generated_files(&config).expect_err("both + automatic=github");
+        let error = must_fail(generated_files(&config), "both + automatic=github");
         assert!(
             error.to_string().contains("automatic") && error.to_string().contains("both"),
             "runners=both must reject automatic=github: {error}"
@@ -12003,8 +11995,10 @@ channel = "stable"
             requires_trusted: false,
             workspace_check: false,
         });
-        let workflow = WorkflowIr::from_config(&config)
-            .render_nested_unit(config.units.last().unwrap(), WorkflowKind::Main);
+        let workflow = WorkflowIr::from_config(&config).render_nested_unit(
+            must_some(config.units.last(), "config has a unit"),
+            WorkflowKind::Main,
+        );
         let github_lane = workflow
             .split_once("\n  velnor:")
             .map_or(workflow.as_str(), |(lane, _)| lane);

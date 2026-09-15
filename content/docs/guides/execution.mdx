@@ -241,12 +241,16 @@ depth; Velnor ignores GitHub cache transport for host-persistent paths entirely.
 
 #### Docker Rust acceleration
 
-The default job image pins Mr Boxington (`mbx`) 1.8.3 and runs
+The default job image pins Mr Boxington (`mbx`) 1.11.1 and runs
 `mbx setup --yes` while building the image. The generated Cargo launcher is
 first on `PATH`, so workflow steps continue to invoke plain `cargo`; those
 commands transparently enter Mr Boxington. There is no default
 `RUSTC_WRAPPER`. Mr Boxington discovers the container's cgroup constraints and
 available resources instead of Velnor hardcoding CPU or memory values for it.
+The image deliberately uses standalone setup because noninteractive Velnor
+execs require the stable absolute Cargo shim path `/opt/mbx/bin/cargo`; the
+image bootstraps mise at 2026.9.9, which supports the current locked mbx
+backend.
 
 Velnor mounts the job's host-persistent Mr Boxington cache and managed target
 directories at `/var/cache/mbx`. The host store is partitioned by the job's

@@ -35,7 +35,12 @@ impl Generated {
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("ci-unit-rust") && name.ends_with(".yml"))
+                    .is_some_and(|name| {
+                        name.starts_with("ci-unit-rust")
+                            && Path::new(name)
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
+                    })
             })
             .map(|path| {
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();

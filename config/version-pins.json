@@ -60,16 +60,12 @@
     },
     {
       "name": "rust",
-      "description": "rust-toolchain.toml is the single source of truth for the compiler. Every mise lockfile mirrors the resolved version, and mise exports RUSTUP_TOOLCHAIN from the lock entry, so a stale lock keeps building with the old compiler however the declaration reads.",
+      "description": "rust-toolchain.toml is the single source of truth for the compiler. Both image mise lockfiles mirror the resolved version, and mise exports RUSTUP_TOOLCHAIN from each lock entry, so a stale image lock keeps building with the old compiler however the declaration reads.",
       "authority": {
         "file": "rust-toolchain.toml",
         "pattern": "channel = \"(?<version>\\d+\\.\\d+\\.\\d+)\""
       },
       "mirrors": [
-        {
-          "file": "mise.lock",
-          "pattern": "\\[\\[tools\\.rust\\]\\]\\s+version = \"(?<version>\\d+\\.\\d+\\.\\d+)\""
-        },
         {
           "file": "docker/build-mise.lock",
           "pattern": "\\[\\[tools\\.rust\\]\\]\\s+version = \"(?<version>\\d+\\.\\d+\\.\\d+)\""
@@ -81,20 +77,6 @@
         {
           "file": "content/docs/guides/development.mdx",
           "pattern": "toolchain is Rust (?<version>\\d+\\.\\d+\\.\\d+)"
-        }
-      ]
-    },
-    {
-      "name": "cosign",
-      "description": "Cosign is not a mise key: it serves exactly the cosign-installer adapter, which fetches the pinned release itself. The adapter's pinned version is the authority; the fixture workflow must request exactly it, because any other release fails closed at job time.",
-      "authority": {
-        "file": "crates/velnor-runner/src/executor.rs",
-        "pattern": "COSIGN_LOCKED_VERSION: &str = \"(?<version>[0-9][0-9.]*)\""
-      },
-      "mirrors": [
-        {
-          "file": "crates/velnor-workflow/templates/fixture/workflows/_docker-suite.yml",
-          "pattern": "cosign-release: v(?<version>[0-9][0-9.]*)"
         }
       ]
     }
