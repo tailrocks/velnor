@@ -825,6 +825,10 @@ fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
 /// units, so the excluded callers stay green instead of failing a selection
 /// they can never satisfy. Units of an unknown kind are kept: dropping a
 /// unit the planner does not recognize would silently skip verification.
+///
+/// A both-lane plan keeps pairable kinds. A GitHub-only kind (Swift) stays
+/// selected so an explicit `jobs = ["github"]` opt-out still runs on the
+/// hosted lane when the plan admits GitHub.
 fn selection_for_lanes<'a>(
     config: &'a CiConfig,
     selection: UnitSelection<'a>,
@@ -836,7 +840,14 @@ fn selection_for_lanes<'a>(
         .map(|unit| (unit.id.as_str(), unit.kind.as_str()))
         .collect::<BTreeMap<_, _>>();
     let supported = |kind: &str| {
-        UnitKind::from_prefix(kind).is_none_or(|parsed| lanes_support_unit_kind(lanes, parsed))
+        UnitKind::from_prefix(kind).is_none_or(|parsed| {
+            if lanes_support_unit_kind(lanes, parsed) {
+                return true;
+            }
+            lanes == RunnerMode::Both
+                && (crate::lane_supports_unit_kind(RunnerMode::Github, parsed)
+                    || crate::lane_supports_unit_kind(RunnerMode::Velnor, parsed))
+        })
     };
     UnitSelection {
         units: selection
@@ -3073,9 +3084,25 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
+    let without_lane = strip_inputs_lane_selector(value);
+    let value = without_lane.unwrap_or(value);
     strip_inputs_unit_selector(value)
         .or_else(|| strip_selected_units_selector(value))
         .or_else(|| strip_combined_selected_units_selector(value))
+        .or(without_lane)
+}
+
+/// Peel `inputs.lane == 'github'|'velnor'|'control' &&` from a generated
+/// reusable-job gate. The conjunct only restricts which caller intends the
+/// job; the remaining expression must still be a trusted event gate.
+fn strip_inputs_lane_selector(value: &str) -> Option<&str> {
+    let rest = value.strip_prefix("inputs.lane=='")?;
+    let separator = rest.find("'&&")?;
+    let lane = &rest[..separator];
+    if !matches!(lane, "github" | "velnor" | "control") {
+        return None;
+    }
+    Some(&rest[separator + "'&&".len()..])
 }
 
 fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
@@ -4302,7 +4329,7 @@ default_branch = "main"
 runners = "both"
 
 [workflow]
-version_bump_units = ["rust-velnor-workflow-contract"]
+version_bump_units = ["rust-contract"]
 
 [[unit]]
 id = "rust-root"
@@ -4315,7 +4342,7 @@ velnor_pr_commands = ["true"]
 velnor_full_commands = ["true"]
 
 [[unit]]
-id = "rust-velnor-workflow-contract"
+id = "rust-contract"
 kind = "rust"
 root = "crates/velnor-workflow-contract"
 watch = ["crates/velnor-workflow-contract/**", "Cargo.lock", "crates/velnor-workflow-contract/Cargo.lock"]
@@ -4978,7 +5005,7 @@ velnor_full_commands = ["markdownlint docs"]
         assert!(!selection
             .units
             .iter()
-            .any(|unit| unit.id == "rust-velnor-workflow-contract"));
+            .any(|unit| unit.id == "rust-contract"));
         assert!(!selection
             .units
             .iter()
@@ -5000,7 +5027,7 @@ velnor_full_commands = ["markdownlint docs"]
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         let expected = BTreeSet::from([
-            "rust-velnor-workflow-contract".to_owned(),
+            "rust-contract".to_owned(),
             "rust-contract-workspace".to_owned(),
         ]);
         assert_eq!(selected_id_set(&selection), expected);
@@ -5027,7 +5054,7 @@ velnor_full_commands = ["markdownlint docs"]
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         let expected = BTreeSet::from([
             "rust-root".to_owned(),
-            "rust-velnor-workflow-contract".to_owned(),
+            "rust-contract".to_owned(),
             "rust-root-workspace".to_owned(),
             "rust-contract-workspace".to_owned(),
         ]);
@@ -5050,7 +5077,7 @@ velnor_full_commands = ["markdownlint docs"]
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
         let expected = BTreeSet::from([
-            "rust-velnor-workflow-contract".to_owned(),
+            "rust-contract".to_owned(),
             "rust-contract-workspace".to_owned(),
         ]);
         assert_eq!(selected_id_set(&selection), expected);
@@ -5551,7 +5578,7 @@ jobs:
         // The base-owned entrypoint carries the `Policy` variant.
         let workflow = format!(
             "name: Advisory caller\non: push\njobs:\n{}",
-            crate::inline_policy_job("Advisory policy", POLICY_REVISION)
+            crate::inline_policy_job("Control / Policy", POLICY_REVISION)
         );
         let root = policy_fixture("inline-advisory", &workflow, "github")?;
         assert!(run_policy(root)?);
@@ -5561,7 +5588,7 @@ jobs:
         let workflow = format!(
             "name: Advisory caller\non: push\njobs:\n{}",
             crate::inline_policy_job(
-                "Advisory policy",
+                "Control / Policy",
                 "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33"
             )
         );
@@ -5581,7 +5608,7 @@ jobs:
         let workflow = format!(
             "name: Velnor caller\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-runner]",
                 "local",
@@ -5595,7 +5622,7 @@ jobs:
         let workflow = format!(
             "name: Velnor pull request policy\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5609,7 +5636,7 @@ jobs:
         let workflow = format!(
             "name: Velnor dispatch policy\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5623,7 +5650,7 @@ jobs:
         let workflow = format!(
             "name: Velnor unit policy\non: workflow_call\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5638,7 +5665,7 @@ jobs:
         let workflow = format!(
             "name: Velnor wrong pin\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33",
                 "[self-hosted, example-runner]",
                 "local",
@@ -5651,7 +5678,7 @@ jobs:
         let workflow = format!(
             "name: Velnor untrusted\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-runner]",
                 "local",

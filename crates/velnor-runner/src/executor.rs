@@ -14748,6 +14748,7 @@ mod tests {
                 "trusted",
             ),
             resource_policy: Some("standard".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
         assert!(sink.record_admission(&admission));
@@ -14828,6 +14829,7 @@ mod tests {
                 "trusted",
             ),
             resource_policy: Some("standard".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
         assert!(sink.record_admission(&admission));
@@ -17027,6 +17029,7 @@ esac
                 "trusted",
             ),
             resource_policy: Some("standard".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
         assert!(sink.record_admission(&admission));
@@ -17113,6 +17116,7 @@ esac
                 "trusted",
             ),
             resource_policy: Some("standard".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
         assert!(sink.record_admission(&admission));
@@ -27490,6 +27494,7 @@ fi"#
                 "trusted",
             ),
             resource_policy: Some("standard".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
         assert!(sink.record_admission(&admission));

@@ -1387,7 +1387,7 @@ fn render_native_publish_job(
         consumer = release.consumer_repository,
     );
     format!(
-        "  publish:\n    name: Publish GitHub release\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n      packages: read\n    env:\n      VERSION: {version}\n      SOURCE_REF: ${{{{ github.ref }}}}\n      SOURCE_COMMIT: ${{{{ github.sha }}}}\n      COMMIT: ${{{{ github.sha }}}}\n      INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n      MANIFEST_SHA256: ${{{{ needs.image.outputs.manifest_sha256 }}}}\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: {lane}-*\n          merge-multiple: true\n      - name: Download Debian packages\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n          path: artifacts\n      - name: Download image digests\n        uses: {download}\n        with:\n          name: image-digests\n          path: artifacts\n      - name: Verify tarball provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify deb provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.deb; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\"; done\n{record_assembly}{record_reverify}      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*.tar.gz artifacts/*.deb)\n          test \"${{#subjects[@]}}\" -eq {subject_count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {subject_count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n{manifest_step}      - name: Stage package subjects for hosted signer\n        run: |\n          set -euo pipefail\n          mkdir signer-input\n          cp artifacts/{binary}-*.tar.gz artifacts/{package}-*.deb signer-input/\n{packaged_identity}      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR for immutable image verification\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Verify OCI index stayed immutable before publication\n        env:\n          EXPECTED_INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > published-image.json\n          published_index=\"$(jq -er '.manifest.digest' published-image.json)\"\n          [ \"$published_index\" = \"$EXPECTED_INDEX_DIGEST\" ] || {{\n            echo \"::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication\" >&2\n            exit 1\n          }}\n      - name: Verify release tag stayed immutable before publication\n        env:\n          EXPECTED_TAG_REF: ${{{{ github.ref }}}}\n          EXPECTED_TAG_COMMIT: ${{{{ github.sha }}}}\n        run: |\n          set -euo pipefail\n          remote_tag_refs=\"$(git ls-remote --exit-code origin \"$EXPECTED_TAG_REF\" \"$EXPECTED_TAG_REF^{{}}\")\"\n          remote_tag_commit=\"$(printf '%s\\n' \"$remote_tag_refs\" | awk -v expected=\"$EXPECTED_TAG_REF\" '\n            $2 == expected \"^{{}}\" {{ peeled=$1; found_peeled=1; next }}\n            $2 == expected && !found_peeled {{ raw=$1 }}\n            END {{\n              if (found_peeled) print peeled\n              else if (raw != \"\") print raw\n            }}\n          ')\"\n          case \"$remote_tag_commit\" in\n            *[!0-9a-f]*|'') echo \"::error::release tag $EXPECTED_TAG_REF did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#remote_tag_commit}}\" -eq 40 ] || {{ echo \"::error::release tag $EXPECTED_TAG_REF did not resolve to one commit\" >&2; exit 1; }}\n          [ \"$remote_tag_commit\" = \"$EXPECTED_TAG_COMMIT\" ] || {{\n            echo \"::error::release tag $EXPECTED_TAG_REF moved from $EXPECTED_TAG_COMMIT to $remote_tag_commit\" >&2\n            exit 1\n          }}\n{create_verify}      - name: Upload package subjects\n        uses: {upload}\n        with:\n          name: package-subjects\n          path: signer-input\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  publish:\n    name: Control / Publish\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n      packages: read\n    env:\n      VERSION: {version}\n      SOURCE_REF: ${{{{ github.ref }}}}\n      SOURCE_COMMIT: ${{{{ github.sha }}}}\n      COMMIT: ${{{{ github.sha }}}}\n      INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n      MANIFEST_SHA256: ${{{{ needs.image.outputs.manifest_sha256 }}}}\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: {lane}-*\n          merge-multiple: true\n      - name: Download Debian packages\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n          path: artifacts\n      - name: Download image digests\n        uses: {download}\n        with:\n          name: image-digests\n          path: artifacts\n      - name: Verify tarball provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify deb provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.deb; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\"; done\n{record_assembly}{record_reverify}      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*.tar.gz artifacts/*.deb)\n          test \"${{#subjects[@]}}\" -eq {subject_count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {subject_count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n{manifest_step}      - name: Stage package subjects for hosted signer\n        run: |\n          set -euo pipefail\n          mkdir signer-input\n          cp artifacts/{binary}-*.tar.gz artifacts/{package}-*.deb signer-input/\n{packaged_identity}      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR for immutable image verification\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Verify OCI index stayed immutable before publication\n        env:\n          EXPECTED_INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > published-image.json\n          published_index=\"$(jq -er '.manifest.digest' published-image.json)\"\n          [ \"$published_index\" = \"$EXPECTED_INDEX_DIGEST\" ] || {{\n            echo \"::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication\" >&2\n            exit 1\n          }}\n      - name: Verify release tag stayed immutable before publication\n        env:\n          EXPECTED_TAG_REF: ${{{{ github.ref }}}}\n          EXPECTED_TAG_COMMIT: ${{{{ github.sha }}}}\n        run: |\n          set -euo pipefail\n          remote_tag_refs=\"$(git ls-remote --exit-code origin \"$EXPECTED_TAG_REF\" \"$EXPECTED_TAG_REF^{{}}\")\"\n          remote_tag_commit=\"$(printf '%s\\n' \"$remote_tag_refs\" | awk -v expected=\"$EXPECTED_TAG_REF\" '\n            $2 == expected \"^{{}}\" {{ peeled=$1; found_peeled=1; next }}\n            $2 == expected && !found_peeled {{ raw=$1 }}\n            END {{\n              if (found_peeled) print peeled\n              else if (raw != \"\") print raw\n            }}\n          ')\"\n          case \"$remote_tag_commit\" in\n            *[!0-9a-f]*|'') echo \"::error::release tag $EXPECTED_TAG_REF did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#remote_tag_commit}}\" -eq 40 ] || {{ echo \"::error::release tag $EXPECTED_TAG_REF did not resolve to one commit\" >&2; exit 1; }}\n          [ \"$remote_tag_commit\" = \"$EXPECTED_TAG_COMMIT\" ] || {{\n            echo \"::error::release tag $EXPECTED_TAG_REF moved from $EXPECTED_TAG_COMMIT to $remote_tag_commit\" >&2\n            exit 1\n          }}\n{create_verify}      - name: Upload package subjects\n        uses: {upload}\n        with:\n          name: package-subjects\n          path: signer-input\n          if-no-files-found: error\n          retention-days: 2\n",
         runner = selected_runner(config),
         lane = canonical_lane(config),
         image = release.image,
@@ -1762,11 +1762,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     .map(|_| format!("release-{}-{}", lane.as_str(), dependency))
             }));
             let runner = workflow.runner_for_unit(lane, unit);
-            let job_name = yaml_scalar(&format!(
-                "{} / Release / {}",
-                lane.display_name(),
-                unit.label
-            ));
+            let job_name = yaml_scalar(&crate::comparison_job_name(lane, unit));
             let verify_name = yaml_scalar(&unit.label);
             let dispatch_gate = if lane == RunnerMode::Velnor {
                 format!(
@@ -1786,6 +1782,9 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 ActionPin::Checkout.reference()
             );
+            if lane == crate::RunnerMode::Velnor {
+                super::render_velnor_runner_identity_step(&mut output);
+            }
             WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
             workflow.render_tool_provisioning(&mut output, lane, unit, false);
             let cargo_cache_restored = CacheBackend::Detected
@@ -1831,7 +1830,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
 fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
     output.push_str(
-        "name: Release\nrun-name: Release · ${{ github.ref_name }}\n\non:\n  push:\n    tags: [\"v*\"]\n\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
+        "name: Release\nrun-name: Release · ${{ github.ref_name }}\n\non:\n  push:\n    tags: [\"v*\"]\n\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Control / Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
     );
     let _ = writeln!(
         output,
@@ -1918,7 +1917,7 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
 fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
     output.push_str(
-        "name: Release\nrun-name: Release · ${{ github.ref_name }}\n\non:\n  push:\n    tags: [\"v*\"]\n\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
+        "name: Release\nrun-name: Release · ${{ github.ref_name }}\n\non:\n  push:\n    tags: [\"v*\"]\n\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Control / Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
     );
     let _ = writeln!(
         output,
@@ -1971,7 +1970,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let matrix_runner = release_matrix_runner(config, &release.targets);
     let _ = writeln!(
         output,
-        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Publish GitHub release\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
+        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
         yaml_scalar(&release.package),
@@ -2040,8 +2039,8 @@ fn inject_native_verify_outputs(
     release: &ReleaseSpec,
 ) -> String {
     let output = output.replace(
-        "  verify:\n    name: Verify release\n",
-        "  verify:\n    name: Verify release\n    outputs:\n      version: ${{ steps.version.outputs.version }}\n",
+        "  verify:\n    name: Control / Verify release\n",
+        "  verify:\n    name: Control / Verify release\n    outputs:\n      version: ${{ steps.version.outputs.version }}\n",
     );
     let verify_tag_run = format!(
         "run: velnor-workflow release verify-tag --branch {} --package {}\n",
@@ -2142,7 +2141,7 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         output = inject_native_binary_digest(&output, release);
     }
     let admit = format!(
-        "  admit-runner:\n    name: Admit release runner\n    runs-on: {github_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n"
+        "  admit-runner:\n    name: Control / Admit release\n    runs-on: {github_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n"
     );
     output = output.replace("jobs:\n  verify:", &format!("jobs:\n{admit}\n  verify:"));
     output = output.replace(
@@ -2206,9 +2205,9 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         }
     } else {
         output = output.replace(
-            "  publish:\n    name: Publish GitHub release\n    needs: [admit-runner, verify, build]\n",
+            "  publish:\n    name: Control / Publish\n    needs: [admit-runner, verify, build]\n",
             &format!(
-                "  publish:\n    name: Publish GitHub release\n    needs: [{}]\n",
+                "  publish:\n    name: Control / Publish\n    needs: [{}]\n",
                 publish_needs.join(", ")
             ),
         );
@@ -2348,8 +2347,8 @@ fn gate_velnor_release_verify(output: &mut String, config: &ProjectConfig) {
     if config.runners == RunnerMode::Velnor {
         let gate = trusted_release_runner_gate(&config.default_branch);
         *output = output.replace(
-            "  verify:\n    name: Verify release\n",
-            &format!("  verify:\n    name: Verify release\n    if: ${{{{ {gate} }}}}\n"),
+            "  verify:\n    name: Control / Verify release\n",
+            &format!("  verify:\n    name: Control / Verify release\n    if: ${{{{ {gate} }}}}\n"),
         );
     }
 }
@@ -2970,7 +2969,7 @@ mod tests {
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Both,
-            automatic: crate::RunnerMode::Github,
+            automatic: crate::RunnerMode::Both,
             github_runner: "ubuntu-24.04".to_owned(),
             macos_runner: "macos-15".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
@@ -3053,7 +3052,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "46047263411c945a1d0dd8272eb4c25acb047c37bad1961db014d2e03b4b9ebc",
+                "da6753909b8bad49cf83380211ceb47ab618c91387ae19f5efc892442f9fdcb8",
             ),
             (
                 "preview.yml",
@@ -3100,7 +3099,7 @@ mod tests {
             "cargo fetch must terminate the run block before the next step: {release}"
         );
         assert!(release.contains("name: Release"), "{release}");
-        assert!(release.contains("Publish GitHub release"), "{release}");
+        assert!(release.contains("Control / Publish"), "{release}");
         assert!(release.contains("Verify archive checksums"), "{release}");
         assert!(!release.contains("inputs.unit"), "{release}");
         for (file, marker) in [
@@ -3129,7 +3128,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "ffa0bf76ba4d0581291b123f74875b6dfa7487da659746f2786eb4fad2e102be",
+                "5bd720c4ee4b682a76bb6d9c94cf9dad205753a03992b9b4ec52334de6de8873",
             ),
             (
                 "preview.yml",
@@ -3418,7 +3417,7 @@ mod tests {
             .get(&PathBuf::from(".github/workflows/release.yml"))
             .unwrap_or_else(|| panic!("a declared release row must render release.yml"));
         assert!(release.contains("name: Release"), "{release}");
-        assert!(release.contains("Publish GitHub release"), "{release}");
+        assert!(release.contains("Control / Publish"), "{release}");
         assert!(
             release.contains("target: aarch64-unknown-linux-gnu"),
             "{release}"
@@ -3487,7 +3486,10 @@ mod tests {
                 .files
                 .get(&PathBuf::from(".github/workflows/release.yml"))
                 .unwrap_or_else(|| panic!("a declared native release must render release.yml"));
-            assert!(release.contains("name: Admit release runner"), "{release}");
+            assert!(
+                release.contains("name: Control / Admit release"),
+                "{release}"
+            );
             assert!(
                 release.contains("native release publishes from GitHub only"),
                 "{release}"

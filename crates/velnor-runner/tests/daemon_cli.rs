@@ -79,11 +79,11 @@ fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
             } else {
                 slot_root.join(format!("slot-{index}"))
             };
-            let expected_name = if configured == 1 {
-                "velnor-ci".to_owned()
-            } else {
-                format!("velnor-ci-slot-{index}")
-            };
+            let expected_name = velnor_runner::runner::compose_github_runner_name(
+                &velnor_runner::runner::github_runner_host_slug(),
+                "velnor-ci",
+                index - 1,
+            );
             assert_eq!(load_runner_name(&slot_dir), expected_name);
         }
         let state = Journal::open(config_dir.join("journal.db"))

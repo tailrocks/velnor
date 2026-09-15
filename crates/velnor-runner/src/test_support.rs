@@ -200,6 +200,7 @@ fn probe_admission(
             pool_scope,
         ),
         resource_policy: Some("standard".to_owned()),
+        execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
         masks,
     }
 }
@@ -237,6 +238,7 @@ pub fn run_ops_telemetry_probe() -> (String, Vec<u8>) {
                 SECRET,
             ),
             resource_policy: Some("standard".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec![SECRET.to_owned()],
         };
 
