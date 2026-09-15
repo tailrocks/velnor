@@ -49,11 +49,11 @@ jobs:
       head_sha: ${{ steps.plan.outputs.head_sha }}
       units: ${{ steps.plan.outputs.units }}
       full_units: ${{ steps.plan.outputs.full_units }}
-      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
       bun_matrix: ${{ steps.plan.outputs.bun_matrix }}
-      opentofu_matrix: ${{ steps.plan.outputs.opentofu_matrix }}
       docker_matrix: ${{ steps.plan.outputs.docker_matrix }}
       docs_matrix: ${{ steps.plan.outputs.docs_matrix }}
+      opentofu_matrix: ${{ steps.plan.outputs.opentofu_matrix }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
