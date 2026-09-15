@@ -499,7 +499,7 @@ fn effective_host_name(globals: &GlobalArgs, args: &HostStartArgs) -> Result<Str
         .instance
         .clone()
         .or_else(|| args.name.clone())
-        .unwrap_or_else(|| format!("velnor-local-{}", hostname_slug())))
+        .unwrap_or_else(default_host_name))
 }
 
 #[derive(Debug, Clone)]
@@ -872,7 +872,7 @@ fn ensure_dev_state_db_env(state_db: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn ensure_dev_canonical_storage() -> Result<(), CommandError> {
+pub(crate) fn ensure_dev_canonical_storage() -> Result<(), CommandError> {
     if env::var_os("VELNOR_STORAGE_ROOT")
         .filter(|value| !value.is_empty())
         .is_some()
@@ -941,6 +941,10 @@ fn resolve_host_config_dir(args: &HostStartArgs, name: &str) -> Result<PathBuf, 
     if let Some(dir) = args.config_dir.clone() {
         return Ok(dir);
     }
+    resolve_default_host_config_dir(name)
+}
+
+pub(crate) fn resolve_default_host_config_dir(name: &str) -> Result<PathBuf, CommandError> {
     let root = velnor_runner::config_dir(None).map_err(|error| {
         CommandError::new(
             ExitClass::Usage,
@@ -950,7 +954,15 @@ fn resolve_host_config_dir(args: &HostStartArgs, name: &str) -> Result<PathBuf, 
     })?;
     // Per-instance journal. Reusing a shared runner/ directory inherits
     // journal.capacity.invalid when a later start uses fewer slots.
-    Ok(root.join("hosts").join(name))
+    Ok(host_config_dir_from_root(&root, name))
+}
+
+pub(crate) fn host_config_dir_from_root(root: &Path, name: &str) -> PathBuf {
+    root.join("hosts").join(name)
+}
+
+pub(crate) fn default_host_name() -> String {
+    format!("velnor-local-{}", hostname_slug())
 }
 
 fn ensure_docker_execution_file(config_dir: &Path, slots: usize) -> Result<(), CommandError> {

@@ -40,31 +40,25 @@ pub(crate) fn bundle(
     globals: &GlobalArgs,
     args: DiagnosticsBundleArgs,
 ) -> Result<(), CommandError> {
-    let config_dir = preflight::resolve_config_dir()?;
+    let config_dir = preflight::resolve_config_dir(globals.instance.as_deref())?;
     let generated_at_unix = unix_now();
-    let captures = vec![
-        (
-            "commands/status.json".to_owned(),
-            preflight::capture(
-                &status_args(&config_dir, globals.instance.as_deref()),
-                std::time::Duration::from_secs(COMMAND_TIMEOUT_SECONDS),
+    let captures = preflight::capture_parallel(
+        vec![
+            (
+                "commands/status.json".to_owned(),
+                status_args(&config_dir, globals.instance.as_deref()),
             ),
-        ),
-        (
-            "commands/preflight.json".to_owned(),
-            preflight::capture(
-                &preflight_args(&config_dir),
-                std::time::Duration::from_secs(COMMAND_TIMEOUT_SECONDS),
+            (
+                "commands/preflight.json".to_owned(),
+                preflight_args(&config_dir),
             ),
-        ),
-        (
-            "commands/host-status.json".to_owned(),
-            preflight::capture(
-                &host_status_args(globals.instance.as_deref()),
-                std::time::Duration::from_secs(COMMAND_TIMEOUT_SECONDS),
+            (
+                "commands/host-status.json".to_owned(),
+                host_status_args(globals.instance.as_deref()),
             ),
-        ),
-    ];
+        ],
+        std::time::Duration::from_secs(COMMAND_TIMEOUT_SECONDS),
+    );
 
     let command_success = captures.iter().all(|(_, capture)| capture.succeeded());
     let metadata = Metadata {
@@ -286,17 +280,15 @@ fn host_status_args(instance: Option<&str>) -> Vec<std::ffi::OsString> {
 }
 
 fn secret_values() -> Vec<String> {
-    [
-        "GITHUB_TOKEN",
-        "VELNOR_PAT",
-        "ACTIONS_RUNTIME_TOKEN",
-        "RUNNER_TOKEN",
-        "VELNOR_GITHUB_TOKEN",
-    ]
-    .into_iter()
-    .filter_map(|name| env::var(name).ok())
-    .filter(|value| !value.is_empty())
-    .collect()
+    secret_values_from(|name| env::var(name).ok())
+}
+
+fn secret_values_from(read: impl FnMut(&str) -> Option<String>) -> Vec<String> {
+    preflight::CREDENTIAL_ENV
+        .into_iter()
+        .filter_map(read)
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CommandError> {
@@ -527,5 +519,23 @@ mod tests {
         assert!(rendered.iter().any(|arg| arg == "status"));
         assert!(rendered.iter().all(|arg| !arg.contains("token")));
         assert!(rendered.iter().all(|arg| !arg.contains("pat")));
+    }
+
+    #[test]
+    fn credential_redaction_allowlist_includes_gh_token() {
+        let secret = "gh-token-secret";
+        let secrets = secret_values_from(|name| (name == "GH_TOKEN").then(|| secret.to_owned()));
+        assert_eq!(secrets, vec![secret]);
+        let service = DiagnosticsService::new(
+            vec![Box::new(StaticCollector::new(
+                "commands/test.json",
+                format!("token={secret}\n").into_bytes(),
+            ))],
+            secrets,
+        );
+        let bundle = service.collect().expect("redacted diagnostics");
+        let content = String::from_utf8_lossy(&bundle.members[0].content);
+        assert!(!content.contains(secret));
+        assert!(content.contains("***"));
     }
 }
