@@ -1901,7 +1901,6 @@ pub enum DrainStateReadError {
 /// existing journal is an error, not an absent marker: admission callers must
 /// fail closed instead of treating corruption or lock contention as permission
 /// to run.
-#[must_use]
 pub fn read_drain_state(path: &Path) -> Result<Option<DrainState>, DrainStateReadError> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| DrainStateReadError::Unavailable)?;
