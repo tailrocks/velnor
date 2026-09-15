@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::condition::ResourceMeta;
+use crate::execution::ExecutionBackendKind;
 use crate::phase::{SlotKind, SlotPhase};
 use crate::sanitized::RepositoryRef;
 use crate::sanitized::SanitizedUrl;
@@ -114,6 +115,21 @@ pub struct Job {
     /// otherwise.
     #[serde(default)]
     pub conclusion: Option<String>,
+    /// Hostname the job is placed on, when known.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Instance slug owning the job, when known.
+    #[serde(default)]
+    pub instance: Option<String>,
+    /// Slot name occupying the job, when known.
+    #[serde(default)]
+    pub slot: Option<String>,
+    /// Runner name advertised for the job, when known.
+    #[serde(default)]
+    pub runner: Option<String>,
+    /// Operator-selected isolation backend (`docker` or `microvm`), when known.
+    #[serde(default)]
+    pub execution_backend: Option<ExecutionBackendKind>,
 }
 
 /// One workflow run.
@@ -373,6 +389,11 @@ mod tests {
                 queued_ms: None,
                 duration_ms: None,
                 conclusion: None,
+                host: None,
+                instance: None,
+                slot: None,
+                runner: None,
+                execution_backend: None,
             }),
             AnyResource::Run(Run {
                 meta: ResourceMeta::new("run", Source::Github, stamp()),
@@ -482,5 +503,62 @@ mod tests {
         assert_eq!(back, wrapped);
         assert_eq!(back.identity(), "Run:run-1");
         assert_eq!(back.meta().name, "run-1");
+    }
+
+    #[test]
+    fn job_placement_fields_round_trip_camel_case() {
+        let job = Job {
+            meta: ResourceMeta::new("job-42", Source::Merged, stamp()),
+            repository: RepositoryRef::new("tailrocks", "velnor"),
+            run: Some("run-7".to_owned()),
+            workflow: "ci.yml".to_owned(),
+            head_branch: Some("main".to_owned()),
+            queued_ms: None,
+            duration_ms: None,
+            conclusion: None,
+            host: Some("sentry".to_owned()),
+            instance: Some("primary".to_owned()),
+            slot: Some("slot-2".to_owned()),
+            runner: Some("velnor-sentry-2".to_owned()),
+            execution_backend: Some(crate::ExecutionBackendKind::Docker),
+        };
+        let json = serde_json::to_string(&job).expect("serialize");
+        for key in [
+            "\"host\":\"sentry\"",
+            "\"instance\":\"primary\"",
+            "\"slot\":\"slot-2\"",
+            "\"runner\":\"velnor-sentry-2\"",
+            "\"executionBackend\":\"docker\"",
+        ] {
+            assert!(json.contains(key), "missing {key} in {json}");
+        }
+        let back: Job = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, job);
+        assert_eq!(serde_json::to_string(&back).expect("reserialize"), json);
+        for spoofed in ["self-hosted", "spoofed", "github-hosted"] {
+            let spoofed_json = json.replace("\"docker\"", &format!("\"{spoofed}\""));
+            assert!(
+                serde_json::from_str::<Job>(&spoofed_json).is_err(),
+                "accepted non-closed backend {spoofed}"
+            );
+        }
+    }
+
+    #[test]
+    fn job_without_placement_deserializes_as_none() {
+        let json = r#"{
+            "schemaVersion":1,
+            "name":"j",
+            "source":"MERGED",
+            "lastTransitionTime":"2026-08-24T00:00:00Z",
+            "repository":{"owner":"o","name":"n"},
+            "workflow":"w.yml"
+        }"#;
+        let job: Job = serde_json::from_str(json).expect("legacy job");
+        assert_eq!(job.host, None);
+        assert_eq!(job.instance, None);
+        assert_eq!(job.slot, None);
+        assert_eq!(job.runner, None);
+        assert_eq!(job.execution_backend, None);
     }
 }

@@ -14,6 +14,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::execution::ExecutionBackendKind;
 use crate::sanitized::RepositoryRef;
 use crate::time::Timestamp;
 
@@ -450,6 +451,8 @@ pub struct NormalizedJob {
     pub acquired_at: Option<Timestamp>,
     pub slot_name: Option<String>,
     pub runner_name: Option<String>,
+    /// Operator-selected execution backend slug (`docker`, `microvm`).
+    pub execution_backend: Option<String>,
     /// Effective admitted scope the job runs with: the pool ceiling narrowed
     /// by the job's trust class, never the raw pool flag.
     pub trust_scope: Option<String>,
@@ -486,6 +489,7 @@ pub struct JobSummary {
     acquired_at: Option<Timestamp>,
     slot_name: Option<Slug>,
     runner_name: Option<Slug>,
+    execution_backend: Option<ExecutionBackendKind>,
     trust_scope: Option<Slug>,
     trust_class: Option<Slug>,
     resource_policy: Option<Slug>,
@@ -512,6 +516,8 @@ struct JobSummaryWire {
     acquired_at: Option<Timestamp>,
     slot_name: Option<String>,
     runner_name: Option<String>,
+    #[serde(default)]
+    execution_backend: Option<String>,
     trust_scope: Option<String>,
     #[serde(default)]
     trust_class: Option<String>,
@@ -540,6 +546,7 @@ impl TryFrom<JobSummaryWire> for JobSummary {
             acquired_at: wire.acquired_at,
             slot_name: wire.slot_name,
             runner_name: wire.runner_name,
+            execution_backend: wire.execution_backend,
             trust_scope: wire.trust_scope,
             trust_class: wire.trust_class,
             resource_policy: wire.resource_policy,
@@ -586,6 +593,7 @@ impl JobSummary {
             acquired_at: input.acquired_at,
             slot_name: optional_slug("slot_name", input.slot_name)?,
             runner_name: optional_slug("runner_name", input.runner_name)?,
+            execution_backend: optional_execution_backend(input.execution_backend)?,
             trust_scope: optional_slug("trust_scope", input.trust_scope)?,
             trust_class: optional_slug("trust_class", input.trust_class)?,
             resource_policy: optional_slug("resource_policy", input.resource_policy)?,
@@ -661,6 +669,11 @@ impl JobSummary {
     }
 
     #[must_use]
+    pub fn execution_backend(&self) -> Option<&str> {
+        self.execution_backend.map(ExecutionBackendKind::as_str)
+    }
+
+    #[must_use]
     pub fn slot_name(&self) -> Option<&str> {
         self.slot_name.as_ref().map(Slug::as_str)
     }
@@ -701,6 +714,19 @@ fn optional_slug(
     raw: Option<String>,
 ) -> Result<Option<Slug>, InvalidJobSummaryField> {
     raw.map(|value| Slug::validate(field, &value)).transpose()
+}
+
+fn optional_execution_backend(
+    raw: Option<String>,
+) -> Result<Option<ExecutionBackendKind>, InvalidJobSummaryField> {
+    match raw {
+        None => Ok(None),
+        Some(value) => ExecutionBackendKind::parse_value(&value)
+            .map(Some)
+            .map_err(|_| {
+                InvalidJobSummaryField::rule("execution_backend", "must be docker or microvm")
+            }),
+    }
 }
 
 fn validate_repository(
@@ -756,6 +782,7 @@ mod tests {
             acquired_at: Some(Timestamp::parse("2026-08-24T12:30:47Z").unwrap()),
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
+            execution_backend: Some("docker".to_owned()),
             trust_scope: Some("trusted".to_owned()),
             trust_class: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),
@@ -1060,5 +1087,50 @@ mod tests {
         let parsed: JobSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, summary);
         assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+        assert!(json.contains("\"executionBackend\":\"docker\""));
+        assert_eq!(parsed.execution_backend(), Some("docker"));
+    }
+
+    #[test]
+    fn execution_backend_round_trips_and_rejects_secrets() {
+        let mut input = normalized();
+        input.execution_backend = Some("microvm".to_owned());
+        let summary = JobSummary::from_normalized(input).unwrap();
+        assert_eq!(summary.execution_backend(), Some("microvm"));
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("\"executionBackend\":\"microvm\""));
+        let parsed: JobSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.execution_backend(), Some("microvm"));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+
+        let mut missing = normalized();
+        missing.execution_backend = None;
+        assert_eq!(
+            JobSummary::from_normalized(missing)
+                .unwrap()
+                .execution_backend(),
+            None
+        );
+
+        let mut secret = normalized();
+        secret.execution_backend = Some("ghp_smuggledtokenvalue".to_owned());
+        let error = JobSummary::from_normalized(secret).unwrap_err();
+        assert!(error.to_string().contains("execution_backend"), "{error}");
+        assert!(!error.to_string().contains("ghp_"));
+        assert!(!format!("{error:?}").contains("ghp_smuggledtokenvalue"));
+
+        for spoofed in ["spoofed", "self-hosted", "github-hosted", "DOCKER"] {
+            let mut input = normalized();
+            input.execution_backend = Some(spoofed.to_owned());
+            let error = JobSummary::from_normalized(input).unwrap_err();
+            assert!(
+                error.to_string().contains("execution_backend"),
+                "{spoofed}: {error}"
+            );
+            assert!(
+                !error.to_string().contains(spoofed),
+                "rejected backend value must not be echoed: {error}"
+            );
+        }
     }
 }

@@ -825,6 +825,10 @@ fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
 /// units, so the excluded callers stay green instead of failing a selection
 /// they can never satisfy. Units of an unknown kind are kept: dropping a
 /// unit the planner does not recognize would silently skip verification.
+///
+/// A both-lane plan keeps pairable kinds. A GitHub-only kind (Swift) stays
+/// selected so an explicit `jobs = ["github"]` opt-out still runs on the
+/// hosted lane when the plan admits GitHub.
 fn selection_for_lanes<'a>(
     config: &'a CiConfig,
     selection: UnitSelection<'a>,
@@ -836,7 +840,14 @@ fn selection_for_lanes<'a>(
         .map(|unit| (unit.id.as_str(), unit.kind.as_str()))
         .collect::<BTreeMap<_, _>>();
     let supported = |kind: &str| {
-        UnitKind::from_prefix(kind).is_none_or(|parsed| lanes_support_unit_kind(lanes, parsed))
+        UnitKind::from_prefix(kind).is_none_or(|parsed| {
+            if lanes_support_unit_kind(lanes, parsed) {
+                return true;
+            }
+            lanes == RunnerMode::Both
+                && (crate::lane_supports_unit_kind(RunnerMode::Github, parsed)
+                    || crate::lane_supports_unit_kind(RunnerMode::Velnor, parsed))
+        })
     };
     UnitSelection {
         units: selection
@@ -1323,6 +1334,7 @@ fn selection_for_diff<'a>(
         base,
         head,
         &changed,
+        &config.unit,
         &config.workflow.version_bump_units,
     )? {
         let allowlist = config
@@ -1415,14 +1427,23 @@ fn version_bump_matches(
     base: &str,
     head: &str,
     changed: &[String],
+    units: &[CiUnit],
     allowlist: &[String],
 ) -> Result<bool, GeneratorError> {
     if allowlist.is_empty() || changed.is_empty() {
         return Ok(false);
     }
+    let independent_lockfiles = units
+        .iter()
+        .filter(|unit| unit.kind == "rust" && allowlist.iter().any(|allowed| allowed == &unit.id))
+        .filter_map(|unit| {
+            let cargo_root = unit.cargo_lockfile_root();
+            (cargo_root != ".").then(|| format!("{cargo_root}/Cargo.lock"))
+        })
+        .collect::<BTreeSet<_>>();
     let mut diff_files = Vec::new();
     for file in changed {
-        if file == "Cargo.lock" {
+        if file == "Cargo.lock" || independent_lockfiles.contains(file) {
             diff_files.push(file.clone());
             continue;
         }
@@ -3063,9 +3084,25 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
+    let without_lane = strip_inputs_lane_selector(value);
+    let value = without_lane.unwrap_or(value);
     strip_inputs_unit_selector(value)
         .or_else(|| strip_selected_units_selector(value))
         .or_else(|| strip_combined_selected_units_selector(value))
+        .or(without_lane)
+}
+
+/// Peel `inputs.lane == 'github'|'velnor'|'control' &&` from a generated
+/// reusable-job gate. The conjunct only restricts which caller intends the
+/// job; the remaining expression must still be a trusted event gate.
+fn strip_inputs_lane_selector(value: &str) -> Option<&str> {
+    let rest = value.strip_prefix("inputs.lane=='")?;
+    let separator = rest.find("'&&")?;
+    let lane = &rest[..separator];
+    if !matches!(lane, "github" | "velnor" | "control") {
+        return None;
+    }
+    Some(&rest[separator + "'&&".len()..])
 }
 
 fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
@@ -4400,6 +4437,56 @@ workspace_check = true
         Ok((root, base, head))
     }
 
+    fn current_project_selection_git_fixture_with_changes(
+        name: &str,
+        changes: &[(&str, &str, &str)],
+        config_text: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-current-project-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let init = |args: &[&str]| -> Result<String, Box<dyn Error>> {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "git command failed: {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+
+        let config = root.join(".github/ci/project.toml");
+        std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
+        std::fs::write(&config, config_text)?;
+
+        for (changed, base_contents, _) in changes {
+            let changed_path = root.join(changed);
+            std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
+            std::fs::write(changed_path, base_contents)?;
+        }
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = init(&["rev-parse", "HEAD"])?;
+
+        for (changed, _, head_contents) in changes {
+            std::fs::write(root.join(changed), head_contents)?;
+        }
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "change"])?;
+        let head = init(&["rev-parse", "HEAD"])?;
+        Ok((root, base, head))
+    }
+
     fn selected_ids(units: Vec<&CiUnit>) -> Vec<&str> {
         units.into_iter().map(|unit| unit.id.as_str()).collect()
     }
@@ -5004,6 +5091,67 @@ velnor_full_commands = ["markdownlint docs"]
     }
 
     #[test]
+    fn independent_manifest_and_lock_version_bump_selects_matching_workspace_check(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}").replace(
+            "version_bump_units = [\"docker\", \"rust-bench\", \"rust-leaf\"]",
+            "version_bump_units = [\"rust-contract\"]",
+        );
+        let (root, base, head) = current_project_selection_git_fixture_with_changes(
+            "contract-version-bump-with-lock",
+            &[
+                (
+                    "crates/contract/Cargo.toml",
+                    "version = \"0.1.0\"\n",
+                    "version = \"0.1.1\"\n",
+                ),
+                (
+                    "crates/contract/Cargo.lock",
+                    "version = \"1\"\n",
+                    "version = \"2\"\n",
+                ),
+            ],
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(selection.full_units, selected_id_set(&selection));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn policy_parsing_ignores_comments_and_literal_run_content() -> Result<(), Box<dyn Error>> {
         let workflow = r"
 name: Comments
@@ -5430,7 +5578,7 @@ jobs:
         // The base-owned entrypoint carries the `Policy` variant.
         let workflow = format!(
             "name: Advisory caller\non: push\njobs:\n{}",
-            crate::inline_policy_job("Advisory policy", POLICY_REVISION)
+            crate::inline_policy_job("Control / Policy", POLICY_REVISION)
         );
         let root = policy_fixture("inline-advisory", &workflow, "github")?;
         assert!(run_policy(root)?);
@@ -5440,7 +5588,7 @@ jobs:
         let workflow = format!(
             "name: Advisory caller\non: push\njobs:\n{}",
             crate::inline_policy_job(
-                "Advisory policy",
+                "Control / Policy",
                 "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33"
             )
         );
@@ -5460,7 +5608,7 @@ jobs:
         let workflow = format!(
             "name: Velnor caller\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-runner]",
                 "local",
@@ -5474,7 +5622,7 @@ jobs:
         let workflow = format!(
             "name: Velnor pull request policy\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5488,7 +5636,7 @@ jobs:
         let workflow = format!(
             "name: Velnor dispatch policy\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5502,7 +5650,7 @@ jobs:
         let workflow = format!(
             "name: Velnor unit policy\non: workflow_call\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5517,7 +5665,7 @@ jobs:
         let workflow = format!(
             "name: Velnor wrong pin\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33",
                 "[self-hosted, example-runner]",
                 "local",
@@ -5530,7 +5678,7 @@ jobs:
         let workflow = format!(
             "name: Velnor untrusted\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-runner]",
                 "local",
@@ -5604,8 +5752,8 @@ jobs:
             );
             assert_eq!(
                 job.matches(POLICY_REVISION).count(),
-                5,
-                "{name} must use the policy revision for the cache key, the install pin, the audit env, and the two rev-keyed cache-path uses"
+                3,
+                "{name} must use the policy revision for the cache key, the install pin, and the audit env"
             );
         }
     }

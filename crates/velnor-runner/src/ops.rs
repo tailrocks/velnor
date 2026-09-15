@@ -22,8 +22,8 @@ use crate::trust_class::TrustClass;
 use rusqlite::Connection;
 use velnor_control::store::{
     EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
-    RetentionMaintenanceBudget, SlotIdentity, SlotTransitionRequest, SlotTransitionRequestKey,
-    Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
+    RetentionMaintenanceBudget, RunnerRegistrationRow, SlotIdentity, SlotTransitionRequest,
+    SlotTransitionRequestKey, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
 #[cfg(test)]
 use velnor_model::ExitClass;
@@ -154,6 +154,10 @@ pub struct JobAdmission {
     /// row and its telemetry always agree.
     pub trust: AdmittedTrust,
     pub resource_policy: Option<String>,
+    /// Operator-selected execution backend advertised as
+    /// `VELNOR_EXECUTION_BACKEND`. Closed enum, never workflow input: it
+    /// bypasses mask projection so a secret cannot rewrite the isolation fact.
+    pub execution_backend: Option<velnor_model::ExecutionBackendKind>,
     /// Secret/mask values collected from the raw job message; applied to
     /// every textual projection so no secret value can enter the store even
     /// when a workflow embeds one in its name or ref.
@@ -202,6 +206,11 @@ impl JobAdmission {
                 .resource_policy
                 .as_deref()
                 .map(|value| self.project(value)),
+            // Code-generated closed label, never workflow input: it bypasses
+            // mask projection so no secret value can rewrite the isolation fact.
+            execution_backend: self
+                .execution_backend
+                .map(|backend| backend.as_str().to_owned()),
             phase: JobPhase::Queued,
             conclusion: None,
             infrastructure_category: None,
@@ -1076,6 +1085,40 @@ impl OpsSink {
         })
     }
 
+    /// Persist one GitHub runner registration after successful JIT configure.
+    ///
+    /// Best-effort: a store miss must not tear down a live GitHub runner.
+    /// Labels are slug-projected; the registration name is already composed.
+    pub fn upsert_runner_registration(
+        &self,
+        runner_id: i64,
+        name: &str,
+        labels: &[String],
+        ephemeral: bool,
+        online: bool,
+    ) -> velnor_control::store::StoreResult<()> {
+        let now = Timestamp::now();
+        let mut labels_map = BTreeMap::new();
+        for label in labels {
+            let key = sanitize_slug(label);
+            if key != "unknown" {
+                labels_map.insert(key, "true".to_owned());
+            }
+        }
+        let labels_json = serde_json::to_string(&labels_map).unwrap_or_else(|_| "{}".to_owned());
+        self.store
+            .upsert_runner_registration(&RunnerRegistrationRow {
+                instance_slug: self.instance_slug.clone(),
+                runner_id,
+                name: name.to_owned(),
+                ephemeral,
+                online,
+                labels_json,
+                registered_at: now,
+                updated_at: now,
+            })
+    }
+
     fn required_failure(&self, code: &str, detail: &str) -> bool {
         let detail = sanitize_forensic_detail(detail);
         eprintln!("REQUIRED operational-store write failed ({code}): {detail}");
@@ -1471,8 +1514,44 @@ mod tests {
             runner_name: Some("fixture-runner-0".to_owned()),
             trust: AdmittedTrust::narrow(TrustClass::Trusted, "trusted"),
             resource_policy: Some("standard".to_owned()),
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: secret.iter().map(|value| (*value).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn runner_registration_persists_non_secret_identity() {
+        let (dir, sink) = temp_sink("runner-reg");
+        let name = "velnor-sentry-primary-2";
+        sink.upsert_runner_registration(
+            42,
+            name,
+            &["self-hosted".into(), "linux".into()],
+            true,
+            true,
+        )
+        .unwrap();
+        let rows = sink
+            .store_for_tests()
+            .runner_registration_rows("test-instance")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].runner_id, 42);
+        assert_eq!(rows[0].name, name);
+        assert!(rows[0].ephemeral);
+        assert!(rows[0].online);
+        assert!(rows[0].labels_json.contains("self-hosted"));
+        assert!(!rows[0].name.contains("ghp_"));
+        assert!(!rows[0].labels_json.contains("ghp_"));
+        let mut admission = admission(202, None);
+        admission.runner_name = Some(name.to_owned());
+        assert!(sink.record_admission(&admission));
+        let stored = sink.store.fetch_summary("test-instance", 202, 1).unwrap();
+        assert_eq!(
+            stored.as_ref().and_then(|row| row.runner_name()),
+            Some(name)
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1525,6 +1604,26 @@ mod tests {
             .expect("fork row");
         assert_eq!(fork.trust_class.as_deref(), Some("fork-pr"));
         assert_eq!(fork.trust_scope.as_deref(), Some("untrusted"));
+    }
+
+    #[test]
+    fn admission_row_carries_execution_backend_without_secrets() {
+        let (_dir, sink) = temp_sink("backend-row");
+        let mut adm = admission(301, Some("super-secret-marker-value"));
+        adm.execution_backend = Some(velnor_model::ExecutionBackendKind::MicroVm);
+        adm.job_name = "hold".to_owned();
+        assert!(sink.record_admission(&adm));
+        let uid = adm.job_uid().unwrap();
+        let stored = sink
+            .store
+            .fetch_summary_by_job_uid("test-instance", &uid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.execution_backend(), Some("microvm"));
+        let rows = sink.store.job_summaries("test-instance").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].execution_backend.as_deref(), Some("microvm"));
+        assert!(!format!("{rows:?}").contains("super-secret-marker-value"));
     }
 
     #[test]
