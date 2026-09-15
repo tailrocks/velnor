@@ -1414,7 +1414,7 @@ jobs:
           cd -- "$GITHUB_WORKSPACE"
           install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-8e1ae640d525125316d7ce8064e739728988b8fe"
           if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
-            cargo install --locked --git https://github.com/tailrocks/velnor --rev 8e1ae640d525125316d7ce8064e739728988b8fe --root "$install_root" --bin velnor-workflow
+            cargo install --locked --git https://github.com/tailrocks/velnor --rev 8e1ae640d525125316d7ce8064e739728988b8fe --root "$install_root" velnor-workflow --bin velnor-workflow
           fi
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
@@ -2539,7 +2539,7 @@ jobs:
           cd -- "$GITHUB_WORKSPACE"
           install_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/velnor-workflow-policy-8e1ae640d525125316d7ce8064e739728988b8fe"
           if [[ ! -x "$install_root/bin/velnor-workflow" ]]; then
-            cargo install --locked --git https://github.com/tailrocks/velnor --rev 8e1ae640d525125316d7ce8064e739728988b8fe --root "$install_root" --bin velnor-workflow
+            cargo install --locked --git https://github.com/tailrocks/velnor --rev 8e1ae640d525125316d7ce8064e739728988b8fe --root "$install_root" velnor-workflow --bin velnor-workflow
           fi
       - name: Run "Rust crate (velnor-workflow)" checks
         env:

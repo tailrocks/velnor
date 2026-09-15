@@ -4506,7 +4506,7 @@ fn policy_install_root(revision: &str) -> PathBuf {
 /// Online prefetch for D19 `--check` when verification runs with `CARGO_NET_OFFLINE`.
 pub(crate) fn render_pinned_policy_prefetch_bash(revision: &str) -> String {
     format!(
-        "          cd -- \"$GITHUB_WORKSPACE\"\n          install_root=\"${{RUNNER_TEMP:-${{TMPDIR:-/tmp}}}}/velnor-workflow-policy-{revision}\"\n          if [[ ! -x \"$install_root/bin/velnor-workflow\" ]]; then\n            cargo install --locked --git {url} --rev {revision} --root \"$install_root\" --bin velnor-workflow\n          fi\n",
+        "          cd -- \"$GITHUB_WORKSPACE\"\n          install_root=\"${{RUNNER_TEMP:-${{TMPDIR:-/tmp}}}}/velnor-workflow-policy-{revision}\"\n          if [[ ! -x \"$install_root/bin/velnor-workflow\" ]]; then\n            cargo install --locked --git {url} --rev {revision} --root \"$install_root\" velnor-workflow --bin velnor-workflow\n          fi\n",
         url = VELNOR_WORKFLOW_INSTALL_GIT_URL,
     )
 }
@@ -10902,6 +10902,14 @@ channel = "stable"
         assert!(policy.contains("--root \"$VELNOR_WORKFLOW_ROOT\""));
         assert!(policy.contains("echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\""));
         assert!(policy.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: abc123")));
+    }
+
+    #[test]
+    fn pinned_policy_prefetch_installs_the_velnor_workflow_package() {
+        let bash = render_pinned_policy_prefetch_bash("abc123");
+        assert!(bash.contains(&format!("--git {VELNOR_WORKFLOW_INSTALL_GIT_URL}")));
+        assert!(bash.contains("--rev abc123"));
+        assert!(bash.contains("velnor-workflow --bin velnor-workflow"));
     }
 
     #[test]

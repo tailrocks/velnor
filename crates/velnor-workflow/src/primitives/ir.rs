@@ -19,13 +19,12 @@ use super::{
 };
 use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_setup, hosted_mold_setup,
-    kind_reusable_lane_display_name,
-    kind_unit_workflow_shard_file, lane_supports_unit, nested_unit_workflow_file,
-    is_prepare_cargo_caller_job_id, prepare_cargo_caller_job_id_for_file, rendered_cache_values,
-    sidebar_group_name, stack_group_job_id,
-    unit_group, unit_group_job_id, unit_job_display_name, unit_job_id, unit_needs, velnor_runner,
-    velnor_runner_group, velnor_rust_dependency_needs, workflow_runtime_artifact_upload,
-    workflow_runtime_download, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
+    is_prepare_cargo_caller_job_id, kind_reusable_lane_display_name, kind_unit_workflow_shard_file,
+    lane_supports_unit, nested_unit_workflow_file, prepare_cargo_caller_job_id_for_file,
+    rendered_cache_values, sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id,
+    unit_job_display_name, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
+    velnor_rust_dependency_needs, workflow_runtime_artifact_upload, workflow_runtime_download,
+    workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
     workflow_selection_file_materialize, workflow_setup_install_rev, yaml_scalar, CachePurpose,
     CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources,
     Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
@@ -952,9 +951,7 @@ pub(crate) fn render_cargo_source_preparation(
     }
     let cache_hit_gate = if skip_on_cache_hit {
         let cache_step_id = cache_step_id.unwrap_or("cache");
-        format!(
-            "        if: ${{{{ steps.{cache_step_id}.outputs.cache-hit != 'true' }}}}\n"
-        )
+        format!("        if: ${{{{ steps.{cache_step_id}.outputs.cache-hit != 'true' }}}}\n")
     } else {
         String::new()
     };
@@ -1061,17 +1058,16 @@ fn prefix_step_block_with_if(block: &str, guard: Option<&str>) -> String {
     let mut pending_name: Option<String> = None;
     let mut pending_if: Option<String> = None;
 
-    let flush_step =
-        |out: &mut String, name: &str, if_expr: Option<&str>| {
-            out.push_str(name);
-            out.push('\n');
-            let combined = if let Some(existing) = if_expr {
-                format!("        if: ${{{{ {guard} && ({existing}) }}}}\n")
-            } else {
-                format!("        if: ${{{{ {guard} }}}}\n")
-            };
-            out.push_str(&combined);
+    let flush_step = |out: &mut String, name: &str, if_expr: Option<&str>| {
+        out.push_str(name);
+        out.push('\n');
+        let combined = if let Some(existing) = if_expr {
+            format!("        if: ${{{{ {guard} && ({existing}) }}}}\n")
+        } else {
+            format!("        if: ${{{{ {guard} }}}}\n")
         };
+        out.push_str(&combined);
+    };
 
     for line in block.lines() {
         if line.starts_with("      - name:") {
@@ -1172,15 +1168,21 @@ const MUTABLE_MOUNT_SEED_FILES: &[&str] =
 /// `velnor-cache-seed` stage with. The image copies out of the context into
 /// its cache mounts only when a mount is empty, so a retained builder keeps
 /// its warm state and a fresh builder starts from the restored one.
-fn render_mutable_mount_seed_restore(output: &mut String, ir: &WorkflowIr, unit: &Unit) {
+fn render_mutable_mount_seed_restore(
+    output: &mut String,
+    ir: &WorkflowIr,
+    unit: &Unit,
+    step_id_prefix: Option<&str>,
+) {
     let Some(cache) = unit.cache.as_ref() else {
         return;
     };
     let (paths, _) = rendered_cache_values(cache);
     let (key, restore_keys) = unit_snapshot(ir, unit, DOCKER_SEED_SNAPSHOT_NAMESPACE);
+    let cache_step_id = crate::qualified_step_id(step_id_prefix, "cache");
     let _ = writeln!(
         output,
-        "      - name: Restore Docker build seed\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}\n          restore-keys: |\n            {restore_keys}",
+        "      - name: Restore Docker build seed\n        id: {cache_step_id}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}\n          restore-keys: |\n            {restore_keys}",
         ir.pins.cache_restore
     );
     let _ = writeln!(
@@ -1210,6 +1212,7 @@ fn render_mutable_mount_seed_collection(
     ir: &WorkflowIr,
     unit: &Unit,
     cache_save: bool,
+    cache_step_id: &str,
 ) {
     let trusted_cache = trusted_cache_save_expression(&ir.default_branch);
     let required_files = MUTABLE_MOUNT_SEED_FILES
@@ -1249,7 +1252,7 @@ fn render_mutable_mount_seed_collection(
         let _ = writeln!(
             output,
             "      - name: Save Docker build seed\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
-            dependency_bundle_cache_save_if(&ir.default_branch),
+            dependency_bundle_cache_save_if_for_step(&ir.default_branch, cache_step_id),
             ir.pins.cache_save
         );
     }
@@ -1865,8 +1868,7 @@ impl WorkflowIr {
             RunnerMode::Both => self.automatic.as_str(),
         };
         let runner = self.runner_for(self.control_plane_lane());
-        let dispatch_if =
-            "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure";
+        let dispatch_if = "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure";
         let simulate_if = "github.event_name == 'workflow_dispatch' && inputs.simulate_failure";
         let _ = writeln!(
             output,
@@ -2035,7 +2037,8 @@ impl WorkflowIr {
                 "(needs.{prep_job}.result == 'success' || needs.{prep_job}.result == 'skipped')"
             ));
         }
-        for dependency in velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units)
+        for dependency in
+            velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units)
         {
             conditions.push(format!(
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
@@ -2203,10 +2206,17 @@ impl WorkflowIr {
                 continue;
             }
             let velnor_job = job_id.starts_with("velnor-");
-            let _ = writeln!(
-                output,
-                "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$FORK_PR\" == true && {velnor_job} ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-            );
+            if velnor_job {
+                let _ = writeln!(
+                    output,
+                    "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+                );
+            } else {
+                let _ = writeln!(
+                    output,
+                    "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+                );
+            }
         }
         if check_name == "ci-required" {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
@@ -2519,8 +2529,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     .lanes
                     .iter()
                     .any(|job| job.lane == lane && lane_supports_unit(lane, unit));
-                active
-                    && trusted_only.is_none_or(|trusted| unit.requires_trusted == trusted)
+                active && trusted_only.is_none_or(|trusted| unit.requires_trusted == trusted)
             })
             .collect()
     }
@@ -2796,16 +2805,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         contract: &UnitContract,
         members: &[&Unit],
     ) {
-        self.render_lane_job_for_input(
-            output,
-            job,
-            unit,
-            contract,
-            None,
-            members,
-            None,
-            false,
-        );
+        self.render_lane_job_for_input(output, job, unit, contract, None, members, None, false);
     }
 
     #[expect(
@@ -2932,11 +2932,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_ci_selection_end_marker(output);
         }
         let mut fragment = String::new();
-        let write_target: &mut String = if steps_only {
-            &mut fragment
-        } else {
-            output
-        };
+        let write_target: &mut String = if steps_only { &mut fragment } else { output };
         self.render_tool_provisioning_for_unit(
             write_target,
             lane,
@@ -2948,7 +2944,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let seed = contract.mutable_mount_seed;
         let cache_step_id = crate::qualified_step_id(step_id_prefix_ref, "cache");
         let skip_fetch_on_cache_hit = if seed && lane == RunnerMode::Github {
-            render_mutable_mount_seed_restore(write_target, self, unit);
+            render_mutable_mount_seed_restore(write_target, self, unit, step_id_prefix_ref);
             false
         } else if contract.cache.lane_enables_actions_cache(lane, self, unit)
             && let Some(cache) = &unit.cache
@@ -3008,7 +3004,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             checks_env,
         );
         if seed && lane == RunnerMode::Github {
-            render_mutable_mount_seed_collection(write_target, self, unit, cache_save);
+            render_mutable_mount_seed_collection(
+                write_target,
+                self,
+                unit,
+                cache_save,
+                &cache_step_id,
+            );
         } else if cache_save
             && lane == RunnerMode::Github
             && contract.cache.lane_enables_actions_cache(lane, self, unit)
@@ -3769,9 +3771,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // narrower trigger set pass their own gate.
         let trusted_cache = trusted_cache_save_expression(&self.default_branch);
         let rustup_id = crate::qualified_step_id(step_id_prefix, "rustup-toolchain");
-        let save_gate = cache_save.then(|| {
-            format!("({trusted_cache}) && steps.{rustup_id}.outputs.cache-hit != 'true'")
-        });
+        let save_gate = cache_save
+            .then(|| format!("({trusted_cache}) && steps.{rustup_id}.outputs.cache-hit != 'true'"));
         render_pinned_toolchain_steps(
             output,
             self.pins.cache_restore,
@@ -3920,9 +3921,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let install_action_tools = [
             (!self.mise_present && tools.contains(&ToolRequirement::Nextest))
                 .then_some("cargo-nextest"),
-            tools.contains(&ToolRequirement::CargoDeny)
+            tools
+                .contains(&ToolRequirement::CargoDeny)
                 .then_some("cargo-deny"),
-            tools.contains(&ToolRequirement::CargoAudit)
+            tools
+                .contains(&ToolRequirement::CargoAudit)
                 .then_some("cargo-audit"),
         ]
         .into_iter()
