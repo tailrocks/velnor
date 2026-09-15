@@ -685,25 +685,19 @@ fn write_kind_matrices(
         .collect::<BTreeSet<_>>();
     let mut matrices: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     for unit in &config.unit {
+        matrices.entry(unit_matrix_output(unit)).or_default();
+    }
+    for unit in &config.unit {
         if !selected.contains(unit.id.as_str()) {
             continue;
         }
-        let kind = unit.kind.as_str();
-        let workflow = unit
-            .workflow_file
-            .clone()
-            .unwrap_or_else(|| format!("ci-unit-{kind}.yml"));
         let label = if unit.label.is_empty() {
             unit.id.clone()
         } else {
             unit.label.clone()
         };
-        let matrix_output = workflow
-            .strip_prefix("ci-unit-")
-            .and_then(|value| value.strip_suffix(".yml"))
-            .map_or_else(|| format!("{kind}_matrix"), |stem| format!("{stem}_matrix"));
         matrices
-            .entry(matrix_output)
+            .entry(unit_matrix_output(unit))
             .or_default()
             .push(serde_json::json!({ "unit": unit.id, "label": label }));
     }
@@ -715,6 +709,19 @@ fn write_kind_matrices(
             .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
     }
     Ok(())
+}
+
+fn unit_matrix_output(unit: &CiUnit) -> String {
+    let kind = unit.kind.as_str();
+    let workflow = unit
+        .workflow_file
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("ci-unit-{kind}.yml"));
+    workflow
+        .strip_prefix("ci-unit-")
+        .and_then(|value| value.strip_suffix(".yml"))
+        .map_or_else(|| format!("{kind}_matrix"), |stem| format!("{stem}_matrix"))
 }
 
 fn scope_for_event() -> Result<Option<String>, GeneratorError> {

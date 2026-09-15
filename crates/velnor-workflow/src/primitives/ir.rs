@@ -1270,10 +1270,6 @@ fn aggregate_triggers(
     }
 }
 
-fn kind_matrix_output(kind: UnitKind) -> String {
-    format!("{}_matrix", kind.id_prefix())
-}
-
 fn kind_matrix_output_from_file(file: &str) -> String {
     let stem = file
         .strip_prefix("ci-unit-")
@@ -2395,12 +2391,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
         ];
-        let mut kinds = BTreeSet::new();
+        let mut matrices = BTreeSet::new();
         for unit in &self.units {
-            kinds.insert(unit.kind);
+            matrices.insert(kind_matrix_output_from_file(&nested_unit_workflow_file(
+                unit,
+            )));
         }
-        for kind in kinds {
-            let name = kind_matrix_output(kind);
+        for name in matrices {
             outputs.push(format!(
                 "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
             ));
