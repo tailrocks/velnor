@@ -4,15 +4,18 @@ run-name: CI / PR · ${{ github.event_name }} · ${{ github.ref_name }}
 
 on:
   pull_request:
+  merge_group:
   workflow_dispatch:
     inputs:
       runner:
         description: Execution backend
-        required: true
+        required: false
         default: velnor
         type: choice
         options:
           - velnor
+          - github
+          - both
       scope:
         description: Verification scope
         required: true
@@ -65,6 +68,7 @@ jobs:
           CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
+          VELNOR_LANES: ${{ github.event.inputs.runner || 'velnor' }}
         run: |
           set -euo pipefail
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi

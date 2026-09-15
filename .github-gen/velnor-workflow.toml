@@ -10,7 +10,7 @@ exclude = ["migrations/**"]
 # lanes that run on PR/push/schedule without a dispatch choice.
 # This recovery branch runs CI on its repository-scoped Velnor host.
 [workflow]
-runners = "velnor"
+runners = "both"
 automatic = "velnor"
 default_branch = "main"
 github_runner = "ubuntu-24.04"
