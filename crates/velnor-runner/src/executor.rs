@@ -26815,6 +26815,16 @@ fi"#
             fs::remove_dir_all(temp).unwrap();
             return;
         }
+        // virtiofs/APFS (macOS Docker Desktop/OrbStack job mounts) may persist
+        // a UTF-8 replacement instead of the raw 0xff byte. The production
+        // check is `OsStr::to_str()` on the name the filesystem returns.
+        let persisted_non_utf8 = fs::read_dir(&temp)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name().to_str().is_none());
+        if !persisted_non_utf8 {
+            fs::remove_dir_all(temp).unwrap();
+            return;
+        }
 
         let error =
             artifact_upload_sources("release", &temp, RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS)

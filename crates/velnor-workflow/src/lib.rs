@@ -7178,11 +7178,10 @@ lockfile = true
                 .find(|unit| unit.kind == UnitKind::Swift),
             "Swift unit",
         );
-        let workflow = WorkflowIr::from_config(&config).render_nested_unit(swift, WorkflowKind::PullRequest);
+        let workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(swift, WorkflowKind::PullRequest);
         assert!(
-            workflow.contains(
-                "install_args: cargo-binstall rust cargo:sccache cargo:boltffi_cli"
-            ),
+            workflow.contains("install_args: cargo-binstall rust cargo:sccache cargo:boltffi_cli"),
             "Swift units with declared mise tools must provision them on GitHub: {workflow}"
         );
         let _ = fs::remove_dir_all(root);
