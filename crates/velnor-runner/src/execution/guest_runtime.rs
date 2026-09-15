@@ -424,7 +424,8 @@ pub fn execute_guest_plan(
         return Ok(exit_code);
     }
     let label = plan.isolation_label();
-    let job_label = format!("{JOB_ID_LABEL}={}", plan.job_id);
+    let job_name = crate::github_adapter::job_container_name_for_id(&plan.job_id);
+    let job_label = format!("{JOB_ID_LABEL}={job_name}");
     let daemon_label = format!("{DAEMON_ID_LABEL}={}", plan.daemon_id);
     let network = format!("velnor-net-{}", plan.isolation_id);
     docker_operands(
@@ -443,7 +444,6 @@ pub fn execute_guest_plan(
         ],
         &[&network],
     )?;
-    let job_name = format!("velnor-job-{}", plan.job_id);
     let mut teardown = GuestDockerTeardown::new(runner, events, host_docker, network);
     let code = match teardown.execute_steps(plan, &job_name) {
         Ok(code) => code,
@@ -1676,10 +1676,49 @@ mod tests {
             .any(|w| w == ["--label", "velnor.isolation=job-1/1"]));
         assert!(args
             .windows(2)
-            .any(|w| w == ["--label", "velnor.job-id=job-1"]));
+            .any(|w| w == ["--label", "velnor.job-id=velnor-job-job-1"]));
         assert!(args
             .windows(2)
             .any(|w| w == ["--label", "velnor.daemon-id=test-daemon"]));
+    }
+
+    #[test]
+    fn guest_docker_identity_sanitizes_job_id_for_label_and_container_name() {
+        let raw_job_id = "run/42:unsafe";
+        let mut plan = sample_plan();
+        plan.job_id = raw_job_id.into();
+        let mut runner = RecordingCommands::default();
+        execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
+
+        let canonical_name = "velnor-job-run_42_unsafe";
+        assert_eq!(
+            crate::github_adapter::job_container_name_for_id(raw_job_id),
+            canonical_name
+        );
+        let (_, network_args) = runner
+            .calls
+            .iter()
+            .find(|(_, args)| args.windows(2).any(|w| w == ["network", "create"]))
+            .expect("guest plan created a docker network");
+        assert!(network_args
+            .windows(2)
+            .any(|w| w == ["--label", "velnor.job-id=velnor-job-run_42_unsafe"]));
+        assert!(!network_args
+            .iter()
+            .any(|arg| arg == "velnor.job-id=run/42:unsafe"));
+
+        let (_, job_args) = runner
+            .calls
+            .iter()
+            .find(|(_, args)| args.windows(2).any(|w| w == ["--name", canonical_name]))
+            .expect("guest plan created the canonical job container");
+        assert!(job_args
+            .windows(2)
+            .any(|w| w == ["--name", "velnor-job-run_42_unsafe"]));
+        assert!(!runner
+            .calls
+            .iter()
+            .any(|(_, args)| { args.iter().any(|arg| arg == raw_job_id) }));
     }
 
     #[test]
