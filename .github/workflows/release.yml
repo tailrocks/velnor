@@ -1752,7 +1752,7 @@ jobs:
     name: "Velnor / Release / Bun package (velnor)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -1784,7 +1784,7 @@ jobs:
     name: "Velnor / Release / Docker"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -1810,7 +1810,7 @@ jobs:
     name: "Velnor / Release / Documentation"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -1842,7 +1842,7 @@ jobs:
     name: "Velnor / Release / OpenTofu"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -1874,7 +1874,7 @@ jobs:
     name: "Velnor / Release / Rust dependency policy"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -1911,7 +1911,7 @@ jobs:
     name: "Velnor / Release / Rust crate (unit-collector)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -1965,7 +1965,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-bench)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model, release-velnor-rust-velnor-runner]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2019,7 +2019,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-client)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2073,7 +2073,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-control)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2127,7 +2127,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-model)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2181,7 +2181,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-render)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2235,7 +2235,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-runner)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2289,7 +2289,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-tools)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-model]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2343,7 +2343,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-workflow)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-runner]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2397,7 +2397,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnor-workflow-contract)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2451,7 +2451,7 @@ jobs:
     name: "Velnor / Release / Rust crate (velnorctl)"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model, release-velnor-rust-velnor-render, release-velnor-rust-velnor-runner]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -2505,7 +2505,7 @@ jobs:
     name: "Velnor / Release / Rust production topology"
     if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
     steps:
       - name: Checkout
