@@ -2269,19 +2269,24 @@ fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
 
 fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
     let path = root.join(DEFAULT_CONFIG);
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
+    let value = match fs::read_to_string(&path) {
+        Ok(content) => toml::from_str::<toml::Value>(&content).map_err(|error| {
+            GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
+        })?,
+        // Advisory sparse-checkout omits `.github/ci`. Do not default the
+        // contract here: generation toml still carries runners, labels, and
+        // the PR-gate opt-in.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(VelnorPolicyContract::default());
+            toml::Value::Table(toml::Table::new())
         }
         Err(error) => return Err(GeneratorError::io("read workflow config", &path, &error)),
     };
-    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
-        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
-    })?;
     let runtime_workflow = value.get("workflow").and_then(toml::Value::as_table);
+    let generation_workflow = generation_workflow(root)?;
+    let generation_workflow = generation_workflow.as_ref().and_then(toml::Value::as_table);
     let labels = runtime_workflow
         .and_then(|workflow| workflow.get("velnor_labels"))
+        .or_else(|| generation_workflow.and_then(|workflow| workflow.get("velnor_labels")))
         .map(|labels| {
             labels
                 .as_array()
@@ -2296,8 +2301,6 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         })
         .transpose()?
         .unwrap_or_default();
-    let generation_workflow = generation_workflow(root)?;
-    let generation_workflow = generation_workflow.as_ref().and_then(toml::Value::as_table);
     let group = generation_workflow
         .and_then(|workflow| workflow.get("velnor_runner_group"))
         .map(|group| {
@@ -2327,11 +2330,21 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         runners: value
             .get("runners")
             .and_then(toml::Value::as_str)
+            .or_else(|| {
+                generation_workflow
+                    .and_then(|workflow| workflow.get("runners"))
+                    .and_then(toml::Value::as_str)
+            })
             .unwrap_or_default()
             .to_owned(),
         default_branch: value
             .get("default_branch")
             .and_then(toml::Value::as_str)
+            .or_else(|| {
+                generation_workflow
+                    .and_then(|workflow| workflow.get("default_branch"))
+                    .and_then(toml::Value::as_str)
+            })
             .unwrap_or("main")
             .to_owned(),
         velnor_labels: labels,
@@ -4997,6 +5010,59 @@ jobs:
 ",
         )?;
         assert!(!run_policy(mismatched)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_generated_pr_gates_when_project_toml_is_absent() -> Result<(), Box<dyn Error>>
+    {
+        // Advisory sparse-checkout never fetches `.github/ci`. Defaulting the
+        // contract there used to skip the generated PR-gate matcher.
+        let group = crate::estate::approved_velnor_runner_group();
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let generation_config = format!(
+            "schema = 1\n\n[workflow]\nrunners = \"velnor\"\ndefault_branch = \"main\"\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\npull_request_on_velnor = true\n"
+        );
+        let runner = format!("{{ group: {group}, labels: [{yaml_labels}] }}");
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))";
+        let root = policy_fixture(
+            "velnor-pr-generation-only",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::remove_file(root.join(".github/ci/project.toml"))?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            &generation_config,
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            format!(
+                r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{{{ {gate} }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+",
+            ),
+        )?;
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION);
+        assert!(
+            result.is_ok(),
+            "generation-only Advisory fixture rejected: {result:?}"
+        );
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
