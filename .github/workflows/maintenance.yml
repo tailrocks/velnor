@@ -72,7 +72,7 @@ jobs:
         with:
           rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '7fa4a0731ee8bedc5b02d90507d6dbe8b719153a' }}
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=3bfd459772bc24161551e755a63a5a02517c63e4" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=7fa4a0731ee8bedc5b02d90507d6dbe8b719153a" >> "$GITHUB_ENV"
       - name: Collect Actions cache account
         env:
           GH_TOKEN: ${{ github.token }}
