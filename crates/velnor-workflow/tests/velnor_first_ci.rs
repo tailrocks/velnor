@@ -217,13 +217,13 @@ fn adopt_is_rejected() {
 }
 
 #[test]
-fn pull_request_and_merge_group_publish_required() {
+fn pull_request_publish_required() {
     let root = unique_dir("pr-gate");
     write_rust_fixture(&root, 2);
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
     assert!(pr.contains("on:\n  pull_request:"));
-    assert!(pr.contains("  merge_group:"));
+    assert!(!pr.contains("  merge_group:"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
     assert!(pr.contains("    name: ci-required"));
@@ -385,7 +385,7 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let main = generated.workflow("ci-main.yml");
     assert!(
-        main.contains("rev: 91a900bed611cfd3c7e176fcd90a4bd2d4b741d6"),
+        main.contains("rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02"),
         "foreign Planning installs the published pin: {main}"
     );
     assert!(
@@ -662,18 +662,17 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     let workflow = generated.workflow("ci-unit-rust.yml");
     for unit in ["rust-crate00", "rust-crate01"] {
         assert!(
-            workflow.contains(&format!(
-                "contains(format(',{{0}},', inputs.selected_units), ',{unit},')"
-            )),
-            "{unit} must select its own reusable job"
+            workflow.contains(&format!("inputs.unit == '{unit}'")),
+            "{unit} must gate its collapsed verify steps"
         );
         assert!(
-            workflow.contains(&format!("CI_UNIT_ID: {unit}")),
-            "{unit} must hard-bind CI_UNIT_ID to the job's unit"
+            workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"),
+            "{unit} must bind CI_UNIT_ID from the caller's unit input"
         );
     }
-    assert!(!workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
-    assert!(!workflow.contains("inputs.unit"));
+    assert!(workflow.contains("unit:\n        required: true"));
+    assert!(workflow.contains("  verify-github:"));
+    assert!(workflow.contains("  verify-velnor:"));
     assert!(!workflow.contains("github-prepare-cargo-sources:"));
     assert!(workflow.contains("velnor-prepare-cargo-sources:"));
     assert!(!workflow.contains("needs: [github-prepare-cargo-sources]"));
@@ -684,8 +683,8 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     );
 
     let github_job = workflow
-        .split_once("  github-rust-crate00:\n")
-        .and_then(|(_, body)| body.split_once("\n  velnor-rust-crate00:\n"))
+        .split_once("  verify-github:\n")
+        .and_then(|(_, body)| body.split_once("\n  verify-velnor:\n"))
         .map_or("", |(body, _)| body);
     assert!(
         github_job.contains("Restore \"Rust crate (crate00)\" cache"),
@@ -702,7 +701,7 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
 
     let velnor_prep = workflow
         .split_once("  velnor-prepare-cargo-sources:\n")
-        .and_then(|(_, body)| body.split_once("\n  github-rust-crate00:\n"))
+        .and_then(|(_, body)| body.split_once("\n  verify-github:\n"))
         .map_or("", |(body, _)| body);
     assert!(
         velnor_prep.contains("github.event_name == 'workflow_dispatch'")
@@ -719,17 +718,19 @@ fn kind_reusable_caller_is_one_call_per_kind() {
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
-    assert_eq!(
+    assert!(
         pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
-            .count(),
-        3
+            .count()
+            >= 16,
+        "each selected (unit, lane) gets its own caller: {pr}"
     );
-    assert!(pr.contains("  group-rust-github:\n    name: \"GitHub / Rust\""));
-    assert!(pr.contains("    name: \"Velnor / Rust\""));
-    assert!(pr.contains("  group-rust-control:\n    name: \"Control / Rust\""));
-    assert!(pr.contains("lane: github"));
-    assert!(pr.contains("lane: velnor"));
-    assert!(pr.contains("lane: control"));
+    assert!(pr.contains("  prepare-cargo:\n    name: \"Control / Prepare Cargo\""));
+    assert!(pr.contains("  github-rust-crate00:\n    name: \"Rust · crate00\""));
+    assert!(pr.contains("  velnor-rust-crate00:\n    name: \"Rust · crate00\""));
+    assert!(pr.contains("      unit: rust-crate00"));
+    assert!(pr.contains("      lane: github"));
+    assert!(pr.contains("      lane: velnor"));
+    assert!(pr.contains("      lane: control"));
     assert!(!pr.contains("strategy:"));
     assert!(!pr.contains("matrix.unit"));
     assert!(!pr.contains("name: ${{ matrix.label }}"));
@@ -763,14 +764,19 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
-    assert_eq!(unit.matches("  github-rust-crate").count(), 8);
-    assert_eq!(unit.matches("  velnor-rust-crate").count(), 8);
-    assert_eq!(unit.matches("    name: rust-crate").count(), 16);
+    assert_eq!(unit.matches("  verify-github:").count(), 1);
+    assert_eq!(unit.matches("  verify-velnor:").count(), 1);
+    for index in 0..8 {
+        assert!(
+            unit.contains(&format!("inputs.unit == 'rust-crate{index:02}'")),
+            "each unit must gate its collapsed steps"
+        );
+    }
     let pr = generated.workflow("ci-pr.yml");
     assert_eq!(
         pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
             .count(),
-        3
+        17
     );
 }
 
@@ -788,7 +794,7 @@ fn kind_reusable_consumes_caller_plan_shas() {
     assert!(unit.contains("head_sha:\n        required: true"));
     assert!(unit.contains("selected_units:\n        required: true"));
     assert!(unit.contains("lane:\n        required: true"));
-    assert!(!unit.contains("      unit:\n        required: true"));
+    assert!(unit.contains("      unit:\n        required: true"));
 }
 
 #[test]
@@ -821,11 +827,13 @@ units = ["rust-crate01"]
 
     let generated = generate(&root);
     let workflow = generated.workflow("ci-unit-rust.yml");
-    assert!(workflow.contains("  github-rust-crate00:\n    name: rust-crate00"));
-    assert!(workflow.contains("timeout-minutes: 17"));
-    assert!(workflow.contains("  velnor-rust-crate01:\n    name: rust-crate01"));
-    assert!(workflow.contains("  github-rust-crate01:\n    name: rust-crate01"));
-    assert!(!workflow.contains("  velnor-rust-crate00:"));
+    assert!(workflow.contains("inputs.unit == 'rust-crate00'"));
+    assert!(
+        workflow.contains("timeout-minutes: 45"),
+        "collapsed verify uses the shard's max declared timeout"
+    );
+    assert!(workflow.contains("inputs.unit == 'rust-crate01'"));
+    assert!(!workflow.contains("inputs.unit == 'rust-crate00' && inputs.lane == 'velnor'"));
 }
 
 #[test]
@@ -852,7 +860,7 @@ fn unique_reusable_calls_stay_under_github_limit() {
         "rust units must stay on kind shards, not per-unit files: {calls:?}"
     );
     assert!(calls.contains("ci-unit-rust.yml"));
-    assert!(pr.contains("needs.plan.outputs.rust_matrix != '[]'"));
+    assert!(pr.contains("contains(format(',{0},', needs.plan.outputs.units), ',rust-crate"));
     assert!(!pr.contains("fromJSON(needs.plan.outputs.rust_matrix)"));
     assert!(!generated
         .output
@@ -867,9 +875,8 @@ fn unit_run_consumes_the_selection_artifact_not_a_hardcoded_id() {
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(unit.contains("VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection"));
-    assert!(unit.contains("CI_UNIT_ID: rust-crate00"));
+    assert!(unit.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
     assert!(unit.contains("--unit \"$CI_UNIT_ID\""));
-    assert!(unit.contains("CI_UNIT_ID: rust-crate00"));
     assert!(!unit.contains("--unit crate00"));
 }
 

@@ -55,11 +55,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -99,11 +99,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Restore "Bun package (velnor)" cache
@@ -136,11 +136,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Expose GitHub Actions runtime
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Set up Docker Buildx
@@ -168,11 +168,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Documentation cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -203,11 +203,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
@@ -243,11 +243,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -347,11 +347,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -370,6 +370,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -465,11 +466,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -488,6 +489,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -583,11 +585,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -606,6 +608,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -701,11 +704,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -724,6 +727,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -819,11 +823,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -842,6 +846,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -937,11 +942,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -960,6 +965,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1055,11 +1061,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1078,6 +1084,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1173,11 +1180,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1196,6 +1203,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1291,11 +1299,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1314,6 +1322,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1409,11 +1418,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1432,6 +1441,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1527,11 +1537,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1550,6 +1560,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1645,11 +1656,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1776,13 +1787,6 @@ jobs:
             echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
             echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
           } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-      - name: Restore "Bun package (velnor)" cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.bun/install/cache
-          key: ci-release-${{ runner.os }}-bun-velnor-${{ hashFiles('package.json', 'bun.lock') }}
       - name: Run "Bun package (velnor)" checks
         env:
           CI_SCOPE: full
@@ -1858,13 +1862,6 @@ jobs:
             echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
             echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
           } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-      - name: Restore Documentation cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.npm
-          key: ci-release-${{ runner.os }}-docs-${{ hashFiles('package-lock.json', 'bun.lock') }}
       - name: Run Documentation checks
         env:
           CI_SCOPE: full
@@ -1902,13 +1899,6 @@ jobs:
             echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
             echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
           } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-      - name: Restore OpenTofu cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.terraform.d/plugin-cache
-          key: ci-release-${{ runner.os }}-opentofu-${{ hashFiles('**/.terraform.lock.hcl') }}
       - name: Run OpenTofu checks
         env:
           CI_SCOPE: full
@@ -2733,11 +2723,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -2894,6 +2884,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -3129,11 +3120,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3152,6 +3143,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -3274,6 +3266,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -3325,7 +3318,7 @@ jobs:
           fi
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
-        if: (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))) && steps.mold-cache.outputs.cache-hit != 'true'
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/velnor/mold/2.42.0
@@ -3482,11 +3475,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c6bc690c88670d093082a0574a422783789117cd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8e438e06855e10b4bfe5072912f47d2ae9dc5a02
         with:
-          rev: c6bc690c88670d093082a0574a422783789117cd
+          rev: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=91a900bed611cfd3c7e176fcd90a4bd2d4b741d6" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8e438e06855e10b4bfe5072912f47d2ae9dc5a02" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3505,6 +3498,7 @@ jobs:
         with:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
+          cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:

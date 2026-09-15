@@ -1,4 +1,4 @@
-//! Structural `runners` pairing: every selected unit has matching lane jobs,
+//! Structural `runners` pairing: every selected unit has matching lane callers,
 //! comparison names stay lane-first, and automatic gates do not silently drop
 //! Velnor except the documented fork-PR admission failure.
 
@@ -152,37 +152,35 @@ fn job_if(job: &Value) -> String {
         .to_owned()
 }
 
-fn comparison_unit_id(job_id: &str) -> Option<(&str, &str)> {
+fn aggregate_lane_caller_id(job_id: &str) -> Option<(&str, &str)> {
     job_id
         .strip_prefix("github-")
         .map(|id| ("github", id))
         .or_else(|| job_id.strip_prefix("velnor-").map(|id| ("velnor", id)))
-        .filter(|(_, id)| {
-            *id != "prepare-cargo-sources" && *id != "lane-admission" && !id.is_empty()
-        })
+        .filter(|(_, id)| *id != "lane-admission" && !id.is_empty())
 }
 
 fn lane_token(name: &str) -> &str {
     name.split(" / ").next().unwrap_or(name)
 }
 
-fn kind_lane_caller(kind: &str, lane: &str) -> String {
-    format!("group-{kind}-{lane}")
-}
-
-fn assert_inner_names_are_unit_ids(jobs: &BTreeMap<String, Value>) {
+fn assert_aggregate_lane_callers_use_sidebar_names(jobs: &BTreeMap<String, Value>) {
     for (id, job) in jobs {
         let name = job_name(job);
         assert!(!name.is_empty(), "job `{id}` is missing a display name");
-        if let Some((_, unit)) = comparison_unit_id(id) {
-            assert_eq!(
-                name, unit,
-                "comparison job `{id}` must display as the unit id so the caller supplies the lane"
+        if let Some((_, unit)) = aggregate_lane_caller_id(id) {
+            assert!(
+                name.starts_with("Rust · "),
+                "aggregate lane caller `{id}` must display as a sidebar unit name, got `{name}`"
             );
-        } else if id.ends_with("prepare-cargo-sources") {
+            assert!(
+                name.ends_with(unit.strip_prefix("rust-").unwrap_or(unit)),
+                "aggregate lane caller `{id}` must keep the unit suffix in `{name}`"
+            );
+        } else if id == "prepare-cargo" {
             assert_eq!(
-                name, "prepare-cargo",
-                "prep job `{id}` must display as prepare-cargo"
+                name, "Control / Prepare Cargo",
+                "prep caller `{id}` must display as Control / Prepare Cargo"
             );
         }
     }
@@ -198,13 +196,20 @@ fn both_emits_one_github_and_one_velnor_job_per_unit() {
     );
     let generated = generate(&root);
     let rust = generated.workflow("ci-unit-rust.yml");
-    let jobs = parse_jobs(&rust);
-    assert_inner_names_are_unit_ids(&jobs);
+    let kind_jobs = parse_jobs(&rust);
+    assert!(kind_jobs.contains_key("verify-github"));
+    assert!(kind_jobs.contains_key("verify-velnor"));
+    assert_eq!(job_name(&kind_jobs["verify-github"]), "GitHub");
+    assert_eq!(job_name(&kind_jobs["verify-velnor"]), "Velnor");
+
+    let pr_yaml = generated.workflow("ci-pr.yml");
+    let pr = parse_jobs(&pr_yaml);
+    assert_aggregate_lane_callers_use_sidebar_names(&pr);
 
     let mut github = BTreeSet::new();
     let mut velnor = BTreeSet::new();
-    for id in jobs.keys() {
-        match comparison_unit_id(id) {
+    for id in pr.keys() {
+        match aggregate_lane_caller_id(id) {
             Some(("github", unit)) => {
                 github.insert(unit.to_owned());
             }
@@ -222,69 +227,73 @@ fn both_emits_one_github_and_one_velnor_job_per_unit() {
             "rust-crate02".to_owned(),
         ])
     );
-    assert_eq!(github, velnor, "both must emit a lane bijection: {jobs:?}");
+    assert_eq!(github, velnor, "both must emit a lane bijection: {pr:?}");
 
-    let prep = jobs
-        .get("velnor-prepare-cargo-sources")
-        .expect("cargo prep stays Velnor-only");
-    assert_eq!(job_name(prep), "prepare-cargo");
+    let prep = pr.get("prepare-cargo").expect("cargo prep caller");
+    assert_eq!(job_name(prep), "Control / Prepare Cargo");
     assert!(
-        job_if(prep).contains("inputs.lane == 'control'"),
-        "prep must belong to the Control / Rust caller: {}",
-        job_if(prep)
+        prep.get("with")
+            .and_then(Value::as_mapping)
+            .and_then(|with| with.get("lane"))
+            .and_then(Value::as_str)
+            == Some("control"),
+        "prep caller must invoke the kind reusable on the control lane"
     );
     assert!(
-        !jobs.contains_key("github-prepare-cargo-sources"),
-        "cargo prep must not invent a GitHub counterpart"
+        !pr.contains_key("github-prepare-cargo-sources"),
+        "cargo prep must not invent a GitHub counterpart caller"
+    );
+
+    let prep_inner = kind_jobs
+        .get("velnor-prepare-cargo-sources")
+        .expect("cargo prep stays inside the kind reusable");
+    assert_eq!(job_name(prep_inner), "prepare-cargo");
+    assert!(
+        job_if(prep_inner).contains("inputs.lane == 'control'"),
+        "inner prep must belong to the control lane: {}",
+        job_if(prep_inner)
     );
 
     for unit in &github {
-        let github_name = job_name(&jobs[&format!("github-{unit}")]);
-        let velnor_name = job_name(&jobs[&format!("velnor-{unit}")]);
-        assert_eq!(github_name, *unit);
-        assert_eq!(velnor_name, *unit);
+        assert!(pr.contains_key(&format!("github-{unit}")));
+        assert!(pr.contains_key(&format!("velnor-{unit}")));
         assert!(
-            jobs[&format!("velnor-{unit}")]
+            kind_jobs["verify-velnor"]
                 .get("steps")
                 .and_then(Value::as_sequence)
                 .into_iter()
                 .flatten()
                 .any(|step| step.get("name").and_then(Value::as_str)
                     == Some("Velnor runner identity")),
-            "Velnor comparison job must carry runner identity: {velnor_name}"
+            "Velnor verify job must carry runner identity"
         );
         assert!(
-            jobs[&format!("github-{unit}")]
+            kind_jobs["verify-github"]
                 .get("steps")
                 .and_then(Value::as_sequence)
                 .into_iter()
                 .flatten()
                 .all(|step| step.get("name").and_then(Value::as_str)
                     != Some("Velnor runner identity")),
-            "GitHub comparison jobs must not carry Velnor identity"
+            "GitHub verify job must not carry Velnor identity"
         );
     }
 
-    let pr_yaml = generated.workflow("ci-pr.yml");
-    let pr = parse_jobs(&pr_yaml);
-    assert_eq!(job_name(&pr["group-rust-github"]), "GitHub / Rust");
-    assert_eq!(
-        job_name(&pr[&kind_lane_caller("rust", "velnor")]),
-        "Velnor / Rust"
-    );
-    assert_eq!(job_name(&pr["group-rust-control"]), "Control / Rust");
+    assert_eq!(job_name(&pr["plan"]), "Control / Planning");
+    assert_eq!(job_name(&pr["prepare-cargo"]), "Control / Prepare Cargo");
     assert_eq!(
         pr_yaml
             .matches("uses: ./.github/workflows/ci-unit-rust.yml")
             .count(),
-        3
+        7,
+        "plan + prepare-cargo + 3 github + 3 velnor callers must reuse the rust kind workflow"
     );
 
     let again = generate(&root);
     assert_eq!(
-        again.workflow("ci-unit-rust.yml"),
-        rust,
-        "comparison job names must be deterministic"
+        again.workflow("ci-pr.yml"),
+        pr_yaml,
+        "aggregate lane callers must be deterministic"
     );
 }
 
@@ -296,10 +305,12 @@ fn github_mode_emits_only_github_comparison_jobs() {
         &root,
         "runners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n",
     );
-    let jobs = parse_jobs(&generate(&root).workflow("ci-unit-rust.yml"));
-    assert_inner_names_are_unit_ids(&jobs);
-    assert!(jobs.keys().any(|id| id.starts_with("github-rust-")));
-    assert!(!jobs.keys().any(|id| id.starts_with("velnor-")));
+    let pr = parse_jobs(&generate(&root).workflow("ci-pr.yml"));
+    assert!(pr.keys().any(|id| id.starts_with("github-rust-")));
+    assert!(!pr.keys().any(|id| id.starts_with("velnor-")));
+    let kind = parse_jobs(&generate(&root).workflow("ci-unit-rust.yml"));
+    assert!(kind.contains_key("verify-github"));
+    assert!(!kind.contains_key("verify-velnor"));
 }
 
 #[test]
@@ -310,12 +321,14 @@ fn velnor_mode_emits_only_velnor_comparison_jobs() {
         &root,
         "runners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\n",
     );
-    let jobs = parse_jobs(&generate(&root).workflow("ci-unit-rust.yml"));
-    assert_inner_names_are_unit_ids(&jobs);
-    assert!(jobs.keys().any(|id| id.starts_with("velnor-rust-")));
-    assert!(!jobs
+    let pr = parse_jobs(&generate(&root).workflow("ci-pr.yml"));
+    assert!(pr.keys().any(|id| id.starts_with("velnor-rust-")));
+    assert!(!pr
         .keys()
-        .any(|id| comparison_unit_id(id).is_some_and(|(lane, _)| lane == "github")));
+        .any(|id| aggregate_lane_caller_id(id).is_some_and(|(lane, _)| lane == "github")));
+    let kind = parse_jobs(&generate(&root).workflow("ci-unit-rust.yml"));
+    assert!(kind.contains_key("verify-velnor"));
+    assert!(!kind.contains_key("verify-github"));
 }
 
 #[test]
@@ -358,18 +371,17 @@ fn automatic_both_gates_pair_except_fork_pr_admission() {
 
     let generated = generate(&root);
     let rust = parse_jobs(&generated.workflow("ci-unit-rust.yml"));
-    let github_if = job_if(&rust["github-rust-crate00"]);
-    let velnor_if = job_if(&rust["velnor-rust-crate00"]);
+    let github_if = job_if(&rust["verify-github"]);
+    let velnor_if = job_if(&rust["verify-velnor"]);
     assert!(
         github_if.contains("inputs.lane == 'github'"),
-        "GitHub inner job must require the github caller: {github_if}"
+        "GitHub verify job must require the github lane: {github_if}"
     );
     assert!(
         velnor_if.contains("inputs.lane == 'velnor'"),
-        "Velnor inner job must require the velnor caller: {velnor_if}"
+        "Velnor verify job must require the velnor lane: {velnor_if}"
     );
     for event in [
-        "github.event_name == 'merge_group'",
         "github.event_name == 'push'",
         "github.event_name == 'schedule'",
     ] {
@@ -407,12 +419,9 @@ fn automatic_both_gates_pair_except_fork_pr_admission() {
     ));
     assert_eq!(lane_token(&job_name(&pr["plan"])), "Control");
     assert_eq!(job_name(&pr["ci-required"]), "ci-required");
-    assert_eq!(job_name(&pr["group-rust-github"]), "GitHub / Rust");
-    assert_eq!(
-        job_name(&pr[&kind_lane_caller("rust", "velnor")]),
-        "Velnor / Rust"
-    );
-    assert_eq!(job_name(&pr["group-rust-control"]), "Control / Rust");
+    assert!(pr.contains_key("github-rust-crate00"));
+    assert!(pr.contains_key("velnor-rust-crate00"));
+    assert!(pr.contains_key("prepare-cargo"));
 }
 
 #[test]
@@ -470,16 +479,28 @@ jobs = ["github"]
     fs::write(root.join(".github-gen/velnor-workflow.toml"), config).unwrap();
     let generated = generate(&root);
     let swift = parse_jobs(&generated.workflow("ci-unit-swift.yml"));
-    let github_job = format!("github-{swift_id}");
     assert!(
-        swift.contains_key(&github_job),
-        "explicit github opt-out must keep the hosted job: {swift:?}"
+        swift.contains_key("verify-github"),
+        "explicit github opt-out must keep the collapsed hosted verify job: {swift:?}"
     );
     assert!(
-        !swift
-            .keys()
-            .any(|id| id.starts_with("velnor-") && comparison_unit_id(id).is_some()),
-        "explicit github opt-out must not emit a Velnor counterpart: {swift:?}"
+        !swift.contains_key("verify-velnor"),
+        "explicit github opt-out must not emit a Velnor verify job: {swift:?}"
     );
-    assert_eq!(job_name(&swift[&github_job]), swift_id);
+    assert_eq!(job_name(&swift["verify-github"]), "GitHub");
+    assert!(
+        job_if(&swift["verify-github"]).contains(&format!("',{swift_id},'")),
+        "swift verify job must gate on the declared unit id"
+    );
+    assert!(
+        generated
+            .workflow("ci-unit-swift.yml")
+            .contains(&format!("inputs.unit == '{swift_id}'")),
+        "swift verify steps must gate on the declared unit id"
+    );
+    let pr = parse_jobs(&generated.workflow("ci-pr.yml"));
+    assert!(
+        pr.contains_key(&format!("github-{swift_id}")),
+        "explicit github opt-out must keep the aggregate github caller: {pr:?}"
+    );
 }

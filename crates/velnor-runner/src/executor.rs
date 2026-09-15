@@ -7841,10 +7841,16 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
         || path_or_child(path, "/opt/mise/installs")
         || path_or_child(path, "/opt/mise/cache")
         || path_or_child(path, "/var/cache/sccache")
+        || path_or_child(path, "/github/home/.bun/install/cache")
+        || path_or_child(path, "/github/home/.npm")
+        || path_or_child(path, "/github/home/.terraform.d/plugin-cache")
         || path_or_child(path, "~/.cargo/registry")
         || path_or_child(path, "~/.cargo/git")
         || path_or_child(path, ".cargo/registry")
         || path_or_child(path, ".cargo/git")
+        || path_or_child(path, "~/.bun/install/cache")
+        || path_or_child(path, "~/.npm")
+        || path_or_child(path, "~/.terraform.d/plugin-cache")
 }
 
 fn rust_cache_covered_by_persistent_storage(cache_directories: &str) -> bool {
@@ -18220,6 +18226,12 @@ esac
             "/opt/mise/cache/downloads",
             "/var/cache/sccache",
             "/var/cache/sccache/objects",
+            "/github/home/.bun/install/cache",
+            "/github/home/.bun/install/cache/abc123",
+            "/github/home/.npm",
+            "/github/home/.npm/_cacache",
+            "/github/home/.terraform.d/plugin-cache",
+            "/github/home/.terraform.d/plugin-cache/registry.terraform.io",
             "~/.cargo/registry",
             "~/.cargo/registry/cache",
             "~/.cargo/git",
@@ -18228,6 +18240,9 @@ esac
             ".cargo/registry/cache",
             ".cargo/git",
             ".cargo/git/db",
+            "~/.bun/install/cache",
+            "~/.npm",
+            "~/.terraform.d/plugin-cache",
         ] {
             assert!(
                 velnor_persistent_cache_path(path),
@@ -18238,6 +18253,10 @@ esac
         // normalized, or glob-like aliases remain ordinary keyed paths.
         for path in [
             "/github/home/.cargo",
+            "/github/home/.bun",
+            "/github/home/.terraform.d",
+            "~/.bun",
+            "~/.terraform.d",
             "/opt/mise",
             "/var/cache",
             ".cargo/registry-old",

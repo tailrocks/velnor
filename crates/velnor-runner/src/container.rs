@@ -562,6 +562,21 @@ impl JobContainerSpec {
                 &self.playwright_browser_store_host(),
                 "/github/home/.cache/ms-playwright",
             ),
+            // Package-manager download caches are not workspace output. Persist
+            // them per trust/repository so bun, npm, and OpenTofu jobs stay warm
+            // without hitting the hosted actions cache from self-hosted runners.
+            "-v".into(),
+            self.mount_arg(
+                &self.bun_install_cache_store_host(),
+                "/github/home/.bun/install/cache",
+            ),
+            "-v".into(),
+            self.mount_arg(&self.npm_cache_store_host(), "/github/home/.npm"),
+            "-v".into(),
+            self.mount_arg(
+                &self.terraform_plugin_cache_store_host(),
+                "/github/home/.terraform.d/plugin-cache",
+            ),
             // Share immutable Cargo downloads and indexes across the daemon,
             // but keep extracted registry sources and git checkouts in the
             // job home. Separate containers can otherwise race while creating
@@ -1264,6 +1279,12 @@ impl JobContainerSpec {
             ("tools", self.tools_host.clone()),
             ("workflow", workflow_host(&self.temp_host)),
             ("Playwright store", self.playwright_browser_store_host()),
+            ("Bun install cache", self.bun_install_cache_store_host()),
+            ("npm cache", self.npm_cache_store_host()),
+            (
+                "OpenTofu plugin cache",
+                self.terraform_plugin_cache_store_host(),
+            ),
             (
                 "Cargo registry cache",
                 cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
@@ -1583,13 +1604,43 @@ impl JobContainerSpec {
     }
 
     fn playwright_browser_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host(
+            "playwright",
+            ".cache/ms-playwright",
+        )
+    }
+
+    fn bun_install_cache_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host(
+            "bun-install-cache",
+            ".bun/install/cache",
+        )
+    }
+
+    fn npm_cache_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host("npm", ".npm")
+    }
+
+    fn terraform_plugin_cache_store_host(&self) -> PathBuf {
+        self.repository_scoped_home_cache_store_host(
+            "terraform-plugin-cache",
+            ".terraform.d/plugin-cache",
+        )
+    }
+
+    fn repository_scoped_home_cache_store_host(
+        &self,
+        store_leaf: &str,
+        home_relative: &str,
+    ) -> PathBuf {
         self.repository_store_key().map_or_else(
-            || self.home_host.join(".cache/ms-playwright"),
+            || self.home_host.join(home_relative),
             |repository| {
-                playwright_browser_store_host(
+                repository_scoped_home_cache_store_host(
                     &self.temp_host,
                     self.store_trust_scope.as_str(),
                     &repository,
+                    store_leaf,
                 )
             },
         )
@@ -2010,6 +2061,44 @@ pub(crate) fn playwright_browser_store_host(
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "playwright")
+}
+
+pub(crate) fn bun_install_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "bun-install-cache")
+}
+
+pub(crate) fn npm_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "npm")
+}
+
+pub(crate) fn terraform_plugin_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    repository_scoped_home_cache_store_host(
+        temp_host,
+        trust_scope,
+        repository,
+        "terraform-plugin-cache",
+    )
+}
+
+fn repository_scoped_home_cache_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+    store_leaf: &str,
+) -> PathBuf {
     let root = crate::storage::cache_class_path(
         &daemon_store_root(temp_host),
         trust_scope,
@@ -2018,7 +2107,7 @@ pub(crate) fn playwright_browser_store_host(
     );
     crate::storage::append_legacy_trust(root, trust_scope)
         .join(sanitize_store_key(repository))
-        .join("playwright")
+        .join(store_leaf)
 }
 
 /// Resolve the daemon-shared store root from a job temp dir
@@ -2708,6 +2797,21 @@ mod tests {
             &args,
             &job.playwright_browser_store_host(),
             "/github/home/.cache/ms-playwright"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.bun_install_cache_store_host(),
+            "/github/home/.bun/install/cache"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.npm_cache_store_host(),
+            "/github/home/.npm"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.terraform_plugin_cache_store_host(),
+            "/github/home/.terraform.d/plugin-cache"
         ));
         assert!(has_mount(
             &args,
