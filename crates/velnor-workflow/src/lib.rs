@@ -550,7 +550,9 @@ pub struct Unit {
     pub(crate) requires_trusted: bool,
     /// Workspace-wide `cargo check` gate declared through generation config.
     /// Watch-graph uses this to omit per-crate source trees that narrower
-    /// crate units already cover.
+    /// crate units already cover. Generation-time only: pinned Planning
+    /// runtimes reject unknown unit fields, and the emitted command list
+    /// carries the contract.
     pub(crate) workspace_check: bool,
 }
 
@@ -872,9 +874,6 @@ impl ProjectConfig {
             write_toml_string(&mut output, "label", &unit.label);
             write_toml_string(&mut output, "kind", unit.kind.id_prefix());
             write_toml_string(&mut output, "root", &unit.root);
-            if unit.workspace_check {
-                output.push_str("workspace_check = true\n");
-            }
             write_toml_array(&mut output, "watch", &unit.watch);
             write_toml_array(
                 &mut output,
@@ -6517,22 +6516,13 @@ mod tests {
             "scan configured repository",
         );
         let emitted = scanned.config.toml();
-        assert!(emitted.contains("workspace_check = true"));
-        let document: toml::Table = must(toml::from_str(&emitted), "parse emitted config");
-        let unit = must_some(
-            document
-                .get("unit")
-                .and_then(toml::Value::as_array)
-                .and_then(|units| {
-                    units.iter().find(|unit| {
-                        unit.get("id").and_then(toml::Value::as_str) == Some("rust-fixture")
-                    })
-                }),
-            "emitted rust fixture unit",
+        assert!(
+            !emitted.contains("workspace_check"),
+            "pinned Planning runtimes reject unknown fields: {emitted}"
         );
-        assert_eq!(
-            unit.get("workspace_check").and_then(toml::Value::as_bool),
-            Some(true)
+        assert!(
+            emitted.contains("cargo check --workspace --all-targets --locked"),
+            "workspace gate contract must live in emitted commands: {emitted}"
         );
         let path = root.join(".github/ci/project.toml");
         must(

@@ -224,6 +224,20 @@ impl CiUnit {
             (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
         }
     }
+
+    /// Whether affected Rust changes should also select this workspace gate.
+    /// The generator keeps the flag in generation config only; pinned Planning
+    /// runtimes infer the gate from the emitted `cargo check --workspace`
+    /// command contract.
+    fn is_workspace_check(&self) -> bool {
+        if self.workspace_check {
+            return true;
+        }
+        [&self.github_pr_commands, &self.github_full_commands, &self.velnor_pr_commands, &self.velnor_full_commands]
+            .into_iter()
+            .flatten()
+            .any(|command| command.contains("cargo check --workspace"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1285,7 +1299,7 @@ fn selection_for_diff<'a>(
             let workspace_checks = config
                 .unit
                 .iter()
-                .filter(|unit| unit.workspace_check)
+                .filter(|unit| unit.is_workspace_check())
                 .map(|unit| unit.id.clone())
                 .collect::<Vec<_>>();
             selected.extend(workspace_checks);
@@ -1336,7 +1350,7 @@ fn selection_for_diff<'a>(
             config
                 .unit
                 .iter()
-                .filter(|unit| unit.workspace_check)
+                .filter(|unit| unit.is_workspace_check())
                 .map(|unit| unit.id.clone()),
         );
     }
