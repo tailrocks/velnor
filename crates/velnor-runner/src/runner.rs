@@ -1049,15 +1049,7 @@ fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
 }
 
 fn job_queue_time(job: &AgentJobRequestMessage) -> Option<&str> {
-    job.queue_time
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            job.variables
-                .get("system.queueTime")
-                .and_then(|value| value.value.as_deref())
-        })
-        .filter(|value| !value.trim().is_empty())
+    crate::runtime_env::protocol_job_queue_time(job)
 }
 
 fn job_queue_time_present(job: &AgentJobRequestMessage) -> bool {
@@ -6869,6 +6861,7 @@ async fn handle_job_request(
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
     let queue_time_present = job_queue_time_present(&job);
+    crate::runtime_env::stamp_admitted_job_queue_time(&mut job);
     let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
     if let Err(persist_error) = persist_in_flight_job(config_dir, &run_service_job, &job) {
         return fail_closed_after_in_flight_persist_error(
