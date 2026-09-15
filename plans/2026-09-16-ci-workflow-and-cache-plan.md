@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `81104ba8` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8`; rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb`; rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `__FINAL_HEAD__` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
+Date: 2026-09-16 (rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `__FINAL_PIN__` @ `__FINAL_HEAD__`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 10); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 10); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -220,7 +220,8 @@ Canonical root `<VELNOR_STORAGE_ROOT>/cache/velnor/v1/<trust_scope>/<class>` —
 | D2 | Same naming rule for all unit kinds |
 | D3 | Keep **`Control / Prepare Cargo`** — Velnor-only shared warmup (today `Control / Rust` → inner `prepare-cargo`) |
 | D4 | Keep #867 both-lane contract |
-| D5 | One aggregate caller per (unit, lane); kind reusable files kept, **collapsed to one job** keyed on `inputs.unit` + `inputs.lane` (otherwise 34 callers × 27 inner jobs = 918 skipped instances per run — the N×N problem `ir.rs:1626-1631` warns about). `tests/velnor_first_ci.rs:675-676` currently forbids `inputs.unit`; rewrite that test. |
+| D5 | One aggregate caller per (unit, lane); kind reusable files kept, **collapsed to one job per lane** keyed on `inputs.unit` + `inputs.lane` (otherwise 34 callers × 27 inner jobs = 918 skipped instances per run — the N×N problem `ir.rs:1626-1631` warns about). (rev 9) The per-unit step block is rendered **once per lane job**; every unit-specific literal is a `workflow_call` input the caller passes through `with:` (D5a below). `tests/velnor_first_ci.rs` forbids `inputs.unit == '<id>'` guards in the callee. |
+| D5a | (rev 9) **Callee size is O(1) in the unit count.** GitHub loads a reusable workflow once *per calling job* into one 10 MiB `TemplateMemory` budget (actions/runner `TemplateMemory`: 24 B per token, 26 + 2×UTF-16-len per string). A callee whose body grows with the units it serves multiplies by its caller count: 27 rust callers × 233 KB (13 guarded copies of the step block) expanded to 15.91 MiB and failed every `ci-pr` run at startup with `Maximum object size exceeded`. Invariant: the generator refuses any aggregate whose expanded cost (own + Σ callee × callers) exceeds **5 MiB** (`template_memory.rs`); size-based sharding (`KIND_WORKFLOW_SHARD_BUDGET`) is removed as the wrong invariant. |
 | D6 | Dependency-closure on aggregate `needs:`; dependents' `if:` must accept `skipped` upstream results exactly as `group-rust-velnor` does today (`ci-pr.yml:235`) |
 | D7 | **GitHub lane:** PR read-only for trusted GHA saves |
 | D8 | **GitHub lane:** `merge_group` — (rev 2) no merge queue is enabled and `merge_group` saves land in an ephemeral queue scope. Decision: **remove the dead trigger** from `ci-pr.yml` and its admission gates until a queue is enabled; when enabled, add it to the *job admission* gate only, not the save gate. |
@@ -408,7 +409,7 @@ Pre-req: Phase 0 green.
 - [x] Toolchain-seeds: add `~/.cargo/bin/{cargo-deny,cargo-nextest}` (or move them into the mise-managed set already cached) — RC-18
 - [x] Docker hosted PR build: pass `--build-context velnor-cache-seed=.velnor-docker-cache/seed` so the restored seed is used; add `--cache-from/--cache-to type=gha,scope=docker,mode=max` (note: 10 GiB shared budget — measure before enabling `mode=max`) — RC-13
 - [x] Composite extraction; restore/save gates stay in one job
-- [x] Update goldens; re-measure shard budget (`ci-unit-rust.yml` is 314 KB today because of 27 inlined jobs; after D5 it is one job) — **235 KiB** @ `c273707d` (under 480 KiB `KIND_WORKFLOW_SHARD_BUDGET`)
+- [x] Update goldens; re-measure shard budget (`ci-unit-rust.yml` is 314 KB today because of 27 inlined jobs; after D5 it is one job) — **235 KiB** @ `c273707d` (under 480 KiB `KIND_WORKFLOW_SHARD_BUDGET`) — **(rev 9) superseded:** the per-file budget was the wrong invariant (D5a); `ci-unit-rust.yml` is **30 KB** and independent of unit count @ `114b7dfc`; expanded `ci-pr.yml` 2.71 MiB < 5 MiB ceiling
 
 ---
 
@@ -521,7 +522,7 @@ Pre-req: Phase 0 green.
 #### Workflow gates
 
 - [x] Unit-first Checks sidebar (`<Kind> · <unit> / GitHub|Velnor`); `lane_compare --strict` green with the new parser
-- [x] 6 reusable files (5 kind + `ci-release-package-signer.yml`), each kind file one job; shard test passes
+- [x] 6 reusable files (5 kind + `ci-release-package-signer.yml`), each kind file one job per lane; (rev 9) no shard files — template-memory ceiling test passes instead
 - [x] Fork PR behaves per D17; no `merge_group` trigger
 
 #### GitHub lane cache
@@ -805,7 +806,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Cargo key per lockfile + arch (RC-11) | V | `ci-unit-rust.yml:289` `ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles(...) }}` |
 | Docker seed consumed on hosted PR (RC-13) | V | `.github/ci/project.toml:55` `--build-context velnor-cache-seed=…` + GHA buildx cache |
 | Toolchain `velnor-cargo-bin-*` seeds (RC-18) | V | `ci-unit-rust.yml:206-215`; `lib.rs:3476` |
-| Shard budget after collapse | V | `KIND_WORKFLOW_SHARD_BUDGET = 120_000` (`ir.rs:37`); `ci-unit-rust.yml` 114163 B + `ci-unit-rust-2.yml` 119717 B + `ci-unit-rust-3.yml` 27103 B (parsed object cap, not 500 KB byte limit) |
+| Shard budget after collapse | C (rev 9) | Neither the 480 KB nor the 120 KB per-file budget modelled GitHub's limit, which is per-run template memory with the callee counted once per caller: 27 callers × 233 KB expanded to 15.91 MiB > 10 MiB; three 120 KB shards still expanded to ~8 MiB. Replaced by D5a: `ci-unit-rust.yml` 30 KB, `ci-pr.yml` expanded 2.71 MiB (`template_memory.rs`); no shard files |
 
 #### Phase 4 — GitHub budget ops
 
@@ -862,7 +863,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 
 | Claim | Verdict | Evidence |
 | --- | --- | --- |
-| PR CI instant-fail (0 jobs) root cause | V | orphan `Set up Velnor workflow runtime` step with only `if:` in `verify-github` (`ir.rs:2524` pre-fix); actionlint `syntax-check` |
+| PR CI instant-fail (0 jobs) root cause | P (rev 9) | The orphan `if:`-only step was a real syntax error but **not the cause of the persisting startup failure**: after the rev-5 fix (and the step-id prefixing in `69f94748` / workflow-level `cache-mode` in `6b60fa4e`, neither of which was causal — `cache-mode` is valid workflow- and job-level syntax) every `ci-pr` run still failed at `ci-pr.yml#L429` with `Error from called workflow …/ci-unit-rust.yml: Maximum object size exceeded`. True root cause: per-caller template memory (D5a, Rev 9 delta) |
 | Collapsed verify runtime bootstrap | V | `render_unit_runtime` in `render_collapsed_lane_verify_job`; actionlint clean on all `ci-unit-*.yml` |
 | Pins @ `8decfeeb` (D19) | V | `lib.rs:83,93`; generated runtime artifact names updated |
 | `cargo test -p velnor-workflow` | V | 453 passed @ `9c1211d7` |
@@ -921,3 +922,18 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | Run 35036454380 trust-gated docker in aggregate | V | `velnor-docker: skipped` accepted; no `velnor-docker did not pass: skipped` |
 | Run 35036454380 velnor-workflow GitHub | P→V | fmt drift `lib.rs:7140`; fixed @ `b6f7f5e2` |
 | Run 35036454380 Velnor admission failures | P | 4/31 Velnor jobs: `operational store rejected the sanitized admission row` (`runner.rs:7266`); fleet ops |
+
+#### Rev 11 delta @ `__FINAL_HEAD__` (2026-09-16)
+Root cause of the persisting `ci-pr` startup failure (`Invalid workflow file: .github/workflows/ci-pr.yml#L429 … Error from called workflow …/ci-unit-rust.yml@…: Maximum object size exceeded`): GitHub loads a called reusable workflow **once per calling job** into one 10 MiB `TemplateMemory` budget. The collapsed rust callee carried 13 copies of the per-unit step block (`if: inputs.unit == '<id>'`, unit-prefixed step ids; 233 KB / 4291 lines) and had 27 callers. Neither `cache-mode` (valid syntax, GA 2026-09-10; actionlint 1.7.12 lags it) nor the step ids were causal. Rev-5's "instant-fail root cause" row is downgraded to PARTIAL above; rev 6's file sharding (`KIND_WORKFLOW_SHARD_BUDGET = 120_000`, `ci-unit-rust-{2,3}.yml`, per-shard `prepare-cargo-N`) treated the symptom and is removed.
+| Pre-fix expansion over GitHub's budget | V | estimator over the `6b60fa4e` tree: `ci-pr.yml` own 155.4 KiB + 27 × 583.8 KiB (`ci-unit-rust.yml`) + 2 × ~50 KiB (bun/docker/docs/opentofu) = **15.91 MiB** > 10 MiB |
+| Callee is O(1) in unit count (D5a) | V | `ci-unit-rust.yml` 30 440 B / 656 lines (was 233 KB / 4291 lines); bun 19.3 KB, docker 22.0 KB, docs 19.2 KB, opentofu 19.4 KB; no `inputs.unit == '` in any callee (`tests/velnor_first_ci.rs`, `velnor-workflow-contract/tests/cache_keys.rs`) |
+| Post-fix expanded totals | V | `ci-pr.yml` **2.71 MiB** (own 196.6 KiB; 27 × 80.0 KiB rust; 2 × 50.7/56.7/50.3/51.0 KiB); `ci-main.yml` **2.72 MiB**; `nightly.yml` **2.73 MiB**; `release.yml` 598.7 KiB; `preview.yml` 151.9 KiB — all under the 5 MiB ceiling (GitHub 10 MiB) |
+| Fail-closed template-memory validator | V | `template_memory.rs`: mirrors `TemplateMemory` (24 B/token, 26 + 2×UTF-16 per string); runs in generation and `--check`; unit tests incl. 30 × 400 KiB synthetic aggregate refused with contributors listed |
+| Cache key values unchanged (D9) | V | `velnor-workflow-contract/tests/cache_keys.rs` resolves each caller's `with:` into the callee's `hashFiles(inputs.*)` / `${{ inputs.* }}` keys and asserts equality with the pre-change literals (`tests/fixtures/pre_parameterization_cache_keys.rs`, 17 hosted (unit, lane) rows) |
+| Sharding removed | V | `KIND_WORKFLOW_SHARD_BUDGET`, `flush_kind_workflow_shard`, `Unit.workflow_file`, stem-based matrix outputs gone; matrix outputs are `<kind>_matrix` |
+| `ci-required` verdict script | V | `[[ "$FORK_PR" == true && false ]]` (SC2158; `false` is a non-empty string, so hosted jobs accepted `skipped` on fork PRs) → fork-skip branch rendered only for Velnor lane jobs |
+| actionlint in Policy | V | `inline_policy_job_for_lane`: `jdx/mise-action` `install_args: actionlint@1.7.12` (hosted) / `mise --yes install` (Velnor) + `mise exec actionlint@1.7.12 -- actionlint` in `policy-checkout`; sparse checkout adds `.github/actions`; `.github/actionlint.yaml` ignores only `unexpected key "cache-mode" for "(workflow|job)" section`; scan refuses a `mise.lock` actionlint pin ≠ `ACTIONLINT_VERSION` |
+| actionlint clean | V | `actionlint .github/workflows/*.yml` exit 0 @ `f7af97c3` (was 83 findings: 72 SC2158/SC2160, 10 bool-to-string input type, 1 `cache-mode`) |
+| Pins @ `c6f45eb4` (D19) | V | `lib.rs:84,94`; `--check` exit 0 with HEAD `f7af97c3` ≠ pin (pinned binary pre-staged from the local build of `c6f45eb4`; the install-from-git path needs the commits pushed) |
+| `cargo test -p velnor-workflow` | V | 409 lib + 50 integration passed @ `f7af97c3`; `velnor-workflow-contract` 6 passed |
+| Further headroom | U | splitting each kind reusable per lane would halve the per-caller cost (~1.4 MiB for `ci-pr.yml`); not needed under the ceiling |
