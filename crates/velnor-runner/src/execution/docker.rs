@@ -254,7 +254,7 @@ impl DockerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let job = format!("velnor-job-{}", isolation.id);
+        let job = crate::github_adapter::job_container_name_for_id(&isolation.id);
         let args = ["rm".into(), "--force".into(), job];
         events.push(ExecutionEvent::HostDockerInvoked(format!(
             "docker {}",
@@ -601,6 +601,8 @@ fn parse_systemd_duration_usec(value: &str) -> Option<u128> {
 )]
 mod tests {
     use super::*;
+    use crate::execution::{HostFs, MemoryFs, RecordingCommands, RecordingFirecracker};
+    use std::path::PathBuf;
 
     #[test]
     fn linux_systemd_v2_keeps_the_host_slice_proof() {
@@ -691,5 +693,46 @@ mod tests {
             };
             assert!(error.contains("cgroup v2"), "{error}");
         }
+    }
+
+    #[test]
+    fn docker_cancel_uses_canonical_container_name_for_unsafe_job_id() {
+        let mut fs = MemoryFs::default();
+        let docker_socket = PathBuf::from("/var/run/docker.sock");
+        fs.write(&docker_socket, b"socket").unwrap();
+        let mut runner = RecordingCommands::default();
+        let mut firecracker = RecordingFirecracker::default();
+        let kvm = PathBuf::from("/dev/kvm");
+        let artifacts = PathBuf::from("/microvm");
+        let mut world = ExecutionWorld {
+            kvm: &kvm,
+            artifact_root: &artifacts,
+            isolation_root: &artifacts,
+            host_docker_socket: &docker_socket,
+            runner: &mut runner,
+            firecracker: &mut firecracker,
+            host_fs: &mut fs,
+            vsock: None,
+            docker_engine: None,
+            allow_inline_guest_plan: true,
+        };
+        let mut backend = DockerBackend::default();
+        let isolation = IsolationIdentity::new("run/42:unsafe", 1);
+        let mut events = Vec::new();
+
+        backend.cancel(&isolation, &mut world, &mut events).unwrap();
+
+        assert_eq!(
+            runner
+                .calls
+                .iter()
+                .find(|(program, _)| program == "docker")
+                .map(|(_, args)| args),
+            Some(&vec![
+                "rm".to_owned(),
+                "--force".to_owned(),
+                "velnor-job-run_42_unsafe".to_owned(),
+            ])
+        );
     }
 }
