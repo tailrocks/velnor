@@ -2674,7 +2674,7 @@ mod tests {
         );
         assert_eq!(
             crate::VELNOR_WORKFLOW_SOURCE_REV,
-            "d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754"
+            "7fa4a0731ee8bedc5b02d90507d6dbe8b719153a"
         );
         let uses_line = must_some(
             workflow.lines().find(|line| {
@@ -2683,7 +2683,7 @@ mod tests {
             "setup-velnor-workflow uses line",
         );
         assert!(
-            uses_line.contains("@d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754"),
+            uses_line.contains("@7fa4a0731ee8bedc5b02d90507d6dbe8b719153a"),
             "uses: must pin SOURCE_REV: {uses_line}"
         );
         assert!(

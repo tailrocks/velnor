@@ -243,11 +243,7 @@ impl CiUnit {
         ]
         .into_iter()
         .flatten()
-        .any(|command| {
-            command.contains("check --workspace --all-targets")
-                && (command.contains("cargo check --workspace")
-                    || command.contains("mbx check --workspace"))
-        })
+        .any(|command| command.contains("cargo check --workspace"))
     }
 }
 
@@ -1855,14 +1851,13 @@ mod run_cmd_stall_tests {
 
     #[test]
     fn chatty_slow_command_succeeds_past_wall_clock_limit() {
-        // ~3s of wall-clock against a 2s stall window: periodic output resets the timer,
-        // so this must succeed. The 1.9s per-gap slack (2s window minus 0.1s chat cadence)
-        // absorbs scheduler stalls under host load that flaked the old 0.2s slack.
+        // ~1.2s of wall-clock against a 0.3s stall window: periodic output
+        // resets the timer, so this must succeed.
         let result = run_command_with_stall_guard(
             &std::env::temp_dir(),
             "test-unit",
-            "for i in $(seq 1 30); do echo tick-$i; sleep 0.1; done",
-            Duration::from_secs(2),
+            "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo tick-$i; sleep 0.1; done",
+            Duration::from_millis(300),
         );
         let message = match &result {
             Ok(()) => String::new(),
@@ -2268,13 +2263,7 @@ fn configured_policy_excludes(root: &Path) -> BTreeSet<String> {
     crate::config::discover(root)
         .ok()
         .flatten()
-        .map(|config| {
-            config
-                .policy_exclude_workflows()
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
+        .map(|config| config.effective_policy_exclude_workflows())
         .unwrap_or_default()
 }
 
@@ -2385,17 +2374,9 @@ fn normalize_gate_expression(value: &str) -> String {
     }
 }
 
-fn strip_outer_parens(value: &str) -> &str {
-    value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-        .unwrap_or(value)
-}
-
 fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     let normalized = normalize_gate_expression(value);
     let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
-    let value = strip_outer_parens(value);
     if !valid_branch(default_branch) {
         return false;
     }
@@ -2728,16 +2709,11 @@ fn inspect_runner(
 }
 
 fn is_approved_velnor_runner(value: &Value, velnor_policy: &VelnorPolicyContract) -> bool {
-    let trusted_label = velnor_policy.velnor_trusted_label.as_deref();
     if let Some(labels) = value.as_sequence() {
         let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
             return false;
         };
-        return super::estate::approved_velnor_runner_contract_matches_with_trusted(
-            &labels,
-            None,
-            trusted_label,
-        );
+        return configured_velnor_runner_labels_match(&labels, None, velnor_policy);
     }
     let Some(runner) = value.as_mapping() else {
         return false;
@@ -2751,12 +2727,31 @@ fn is_approved_velnor_runner(value: &Value, velnor_policy: &VelnorPolicyContract
     let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
         return false;
     };
-    runner.len() == 2
-        && super::estate::approved_velnor_runner_contract_matches_with_trusted(
-            &labels,
-            Some(group),
-            trusted_label,
-        )
+    runner.len() == 2 && configured_velnor_runner_labels_match(&labels, Some(group), velnor_policy)
+}
+
+fn configured_velnor_runner_labels_match(
+    labels: &[&str],
+    group: Option<&str>,
+    velnor_policy: &VelnorPolicyContract,
+) -> bool {
+    let configured: Vec<&str> = velnor_policy
+        .velnor_labels
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if !super::estate::approved_velnor_runner_contract_matches(&configured, group) {
+        return false;
+    }
+    if labels == configured {
+        return true;
+    }
+    let Some(trusted_label) = velnor_policy.velnor_trusted_label.as_deref() else {
+        return false;
+    };
+    labels.len() == configured.len() + 1
+        && labels[..configured.len()] == configured[..]
+        && labels[configured.len()] == trusted_label
 }
 
 fn normalize_runner_expression(value: &str) -> String {
@@ -2941,7 +2936,7 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         return has_trusted_runner_gate(trusted);
     }
     if let Some(trusted) = strip_reusable_unit_selector(&value) {
-        return has_trusted_runner_gate(strip_outer_parens(trusted));
+        return has_trusted_runner_gate(trusted);
     }
     let marker = "github.ref=='refs/heads/";
     let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
@@ -2990,25 +2985,7 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
     strip_inputs_unit_selector(value)
         .or_else(|| strip_selected_units_selector(value))
-        .or_else(|| strip_or_selected_units_and_gate(value))
-}
-
-fn strip_or_selected_units_and_gate(value: &str) -> Option<&str> {
-    const SUFFIX: &str = ")&&(";
-    let split = value.rfind(SUFFIX)?;
-    let gate = value[split + SUFFIX.len()..].strip_suffix(')')?;
-    // `value[..split]` is `(sel1||sel2||contains(...))` minus the OR-group
-    // close, which lives in SUFFIX. The last selector is a `contains(...)`
-    // call, so a trailing `strip_suffix(')')` would eat that call's `)` and
-    // reject the generated prepare-cargo-sources job.
-    let selectors = value[..split].strip_prefix('(')?;
-    if selectors.split("||").all(|branch| {
-        strip_selected_units_selector(&format!("{}&&(x)", branch.trim())).is_some()
-    }) {
-        Some(strip_outer_parens(gate))
-    } else {
-        None
-    }
+        .or_else(|| strip_combined_selected_units_selector(value))
 }
 
 fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
@@ -3032,6 +3009,40 @@ fn strip_selected_units_selector(value: &str) -> Option<&str> {
         return None;
     }
     rest[separator + ",')&&(".len()..].strip_suffix(')')
+}
+
+fn is_selected_units_selector(value: &str) -> bool {
+    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    let rest = match value.strip_prefix(PREFIX) {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let rest = match rest.strip_prefix(',') {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let separator = match rest.find(",')") {
+        Some(separator) => separator,
+        None => return false,
+    };
+    is_unit_id(&rest[..separator])
+}
+
+fn strip_combined_selected_units_selector(value: &str) -> Option<&str> {
+    // (contains(...,unit-a,')||contains(...,unit-b,'))&&(gate)
+    let value = value.strip_prefix('(')?;
+    let split = value.rfind(")&&(")?;
+    let selectors = &value[..split];
+    let gate = value[split + 4..].strip_suffix(')')?;
+    if selectors.is_empty() || gate.is_empty() {
+        return None;
+    }
+    for selector in selectors.split("||") {
+        if !is_selected_units_selector(selector) {
+            return None;
+        }
+    }
+    Some(gate)
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -4955,11 +4966,6 @@ jobs:
     runs-on: {runner}
     steps:
       - run: true
-  prepare:
-    if: ${{{{ (contains(format(',{{0}},', inputs.selected_units), ',rust-policy,') || contains(format(',{{0}},', inputs.selected_units), ',rust-velnor-runner,')) && ({gate}) }}}}
-    runs-on: {runner}
-    steps:
-      - run: true
 ",
             ),
         )?;
@@ -5602,6 +5608,65 @@ jobs:
             "labels-only approved runner rejected: {result:?}"
         );
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_trusted_label_suffix_and_combined_unit_selectors() -> Result<(), Box<dyn Error>>
+    {
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let trusted_label = "velnor-host-docker";
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config_text = format!(
+            "schema = 2\nrunners = \"both\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\n"
+        );
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
+        let combined_gate = format!(
+            "(contains(format(',{{0}},',inputs.selected_units),',rust-policy,')||contains(format(',{{0}},',inputs.selected_units),',rust-velnor-workflow,'))&&({gate})"
+        );
+        let root = policy_fixture(
+            "velnor-trusted-and-combined-gates",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "both",
+        )?;
+        std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            format!(
+                "schema = 1\n\n[workflow]\npull_request_on_velnor = true\nvelnor_trusted_label = \"{trusted_label}\"\n"
+            ),
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-unit-rust.yml"),
+            format!(
+                r"
+name: Rust units
+on:
+  workflow_call:
+    inputs:
+      selected_units:
+        required: true
+        type: string
+jobs:
+  velnor-prepare-cargo-sources:
+    if: ${{{{ {combined_gate} }}}}
+    runs-on: [{yaml_labels}, {trusted_label}]
+    steps:
+      - run: true
+  velnor-rust-policy:
+    if: ${{{{ contains(format(',{{0}},', inputs.selected_units), ',rust-policy,') && ({gate}) }}}}
+    runs-on: [{yaml_labels}]
+    steps:
+      - run: true
+"
+            ),
+        )?;
+        assert!(run_policy(root)?);
         Ok(())
     }
 
