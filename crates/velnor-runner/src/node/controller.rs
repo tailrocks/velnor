@@ -1944,137 +1944,14 @@ async fn reclaim_orphaned_jobs(
     };
 
     for job in orphan_jobs {
-        let slot_dir = recovery_slot_config_dir(&args.state_dir, &exec, &state, &job.slot_id)?;
-        let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
-        let pending_completion = job.phase == JobPhase2::Completing
-            && state.outbox.iter().any(|row| {
-                row.job_id == job.job_id
-                    && row.generation == job.generation
-                    && row.intended
-                    && !row.remote_acked
-            });
-        if let Some(marker_job_id) = marker_job_id.as_deref()
-            && marker_job_id != job.job_id.0
+        // One Completing row must not abort the fleet cycle. Log and move on
+        // so other slots still reclaim; the next tick retries this job.
+        if let Err(error) =
+            recover_one_orphaned_job(args, journal, &exec, &state, &job, remote_deadline).await
         {
-            return Err(anyhow::anyhow!(
-                "in-flight marker job {} does not match orphan job {}",
-                marker_job_id,
-                job.job_id.0
-            ));
-        }
-        if job.phase == JobPhase2::Completing
-            && !pending_completion
-            // A job whose terminal result is durable but whose payload is not
-            // is the crash window between the two writes, not a lost payload.
-            // Its real conclusion is recorded, so recovery re-drives the
-            // completion instead of failing the whole reconciliation.
-            && job.terminal_conclusion.is_none()
-        {
-            return Err(anyhow::anyhow!(
-                "completing job {} has no exact durable completion payload",
-                job.job_id.0
-            ));
-        }
-        if let Some(stored) = load_local_runner_config(&slot_dir)? {
-            if marker_job_id.is_some() {
-                let cleanup = if pending_completion {
-                    match defer_remote_recovery_on_timeout(
-                        remaining_remote_budget(remote_deadline),
-                        crate::runner::replay_recorded_completion(
-                            &slot_dir,
-                            &stored,
-                            &args.state_dir,
-                        ),
-                        "replay recorded completion during orphan recovery",
-                    )
-                    .await
-                    {
-                        Ok(cleanup) => cleanup,
-                        Err(error) => {
-                            // A completion that cannot be delivered is not a
-                            // controller failure. The completion path already
-                            // charged this attempt to the row's durable
-                            // budget; propagating instead would re-run the
-                            // same doomed replay on every cycle and never let
-                            // the row terminate.
-                            eprintln!(
-                                "Warning: completion replay for job {} failed: {error:#}",
-                                job.job_id.0
-                            );
-                            if let Some(row) = journal
-                                .materialized_state()?
-                                .outbox
-                                .into_iter()
-                                .find(|row| {
-                                    row.job_id == job.job_id && row.generation == job.generation
-                                })
-                            {
-                                abandon_if_budget_spent(args, journal, &row)?;
-                            }
-                            continue;
-                        }
-                    }
-                } else {
-                    if let Some(conclusion) = job.terminal_conclusion.as_deref() {
-                        defer_remote_recovery_on_timeout(
-                            remaining_remote_budget(remote_deadline),
-                            crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion(
-                                &slot_dir, &stored, conclusion,
-                            ),
-                            "complete recorded terminal conclusion during orphan recovery",
-                        )
-                        .await?
-                    } else {
-                        defer_remote_recovery_on_timeout(
-                            remaining_remote_budget(remote_deadline),
-                            crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
-                            "complete recorded in-flight job during orphan recovery",
-                        )
-                        .await?
-                    }
-                };
-                let Some(cleanup) = cleanup else {
-                    continue;
-                };
-                if cleanup {
-                    eprintln!(
-                        "Recovered stale in-flight job {} before restoring slot {}",
-                        job.job_id.0, job.slot_id.0
-                    );
-                }
-            }
-        } else if marker_job_id.is_some() {
-            return Err(anyhow::anyhow!(
-                "runner credentials missing while recovering in-flight job {}",
-                job.job_id.0
-            ));
-        }
-        if crate::runner::recorded_in_flight_job_exists(&slot_dir)? && pending_completion {
-            return Err(anyhow::anyhow!(
-                "completing job {} retained its in-flight marker after recovery",
-                job.job_id.0
-            ));
-        }
-        let current = journal.materialized_state()?;
-        if current.jobs.iter().all(|row| row.job_id != job.job_id) {
-            // complete_recorded_in_flight_job already committed the terminal
-            // acknowledgement and removed this job from the journal.
-            continue;
-        }
-        if pending_completion {
-            return Err(anyhow::anyhow!(
-                "completing job {} has no recoverable terminal acknowledgement",
-                job.job_id.0
-            ));
-        }
-        let lost = journal.apply(Event::JobWorkerLost {
-            job_id: job.job_id.clone(),
-            generation: job.generation,
-        })?;
-        if !lost.rejected {
             eprintln!(
-                "Warning: job {} worker lost on {}; slot restored to Ready",
-                job.job_id.0, job.slot_id.0
+                "Warning: orphan recovery for job {} failed this cycle: {error:#}",
+                job.job_id.0
             );
         }
     }
@@ -2167,6 +2044,152 @@ async fn reclaim_orphaned_jobs(
                 marker_job_id
             ));
         }
+    }
+    Ok(())
+}
+
+async fn recover_one_orphaned_job(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    exec: &crate::args::DaemonArgs,
+    state: &velnor_control::journal::FleetState,
+    job: &velnor_control::journal::JobRecord,
+    remote_deadline: tokio::time::Instant,
+) -> anyhow::Result<()> {
+    let slot_dir = recovery_slot_config_dir(&args.state_dir, exec, state, &job.slot_id)?;
+    let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
+    let pending_completion = job.phase == JobPhase2::Completing
+        && state.outbox.iter().any(|row| {
+            row.job_id == job.job_id
+                && row.generation == job.generation
+                && row.intended
+                && !row.remote_acked
+        });
+    if let Some(marker_job_id) = marker_job_id.as_deref()
+        && marker_job_id != job.job_id.0
+    {
+        return Err(anyhow::anyhow!(
+            "in-flight marker job {} does not match orphan job {}",
+            marker_job_id,
+            job.job_id.0
+        ));
+    }
+    if job.phase == JobPhase2::Completing
+        && !pending_completion
+        // A job whose terminal result is durable but whose payload is not
+        // is the crash window between the two writes, not a lost payload.
+        // Its real conclusion is recorded, so recovery re-drives the
+        // completion instead of failing the whole reconciliation.
+        && job.terminal_conclusion.is_none()
+    {
+        // Missing payload is a retryable gap, not a controller failure.
+        // Returning Err here used to abort the whole reconcile loop and
+        // leave every Completing slot stuck until the next process start.
+        eprintln!(
+            "Warning: completing job {} has no exact durable completion payload; retrying next cycle",
+            job.job_id.0
+        );
+        return Ok(());
+    }
+    if let Some(stored) = load_local_runner_config(&slot_dir)? {
+        if marker_job_id.is_some() {
+            let cleanup = if pending_completion {
+                match defer_remote_recovery_on_timeout(
+                    remaining_remote_budget(remote_deadline),
+                    crate::runner::replay_recorded_completion(
+                        &slot_dir,
+                        &stored,
+                        &args.state_dir,
+                    ),
+                    "replay recorded completion during orphan recovery",
+                )
+                .await
+                {
+                    Ok(cleanup) => cleanup,
+                    Err(error) => {
+                        // A completion that cannot be delivered is not a
+                        // controller failure. The completion path already
+                        // charged this attempt to the row's durable
+                        // budget; propagating instead would re-run the
+                        // same doomed replay on every cycle and never let
+                        // the row terminate.
+                        eprintln!(
+                            "Warning: completion replay for job {} failed: {error:#}",
+                            job.job_id.0
+                        );
+                        if let Some(row) = journal
+                            .materialized_state()?
+                            .outbox
+                            .into_iter()
+                            .find(|row| {
+                                row.job_id == job.job_id && row.generation == job.generation
+                            })
+                        {
+                            abandon_if_budget_spent(args, journal, &row)?;
+                        }
+                        return Ok(());
+                    }
+                }
+            } else if let Some(conclusion) = job.terminal_conclusion.as_deref() {
+                defer_remote_recovery_on_timeout(
+                    remaining_remote_budget(remote_deadline),
+                    crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion(
+                        &slot_dir, &stored, conclusion,
+                    ),
+                    "complete recorded terminal conclusion during orphan recovery",
+                )
+                .await?
+            } else {
+                defer_remote_recovery_on_timeout(
+                    remaining_remote_budget(remote_deadline),
+                    crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
+                    "complete recorded in-flight job during orphan recovery",
+                )
+                .await?
+            };
+            let Some(cleanup) = cleanup else {
+                return Ok(());
+            };
+            if cleanup {
+                eprintln!(
+                    "Recovered stale in-flight job {} before restoring slot {}",
+                    job.job_id.0, job.slot_id.0
+                );
+            }
+        }
+    } else if marker_job_id.is_some() {
+        return Err(anyhow::anyhow!(
+            "runner credentials missing while recovering in-flight job {}",
+            job.job_id.0
+        ));
+    }
+    if crate::runner::recorded_in_flight_job_exists(&slot_dir)? && pending_completion {
+        return Err(anyhow::anyhow!(
+            "completing job {} retained its in-flight marker after recovery",
+            job.job_id.0
+        ));
+    }
+    let current = journal.materialized_state()?;
+    if current.jobs.iter().all(|row| row.job_id != job.job_id) {
+        // complete_recorded_in_flight_job already committed the terminal
+        // acknowledgement and removed this job from the journal.
+        return Ok(());
+    }
+    if pending_completion {
+        return Err(anyhow::anyhow!(
+            "completing job {} has no recoverable terminal acknowledgement",
+            job.job_id.0
+        ));
+    }
+    let lost = journal.apply(Event::JobWorkerLost {
+        job_id: job.job_id.clone(),
+        generation: job.generation,
+    })?;
+    if !lost.rejected {
+        eprintln!(
+            "Warning: job {} worker lost on {}; slot restored to Ready",
+            job.job_id.0, job.slot_id.0
+        );
     }
     Ok(())
 }
@@ -4429,6 +4452,173 @@ mod tests {
         assert!(
             slot_dir.join("in-flight-job.json").exists(),
             "live waiter must keep its in-flight marker for the next tick"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn completing_job_without_payload_does_not_abort_orphan_reclaim() {
+        let dir = metrics_test_dir("completing-no-payload-reclaim");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let generation = Generation::INITIAL;
+        let completing_slot = SlotId("velnor-1".to_owned());
+        let running_slot = SlotId("velnor-2".to_owned());
+        let completing_job = JobId("job-completing".to_owned());
+        let running_job = JobId("job-running".to_owned());
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 2 },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        for slot_id in [completing_slot.clone(), running_slot.clone()] {
+            for event in [
+                Event::PermitReserved {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::ExecutorProven {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::SessionLive {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::RegistrationIntended {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::Registered {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+                Event::ReadyAttempt {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+            ] {
+                assert!(!journal.apply(event).unwrap().rejected);
+            }
+        }
+        for (slot_id, job_id, message_id) in [
+            (
+                completing_slot.clone(),
+                completing_job.clone(),
+                "msg-completing",
+            ),
+            (running_slot.clone(), running_job.clone(), "msg-running"),
+        ] {
+            for event in [
+                Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: job_id.clone(),
+                    generation,
+                    message_id: message_id.into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
+                },
+                Event::JobOwned {
+                    job_id: job_id.clone(),
+                    slot_id: slot_id.clone(),
+                    attempt: 1,
+                    generation,
+                    worker: format!("worker-{}", job_id.0),
+                    accepted_unix: 1,
+                },
+                Event::JobStarted {
+                    job_id: job_id.clone(),
+                    generation,
+                },
+            ] {
+                assert!(!journal.apply(event).unwrap().rejected);
+            }
+        }
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: completing_job.clone(),
+                    generation,
+                    payload_sha256: velnor_control::journal::payload_checksum(b"payload"),
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+        rusqlite::Connection::open(dir.join("journal.db"))
+            .unwrap()
+            .execute("DELETE FROM outbox", [])
+            .unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
+        let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        std::fs::write(
+            slot_dir.join("in-flight-job.json"),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": completing_job.0,
+                "run_service_url": "https://example.invalid/run-service",
+                "billing_owner_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let stale = stale_pid();
+        for isolation in [
+            completing_job.0.as_str(),
+            running_job.0.as_str(),
+            "wait-velnor-1",
+            "wait-velnor-2",
+        ] {
+            cleanup::write_owned_pid(&dir, isolation, generation.0, stale).unwrap();
+        }
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 2,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+        )
+        .await
+        .expect("missing completion payload must not abort the controller cycle");
+
+        let state = journal.materialized_state().unwrap();
+        let completing = state
+            .jobs
+            .iter()
+            .find(|job| job.job_id == completing_job)
+            .expect("completing job is retried, not discarded");
+        assert_eq!(completing.phase, JobPhase2::Completing);
+        assert!(completing.terminal_conclusion.is_none());
+        assert!(
+            state.jobs.iter().all(|job| job.job_id != running_job),
+            "the other slot must still reclaim after the completing job is skipped: {:?}",
+            state.jobs
+        );
+        assert_eq!(
+            state
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == running_slot)
+                .map(|slot| slot.phase),
+            Some(SlotPhase2::Ready)
         );
         std::fs::remove_dir_all(dir).ok();
     }
