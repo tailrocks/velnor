@@ -11,3 +11,6 @@ config:
 # `# Generated` banner is deliberately an H1); it is not hand-written prose.
 ignores:
   - "**/.github-gen/**"
+  # Operator recovery records; living tables and a binding spec, not product docs.
+  - VELNOR_RECOVERY_EXECUTION.md
+  - velnor-recovery-goal.md

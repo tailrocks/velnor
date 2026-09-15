@@ -978,6 +978,7 @@ mod tests {
             }),
             services: Vec::new(),
             workflow_file: None,
+            requires_trusted: false,
         }
     }
 
@@ -1001,6 +1002,7 @@ mod tests {
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Github,
+            automatic: crate::RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
             macos_runner: "macos-15".to_owned(),
             velnor_labels: Vec::new(),
@@ -1018,6 +1020,7 @@ mod tests {
             ci_required: true,
             package_update_channels: None,
             velnor_runner_group: None,
+            velnor_trusted_label: None,
             pull_request_on_velnor: false,
             default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
@@ -1038,7 +1041,6 @@ mod tests {
                 dry_run: true,
                 check: false,
                 force: false,
-                adopt: false,
                 plain: false,
             },
             receiver,

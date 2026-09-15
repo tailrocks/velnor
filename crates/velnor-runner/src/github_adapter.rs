@@ -10,7 +10,26 @@ use crate::{
     },
 };
 use serde_json::Value;
-use std::{collections::BTreeMap, num::NonZeroU32, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroU32,
+    path::{Path, PathBuf},
+};
+
+const PACKAGED_WORKFLOW_CLI_APT: &str = "/usr/bin/velnor-workflow";
+
+/// Host path of the apt-packaged `velnor-workflow` CLI when installed.
+///
+/// Dev and macOS hosts bootstrap the job image locally; they rely on the
+/// image copy at `/usr/local/bin/velnor-workflow` instead of bind-mounting
+/// from the host.
+fn host_packaged_workflow_cli() -> Option<PathBuf> {
+    packaged_workflow_cli_if_present(Path::new(PACKAGED_WORKFLOW_CLI_APT))
+}
+
+fn packaged_workflow_cli_if_present(path: &Path) -> Option<PathBuf> {
+    path.is_file().then(|| path.to_path_buf())
+}
 
 pub struct GitHubJobContainerPaths {
     pub workspace_host: PathBuf,
@@ -39,6 +58,14 @@ pub fn github_job_container_spec(
     daemon_id: String,
     trust_scope: &str,
 ) -> anyhow::Result<JobContainerSpec> {
+    if let Some(host_work_dir) = paths.docker_host_work_dir.as_deref()
+        && !host_work_dir.is_absolute()
+    {
+        anyhow::bail!(
+            "docker_host_work_dir must be an absolute path for Docker Desktop/OrbStack; got {}",
+            host_work_dir.display()
+        );
+    }
     if paths.execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         crate::manifest::validate_microvm_compiler_cache(job)?;
     }
@@ -84,7 +111,7 @@ pub fn github_job_container_spec(
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: None,
         docker_cli_plugin_host_dir: None,
-        packaged_workflow_cli_host: Some(PathBuf::from("/usr/bin/velnor-workflow")),
+        packaged_workflow_cli_host: host_packaged_workflow_cli(),
         docker_host_work_dir: paths.docker_host_work_dir,
         verify_bind_mounts: true,
         daemon_id,
@@ -154,7 +181,7 @@ pub(crate) fn github_rust_store_host(
 /// `trusted` passes, case-insensitively. Untrusted jobs — and jobs on
 /// untrusted pools — get no host Docker socket, no privileged container
 /// options, no host port publishing, and no user secrets.
-pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
+pub fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
     trust_scope
         .trim()
         .eq_ignore_ascii_case(crate::trust_scope::TRUSTED)
@@ -977,6 +1004,25 @@ fn sanitize_path_segment(value: &str) -> String {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_workflow_cli_is_omitted_when_apt_file_is_missing() {
+        let missing = Path::new("/tmp/velnor-missing-workflow-cli-does-not-exist");
+        assert!(!missing.is_file());
+        assert_eq!(packaged_workflow_cli_if_present(missing), None);
+    }
+
+    #[test]
+    fn packaged_workflow_cli_is_used_when_apt_file_exists() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-workflow-cli-present-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"cli").unwrap();
+        let found = packaged_workflow_cli_if_present(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(found, Some(path));
+    }
 
     fn microvm_job() -> AgentJobRequestMessage {
         serde_json::from_value(serde_json::json!({

@@ -1114,7 +1114,13 @@ pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
         return Ok(false);
     };
     let conclusion = parse_recorded_terminal_conclusion(terminal_conclusion)?;
-    let token = oauth_access_token(stored).await?;
+    let token = match oauth_access_token(stored).await {
+        Ok(token) => token,
+        Err(error) if release_in_flight_after_registration_gone(slot_dir, &error)? => {
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
     let client = RunServiceClient::new(token.token)?;
     let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
     let ctx = RunServiceJobContext {
@@ -1172,7 +1178,13 @@ async fn complete_recorded_in_flight_job_with_failure(
     let Some(record) = load_in_flight_job(slot_dir)? else {
         return Ok(false);
     };
-    let token = oauth_access_token(stored).await?;
+    let token = match oauth_access_token(stored).await {
+        Ok(token) => token,
+        Err(error) if release_in_flight_after_registration_gone(slot_dir, &error)? => {
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
     let client = RunServiceClient::new(token.token)?;
     let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
     let ctx = RunServiceJobContext {
@@ -1186,14 +1198,20 @@ async fn complete_recorded_in_flight_job_with_failure(
         plan_id: record.plan_id,
         job_id: record.job_id.clone(),
     };
-    complete_acquired_job_failure(
+    if let Err(error) = complete_acquired_job_failure(
         &ctx,
         &identity,
         None,
         infrastructure_failure_category,
         reason,
     )
-    .await?;
+    .await
+    {
+        if release_in_flight_after_registration_gone(slot_dir, &error)? {
+            return Ok(true);
+        }
+        return Err(error);
+    }
     cleanup_recorded_in_flight_job(slot_dir)?;
     Ok(true)
 }
@@ -1736,6 +1754,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         args.target_mvp_arm_label,
     );
     validate_linux_only_labels(&labels)?;
+    validate_trusted_label_requires_trusted_scope(&labels, args.trust_scope.as_deref())?;
     platform::validate_arm_label_matches_host(&labels, std::env::consts::ARCH)?;
 
     let pat = if args.dry_run {
@@ -2355,6 +2374,23 @@ fn registration_was_deleted(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<crate::protocol::OAuthRegistrationNotFound>())
 }
 
+/// GitHub already dropped the runner. Local completion cannot reach Run
+/// Service; the in-flight marker is the only leftover that can wedge restart.
+fn release_in_flight_after_registration_gone(
+    slot_dir: &Path,
+    error: &anyhow::Error,
+) -> Result<bool> {
+    if !registration_was_deleted(error) {
+        return Ok(false);
+    }
+    if crate::ops::global().is_some() {
+        cleanup_recorded_in_flight_job(slot_dir)?;
+    } else if recorded_in_flight_job_exists(slot_dir)? {
+        clear_in_flight_job(slot_dir)?;
+    }
+    Ok(true)
+}
+
 pub async fn run(args: RunArgs) -> Result<()> {
     run_with_jit_prewarmer(args, None, RunnerStorageMode::ExplicitLocal).await
 }
@@ -2368,7 +2404,12 @@ enum RunnerStorageMode {
 }
 
 fn daemon_storage_mode(args: &DaemonArgs) -> RunnerStorageMode {
-    if args.url.is_some() && !args.once && !args.dry_run_registration {
+    // Packaged Linux units set VELNOR_STORAGE_ROOT=/var. A long-running
+    // GitHub URL alone is not production: `velnorctl host start` on macOS
+    // is a repository-scoped recovery daemon and must use user-local storage.
+    let packaged_linux = std::env::var_os("VELNOR_STORAGE_ROOT")
+        .is_some_and(|value| Path::new(&value) == Path::new("/var"));
+    if packaged_linux && args.url.is_some() && !args.once && !args.dry_run_registration {
         RunnerStorageMode::SupervisedProduction
     } else {
         RunnerStorageMode::ExplicitLocal
@@ -2424,8 +2465,15 @@ async fn run_with_jit_prewarmer(
     }
 
     // Operational-store open/migration is mandatory before one-shot work.
-    crate::ops::init(instance_slug_for_store())
-        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
+    // On-demand hosts pass the config-dir store; do not fall through to
+    // `/var/lib/velnor/state.db` when that path is known.
+    if let Some(store_path) = args.state_db.clone() {
+        crate::ops::init_at(instance_slug_for_store(), Some(&store_path))
+    } else {
+        crate::ops::init(instance_slug_for_store())
+    }
+    .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
+    let dir = config::config_dir(args.config_dir.clone())?;
     if let Some(sink) = crate::ops::global() {
         sink.emit(
             velnor_model::EventReason::ReadinessReady,
@@ -2434,7 +2482,6 @@ async fn run_with_jit_prewarmer(
         );
     }
 
-    let dir = config::config_dir(args.config_dir.clone())?;
     let storage_layout = select_runner_storage_layout(&dir, storage_mode)?;
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
@@ -5176,6 +5223,7 @@ fn daemon_slot_configure_args(
         pool_id_pre_resolved: args.pool_id_pre_resolved,
         dry_run: args.dry_run_registration,
         config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
+        trust_scope: Some(args.trust_scope.clone()),
     })
 }
 
@@ -5194,6 +5242,11 @@ fn daemon_slot_run_args(
 
     Ok(RunArgs {
         slot_count: validated_slot_count,
+        state_db: Some(
+            args.state_db
+                .clone()
+                .unwrap_or_else(|| config_base.join("state.db")),
+        ),
         config_dir: Some(slot_dir),
         pat: args.pat.clone(),
         max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
@@ -14757,7 +14810,21 @@ fn target_mvp_required_x64_labels() -> &'static [&'static str] {
     ]
 }
 
-fn normalize_labels(
+/// The label trust-gated Velnor jobs append to `runs-on`
+/// (`[workflow] velnor_trusted_label` in the adopting repository's generation
+/// config). Only trusted pools may claim it: gated jobs need the host Docker
+/// lease socket, which untrusted pools never receive. An untrusted runner
+/// that claimed it would attract jobs it deterministically fails, so
+/// registration refuses the combination.
+pub const TRUST_GATED_RUNNER_LABEL: &str = "velnor-host-docker";
+
+pub use crate::github_adapter::github_trust_scope_allows_host_docker;
+
+/// The registration claim set: the configured labels plus the target packs
+/// the host's architecture opts into, sorted and deduplicated. Host-start
+/// tests pin their full normalized set through this computation so the
+/// pinned claims cannot drift from what registration actually sends.
+pub fn normalize_labels(
     mut labels: Vec<String>,
     target_mvp_labels: bool,
     target_mvp_arm_label: bool,
@@ -14792,6 +14859,29 @@ fn validate_linux_only_labels(labels: &[String]) -> Result<()> {
     if let Some(label) = unsupported {
         bail!(
             "unsupported non-Linux runner label '{label}'; Velnor runner execution is Linux-only"
+        );
+    }
+    Ok(())
+}
+
+/// Refuse to register the trust-gated label on a pool that is not trusted.
+/// The scope check is the same gate that withholds the host Docker socket
+/// from untrusted jobs, so the two cannot disagree. `None` is standalone
+/// registration without trust context, which carries no pool ceiling to
+/// check; daemon slots always pass their resolved scope.
+fn validate_trusted_label_requires_trusted_scope(
+    labels: &[String],
+    trust_scope: Option<&str>,
+) -> Result<()> {
+    let Some(scope) = trust_scope else {
+        return Ok(());
+    };
+    let gated = labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(TRUST_GATED_RUNNER_LABEL));
+    if gated && !crate::github_adapter::github_trust_scope_allows_host_docker(scope) {
+        bail!(
+            "runner claims trust-gated label '{TRUST_GATED_RUNNER_LABEL}' but trust scope is '{scope}'; trust-gated jobs need the host Docker socket, which only trusted pools receive"
         );
     }
     Ok(())
@@ -14969,6 +15059,33 @@ mod tests {
     }
 
     #[test]
+    fn gone_registration_releases_in_flight_marker_without_remote_complete() {
+        let dir = unique_temp_dir("in-flight-registration-gone");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            in_flight_job_path(&dir),
+            r#"{"plan_id":"plan","job_id":"job","run_service_url":"https://example.test/","billing_owner_id":null}"#,
+        )
+        .unwrap();
+        let gone = anyhow::Error::new(crate::protocol::OAuthRegistrationNotFound(
+            "Registration ccd04c2f-e01f-4ba8-9c00-3edacdd60899 was not found.".to_string(),
+        ));
+        let other = anyhow::anyhow!("oauth unavailable");
+
+        assert!(release_in_flight_after_registration_gone(&dir, &gone).unwrap());
+        assert!(load_in_flight_job(&dir).unwrap().is_none());
+
+        fs::write(
+            in_flight_job_path(&dir),
+            r#"{"plan_id":"plan","job_id":"job","run_service_url":"https://example.test/","billing_owner_id":null}"#,
+        )
+        .unwrap();
+        assert!(!release_in_flight_after_registration_gone(&dir, &other).unwrap());
+        assert!(load_in_flight_job(&dir).unwrap().is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn persist_in_flight_job_does_not_touch_deterministic_temp_collision() {
         let dir = unique_temp_dir("in-flight-marker-temp-collision");
         fs::create_dir_all(&dir).unwrap();
@@ -15087,6 +15204,21 @@ mod tests {
 
         assert!(error.to_string().contains("supervised production"));
         assert!(error.to_string().contains("VELNOR_STORAGE_ROOT"));
+    }
+
+    #[test]
+    fn on_demand_github_daemon_uses_explicit_local_storage() {
+        let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
+        // SAFETY: this test process owns the variable for the assertion.
+        unsafe { std::env::remove_var("VELNOR_STORAGE_ROOT") };
+        let mut args = daemon_args(1);
+        args.url = Some("https://github.com/tailrocks/velnor".into());
+        let mode = daemon_storage_mode(&args);
+        match previous {
+            Some(value) => unsafe { std::env::set_var("VELNOR_STORAGE_ROOT", value) },
+            None => unsafe { std::env::remove_var("VELNOR_STORAGE_ROOT") },
+        }
+        assert_eq!(mode, RunnerStorageMode::ExplicitLocal);
     }
 
     #[test]
@@ -15497,6 +15629,7 @@ mod tests {
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
             slot_count: NonZeroU32::MIN,
+            state_db: None,
             config_dir: None,
             pat: None,
             max_idle_slot_age_seconds: None,
@@ -17416,6 +17549,7 @@ jobs:
             pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
+            trust_scope: None,
         })
         .await
         .unwrap_err()
@@ -17474,6 +17608,7 @@ jobs:
             pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
+            trust_scope: None,
         })
         .await
         .unwrap_err()
@@ -17505,6 +17640,7 @@ jobs:
             pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
+            trust_scope: None,
         })
         .await
         .unwrap_err()
@@ -17787,6 +17923,10 @@ jobs:
         assert_eq!(run_args.job_cpus, "4");
         assert_eq!(run_args.job_memory, "12g");
         assert_eq!(run_args.trust_scope, "public-forks");
+        assert_eq!(
+            run_args.state_db.as_deref(),
+            Some(Path::new("/config/state.db"))
+        );
     }
 
     #[test]
@@ -21113,6 +21253,85 @@ jobs:
         let labels = vec!["x86_64-apple-darwin".into()];
         let error = validate_linux_only_labels(&labels).unwrap_err().to_string();
         assert!(error.contains("unsupported non-Linux runner label"));
+    }
+
+    #[test]
+    fn trust_gated_label_requires_a_trusted_pool() {
+        let gated = vec![
+            "self-hosted".to_owned(),
+            "velnor-target-mvp".to_owned(),
+            TRUST_GATED_RUNNER_LABEL.to_owned(),
+        ];
+        let error = validate_trusted_label_requires_trusted_scope(&gated, Some("untrusted"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(TRUST_GATED_RUNNER_LABEL), "{error}");
+        assert!(error.contains("only trusted pools"), "{error}");
+
+        let mixed_case = vec![TRUST_GATED_RUNNER_LABEL.to_ascii_uppercase()];
+        validate_trusted_label_requires_trusted_scope(&mixed_case, Some("trusted")).unwrap();
+        validate_trusted_label_requires_trusted_scope(&mixed_case, Some("  Trusted  ")).unwrap();
+        assert!(
+            validate_trusted_label_requires_trusted_scope(&mixed_case, Some("public")).is_err()
+        );
+
+        let ungated = vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()];
+        validate_trusted_label_requires_trusted_scope(&ungated, Some("untrusted")).unwrap();
+        // Standalone registration carries no pool ceiling, so there is
+        // nothing to check the label against.
+        validate_trusted_label_requires_trusted_scope(&gated, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn configure_refuses_trust_gated_label_on_untrusted_pool() {
+        let dir = unique_temp_dir("configure-trust-gated-label");
+        let error = configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-untrusted".into()),
+            labels: vec!["velnor".into(), TRUST_GATED_RUNNER_LABEL.into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: false,
+            pool_id: None,
+            pool_name: None,
+            pool_id_pre_resolved: false,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+            trust_scope: Some("untrusted".into()),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(TRUST_GATED_RUNNER_LABEL), "{error}");
+        assert!(error.contains("trust scope is 'untrusted'"), "{error}");
+        fs::remove_dir_all(&dir).ok();
+
+        let dir = unique_temp_dir("configure-trust-gated-label-trusted");
+        configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-trusted".into()),
+            labels: vec!["velnor".into(), TRUST_GATED_RUNNER_LABEL.into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: false,
+            pool_id: None,
+            pool_name: None,
+            pool_id_pre_resolved: false,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+            trust_scope: Some("trusted".into()),
+        })
+        .await
+        .unwrap();
+        let stored = config::load(&dir).unwrap();
+        assert!(stored
+            .settings
+            .labels
+            .iter()
+            .any(|label| label == TRUST_GATED_RUNNER_LABEL));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

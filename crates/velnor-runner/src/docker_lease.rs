@@ -33,11 +33,6 @@ pub const DAEMON_ID_LABEL: &str = "velnor.daemon-id";
 /// per-job API proxy (BuildKit and Testcontainers).
 pub const JOB_CGROUP_PARENT: &str = "velnor-jobs.slice";
 pub const TESTCONTAINERS_LABEL: &str = "org.testcontainers.managed-by=testcontainers";
-pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
-/// Host-visible runtime dir. systemd `PrivateTmp=yes` remaps daemon `/tmp`, so
-/// a lease socket there is invisible to host dockerd and the guest bind-mount
-/// of `/tmp/vdl-*.sock` is not the proxy.
-pub const LEASE_SOCKET_DIR: &str = "/run/velnor";
 /// Job containers are owned by their Velnor name and labels. Do not use an
 /// untagged `ancestor=` filter here: Docker resolves it as an image reference
 /// on every scan and emits a lookup warning when only `:26.04` is tagged.
@@ -48,6 +43,7 @@ pub const JOB_CONTAINER_NAME_PREFIX: &str = "velnor-job-";
 /// builders survived cancel/restart. Prefix match plus orphan-job reclaim is the
 /// ownership path.
 pub const BUILDKIT_CONTAINER_NAME_PREFIX: &str = "buildx_buildkit_velnor-builder-";
+const UNIX_SOCKET_PATH_LIMIT: usize = 100;
 
 const MAX_PROXY_BODY: usize = 32 * 1024 * 1024;
 const MAX_PROXY_HEADER: usize = 64 * 1024;
@@ -570,21 +566,40 @@ pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
     let digest = hasher.finalize();
     let mut short = [0_u8; 8];
     short.copy_from_slice(&digest[..8]);
-    lease_socket_dir().join(format!("vdl-{:016x}.sock", u64::from_be_bytes(short)))
-}
-
-/// Prefer the package-owned `/run/velnor` tmpfiles path: host-visible, not
-/// remapped by `PrivateTmp`. Tests and unprivileged checkouts cannot create
-/// that dir; they fall back to `$TMPDIR/velnor-lease`, still outside the
-/// daemon's private `/tmp/vdl-*` path that dockerd never sees.
-fn lease_socket_dir() -> PathBuf {
-    let runtime = PathBuf::from(LEASE_SOCKET_DIR);
-    if std::fs::create_dir_all(&runtime).is_ok() {
-        return runtime;
+    // Keep the proxy socket below the job's shared work tree. The Docker
+    // daemon may run in a VM (Docker Desktop/OrbStack), so a host-global
+    // runtime path is not necessarily visible to it. `JobContainerSpec`
+    // applies the same host-work-dir mapping to this path before mounting it;
+    // the runner itself always binds the returned host-visible path.
+    let name = format!("vdl-{:016x}.sock", u64::from_be_bytes(short));
+    let preferred = unique.join("_velnor").join(&name);
+    if preferred.to_string_lossy().len() < UNIX_SOCKET_PATH_LIMIT {
+        return preferred;
     }
-    let fallback = std::env::temp_dir().join("velnor-lease");
-    let _ = std::fs::create_dir_all(&fallback);
-    fallback
+
+    // macOS's temporary roots can be longer than Linux's while still being
+    // valid Docker bind sources. Walk upward only within the daemon-shared
+    // work root when necessary. Never fall back to an unrelated global temp
+    // directory: that would let the host listener and VM bind source diverge.
+    let shared_root = unique
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| crate::container::daemon_shared_root(root.to_path_buf()));
+    let mut ancestor = unique.parent();
+    while let Some(path) = ancestor {
+        let candidate = path.join(&name);
+        if candidate.to_string_lossy().len() < UNIX_SOCKET_PATH_LIMIT {
+            return candidate;
+        }
+        if shared_root.as_deref().is_some_and(|root| path == root) {
+            break;
+        }
+        ancestor = path.parent();
+    }
+    // Keep the original tree identity when no shorter candidate exists. The
+    // bind operation returns an actionable length error, and a configured VM
+    // mapping can reject an escaping path before any container starts.
+    preferred
 }
 
 pub fn list_owned_containers_args(job_id: &str) -> Vec<String> {
@@ -2295,13 +2310,15 @@ impl Drop for WatchedStream {
 }
 
 impl DockerLeaseGuard {
+    /// Bind a lease on the runner-visible filesystem and proxy it to the
+    /// resolved local Docker daemon socket. A Docker VM path, when needed, is
+    /// only used by the container bind mount; it must never be passed here as
+    /// the listener path.
     pub fn bind(listen_path: PathBuf, job_id: String, daemon_id: String) -> Result<Self> {
-        Self::bind_to(
-            listen_path,
-            PathBuf::from(HOST_DOCKER_SOCKET),
-            job_id,
-            daemon_id,
-        )
+        let host_socket = crate::docker::engine::resolve_docker_endpoint()
+            .context("resolve Docker endpoint for job lease")?
+            .socket;
+        Self::bind_to(listen_path, host_socket, job_id, daemon_id)
     }
 
     pub fn bind_to(
@@ -2367,7 +2384,17 @@ fn bind_unix_lease(
     job_id: String,
     daemon_id: String,
 ) -> Result<DockerLeaseGuard> {
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::{ffi::OsStrExt, net::UnixListener};
+
+    let path_bytes = listen_path.as_os_str().as_bytes().len();
+    if path_bytes >= UNIX_SOCKET_PATH_LIMIT {
+        bail!(
+            "job Docker lease socket path {} is {} bytes, exceeding the safe Unix socket limit of {}; shorten --work-dir or choose a shorter daemon-visible work root",
+            listen_path.display(),
+            path_bytes,
+            UNIX_SOCKET_PATH_LIMIT
+        );
+    }
 
     if let Some(parent) = listen_path.parent() {
         std::fs::create_dir_all(parent)
@@ -4430,13 +4457,50 @@ mod tests {
         );
         let parent = path.parent().unwrap().to_string_lossy();
         assert!(
-            parent == LEASE_SOCKET_DIR || parent.ends_with("velnor-lease"),
-            "lease socket must live in /run/velnor or test fallback velnor-lease, not PrivateTmp /tmp/vdl-*; got {rendered}"
+            parent.ends_with("/temp/_velnor") || parent.ends_with("\\temp\\_velnor"),
+            "lease socket must live below the job temp tree visible to Docker, got {rendered}"
         );
         assert!(
-            !rendered.starts_with("/tmp/vdl-"),
-            "PrivateTmp remaps daemon /tmp; dockerd would not see {rendered}"
+            rendered.contains("/temp/_velnor/vdl-") || rendered.contains("\\temp\\_velnor\\vdl-")
         );
+    }
+
+    #[test]
+    fn long_socket_path_never_falls_back_outside_the_shared_work_tree() {
+        let unique = Path::new(
+            "/private/tmp/velnor-host-with-a-deliberately-long-name/runner/work/slot-1/job/temp",
+        );
+        let path = guest_docker_socket_host("job", unique);
+        let shared = crate::container::daemon_shared_root(PathBuf::from(
+            "/private/tmp/velnor-host-with-a-deliberately-long-name/runner/work/slot-1",
+        ));
+        assert!(
+            path.starts_with(&shared),
+            "lease path escaped shared root: {} not below {}",
+            path.display(),
+            shared.display()
+        );
+        assert!(
+            !path.starts_with(std::env::temp_dir().join("vdl-")),
+            "lease path must not use an unrelated global temp fallback: {}",
+            path.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_rejects_a_host_socket_path_that_exceeds_unix_limit() {
+        let path = PathBuf::from("/tmp").join("x".repeat(UNIX_SOCKET_PATH_LIMIT));
+        let error = DockerLeaseGuard::bind_to(
+            path,
+            PathBuf::from("/nonexistent-host-docker.sock"),
+            "job".into(),
+            "daemon".into(),
+        )
+        .err()
+        .expect("overlong Unix socket path must fail before bind");
+        assert!(error.to_string().contains("safe Unix socket limit"));
+        assert!(error.to_string().contains("shorten --work-dir"));
     }
 
     #[test]

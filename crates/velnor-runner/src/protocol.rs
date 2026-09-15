@@ -18,8 +18,10 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fmt,
-    io::{Read, Seek},
+    io::{Read, Seek, Write},
+    process::{Command, Stdio},
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -38,6 +40,8 @@ pub fn velnor_runner_display() -> String {
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_MAX_TIME_SECS: u64 = 5;
+const GITHUB_CURL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const OAUTH_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
@@ -1067,7 +1071,7 @@ impl OAuthClient {
         &self,
         credentials: &OAuthJwtCredentials,
     ) -> Result<OAuthAccessToken> {
-        github_http_transport()?;
+        let transport = github_http_transport()?;
         validate_authenticated_url(&credentials.authorization_url)?;
         let assertion = build_client_assertion(credentials)?;
         // Build the URL-encoded OAuth form body.
@@ -1080,53 +1084,74 @@ impl OAuthClient {
             .append_pair("client_assertion", &assertion)
             .finish();
         let url = credentials.authorization_url.clone();
-        let response = native_http_client()?
-            .post(url)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/json")
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS))
-            .body(body)
-            .send()
-            .await
-            .context("send OAuth token request")?;
-        let status = response.status().as_u16();
-        let text = response
-            .text()
-            .await
-            .context("read OAuth token response body")?;
-        let ok = (200..300).contains(&status);
-        if !ok && status != 400 {
-            return Err(github_api_error("OAuth token request", status, text));
-        }
-
-        let token_response: OAuthTokenResponse =
-            serde_json::from_str(text.trim()).context("parse OAuth token response")?;
-
-        if let Some(error) = token_response.error {
-            let description = token_response.error_description.unwrap_or_default();
-            if oauth_registration_not_found(&error) {
-                return Err(OAuthRegistrationNotFound(description).into());
+        let (status, text) = match transport {
+            "native" => {
+                let response = native_http_client()?
+                    .post(&url)
+                    .header(USER_AGENT, RUNNER_USER_AGENT)
+                    .header(ACCEPT, "application/json")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS))
+                    .body(body.clone())
+                    .send()
+                    .await
+                    .context("send OAuth token request")?;
+                let status = response.status().as_u16();
+                let text = response
+                    .text()
+                    .await
+                    .context("read OAuth token response body")?;
+                (status, text)
             }
-            bail!(
-                "OAuth token request failed: error={error}, description={}",
-                description
-            );
-        }
+            "curl" => {
+                let response = curl_oauth_form_request(&url, &body, GITHUB_MAX_TIME_SECS)
+                    .await
+                    .context("send OAuth token request")?;
+                (response.status, response.body)
+            }
+            other => bail!("OAuth HTTP transport selector returned an unknown value: {other}"),
+        };
 
-        let token = token_response
-            .access_token
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("OAuth token response missing access_token"))?;
-        Ok(OAuthAccessToken {
-            token,
-            expires_in: token_response
-                .expires_in
-                .and_then(|seconds| u64::try_from(seconds).ok())
-                .filter(|seconds| *seconds > 0)
-                .map(std::time::Duration::from_secs),
-        })
+        parse_oauth_token_response(status, &text)
     }
+}
+
+fn parse_oauth_token_response(status: u16, body: &str) -> Result<OAuthAccessToken> {
+    if body.len() > OAUTH_MAX_RESPONSE_BYTES {
+        bail!("OAuth token response exceeded {OAUTH_MAX_RESPONSE_BYTES} bytes");
+    }
+    if !(200..300).contains(&status) && status != StatusCode::BAD_REQUEST.as_u16() {
+        // Do not attach the response body: an unexpected body could contain a
+        // token and would then be copied into daemon error logs.
+        bail!("OAuth token request failed: HTTP status {status}");
+    }
+
+    let token_response: OAuthTokenResponse =
+        serde_json::from_str(body.trim()).context("parse OAuth token response")?;
+
+    if let Some(error) = token_response.error {
+        let description = token_response.error_description.unwrap_or_default();
+        if oauth_registration_not_found(&error) {
+            return Err(OAuthRegistrationNotFound(description).into());
+        }
+        bail!(
+            "OAuth token request failed: error={error}, description={}",
+            description
+        );
+    }
+
+    let token = token_response
+        .access_token
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("OAuth token response missing access_token"))?;
+    Ok(OAuthAccessToken {
+        token,
+        expires_in: token_response
+            .expires_in
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .filter(|seconds| *seconds > 0)
+            .map(std::time::Duration::from_secs),
+    })
 }
 
 fn build_client_assertion(credentials: &OAuthJwtCredentials) -> Result<String> {
@@ -1224,8 +1249,20 @@ async fn github_http_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<GithubHttpResponse> {
-    github_http_transport()?;
+    let transport = github_http_transport()?;
     validate_authenticated_url(url)?;
+    if transport == "curl" {
+        return curl_http_request(
+            method,
+            url,
+            bearer_token,
+            json_body,
+            max_time_secs,
+            "application/vnd.github+json",
+            Some("2026-03-10"),
+        )
+        .await;
+    }
     let method_name = method.to_owned();
     let method = Method::from_bytes(method.as_bytes()).map_err(|error| {
         github_transport_error(&format!("parse GitHub HTTP method '{method}'"), error)
@@ -1269,6 +1306,338 @@ async fn github_http_request(
         body,
         headers,
     })
+}
+
+struct CurlCommandSpec {
+    args: Vec<OsString>,
+    header_stdin: Vec<u8>,
+}
+
+fn curl_command_args(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<&str>,
+    max_time_secs: u64,
+    accept: &str,
+    api_version: Option<&str>,
+) -> Result<CurlCommandSpec> {
+    Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("parse GitHub HTTP method '{method}'"))?;
+
+    let max_time_secs = max_time_secs.max(1);
+    let connect_timeout_secs = GITHUB_CONNECT_TIMEOUT_SECS.min(max_time_secs);
+    let mut header_stdin = Vec::new();
+    append_curl_header(
+        &mut header_stdin,
+        "Authorization",
+        &format!("Bearer {bearer_token}"),
+    )?;
+    append_curl_header(&mut header_stdin, "User-Agent", RUNNER_USER_AGENT)?;
+    append_curl_header(&mut header_stdin, "Accept", accept)?;
+    if let Some(api_version) = api_version {
+        append_curl_header(&mut header_stdin, "X-GitHub-Api-Version", api_version)?;
+    }
+    if json_body.is_some() {
+        append_curl_header(&mut header_stdin, "Content-Type", "application/json")?;
+    }
+
+    let mut args = vec![
+        OsString::from("--disable"),
+        OsString::from("--silent"),
+        OsString::from("--show-error"),
+        OsString::from("--request"),
+        OsString::from(method),
+        OsString::from("--url"),
+        OsString::from(url),
+        OsString::from("--connect-timeout"),
+        OsString::from(connect_timeout_secs.to_string()),
+        OsString::from("--max-time"),
+        OsString::from(max_time_secs.to_string()),
+        // Curl has no implicit retries, but make the mutation safety policy
+        // visible and stable if its defaults ever change.
+        OsString::from("--retry"),
+        OsString::from("0"),
+        OsString::from("--dump-header"),
+        OsString::from("-"),
+        // Feed all headers through stdin so the bearer token is not present
+        // in the child argv or in any command-line diagnostic.
+        OsString::from("--header"),
+        OsString::from("@-"),
+    ];
+    if let Some(json_body) = json_body {
+        // --data-raw keeps a JSON body beginning with `@` as data, not a
+        // filename. It is a distinct argv element; no shell is involved.
+        args.push(OsString::from("--data-raw"));
+        args.push(OsString::from(json_body));
+    }
+
+    Ok(CurlCommandSpec { args, header_stdin })
+}
+
+fn append_curl_header(headers: &mut Vec<u8>, name: &str, value: &str) -> Result<()> {
+    let value = HeaderValue::from_str(value).context("build curl GitHub request header")?;
+    headers.extend_from_slice(name.as_bytes());
+    headers.extend_from_slice(b": ");
+    headers.extend_from_slice(value.as_bytes());
+    headers.push(b'\n');
+    Ok(())
+}
+
+async fn curl_http_request(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+    accept: &str,
+    api_version: Option<&str>,
+) -> Result<GithubHttpResponse> {
+    validate_authenticated_url(url)?;
+    let method_name = method.to_owned();
+    let redacted_url = redacted_authenticated_url(url);
+    let spec = curl_command_args(
+        method,
+        url,
+        bearer_token,
+        json_body.as_deref(),
+        max_time_secs,
+        accept,
+        api_version,
+    )
+    .map_err(|error| {
+        github_transport_error(
+            &format!("build curl GitHub request {method_name} {redacted_url}"),
+            error,
+        )
+    })?;
+    tokio::task::spawn_blocking(move || run_curl_command(spec))
+        .await
+        .context("join curl GitHub request")?
+        .map_err(|error| {
+            github_transport_error(
+                &format!("send curl GitHub request {method_name} {redacted_url}"),
+                error,
+            )
+        })
+}
+
+async fn curl_oauth_form_request(
+    url: &str,
+    body: &str,
+    max_time_secs: u64,
+) -> Result<GithubHttpResponse> {
+    validate_authenticated_url(url)?;
+    let max_time_secs = max_time_secs.max(1);
+    let connect_timeout_secs = GITHUB_CONNECT_TIMEOUT_SECS.min(max_time_secs);
+    let redacted_url = redacted_authenticated_url(url);
+    let args = vec![
+        OsString::from("--disable"),
+        OsString::from("--silent"),
+        OsString::from("--show-error"),
+        OsString::from("--request"),
+        OsString::from("POST"),
+        OsString::from("--url"),
+        OsString::from(url),
+        OsString::from("--connect-timeout"),
+        OsString::from(connect_timeout_secs.to_string()),
+        OsString::from("--max-time"),
+        OsString::from(max_time_secs.to_string()),
+        // Curl has no implicit retries, but make the mutation safety policy
+        // visible and stable if its defaults ever change.
+        OsString::from("--retry"),
+        OsString::from("0"),
+        OsString::from("--dump-header"),
+        OsString::from("-"),
+        OsString::from("--header"),
+        OsString::from(format!("User-Agent: {RUNNER_USER_AGENT}")),
+        OsString::from("--header"),
+        OsString::from("Accept: application/json"),
+        OsString::from("--header"),
+        OsString::from("Content-Type: application/x-www-form-urlencoded"),
+        // Keep the OAuth assertion out of argv and process diagnostics.
+        OsString::from("--data-binary"),
+        OsString::from("@-"),
+    ];
+    let body = body.as_bytes().to_vec();
+    tokio::task::spawn_blocking(move || run_curl_oauth_form_command(args, body))
+        .await
+        .context("join curl OAuth token request")?
+        .map_err(|error| {
+            github_transport_error(
+                &format!("send curl OAuth token request {redacted_url}"),
+                error,
+            )
+        })
+}
+
+fn run_curl_oauth_form_command(args: Vec<OsString>, body: Vec<u8>) -> Result<GithubHttpResponse> {
+    let mut child = Command::new("curl")
+        .args(args)
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn curl OAuth token request")?;
+
+    let mut body_stdin = child
+        .stdin
+        .take()
+        .context("open curl OAuth token request body pipe")?;
+    if let Err(error) = body_stdin.write_all(&body) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error).context("write curl OAuth token request body");
+    }
+    drop(body_stdin);
+
+    let output = child
+        .wait_with_output()
+        .context("wait for curl OAuth token request")?;
+    if !output.status.success() {
+        let exit = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+        bail!("curl OAuth token request exited with status {exit}");
+    }
+    if output.stdout.len() > OAUTH_MAX_RESPONSE_BYTES {
+        bail!("curl OAuth token response exceeded {OAUTH_MAX_RESPONSE_BYTES} bytes");
+    }
+    parse_curl_response(&output.stdout)
+}
+
+fn run_curl_command(spec: CurlCommandSpec) -> Result<GithubHttpResponse> {
+    let mut child = Command::new("curl")
+        .args(spec.args)
+        // The curl child does not need the operator token in its environment;
+        // it receives the in-memory value through the private header pipe.
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn curl GitHub request")?;
+
+    let mut header_stdin = child
+        .stdin
+        .take()
+        .context("open curl GitHub request header pipe")?;
+    if let Err(error) = header_stdin.write_all(&spec.header_stdin) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error).context("write curl GitHub request headers");
+    }
+    drop(header_stdin);
+
+    let output = child
+        .wait_with_output()
+        .context("wait for curl GitHub request")?;
+    if !output.status.success() {
+        let exit = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+        bail!("curl GitHub request exited with status {exit}");
+    }
+    parse_curl_response(&output.stdout)
+}
+
+fn parse_curl_response(output: &[u8]) -> Result<GithubHttpResponse> {
+    if output.len() > GITHUB_CURL_MAX_RESPONSE_BYTES {
+        bail!("curl GitHub response exceeded {GITHUB_CURL_MAX_RESPONSE_BYTES} bytes");
+    }
+
+    let mut offset = 0;
+    let (status, headers) = loop {
+        let remaining = output
+            .get(offset..)
+            .context("curl GitHub response ended before headers")?;
+        if !remaining.starts_with(b"HTTP/") {
+            bail!("curl GitHub response is missing an HTTP status line");
+        }
+        let (header_end, separator_len) = curl_header_terminator(remaining)
+            .context("curl GitHub response headers are not terminated")?;
+        let (status, headers) = parse_curl_header_block(&remaining[..header_end])?;
+        offset = offset
+            .saturating_add(header_end)
+            .saturating_add(separator_len);
+        if (100..200).contains(&status) {
+            continue;
+        }
+        break (status, headers);
+    };
+
+    let body = String::from_utf8(
+        output
+            .get(offset..)
+            .context("curl GitHub response body offset is invalid")?
+            .to_vec(),
+    )
+    .context("decode curl GitHub response body as UTF-8")?;
+    Ok(GithubHttpResponse {
+        status,
+        body,
+        headers,
+    })
+}
+
+fn curl_header_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
+    if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+        return Some((index, 4));
+    }
+    bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2))
+}
+
+fn parse_curl_header_block(block: &[u8]) -> Result<(u16, HeaderMap)> {
+    let mut lines = block.split(|byte| *byte == b'\n');
+    let status_line = lines.next().context("curl response has no status line")?;
+    let status_line = status_line.strip_suffix(b"\r").unwrap_or(status_line);
+    let status_line = std::str::from_utf8(status_line).context("curl status line is not UTF-8")?;
+    let mut fields = status_line.split_ascii_whitespace();
+    let version = fields.next().context("curl status line has no version")?;
+    if !version.starts_with("HTTP/") {
+        bail!("curl response status line has invalid protocol");
+    }
+    let status = fields
+        .next()
+        .context("curl status line has no status code")?
+        .parse::<u16>()
+        .context("parse curl response status code")?;
+
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        let colon = line
+            .iter()
+            .position(|byte| *byte == b':')
+            .context("curl response header has no colon")?;
+        let name =
+            HeaderName::from_bytes(&line[..colon]).context("parse curl response header name")?;
+        let value = HeaderValue::from_bytes(trim_ascii_bytes(&line[colon + 1..]))
+            .context("parse curl response header value")?;
+        headers.append(name, value);
+    }
+    Ok((status, headers))
+}
+
+fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 impl RegistrationClient {
@@ -1606,23 +1975,25 @@ impl RegistrationClient {
 
 /// Transport selector for GitHub JSON requests.
 ///
-/// Native HTTP is the only supported GitHub JSON transport. The selector is
-/// explicit so a missing or unsupported configuration cannot silently choose
-/// a legacy transport.
+/// The selector is explicit so a missing or unsupported configuration cannot
+/// silently choose a legacy transport. `native` is the normal Linux path;
+/// `curl` uses the host executable for macOS hosts where native TLS stalls.
 pub const GITHUB_HTTP_TRANSPORT_ENV: &str = "VELNOR_GITHUB_HTTP_TRANSPORT";
 
 fn parse_github_http_transport(configured: &str) -> Result<&'static str> {
     match configured.trim() {
         "native" => Ok("native"),
+        "curl" => Ok("curl"),
         value => bail!(
-            "unsupported {GITHUB_HTTP_TRANSPORT_ENV} value '{value}'; accepted values: native"
+            "unsupported {GITHUB_HTTP_TRANSPORT_ENV} value '{value}'; accepted values: native, curl"
         ),
     }
 }
 
 pub fn github_http_transport() -> Result<&'static str> {
-    let configured = std::env::var(GITHUB_HTTP_TRANSPORT_ENV)
-        .with_context(|| format!("{GITHUB_HTTP_TRANSPORT_ENV} must be set to 'native'"))?;
+    let configured = std::env::var(GITHUB_HTTP_TRANSPORT_ENV).with_context(|| {
+        format!("{GITHUB_HTTP_TRANSPORT_ENV} must be set to 'native' or 'curl'")
+    })?;
     parse_github_http_transport(&configured)
 }
 
@@ -1635,8 +2006,23 @@ pub async fn github_json_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String)> {
-    github_http_transport()?;
-    native_json_request(method, url, bearer_token, json_body, max_time_secs).await
+    match github_http_transport()? {
+        "native" => native_json_request(method, url, bearer_token, json_body, max_time_secs).await,
+        "curl" => {
+            let response = curl_http_request(
+                method,
+                url,
+                bearer_token,
+                json_body,
+                max_time_secs,
+                "application/json",
+                None,
+            )
+            .await?;
+            Ok((response.status, response.body))
+        }
+        other => bail!("github HTTP transport selector returned an unknown value: {other}"),
+    }
 }
 
 /// Like [`github_json_request`] but also returns the rate-limit telemetry
@@ -1650,8 +2036,28 @@ pub async fn github_json_request_with_rate_limit(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String, GitHubRateLimitStatus)> {
-    github_http_transport()?;
-    native_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs).await
+    match github_http_transport()? {
+        "native" => {
+            native_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs)
+                .await
+        }
+        "curl" => {
+            let response = curl_http_request(
+                method,
+                url,
+                bearer_token,
+                json_body,
+                max_time_secs,
+                "application/json",
+                None,
+            )
+            .await?;
+            let rate_limit =
+                github_retry_hint_from_header_map(&response.headers, unix_epoch_now()).into();
+            Ok((response.status, response.body, rate_limit))
+        }
+        other => bail!("github HTTP transport selector returned an unknown value: {other}"),
+    }
 }
 
 fn native_http_client() -> Result<Client> {
@@ -6913,12 +7319,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_http_transport_accepts_only_explicit_native_value() {
+    fn github_http_transport_accepts_only_explicit_values() {
         assert_eq!(parse_github_http_transport("native").unwrap(), "native");
-        for value in ["", "curl", "reqwest", "unknown"] {
+        assert_eq!(parse_github_http_transport(" curl ").unwrap(), "curl");
+        for value in ["", "reqwest", "unknown"] {
             let error = parse_github_http_transport(value).unwrap_err();
-            assert!(error.to_string().contains("accepted values: native"));
+            assert!(error.to_string().contains("accepted values: native, curl"));
         }
+    }
+
+    #[test]
+    fn curl_command_args_are_typed_bounded_and_keep_token_out_of_argv() {
+        for method in ["POST", "PUT", "DELETE"] {
+            let spec = curl_command_args(
+                method,
+                "https://api.github.com/repos/tailrocks/velnor",
+                "ghs_test_token",
+                Some("@{\"hello\":true}"),
+                0,
+                "application/vnd.github+json",
+                Some("2026-03-10"),
+            )
+            .unwrap();
+            let args = spec
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert!(args.windows(2).any(|pair| pair == ["--max-time", "1"]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--connect-timeout", "1"]));
+            assert!(args.windows(2).any(|pair| pair == ["--retry", "0"]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--data-raw", "@{\"hello\":true}"]));
+            assert!(!args.iter().any(|arg| arg.contains("ghs_test_token")));
+
+            let headers = String::from_utf8(spec.header_stdin).unwrap();
+            assert!(headers.contains("Authorization: Bearer ghs_test_token\n"));
+            assert!(headers.contains("Content-Type: application/json\n"));
+            assert!(headers.contains("X-GitHub-Api-Version: 2026-03-10\n"));
+        }
+    }
+
+    #[test]
+    fn parse_curl_response_extracts_final_status_headers_and_body() {
+        let response = parse_curl_response(
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/2 201 \r\nx-ratelimit-remaining: 41\r\nretry-after: 2\r\n\r\n{\"ok\":true}",
+        )
+        .unwrap();
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body, r#"{"ok":true}"#);
+        assert_eq!(
+            response
+                .headers
+                .get("x-ratelimit-remaining")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "41"
+        );
+        assert_eq!(
+            response
+                .headers
+                .get("retry-after")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2"
+        );
     }
 
     #[tokio::test]
@@ -6931,14 +7401,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.to_string().contains("must be set to 'native'"),
+            error
+                .to_string()
+                .contains("must be set to 'native' or 'curl'"),
             "{error:#}"
         );
         let error = github_json_request_with_rate_limit("INVALID", "not a URL", "token", None, 1)
             .await
             .unwrap_err();
         assert!(
-            error.to_string().contains("must be set to 'native'"),
+            error
+                .to_string()
+                .contains("must be set to 'native' or 'curl'"),
             "{error:#}"
         );
 
@@ -6948,14 +7422,14 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.to_string().contains("accepted values: native"),
+            error.to_string().contains("accepted values: native, curl"),
             "{error:#}"
         );
         let error = github_json_request_with_rate_limit("INVALID", "not a URL", "token", None, 1)
             .await
             .unwrap_err();
         assert!(
-            error.to_string().contains("accepted values: native"),
+            error.to_string().contains("accepted values: native, curl"),
             "{error:#}"
         );
     }

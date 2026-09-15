@@ -430,3 +430,99 @@ pub struct DiagnosticsBundleArgs {
     #[arg(long)]
     pub archive: PathBuf,
 }
+
+/// Local Docker endpoint and Velnor capability report.
+#[derive(Debug, Args)]
+pub struct DockerArgs {
+    /// Report action. The default keeps `velnorctl docker` convenient while
+    /// making the documented `velnorctl docker report` spelling explicit.
+    #[arg(value_enum, default_value = "report")]
+    pub action: DockerAction,
+
+    /// Container image used only when `--check-bind-mount` is requested.
+    #[arg(long, default_value = "alpine:3.20")]
+    pub image: String,
+
+    /// Run a bounded host-to-container bind-mount visibility probe.
+    #[arg(long)]
+    pub check_bind_mount: bool,
+
+    /// Local work directory used by the bind-mount probe.
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+
+    /// Path to the work directory as seen by the Docker daemon.
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
+}
+
+/// Docker report actions. `status` is intentionally the same read-only
+/// report, so operators can use the noun that matches their incident.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DockerAction {
+    Report,
+    Status,
+}
+
+/// On-demand host operations.
+#[derive(Debug, Args)]
+pub struct HostArgs {
+    #[command(subcommand)]
+    pub command: HostCommand,
+}
+
+/// On-demand host verbs.
+#[derive(Debug, Subcommand)]
+pub enum HostCommand {
+    /// Start foreground, repository-scoped, Docker-backed capacity.
+    Start(HostStartArgs),
+    /// Build the local job image from this checkout (no GHCR/Sentry).
+    BootstrapImage(HostBootstrapImageArgs),
+    /// Show the selected host, Docker endpoint, and execution platform.
+    Status,
+    /// Explain how to drain a foreground host session.
+    Drain,
+    /// Explain how to stop a foreground host session.
+    Stop,
+}
+
+/// Source-bootstrap `velnor/job-ubuntu:26.04` on the current Docker daemon.
+#[derive(Debug, Args)]
+pub struct HostBootstrapImageArgs {
+    /// Tag written by the source build. Defaults to velnor/job-ubuntu:26.04.
+    #[arg(long)]
+    pub docker_image: Option<String>,
+    /// Rebuild release-binaries/$TARGETARCH/velnor-workflow even if it exists.
+    #[arg(long)]
+    pub rebuild_workflow: bool,
+}
+
+/// Start one repository-scoped recovery host.
+#[derive(Debug, Args)]
+pub struct HostStartArgs {
+    /// GitHub repository as owner/name. Defaults to tailrocks/velnor.
+    #[arg(long, value_name = "OWNER/NAME")]
+    pub repo: Option<String>,
+    /// Full repository URL. Must be owner/name, never an org pool.
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+    /// Local runner/instance name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Bounded slot count.
+    #[arg(long, default_value_t = 1)]
+    pub slots: usize,
+    /// PR number to document targeting semantics for. GitHub stays the scheduler.
+    #[arg(long, value_name = "NUMBER")]
+    pub pr: Option<u64>,
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+    /// Path the Docker daemon uses for --work-dir when it differs from the host.
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
+    /// Job image. Defaults to velnor/job-ubuntu:26.04. Must already exist locally.
+    #[arg(long)]
+    pub docker_image: Option<String>,
+}

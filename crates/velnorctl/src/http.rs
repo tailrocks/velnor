@@ -188,6 +188,9 @@ pub fn prepare_instance_dir(path: &FsPath) -> Result<(), std::io::Error> {
 
 /// Verify that package-owned socket groups exist before daemon readiness.
 pub fn validate_socket_groups() -> Result<(), std::io::Error> {
+    if !velnor_client::is_package_socket_mode() {
+        return Ok(());
+    }
     for name in [CONTROL_GROUP, ADMIN_GROUP] {
         if group_id(name).is_none() {
             return Err(std::io::Error::new(
@@ -199,9 +202,84 @@ pub fn validate_socket_groups() -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// Dev-host socket mode: owner-only access without package groups.
+pub const DEV_SOCKET_MODE: u32 = 0o600;
+
 /// Bind one exact Unix socket path without following or deleting foreign
 /// filesystem objects.
 pub fn bind_unix(
+    path: &FsPath,
+    mode: u32,
+    group_name: &str,
+) -> Result<tokio::net::UnixListener, std::io::Error> {
+    if velnor_client::is_package_socket_mode() {
+        bind_unix_package(path, mode, group_name)
+    } else {
+        bind_unix_dev(path)
+    }
+}
+
+fn bind_unix_dev(path: &FsPath) -> Result<tokio::net::UnixListener, std::io::Error> {
+    use std::os::unix::io::AsRawFd;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket must have a parent",
+        )
+    })?;
+    inspect_directory_chain(parent)?;
+    let listener = tokio::net::UnixListener::bind(path)?;
+    let bound_socket = match socket_identity(path) {
+        Some(identity) => identity,
+        None => {
+            drop(listener);
+            return Err(std::io::Error::other(
+                "bound control socket identity could not be verified",
+            ));
+        }
+    };
+    if let Err(error) = enforce_dev_socket_mode(path, listener.as_raw_fd()) {
+        cleanup_failed_bind(path, listener, bound_socket);
+        return Err(error);
+    }
+    Ok(listener)
+}
+
+fn enforce_dev_socket_mode(path: &FsPath, _fd: std::os::fd::RawFd) -> Result<(), std::io::Error> {
+    // Pathname ownership/mode is the contract callers observe. Darwin rejects
+    // fchmod/fchown on a live socket fd; Linux accepts fd fchmod but some
+    // engines (including OrbStack-backed job VMs) leave stale mode bits on the
+    // bound path until lchmod runs.
+    enforce_dev_socket_mode_path(path, current_uid(), current_gid())
+}
+
+fn enforce_dev_socket_mode_path(path: &FsPath, uid: u32, gid: u32) -> Result<(), std::io::Error> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // Darwin rejects fchmod/fchown on a Unix socket fd (EINVAL). The pathname
+    // we just bound is the identity we can actually chmod.
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path contains NUL")
+    })?;
+    if unsafe { libc::lchown(c_path.as_ptr(), uid, gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut permissions = std::fs::symlink_metadata(path)?.permissions();
+    permissions.set_mode(DEV_SOCKET_MODE);
+    std::fs::set_permissions(path, permissions)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.uid() != uid || metadata.gid() != gid || metadata.mode() & 0o777 != DEV_SOCKET_MODE
+    {
+        return Err(std::io::Error::other(
+            "bound control socket ownership or mode was not enforced",
+        ));
+    }
+    Ok(())
+}
+
+fn bind_unix_package(
     path: &FsPath,
     mode: u32,
     group_name: &str,
@@ -493,6 +571,11 @@ pub struct PeerCredentials {
 fn current_uid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() as u32 }
+}
+
+fn current_gid() -> u32 {
+    // SAFETY: getegid has no preconditions and cannot fail.
+    unsafe { libc::getegid() as u32 }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1289,6 +1372,12 @@ mod tests {
         prepare_instance_dir(&instance).expect("prepare instance directory");
 
         assert!(instance.is_dir());
+        let socket = instance.join("control.sock");
+        let listener = bind_unix(&socket, DEV_SOCKET_MODE, CONTROL_GROUP).expect("bind dev socket");
+        let metadata = std::fs::symlink_metadata(&socket).expect("socket metadata");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(metadata.mode() & 0o777, DEV_SOCKET_MODE);
+        drop(listener);
         std::fs::remove_dir_all(parent).expect("remove test directory");
     }
 

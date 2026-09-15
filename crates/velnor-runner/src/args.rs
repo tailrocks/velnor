@@ -189,6 +189,11 @@ pub struct ConfigureArgs {
     pub pool_id_pre_resolved: bool,
     pub dry_run: bool,
     pub config_dir: Option<PathBuf>,
+    /// Resolved pool trust ceiling, when the caller runs under one. Daemon
+    /// slots pass it so registration can refuse the trust-gated label on a
+    /// pool that is not trusted; standalone registration passes `None` and
+    /// skips that check.
+    pub trust_scope: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +202,9 @@ pub struct RunArgs {
     /// budgeting must use this carried value, never infer topology from paths
     /// or ambient environment.
     pub slot_count: NonZeroU32,
+    /// Host operational store. Slot config dirs are not this parent; omit
+    /// only for standalone `run` that still honors `VELNOR_STATE_DB`.
+    pub state_db: Option<PathBuf>,
     pub config_dir: Option<PathBuf>,
     pub pat: Option<String>,
     pub max_idle_slot_age_seconds: Option<u64>,

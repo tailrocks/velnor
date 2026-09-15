@@ -309,6 +309,7 @@ fn docker_backend_does_not_boot_firecracker() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn docker_backend_rejects_unbounded_cgroup_driver() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     for driver in ["cgroupfs 2", "systemd 1"] {
@@ -329,7 +330,18 @@ fn docker_backend_rejects_unbounded_cgroup_driver() {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
 
         let error = preflight_selected(&file, &mut world).unwrap_err();
-        assert!(error.to_string().contains("systemd cgroup driver"));
+        let message = error.to_string();
+        if driver.ends_with(" 1") {
+            assert!(
+                message.contains("cgroup v2"),
+                "unexpected rejection for {driver}: {message}"
+            );
+        } else {
+            assert!(
+                message.contains("systemd cgroup driver"),
+                "unexpected rejection for {driver}: {message}"
+            );
+        }
         assert!(runner
             .calls
             .iter()
@@ -338,6 +350,7 @@ fn docker_backend_rejects_unbounded_cgroup_driver() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn docker_backend_rejects_missing_effective_cpu_quota() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
@@ -361,6 +374,7 @@ fn docker_backend_rejects_missing_effective_cpu_quota() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn docker_backend_accepts_fractional_effective_cpu_quota() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();

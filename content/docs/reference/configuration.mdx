@@ -98,6 +98,11 @@ enterprise scope, pool name/ID. Registration creates per-slot
 and routing checks require exact agreement between desired group, repositories,
 labels, and trust scope.
 
+GitHub JSON requests use the explicit `VELNOR_GITHUB_HTTP_TRANSPORT` setting:
+`native` is the packaged/default Linux path, and `curl` uses the host `curl`
+executable for macOS hosts where native TLS stalls. The curl path uses bounded
+requests with no automatic retry; there is no implicit transport fallback.
+
 ## Validation and operations
 
 ```sh

@@ -865,14 +865,19 @@ async fn reconcile_once(
             generation,
             SLOT_HEARTBEAT_MAX_AGE,
         );
-        if heartbeat_fresh {
+        let acting = slot_is_acting(&state, jobs, &id, generation);
+        // A leftover deadline from before/during a job must not fire the
+        // instant the journal row is gone. The waiter is still the broker
+        // actor; fencing the supervisor while that waiter lives splits
+        // GitHub's view from the journal and then `child_owns_slot` blocks
+        // the only generation-recovery path.
+        if heartbeat_fresh || acting {
             startup_deadlines.remove(&id.0);
         } else if args.spawn_slots
             && !fenced
-            && !admission_blocked
             && stale_slot_deadline_reached(args, slot, &id, startup_deadlines, Instant::now())
         {
-            fence_stale_slot_actor(args, journal, slots, &id, generation).await?;
+            fence_stale_slot_actor(args, journal, slots, jobs, &id, generation).await?;
             startup_deadlines.remove(&id.0);
             continue;
         }
@@ -880,7 +885,8 @@ async fn reconcile_once(
             // Proof: `fenced` is `slot.is_some_and(...)`, so `slot` is `Some`
             // in this arm.
             #[allow(clippy::expect_used, reason = "fenced implies slot is Some")]
-            terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
+            terminate_fenced_slot_actor(args, slots, jobs, &state, &id, slot.expect("fenced slot"))
+                .await?;
         }
         let fenced_generation = fenced_slot_recovery_generation(slot, &state, jobs);
         let generation = fenced_generation.unwrap_or(generation);
@@ -2446,59 +2452,85 @@ fn child_owns_slot(
             .any(|job| job.slot_id == *slot_id && jobs.contains_key(&job.job_id.0))
 }
 
+/// Journal work or a live waiter/worker means the slot is still acting.
+/// Supervisor-heartbeat stale must not fence through that window: the waiter
+/// is what GitHub talks to, and leaving it up after `SlotStale` deadlocks
+/// generation recovery.
+fn slot_is_acting(
+    state: &velnor_control::journal::FleetState,
+    jobs: &HashMap<String, Child>,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    slot_has_admission_block(state, slot_id, generation) || child_owns_slot(state, jobs, slot_id)
+}
+
+async fn reap_supervised_child(
+    children: &mut HashMap<String, Child>,
+    key: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    if !children.contains_key(key) {
+        return Ok(());
+    }
+    // Proof: the `contains_key` guard above holds with no `await` between
+    // it and this lookup (shutdown is synchronous), so the entry is `Some`.
+    #[allow(clippy::expect_used, reason = "contains_key just proved presence")]
+    request_child_shutdown(children.get(key).expect("child still present"))?;
+    let mut deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+    let mut escalated = false;
+    loop {
+        // Proof: `children` is exclusively borrowed, so no other task can
+        // remove the entry; the loop's only `remove` returns immediately,
+        // so the entry is present on every iteration.
+        #[allow(clippy::expect_used, reason = "child retained until reap")]
+        if children
+            .get_mut(key)
+            .expect("child retained until reap")
+            .try_wait()?
+            .is_some()
+        {
+            children.remove(key);
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            if escalated {
+                anyhow::bail!("{label} failed to reap after SIGKILL; handle retained");
+            }
+            // Proof: same as above — exclusive borrow plus remove-then-return
+            // means the entry is present on every loop iteration.
+            #[allow(clippy::expect_used, reason = "child retained until escalation")]
+            children
+                .get_mut(key)
+                .expect("child retained until escalation")
+                .kill()
+                .map_err(|error| {
+                    anyhow::anyhow!("{label} SIGKILL escalation failed; handle retained: {error}")
+                })?;
+            eprintln!("{label} shutdown escalated to SIGKILL");
+            escalated = true;
+            deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn terminate_fenced_slot_actor(
     args: &ControllerArgs,
     slots: &mut HashMap<String, Child>,
+    jobs: &mut HashMap<String, Child>,
+    state: &velnor_control::journal::FleetState,
     slot_id: &SlotId,
     slot: &SlotRecord,
 ) -> anyhow::Result<()> {
-    if slots.contains_key(&slot_id.0) {
-        // Proof: the `contains_key` guard above holds with no `await` between
-        // it and this lookup (shutdown is synchronous), so the entry is `Some`.
-        #[allow(clippy::expect_used, reason = "contains_key just proved presence")]
-        request_child_shutdown(slots.get(&slot_id.0).expect("child still present"))?;
-        let mut deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
-        let mut escalated = false;
-        loop {
-            // Proof: `slots` is exclusively borrowed, so no other task can
-            // remove the entry; the loop's only `remove` returns immediately,
-            // so the entry is present on every iteration.
-            #[allow(clippy::expect_used, reason = "child retained until reap")]
-            if slots
-                .get_mut(&slot_id.0)
-                .expect("child retained until reap")
-                .try_wait()?
-                .is_some()
-            {
-                slots.remove(&slot_id.0);
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                if escalated {
-                    anyhow::bail!(
-                        "fenced slot {:?} child failed to reap after SIGKILL; handle retained",
-                        slot_id
-                    );
-                }
-                // Proof: same as above — exclusive borrow plus remove-then-return
-                // means the entry is present on every loop iteration.
-                #[allow(clippy::expect_used, reason = "child retained until escalation")]
-                slots
-                    .get_mut(&slot_id.0)
-                    .expect("child retained until escalation")
-                    .kill()
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "fenced slot {:?} SIGKILL escalation failed; handle retained: {error}",
-                            slot_id
-                        )
-                    })?;
-                eprintln!("fenced slot {:?} shutdown escalated to SIGKILL", slot_id);
-                escalated = true;
-                deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+    reap_supervised_child(slots, &slot_id.0, &format!("fenced slot {:?}", slot_id)).await?;
+    for key in job_child_keys_for_slot(jobs, state, slot_id) {
+        reap_supervised_child(
+            jobs,
+            &key,
+            &format!("fenced slot {:?} child {key}", slot_id),
+        )
+        .await?;
     }
 
     let Some(pid) = slot.pid else {
@@ -2575,6 +2607,7 @@ async fn fence_stale_slot_actor(
     args: &ControllerArgs,
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
+    jobs: &mut HashMap<String, Child>,
     id: &SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
@@ -2585,15 +2618,16 @@ async fn fence_stale_slot_actor(
     if outcome.rejected {
         return Ok(());
     }
-    let slot = journal
-        .materialized_state()?
+    let state = journal.materialized_state()?;
+    let slot = state
         .slots
-        .into_iter()
+        .iter()
         .find(|slot| {
             slot.slot_id == *id && slot.generation == generation && slot.phase == SlotPhase2::Fenced
         })
+        .cloned()
         .ok_or_else(|| anyhow::anyhow!("stale slot {id:?} was not fenced"))?;
-    terminate_fenced_slot_actor(args, slots, id, &slot).await
+    terminate_fenced_slot_actor(args, slots, jobs, &state, id, &slot).await
 }
 
 fn permit_needs_reconciliation(
@@ -2680,7 +2714,7 @@ fn maybe_spawn_slot(
     {
         return Ok(());
     }
-    let exe = std::env::current_exe()?;
+    let exe = crate::service::node_service_executable()?;
     let index = slot_index_from_id(slot_id);
     let child = Command::new(exe)
         .arg("slot")
@@ -2730,7 +2764,7 @@ fn maybe_spawn_job(
     {
         return Ok(());
     }
-    let exe = std::env::current_exe()?;
+    let exe = crate::service::node_service_executable()?;
     let slot_index = slot_index_from_id(&slot_id);
     let child = Command::new(exe)
         .arg("job")
@@ -3635,6 +3669,83 @@ mod tests {
             fenced_slot_recovery_generation(None, &state, &children),
             None
         );
+    }
+
+    #[test]
+    fn a_live_waiter_is_an_acting_slot_and_blocks_fenced_recovery() {
+        let mut slot = reserved_slot();
+        slot.phase = SlotPhase2::Ready;
+        let state = FleetState::default();
+        let waiter = Command::new("sleep").arg("5").spawn().unwrap();
+        let mut jobs = HashMap::from([(String::from("wait-velnor-1"), waiter)]);
+
+        assert!(slot_is_acting(
+            &state,
+            &jobs,
+            &slot.slot_id,
+            slot.generation
+        ));
+        slot.phase = SlotPhase2::Fenced;
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &state, &jobs),
+            None,
+            "a live waiter must not be skipped: it is why generation recovery deadlocks"
+        );
+
+        let _ = jobs.get_mut("wait-velnor-1").unwrap().kill();
+        let _ = jobs.get_mut("wait-velnor-1").unwrap().wait();
+        jobs.remove("wait-velnor-1");
+        assert!(!slot_is_acting(
+            &state,
+            &jobs,
+            &slot.slot_id,
+            slot.generation
+        ));
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &state, &jobs),
+            Some(Generation(slot.generation.0 + 1))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fencing_terminates_the_waiter_so_generation_can_advance() {
+        let dir = metrics_test_dir("fence-waiter");
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut slot = reserved_slot();
+        slot.phase = SlotPhase2::Fenced;
+        let state = FleetState::default();
+        let mut slots = HashMap::new();
+        let mut jobs = HashMap::from([(
+            String::from("wait-velnor-1"),
+            Command::new("sleep").arg("30").spawn().unwrap(),
+        )]);
+        let waiter_pid = jobs.get("wait-velnor-1").unwrap().id();
+
+        terminate_fenced_slot_actor(&args, &mut slots, &mut jobs, &state, &slot.slot_id, &slot)
+            .await
+            .unwrap();
+
+        assert!(
+            !jobs.contains_key("wait-velnor-1"),
+            "fenced recovery must reap the waiter that would block the next generation"
+        );
+        assert!(
+            !prove::pid_is_alive(waiter_pid),
+            "the waiter process itself must be gone, not just dropped from the map"
+        );
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &state, &jobs),
+            Some(Generation(slot.generation.0 + 1))
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

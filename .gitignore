@@ -4,6 +4,8 @@ dist/
 dist-ssr/
 build/
 target/
+release-binaries/
+.velnor-bootstrap/
 coverage/
 *.local
 .env

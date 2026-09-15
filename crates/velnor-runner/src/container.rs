@@ -4,7 +4,7 @@ use std::{
     fmt::Write as _,
     fs, io,
     num::NonZeroU32,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use sha2::{Digest, Sha256};
@@ -38,6 +38,8 @@ fn is_docker_control_env(name: &str) -> bool {
     name.eq_ignore_ascii_case("DOCKER_HOST")
         || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
+        || name.eq_ignore_ascii_case("VELNOR_DOCKER_HOST")
+        || name.eq_ignore_ascii_case("VELNOR_DOCKER_CONTEXT")
 }
 
 fn append_flags_without_limits(
@@ -179,7 +181,7 @@ pub struct JobContainerSpec {
     pub docker_cli_plugin_host_dir: Option<PathBuf>,
     /// Host path of the apt-packaged `velnor-workflow` CLI. Jobs bind-mount it
     /// over the image copy so `apt install velnor-runner` is enough to update
-    /// plan/run. `None` skips the mount (tests).
+    /// plan/run. `None` skips the mount (tests, macOS/dev hosts without apt).
     pub packaged_workflow_cli_host: Option<PathBuf>,
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
@@ -197,6 +199,18 @@ pub struct JobContainerSpec {
     pub mbx_store_host: Option<PathBuf>,
     /// Docker-only explicit sccache action store.
     pub sccache_store_host: Option<PathBuf>,
+}
+
+/// The two filesystem views of a job Docker lease.
+///
+/// The runner binds the proxy on `host_visible`; Docker receives
+/// `daemon_visible` as the bind-mount source. They are equal for a native
+/// Linux daemon and may differ when Docker Desktop/OrbStack maps a host work
+/// root into its Linux VM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockerLeasePaths {
+    pub(crate) host_visible: PathBuf,
+    pub(crate) daemon_visible: PathBuf,
 }
 
 /// Job environment that carries the daemon's resource budget. A workflow that
@@ -416,7 +430,7 @@ impl JobContainerSpec {
         );
     }
 
-    fn append_rust_acceleration(&self, command: &mut DockerCommand) {
+    fn append_rust_acceleration(&self, command: &mut DockerCommand) -> io::Result<()> {
         if let Some(host) = &self.mbx_store_host {
             command.pair("-v", self.mount_arg(host, "/var/cache/mbx"));
             command.envs([
@@ -436,6 +450,7 @@ impl JobContainerSpec {
             );
             command.envs(crate::sccache_compat::container_env());
         }
+        Ok(())
     }
 
     /// Directory that holds the mode-0600 env files backing this job's Docker
@@ -469,6 +484,7 @@ impl JobContainerSpec {
     /// The job image is not a valid OCI reference, or an env file backing the
     /// job environment could not be created.
     pub fn start_args(&self) -> io::Result<PreparedDockerArgs> {
+        self.validate_docker_host_path_mapping()?;
         let image = self.image_reference()?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
         let args = &mut command;
@@ -613,7 +629,7 @@ impl JobContainerSpec {
         // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
         args.flags(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]);
 
-        self.append_docker_socket_mount(args);
+        self.append_docker_socket_mount(args)?;
         self.append_docker_cli_mounts(args);
         self.append_packaged_workflow_cli_mounts(args)?;
 
@@ -626,7 +642,7 @@ impl JobContainerSpec {
         // workflow environment and expanded container options. A trusted job
         // may add options, but cannot redirect a persistent store or stack
         // sccache with the image's mbx shim.
-        self.append_rust_acceleration(args);
+        self.append_rust_acceleration(args)?;
 
         // The machine budget divided by the number of provisioned slots. Last,
         // so neither workflow environment nor workflow createOptions can widen
@@ -657,6 +673,7 @@ impl JobContainerSpec {
     /// # Errors
     /// The job image is not a valid OCI reference.
     pub fn seed_mise_store_args(&self) -> io::Result<Vec<String>> {
+        self.validate_docker_host_path_mapping()?;
         let image = self.image_reference()?;
         let store = mise_store_host(&self.temp_host, self.store_trust_scope.as_str());
         let mut args = DockerArgv::new(["run"]);
@@ -865,6 +882,7 @@ impl JobContainerSpec {
         node_image: &str,
         entrypoint_container_path: &str,
     ) -> io::Result<PreparedDockerArgs> {
+        self.validate_docker_host_path_mapping()?;
         let image = ImageReference::parse(node_image)?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
         let args = &mut command;
@@ -901,9 +919,9 @@ impl JobContainerSpec {
         // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
         args.pair("--entrypoint", "node");
         self.append_ownership_labels(args);
-        self.append_docker_socket_mount(args);
+        self.append_docker_socket_mount(args)?;
         self.append_docker_cli_mounts(args);
-        self.append_rust_acceleration(args);
+        self.append_rust_acceleration(args)?;
         self.append_job_cgroup_parent(args);
         if !path_prepend.is_empty() {
             let path = path_prepend
@@ -1023,6 +1041,9 @@ impl JobContainerSpec {
         dockerfile_host: &Path,
         context_host: &Path,
     ) -> io::Result<Vec<String>> {
+        self.validate_docker_host_path_mapping()?;
+        let dockerfile_host = self.docker_host_path_checked(dockerfile_host, "Dockerfile")?;
+        let context_host = self.docker_host_path_checked(context_host, "Docker build context")?;
         let image = ImageReference::parse(image)?;
         let mut args = DockerArgv::new(["build"]);
         args.flags([
@@ -1031,11 +1052,11 @@ impl JobContainerSpec {
             "--tag".to_owned(),
             image.as_str().to_owned(),
             "--file".to_owned(),
-            self.docker_host_path(dockerfile_host).display().to_string(),
+            dockerfile_host.display().to_string(),
         ]);
         Ok(args
             .operands()
-            .operand(self.docker_host_path(context_host).display().to_string())
+            .operand(context_host.display().to_string())
             .into_argv())
     }
 
@@ -1057,6 +1078,7 @@ impl JobContainerSpec {
         entrypoint: Option<&str>,
         command_args: &[String],
     ) -> io::Result<PreparedDockerArgs> {
+        self.validate_docker_host_path_mapping()?;
         let image = ImageReference::parse(image)?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
         let args = &mut command;
@@ -1093,9 +1115,9 @@ impl JobContainerSpec {
         args.env("RUNNER_TOOL_CACHE", "/__tool");
         args.env("AGENT_TOOLSDIRECTORY", "/__tool");
         self.append_ownership_labels(args);
-        self.append_docker_socket_mount(args);
+        self.append_docker_socket_mount(args)?;
         self.append_docker_cli_mounts(args);
-        self.append_rust_acceleration(args);
+        self.append_rust_acceleration(args)?;
         self.append_job_cgroup_parent(args);
         if let Some(entrypoint) = entrypoint {
             args.pair("--entrypoint", entrypoint.to_owned());
@@ -1169,17 +1191,105 @@ impl JobContainerSpec {
         crate::docker_lease::guest_docker_socket_host(&self.name, &self.temp_host)
     }
 
-    fn append_docker_socket_mount(&self, args: &mut impl FlagSink) {
-        if !self.mount_docker_socket {
-            return;
+    /// Resolve both filesystem views of the job lease.
+    pub(crate) fn docker_lease_paths(&self) -> io::Result<DockerLeasePaths> {
+        let host_visible = self.guest_docker_socket_host();
+        let daemon_visible =
+            self.docker_host_path_checked(&host_visible, "job Docker lease socket")?;
+        Ok(DockerLeasePaths {
+            host_visible,
+            daemon_visible,
+        })
+    }
+
+    /// Validate every work-tree path that Docker mounts or passes to the
+    /// daemon when a VM path mapping is configured. A lexical fallback to the
+    /// runner path would make Docker Desktop/OrbStack mount a different file,
+    /// so mapping failures are fatal and explain which roots must agree.
+    pub(crate) fn validate_docker_host_path_mapping(&self) -> io::Result<()> {
+        if self.docker_host_work_dir.is_none() {
+            return Ok(());
         }
+
+        let paths = [
+            ("workspace", self.workspace_host.clone()),
+            ("temp", self.temp_host.clone()),
+            ("home", self.home_host.clone()),
+            ("actions", self.actions_host.clone()),
+            ("tools", self.tools_host.clone()),
+            ("workflow", workflow_host(&self.temp_host)),
+            ("Playwright store", self.playwright_browser_store_host()),
+            (
+                "Cargo registry cache",
+                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
+                    .join("registry/cache"),
+            ),
+            (
+                "Cargo registry index",
+                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
+                    .join("registry/index"),
+            ),
+            (
+                "Cargo git database",
+                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("git/db"),
+            ),
+            ("Cargo executable store", self.cargo_executable_store_host()),
+            ("mise executable store", self.mise_executable_store_host()),
+            ("mise binary store", self.mise_binary_store_host()),
+            (
+                "mise cache",
+                mise_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("cache"),
+            ),
+        ];
+        for (label, path) in paths {
+            self.docker_host_path_checked(&path, label)?;
+        }
+        if let Some(path) = &self.mbx_store_host {
+            self.docker_host_path_checked(path, "MBX store")?;
+        }
+        if let Some(path) = &self.sccache_store_host {
+            self.docker_host_path_checked(path, "sccache store")?;
+        }
+        // This also rejects a lease path shortened outside the mapped work
+        // root; the host listener and daemon mount must refer to one socket.
+        self.docker_lease_paths()?;
+        Ok(())
+    }
+
+    fn append_docker_socket_mount(&self, args: &mut impl FlagSink) -> io::Result<()> {
+        if !self.mount_docker_socket {
+            return Ok(());
+        }
+        let daemon_visible = self.guest_docker_socket_bind_source()?;
         args.pair(
             "-v",
-            format!(
-                "{}:/var/run/docker.sock",
-                self.guest_docker_socket_host().display()
-            ),
+            format!("{}:/var/run/docker.sock", daemon_visible.display()),
         );
+        Ok(())
+    }
+
+    /// Unix socket the Linux job container should see as `/var/run/docker.sock`.
+    ///
+    /// On a native Linux host that is the per-job lease proxy. On macOS the
+    /// runner binds that proxy on a host path the OrbStack/Docker Desktop VM
+    /// can *see* as a socket inode, but `connect()` is `ECONNREFUSED`
+    /// (virtiofs). The daemon's own socket is special-cased and connectable.
+    /// A TCP lease proxy is the root fix; until then trusted macOS jobs
+    /// mount the resolved host socket.
+    pub(crate) fn guest_can_connect_host_bound_unix_lease() -> bool {
+        !cfg!(target_os = "macos")
+    }
+
+    fn guest_docker_socket_bind_source(&self) -> io::Result<PathBuf> {
+        if Self::guest_can_connect_host_bound_unix_lease() {
+            return Ok(self.docker_lease_paths()?.daemon_visible);
+        }
+        let endpoint = crate::docker::engine::resolve_docker_endpoint().map_err(|error| {
+            io::Error::other(format!(
+                "resolve host Docker socket for macOS job mount: {error}"
+            ))
+        })?;
+        Ok(endpoint.socket.canonicalize().unwrap_or(endpoint.socket))
     }
 
     fn append_docker_cli_mounts(&self, args: &mut impl FlagSink) {
@@ -1329,6 +1439,52 @@ impl JobContainerSpec {
         docker_work_dir.join(relative)
     }
 
+    fn docker_host_path_checked(&self, host_path: &Path, label: &str) -> io::Result<PathBuf> {
+        let Some(docker_work_dir) = &self.docker_host_work_dir else {
+            return Ok(host_path.to_path_buf());
+        };
+        let local_work_dir = self.local_work_dir().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': derive the runner work root from an absolute job temp path",
+                    host_path.display()
+                ),
+            )
+        })?;
+        validate_docker_mapping_root(&local_work_dir, "runner work root")?;
+        validate_docker_mapping_root(docker_work_dir, "Docker daemon work root")?;
+        if !host_path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': host-visible paths must be absolute when docker_host_work_dir is set",
+                    host_path.display()
+                ),
+            ));
+        }
+        if has_parent_component(host_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': parent ('..') path components are unsafe; use normalized paths below the runner work root",
+                    host_path.display()
+                ),
+            ));
+        }
+        let relative = host_path.strip_prefix(&local_work_dir).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map Docker {label} '{}': it escapes host-visible runner work root '{}'; set docker_host_work_dir to the daemon-visible equivalent of that root",
+                    host_path.display(),
+                    local_work_dir.display()
+                ),
+            )
+        })?;
+        Ok(docker_work_dir.join(relative))
+    }
+
     fn local_work_dir(&self) -> Option<PathBuf> {
         let job_dir = self.temp_host.parent()?;
         Some(daemon_shared_root(job_dir.parent()?.to_path_buf()))
@@ -1346,6 +1502,33 @@ impl JobContainerSpec {
     fn append_job_cgroup_parent(&self, args: &mut impl FlagSink) {
         args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
     }
+}
+
+fn validate_docker_mapping_root(path: &Path, label: &str) -> io::Result<()> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Docker {label} must be absolute for a VM-backed daemon; got '{}'",
+                path.display()
+            ),
+        ));
+    }
+    if has_parent_component(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Docker {label} '{}' contains an unsafe parent ('..') component; use a normalized absolute path",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn has_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| component == Component::ParentDir)
 }
 
 /// Fail-closed audit: no finished Docker command line may contain a masked
@@ -2429,20 +2612,29 @@ mod tests {
         } else {
             assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
         }
-        let lease_mount = format!(
-            "{}:/var/run/docker.sock",
-            job.guest_docker_socket_host().display()
-        );
-        assert!(
-            args.contains(&lease_mount),
-            "guest Docker must use the job lease socket {lease_mount}, got {args:?}"
-        );
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "/var/run/docker.sock:/var/run/docker.sock"),
-            "host engine socket must not be mounted into the job"
-        );
+        if JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+            let lease_mount = format!(
+                "{}:/var/run/docker.sock",
+                job.guest_docker_socket_host().display()
+            );
+            assert!(
+                args.contains(&lease_mount),
+                "guest Docker must use the job lease socket {lease_mount}, got {args:?}"
+            );
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == "/var/run/docker.sock:/var/run/docker.sock"),
+                "host engine socket must not be mounted into the job"
+            );
+        } else {
+            assert!(
+                args.iter()
+                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
+                        && !arg.contains("vdl-")),
+                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+            );
+        }
         // PID 1 tails the live console file (so `docker logs` mirrors the UI).
         assert_eq!(
             args.last().map(String::as_str),
@@ -2538,6 +2730,25 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
+        let lease_paths = spec.docker_lease_paths().unwrap();
+        assert_ne!(lease_paths.host_visible, lease_paths.daemon_visible);
+        if JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+            let lease_mount = format!(
+                "{}:/var/run/docker.sock",
+                lease_paths.daemon_visible.display()
+            );
+            assert!(
+                args.contains(&lease_mount),
+                "the lease listener must use the Docker-daemon-visible path {lease_mount}, got {args:?}"
+            );
+        } else {
+            assert!(
+                args.iter()
+                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
+                        && !arg.contains("vdl-")),
+                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+            );
+        }
     }
 
     #[test]
@@ -2557,6 +2768,42 @@ mod tests {
             spec.docker_host_path(spec.mbx_store_host.as_ref().unwrap()),
             PathBuf::from("/daemon/work/_velnor_mbx/trusted")
         );
+        assert_eq!(
+            spec.docker_lease_paths().unwrap().daemon_visible.parent(),
+            Some(Path::new("/daemon/work/slot-1/job-1/temp/_velnor"))
+        );
+    }
+
+    #[test]
+    fn rejects_docker_mapping_that_escapes_the_host_work_root() {
+        let root = container_test_temp("reject-escaping-host-path");
+        let mut spec = spec();
+        spec.temp_host = root.join("work/job-1/temp");
+        spec.workspace_host = root.join("outside/workspace");
+        spec.home_host = root.join("work/job-1/home");
+        spec.actions_host = root.join("work/job-1/actions");
+        spec.tools_host = root.join("work/job-1/tools");
+        spec.docker_host_work_dir = Some("/daemon/work".into());
+
+        let error = spec.validate_docker_host_path_mapping().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("workspace"), "{message}");
+        assert!(
+            message.contains("escapes host-visible runner work root"),
+            "{message}"
+        );
+        assert!(message.contains("docker_host_work_dir"), "{message}");
+    }
+
+    #[test]
+    fn rejects_parent_components_in_docker_mapping_roots() {
+        let mut spec = spec();
+        spec.docker_host_work_dir = Some("/daemon/work/../escape".into());
+
+        let error = spec.validate_docker_host_path_mapping().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Docker daemon work root"), "{message}");
+        assert!(message.contains("unsafe parent"), "{message}");
     }
 
     #[test]
@@ -3568,6 +3815,25 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));
         assert_eq!(&args[args.len() - 2..], ["alpine:3.20", "arg1"]);
+    }
+
+    #[test]
+    fn rejects_docker_action_paths_outside_mapped_work_root() {
+        let root = container_test_temp("reject-docker-action-path");
+        let mut spec = spec();
+        spec.docker_host_work_dir = Some("/daemon/work".into());
+        let dockerfile = root.join("outside/Dockerfile");
+        let context = root.join("outside");
+
+        let error = spec
+            .build_docker_action_args("alpine:3.20", &dockerfile, &context)
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Dockerfile"), "{message}");
+        assert!(
+            message.contains("escapes host-visible runner work root"),
+            "{message}"
+        );
     }
 
     #[test]

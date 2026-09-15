@@ -176,6 +176,7 @@ pub(crate) fn unit(
         toolchain: None,
         services: Vec::new(),
         workflow_file: None,
+        requires_trusted: false,
     }
 }
 
@@ -207,6 +208,10 @@ impl From<RepositoryShape> for ProjectConfig {
             version_bump_units: Vec::new(),
             default_branch: shape.default_branch,
             runners: shape.runners,
+            automatic: match shape.runners {
+                RunnerMode::Both => RunnerMode::Github,
+                other => other,
+            },
             github_runner: "ubuntu-24.04".to_owned(),
             macos_runner: "macos-15".to_owned(),
             velnor_labels: Vec::new(),
@@ -220,6 +225,7 @@ impl From<RepositoryShape> for ProjectConfig {
             ci_required: true,
             package_update_channels: None,
             velnor_runner_group: None,
+            velnor_trusted_label: None,
             pull_request_on_velnor: false,
             default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),

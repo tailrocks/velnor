@@ -3,7 +3,7 @@ name: Rust
 on:
   workflow_call:
     inputs:
-      unit:
+      selected_units:
         required: true
         type: string
       scope:
@@ -12,11 +12,17 @@ on:
       selection-artifact:
         required: true
         type: string
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
 
 jobs:
   github-rust-policy:
     name: "GitHub / rust-policy"
-    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -26,13 +32,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -129,19 +151,50 @@ jobs:
           key: ci-${{ runner.os }}-rust-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
             ci-${{ runner.os }}-rust-
+      - name: Prepare Cargo sources
+        env:
+          CI_UNIT_ID: rust-policy
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-policy
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -268,7 +321,7 @@ jobs:
 
   velnor-rust-policy:
     name: "Velnor / rust-policy"
-    if: ${{ inputs.unit == 'rust-policy' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -278,6 +331,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -301,19 +355,50 @@ jobs:
           key: ci-${{ runner.os }}-rust-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
             ci-${{ runner.os }}-rust-
+      - name: Prepare Cargo sources
+        env:
+          CI_UNIT_ID: rust-policy
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-policy
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -432,7 +517,7 @@ jobs:
 
   github-rust-unit-collector:
     name: "GitHub / rust-unit-collector"
-    if: ${{ inputs.unit == 'rust-unit-collector' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -442,13 +527,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -547,26 +648,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-unit-collector
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'tools/unit-collector' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-unit-collector
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -693,7 +816,7 @@ jobs:
 
   velnor-rust-unit-collector:
     name: "Velnor / rust-unit-collector"
-    if: ${{ inputs.unit == 'rust-unit-collector' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -703,6 +826,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -728,26 +852,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-unit-collector
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'tools/unit-collector' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-unit-collector
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -866,7 +1012,7 @@ jobs:
 
   github-rust-velnor-bench:
     name: "GitHub / rust-velnor-bench"
-    if: ${{ inputs.unit == 'rust-velnor-bench' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -876,13 +1022,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -981,26 +1143,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-bench
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-bench' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-bench
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1127,7 +1311,7 @@ jobs:
 
   velnor-rust-velnor-bench:
     name: "Velnor / rust-velnor-bench"
-    if: ${{ inputs.unit == 'rust-velnor-bench' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1137,6 +1321,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1162,26 +1347,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-bench
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-bench' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-bench
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1300,7 +1507,7 @@ jobs:
 
   github-rust-velnor-client:
     name: "GitHub / rust-velnor-client"
-    if: ${{ inputs.unit == 'rust-velnor-client' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1310,13 +1517,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1415,26 +1638,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-client
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-client' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-client
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1561,7 +1806,7 @@ jobs:
 
   velnor-rust-velnor-client:
     name: "Velnor / rust-velnor-client"
-    if: ${{ inputs.unit == 'rust-velnor-client' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1571,6 +1816,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1596,26 +1842,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-client
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-client' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-client
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1734,7 +2002,7 @@ jobs:
 
   github-rust-velnor-control:
     name: "GitHub / rust-velnor-control"
-    if: ${{ inputs.unit == 'rust-velnor-control' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1744,13 +2012,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1849,26 +2133,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-control
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-control' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-control
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -1995,7 +2301,7 @@ jobs:
 
   velnor-rust-velnor-control:
     name: "Velnor / rust-velnor-control"
-    if: ${{ inputs.unit == 'rust-velnor-control' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2005,6 +2311,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2030,26 +2337,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-control
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-control' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-control
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2168,7 +2497,7 @@ jobs:
 
   github-rust-velnor-model:
     name: "GitHub / rust-velnor-model"
-    if: ${{ inputs.unit == 'rust-velnor-model' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2178,13 +2507,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2283,26 +2628,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-model
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-model' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-model
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2429,7 +2796,7 @@ jobs:
 
   velnor-rust-velnor-model:
     name: "Velnor / rust-velnor-model"
-    if: ${{ inputs.unit == 'rust-velnor-model' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2439,6 +2806,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2464,26 +2832,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-model
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-model' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-model
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2602,7 +2992,7 @@ jobs:
 
   github-rust-velnor-render:
     name: "GitHub / rust-velnor-render"
-    if: ${{ inputs.unit == 'rust-velnor-render' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2612,13 +3002,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2717,26 +3123,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-render
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-render' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-render
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -2863,7 +3291,7 @@ jobs:
 
   velnor-rust-velnor-render:
     name: "Velnor / rust-velnor-render"
-    if: ${{ inputs.unit == 'rust-velnor-render' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2873,6 +3301,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2898,26 +3327,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-render
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-render' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-render
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3036,7 +3487,7 @@ jobs:
 
   github-rust-velnor-runner:
     name: "GitHub / rust-velnor-runner"
-    if: ${{ inputs.unit == 'rust-velnor-runner' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3046,13 +3497,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3151,26 +3618,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-runner
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-runner' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-runner
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3297,7 +3786,7 @@ jobs:
 
   velnor-rust-velnor-runner:
     name: "Velnor / rust-velnor-runner"
-    if: ${{ inputs.unit == 'rust-velnor-runner' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3307,6 +3796,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3332,26 +3822,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-runner
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-runner' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-runner
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3470,7 +3982,7 @@ jobs:
 
   github-rust-velnor-tools:
     name: "GitHub / rust-velnor-tools"
-    if: ${{ inputs.unit == 'rust-velnor-tools' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3480,13 +3992,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3585,26 +4113,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-tools
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-tools' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-tools
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3731,7 +4281,7 @@ jobs:
 
   velnor-rust-velnor-tools:
     name: "Velnor / rust-velnor-tools"
-    if: ${{ inputs.unit == 'rust-velnor-tools' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3741,6 +4291,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3766,26 +4317,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-tools
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-tools' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-tools
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -3904,7 +4477,7 @@ jobs:
 
   github-rust-velnor-workflow:
     name: "GitHub / rust-velnor-workflow"
-    if: ${{ inputs.unit == 'rust-velnor-workflow' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3914,13 +4487,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -4019,26 +4608,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-workflow
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4165,7 +4776,7 @@ jobs:
 
   velnor-rust-velnor-workflow:
     name: "Velnor / rust-velnor-workflow"
-    if: ${{ inputs.unit == 'rust-velnor-workflow' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4175,6 +4786,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -4200,26 +4812,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-workflow
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4338,7 +4972,7 @@ jobs:
 
   github-rust-velnor-workflow-contract:
     name: "GitHub / rust-velnor-workflow-contract"
-    if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4348,13 +4982,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -4453,26 +5103,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow-contract
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow-contract' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-workflow-contract
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4599,7 +5271,7 @@ jobs:
 
   velnor-rust-velnor-workflow-contract:
     name: "Velnor / rust-velnor-workflow-contract"
-    if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4609,6 +5281,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -4634,26 +5307,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnor-workflow-contract
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnor-workflow-contract' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnor-workflow-contract
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -4772,7 +5467,7 @@ jobs:
 
   github-rust-velnorctl:
     name: "GitHub / rust-velnorctl"
-    if: ${{ inputs.unit == 'rust-velnorctl' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4782,13 +5477,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -4887,26 +5598,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnorctl
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnorctl' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnorctl
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -5033,7 +5766,7 @@ jobs:
 
   velnor-rust-velnorctl:
     name: "Velnor / rust-velnorctl"
-    if: ${{ inputs.unit == 'rust-velnorctl' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -5043,6 +5776,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -5068,26 +5802,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-velnorctl
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
-          cd -- 'crates/velnorctl' && cargo fetch --locked
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
       - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-velnorctl
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -5206,7 +5962,7 @@ jobs:
 
   github-rust-production-topology:
     name: "GitHub / rust-production-topology"
-    if: ${{ inputs.unit == 'rust-production-topology' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-production-topology,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -5216,13 +5972,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 6017727759da543800c90be401c60c7f0d42092b
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -5258,10 +6030,10 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-e382ab965305-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ hashFiles('./**/*.rs', 'crates/**', 'crates/velnor-workflow/src/runtime.rs', 'docker/**', 'microvm/**', 'mise.lock', 'tools/**') }}
+          cache-key: velnor-mbx-v3-35a1a860e58a-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ hashFiles('./**/*.rs', 'crates/**', 'crates/velnor-workflow/src/runtime.rs', 'docker/**', 'microvm/**', 'mise.lock', 'tools/**') }}
           restore-keys: |
-            velnor-mbx-v3-e382ab965305-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
-            velnor-mbx-v3-e382ab965305-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-
+            velnor-mbx-v3-35a1a860e58a-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
+            velnor-mbx-v3-35a1a860e58a-${{ runner.os }}-${{ runner.arch }}-rust-production-topology-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -5320,26 +6092,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-production-topology
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
           cargo fetch --locked
       - name: Run "Rust production topology" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-production-topology
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
@@ -5466,7 +6260,7 @@ jobs:
 
   velnor-rust-production-topology:
     name: "Velnor / rust-production-topology"
-    if: ${{ inputs.unit == 'rust-production-topology' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-production-topology,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -5476,6 +6270,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -5501,26 +6296,48 @@ jobs:
             ci-${{ runner.os }}-rust-
       - name: Prepare Cargo sources
         env:
+          CI_UNIT_ID: rust-production-topology
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') root='tools/unit-collector' ;;
+            'rust-velnor-bench') root='crates/velnor-bench' ;;
+            'rust-velnor-client') root='crates/velnor-client' ;;
+            'rust-velnor-control') root='crates/velnor-control' ;;
+            'rust-velnor-model') root='crates/velnor-model' ;;
+            'rust-velnor-render') root='crates/velnor-render' ;;
+            'rust-velnor-runner') root='crates/velnor-runner' ;;
+            'rust-velnor-tools') root='crates/velnor-tools' ;;
+            'rust-velnor-workflow') root='crates/velnor-workflow' ;;
+            'rust-velnor-workflow-contract') root='crates/velnor-workflow-contract' ;;
+            'rust-velnorctl') root='crates/velnorctl' ;;
+            'rust-production-topology') root='.' ;;
+            *) echo "unknown unit for cargo fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
           cargo fetch --locked
       - name: Run "Rust production topology" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: rust-production-topology
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?

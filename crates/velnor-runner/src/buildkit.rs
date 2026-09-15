@@ -1120,8 +1120,7 @@ pub(crate) fn resize_builder_daemon(
             Ok(true)
         }
         Err(error) => {
-            let detail = format!("{error:#}");
-            if crate::docker::client::daemon_reports_missing(&detail) {
+            if crate::docker::client::is_not_found(&error) {
                 Ok(false)
             } else {
                 Err(error).with_context(|| format!("resize BuildKit daemon {daemon}"))
@@ -1154,7 +1153,7 @@ fn prune_builder(builder: &str) -> Result<u64> {
     let mut docker = crate::docker::Docker::host();
     let before = match docker.buildx_disk_usage(builder) {
         Ok(usage) => usage,
-        Err(error) if format!("{error:#}").contains("is not running") => {
+        Err(error) if crate::docker::client::is_not_running(&error) => {
             if !start_builder_daemon(builder)? {
                 return Ok(0);
             }
@@ -1170,10 +1169,12 @@ fn prune_builder(builder: &str) -> Result<u64> {
         "--force".to_string(),
     ];
     if let Err(error) = crate::docker::client::host_call(&args) {
-        let detail = format!("{error:#}");
         // Missing daemon (narrow engine vocabulary) or missing buildx
-        // registration (`no builder "x" found`, a buildx-side answer).
-        if crate::docker::client::daemon_reports_missing(&detail) || detail.contains("no builder") {
+        // registration (`no builder "x" found`, typed at the Docker
+        // boundary) both free nothing.
+        if crate::docker::client::is_not_found(&error)
+            || crate::docker::client::is_buildkit_builder_not_found(&error)
+        {
             return Ok(0);
         }
         return Err(error).with_context(|| format!("prune BuildKit builder {builder}"));
@@ -1234,8 +1235,7 @@ pub(crate) fn remove_builder(builder: &str) -> Result<()> {
     match crate::docker::client::host_call(&rm_volume) {
         Ok(_) => Ok(()),
         Err(error) => {
-            let detail = format!("{error:#}");
-            if crate::docker::client::daemon_reports_missing(&detail) {
+            if crate::docker::client::is_not_found(&error) {
                 Ok(())
             } else {
                 Err(error).with_context(|| format!("remove BuildKit state volume {volume}"))

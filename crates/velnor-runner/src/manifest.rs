@@ -388,6 +388,8 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
     InputRule::Any("outputs"),
     InputRule::Literal("push", &["true", "false"]),
     InputRule::Literal("load", &["true", "false"]),
+    InputRule::Literal("provenance", &["true", "false"]),
+    InputRule::Literal("sbom", &["true", "false"]),
 ];
 
 macro_rules! capability {
@@ -702,6 +704,56 @@ pub static ACTIONS: &[ActionCapability] = &[
             InputRule::Any("install-dir")
         ]
     ),
+    ActionCapability {
+        repository: "tailrocks/velnor",
+        adapter: ActionAdapter::Composite,
+        allowed_refs: &[allowed(
+            "d3e441fb36dc0fee7502cc08fdc7bebf8c8bf754",
+            "hosted runtime source pin",
+        )],
+        allowed_subpaths: &[".github/actions/setup-velnor-workflow"],
+        inputs: &[InputRule::Any("rev")],
+        notes: "first-party composite; release jobs install the pinned workflow runtime with a rev-only input surface",
+    },
+    ActionCapability {
+        repository: "oven-sh/setup-bun",
+        adapter: ActionAdapter::JavaScript,
+        allowed_refs: &[allowed(
+            "0c5077e51419868618aeaa5fe8019c62421857d6",
+            "v2.2.0",
+        )],
+        allowed_subpaths: &[],
+        inputs: &[],
+        notes: "pinned Bun setup; the generated unit jobs pass no inputs",
+    },
+    ActionCapability {
+        repository: "opentofu/setup-opentofu",
+        adapter: ActionAdapter::JavaScript,
+        allowed_refs: &[allowed(
+            "a1320f892987e89d278cc92dc5adc984fb93aca4",
+            "v2.0.2",
+        )],
+        allowed_subpaths: &[],
+        inputs: &[
+            InputRule::Any("tofu_version"),
+            InputRule::Literal("tofu_wrapper", &["true", "false"]),
+        ],
+        notes: "pinned OpenTofu setup; version plus a boolean wrapper flag",
+    },
+    ActionCapability {
+        repository: "taiki-e/install-action",
+        adapter: ActionAdapter::JavaScript,
+        allowed_refs: &[allowed(
+            "0758d235715de2f3551eacc980d9ae8fce9342c3",
+            "v2.87.3",
+        )],
+        allowed_subpaths: &[],
+        inputs: &[
+            InputRule::Literal("tool", &["nextest", "cargo-deny", "cargo-audit"]),
+            InputRule::Literal("fallback", &["none"]),
+        ],
+        notes: "pinned Rust tool installer; the generator emits exactly the reviewable tool set with no fallback",
+    },
 ];
 
 /// Exact `on.workflow_call.inputs` surface of the latest approved publish
@@ -2058,90 +2110,47 @@ mod tests {
     }
 
     #[test]
-    fn release_signers_use_validated_tag_ref_not_raw_commit() {
+    fn publish_addresses_releases_by_tag_not_commit() {
+        // Native pipeline successor to the static release_gate identity gate:
+        // the publish job addresses the release by its version tag, verifies
+        // tag immutability before creation, and uses gh --verify-tag.
         let Some(workflow_text) = release_workflow_text() else {
             return;
         };
         let workflow: serde_yaml::Value =
             serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
-        assert!(workflow_text.contains("EXPECTED_TAG_REF"));
-        assert!(workflow_text.contains("git ls-remote --exit-code origin"));
-        assert!(workflow_text.contains("$2 == expected \"^{}\""));
-        assert!(workflow_text.contains("\"$remote_tag_commit\" = \"$EXPECTED_TAG_COMMIT\""));
-        assert!(workflow_text.contains("tags_here"));
-        assert!(workflow_text.contains("refs\\/tags\\/v[0-9]"));
-        assert!(workflow_text.contains("[ \"$tags_here\" = \"1\" ]"));
-        assert!(workflow_text
-            .contains("[ \"$default_branch_commit\" = \"$EXPECTED_DEFAULT_BRANCH_COMMIT\" ]"));
+        let steps = workflow["jobs"]["publish"]["steps"]
+            .as_sequence()
+            .expect("publish job steps");
+        let create = steps
+            .iter()
+            .filter_map(|step| step.get("run").and_then(serde_yaml::Value::as_str))
+            .find(|run| run.contains("gh release create"))
+            .expect("publish job must create the release");
         assert!(
-            workflow_text.contains("[ \"$default_branch_commit\" = \"$EXPECTED_RELEASE_COMMIT\" ]")
-        );
-        assert!(workflow_text.contains("[ \"$default_branch_commit\" = \"$EXPECTED_TAG_COMMIT\" ]"));
-        assert!(
-            workflow_text.contains("case \"$TAG\" in\n            v[0-9]*)"),
-            "identity gate must reject tags outside v[0-9]*"
+            create.contains("tag=\"v${VERSION}\"") && create.contains("gh release create \"$tag\""),
+            "release creation must address the version tag: {create}"
         );
         assert!(
-            workflow_text.contains("tag_ref: ${{ steps.gate.outputs.tag_ref }}"),
-            "release_gate outputs must expose the gate's verified canonical tag ref"
+            create.contains("--verify-tag"),
+            "release creation must verify the tag: {create}"
+        );
+        let tag_immutability = steps
+            .iter()
+            .find(|step| {
+                step.get("name").and_then(serde_yaml::Value::as_str)
+                    == Some("Verify release tag stayed immutable before publication")
+            })
+            .and_then(|step| step.get("run").and_then(serde_yaml::Value::as_str))
+            .expect("publish job must verify tag immutability before creation");
+        assert!(
+            tag_immutability.contains("git ls-remote"),
+            "tag immutability check must resolve the remote tag: {tag_immutability}"
         );
         assert!(
-            workflow_text.contains("tag_ref=\"refs/tags/$TAG\""),
-            "identity gate must construct the canonical tag ref"
+            workflow_text.contains("# Release tags are cut from the protected main branch."),
+            "release pipeline must document the protected-branch tag cutover"
         );
-        assert!(
-            workflow_text.contains("git show-ref --verify --quiet \"$tag_ref\""),
-            "identity gate must verify the requested tag ref exists"
-        );
-        assert!(
-            workflow_text.contains("git rev-list -n 1 \"$tag_ref\""),
-            "identity gate must peel the canonical tag ref"
-        );
-        assert!(
-            workflow_text.contains("[ \"$default_branch_commit\" = \"$tag_commit\" ] || {"),
-            "identity gate must require the tag to equal the current default-branch tip"
-        );
-        assert!(
-            workflow_text.contains(
-                "tags_here=\"$(git tag --points-at \"$tag_commit\" | grep -c '^v' || true)\""
-            ) && workflow_text.contains("[ \"$tags_here\" = \"1\" ] || {"),
-            "identity gate must require exactly one v* tag at the release commit"
-        );
-        assert!(
-            workflow_text.contains("echo \"tag_ref=$tag_ref\""),
-            "identity gate must output the verified canonical tag ref"
-        );
-        let signer_jobs = [
-            "sign-amd64-tar",
-            "sign-arm64-tar",
-            "sign-amd64-deb",
-            "sign-arm64-deb",
-        ];
-        let expected = "${{ needs.release_gate.outputs.tag_ref }}";
-        let expected_signer = "./.github/workflows/ci-release-package-signer.yml";
-
-        for job in signer_jobs {
-            assert_eq!(
-                workflow["jobs"][job]["uses"].as_str(),
-                Some(expected_signer),
-                "{job} must use the local policy-approved package signer"
-            );
-            let source_ref = workflow["jobs"][job]["with"]["source-ref"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{job} must define a string source-ref"));
-            assert_eq!(
-                source_ref, expected,
-                "{job} must use release_gate's validated canonical tag ref"
-            );
-            assert!(
-                source_ref.starts_with("${{ needs.release_gate.outputs."),
-                "{job} source-ref must come from release_gate validation"
-            );
-            assert_ne!(
-                source_ref, "${{ needs.release_gate.outputs.default_branch_commit }}",
-                "{job} must not pass a raw commit SHA to package-signer"
-            );
-        }
     }
 
     #[test]
@@ -2157,199 +2166,428 @@ mod tests {
     }
 
     #[test]
-    fn release_workflow_reads_platforms_from_imagetools_inspect_schema() {
-        let Some(workflow) = release_workflow_text() else {
+    fn image_and_debian_cover_both_arches_with_attestation() {
+        // Native pipeline successor to the imagetools platform reads: the
+        // image-platform matrix builds and pushes one staging image per
+        // arch (attestations stay enabled; the digest recorder filters the
+        // attestation manifests out of the platform selection), the image
+        // job assembles the immutable multi-arch index from those digests,
+        // and the debian matrix builds both Linux targets.
+        let Some(workflow_text) = release_workflow_text() else {
             return;
         };
-        for architecture in ["amd64", "arm64"] {
-            let selector = format!(
-                ".manifest.manifests[] | select(.platform.architecture==\"{architecture}\") | .digest"
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
+        let platform = &workflow["jobs"]["image-platform"];
+        let platform_steps = platform["steps"]
+            .as_sequence()
+            .expect("image-platform job steps");
+        let build_push = platform_steps
+            .iter()
+            .find(|step| {
+                step.get("uses")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|uses| uses.starts_with("docker/build-push-action@"))
+            })
+            .expect("image-platform job must build and push");
+        assert_eq!(
+            build_push["with"]["push"].as_bool(),
+            Some(true),
+            "image-platform job must push the staging image"
+        );
+        let platforms = build_push["with"]["platforms"]
+            .as_str()
+            .expect("build-push must target the matrix platform");
+        assert!(
+            platforms.contains("matrix.platform"),
+            "build-push must target the matrix platform: {platforms}"
+        );
+        let tags = build_push["with"]["tags"]
+            .as_str()
+            .expect("build-push must tag the staging image");
+        for fragment in ["release-", "matrix.arch"] {
+            assert!(
+                tags.contains(fragment),
+                "staging tag must be commit- and arch-scoped: {tags}"
+            );
+        }
+        let labels = build_push["with"]["labels"]
+            .as_str()
+            .expect("build-push must label the staging image");
+        assert!(
+            labels.contains("org.velnor.manifest-sha256"),
+            "staging image must carry the record-bound manifest label: {labels}"
+        );
+        for attestation in ["provenance", "sbom"] {
+            let disabled = build_push
+                .get("with")
+                .and_then(|with| with.get(attestation))
+                .is_some_and(|value| {
+                    value.as_bool() == Some(false) || value.as_str() == Some("false")
+                });
+            assert!(
+                !disabled,
+                "image-platform job must not disable {attestation} attestations"
+            );
+        }
+        let platform_include = platform["strategy"]["matrix"]["include"]
+            .as_sequence()
+            .expect("image-platform must carry a matrix");
+        let matrix_platforms: Vec<_> = platform_include
+            .iter()
+            .filter_map(|row| row.get("platform").and_then(serde_yaml::Value::as_str))
+            .collect();
+        for expected in ["linux/amd64", "linux/arm64"] {
+            assert!(
+                matrix_platforms.contains(&expected),
+                "image-platform must build {expected}: {matrix_platforms:?}"
+            );
+        }
+        let recorder = platform_steps
+            .iter()
+            .find(|step| {
+                step.get("name").and_then(serde_yaml::Value::as_str)
+                    == Some("Record platform digest")
+            })
+            .expect("image-platform must record the platform digest")
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("platform digest recorder must be a shell step");
+        assert!(
+            recorder.contains("attestation-manifest"),
+            "digest recorder must filter the attestation manifests: {recorder}"
+        );
+        let image = &workflow["jobs"]["image"];
+        let image_needs: Vec<_> = image["needs"]
+            .as_sequence()
+            .expect("image job needs")
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .collect();
+        assert!(
+            image_needs.contains(&"image-platform"),
+            "image job must wait for image-platform: {image_needs:?}"
+        );
+        let gate = image["if"].as_str().expect("image job gate");
+        assert!(
+            gate.contains("needs.image-platform.result == 'success'"),
+            "image job must gate on the platform builders: {gate}"
+        );
+        let image_steps = image["steps"].as_sequence().expect("image job steps");
+        assert!(
+            !image_steps.iter().any(|step| {
+                step.get("uses")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|uses| uses.starts_with("docker/build-push-action@"))
+            }),
+            "image job must assemble the index, not build and push"
+        );
+        let assembly = image_steps
+            .iter()
+            .find(|step| {
+                step.get("name").and_then(serde_yaml::Value::as_str)
+                    == Some("Assemble and inspect immutable image index")
+            })
+            .expect("image job must assemble the immutable index")
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("index assembly must be a shell step");
+        for fragment in [
+            "imagetools create",
+            "--tag \"${GHCR_IMAGE}:${VERSION}\"",
+            "release-${COMMIT}-amd64",
+            "release-${COMMIT}-arm64",
+            "does not reference both newly built platform digests",
+        ] {
+            assert!(
+                assembly.contains(fragment),
+                "index assembly must bind {fragment}: {assembly}"
+            );
+        }
+        assert_eq!(
+            image["outputs"]["index_digest"].as_str(),
+            Some("${{ steps.push.outputs.index_digest }}"),
+            "image job must export the assembled index digest"
+        );
+        for job in ["debian", "guest-payload"] {
+            let include = workflow["jobs"][job]["strategy"]["matrix"]["include"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{job} must carry a matrix"));
+            let targets: Vec<_> = include
+                .iter()
+                .filter_map(|row| row.get("target").and_then(serde_yaml::Value::as_str))
+                .collect();
+            for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+                assert!(
+                    targets.contains(&target),
+                    "{job} must build {target}: {targets:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn debian_packaging_binds_build_and_guest_payload() {
+        // Native pipeline successor to the static build-job deb guard: the
+        // build job records the runner binary, the debian job downloads the
+        // guest payload, stages the pinned Firecracker, jailer, and guest
+        // agent with digest verification, and packages through `package-deb`,
+        // which fails closed on missing inputs (see velnor-workflow runtime
+        // tests).
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
+        let build_steps = workflow["jobs"]["build"]["steps"]
+            .as_sequence()
+            .expect("build job steps");
+        assert!(
+            build_steps.iter().any(|step| {
+                step.get("run")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|run| {
+                        run.contains("package-binary")
+                            && run.contains("--package velnor-runner")
+                            && run.contains("--binary velnor-runner")
+                    })
+            }),
+            "build job must record the runner binary through package-binary"
+        );
+        let debian = &workflow["jobs"]["debian"];
+        let needs: Vec<_> = debian["needs"]
+            .as_sequence()
+            .expect("debian job needs")
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .collect();
+        for required in ["build", "guest-payload"] {
+            assert!(
+                needs.contains(&required),
+                "debian job must wait for {required}: {needs:?}"
+            );
+        }
+        let steps = debian["steps"].as_sequence().expect("debian job steps");
+        assert!(
+            steps.iter().any(|step| {
+                step.get("uses")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+            }),
+            "debian job must download the recorded build artifacts"
+        );
+        let position = |name: &str| {
+            steps
+                .iter()
+                .position(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("debian job must carry {name}"))
+        };
+        let download_at = position("Download guest payload");
+        let download = &steps[download_at];
+        assert_eq!(
+            download["with"]["name"].as_str(),
+            Some("guest-payload-${{ matrix.guest_arch }}"),
+            "debian job must download the guest payload for its guest arch"
+        );
+        assert_eq!(
+            download["with"]["path"].as_str(),
+            Some("guest-payload"),
+            "debian job must download the guest payload beside the staging root"
+        );
+        let stage_at = position("Stage pinned Firecracker, jailer, and guest agent");
+        assert!(
+            download_at < stage_at,
+            "guest payload download must precede staging"
+        );
+        let stage = steps[stage_at]
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("guest staging must be a shell step");
+        for fragment in [
+            ".tarballs[$a].sha256",
+            ".tarballs[$a].firecracker_sha256",
+            ".tarballs[$a].jailer_sha256",
+            "downloaded guest-agent digest mismatch",
+            "downloaded guest rootfs digest mismatch",
+        ] {
+            assert!(
+                stage.contains(fragment),
+                "guest staging must verify {fragment}: {stage}"
+            );
+        }
+        assert!(
+            !stage.contains("dist/microvm"),
+            "guest staging must not use the retired dist/microvm layout: {stage}"
+        );
+        let runs: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| step.get("run").and_then(serde_yaml::Value::as_str))
+            .collect();
+        assert!(
+            !steps.iter().any(|step| {
+                step.get("name").and_then(serde_yaml::Value::as_str) == Some("Stage guest payload")
+            }),
+            "debian job must not carry the retired staging step"
+        );
+        let package_at = steps
+            .iter()
+            .position(|step| {
+                step.get("run")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|run| run.contains("package-deb"))
+            })
+            .expect("debian job must package through package-deb");
+        assert!(
+            stage_at < package_at,
+            "guest staging must precede packaging"
+        );
+        let packaged = steps[package_at]
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("packaging must be a shell step");
+        assert_eq!(
+            debian["env"]["TARGET"].as_str(),
+            Some("${{ matrix.target }}"),
+            "debian job must bind TARGET to the matrix target"
+        );
+        assert_eq!(
+            debian["env"]["VERSION"].as_str(),
+            Some("${{ needs.verify.outputs.version }}"),
+            "debian job must bind VERSION to the resolved release version"
+        );
+        for flag in [
+            "--package velnor-runner",
+            "--version \"$VERSION\"",
+            "--no-build true",
+            "--asset-name \"velnor-runner-${{ needs.verify.outputs.version }}-${{ matrix.arch }}.deb\"",
+            "--target \"$TARGET\"",
+        ] {
+            assert!(
+                packaged.contains(flag),
+                "package-deb must bind {flag}: {packaged}"
+            );
+        }
+        let runs: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| step.get("run").and_then(serde_yaml::Value::as_str))
+            .collect();
+        for run in &runs {
+            assert!(
+                !run.contains("dpkg-deb --extract"),
+                "debian staging must not fully extract the package"
             );
             assert!(
-                workflow.contains(&selector),
-                "release record must read {architecture} from the manifest nested in the imagetools JSON output"
+                !run.contains("package_root"),
+                "debian staging must not create a package root"
             );
         }
     }
 
     #[test]
-    fn deb_staging_binds_package_runner_to_build_and_binary_sidecar() {
+    fn publish_verifies_provenance_before_release_create() {
+        // Native pipeline successor to the packaged-runner identity check:
+        // the publish job verifies tarball/deb attestations and checksums
+        // before the release exists.
         let Some(workflow_text) = release_workflow_text() else {
             return;
         };
         let workflow: serde_yaml::Value =
             serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
-        let steps = workflow["jobs"]["build"]["steps"]
+        let steps = workflow["jobs"]["publish"]["steps"]
             .as_sequence()
-            .expect("build job steps");
-        let matching_steps: Vec<_> = steps
-            .iter()
-            .filter(|step| {
-                step.get("name")
-                    .and_then(serde_yaml::Value::as_str)
-                    .is_some_and(|name| name == "Stage .deb with the empty-deb-incident guards")
-            })
-            .collect();
-        assert_eq!(
-            matching_steps.len(),
-            1,
-            "build job must contain exactly one deb staging guard step"
-        );
-        let guard = matching_steps[0]
-            .get("run")
-            .and_then(serde_yaml::Value::as_str)
-            .expect("build job must stage the deb with its guards");
-
-        let shell_lines: Vec<_> = guard
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| line.strip_suffix('\\').map(str::trim_end).unwrap_or(line))
-            .collect();
-        let unique_position = |expected: &str| {
-            let mut matches = shell_lines
+            .expect("publish job steps");
+        let position = |name: &str| {
+            steps
                 .iter()
-                .enumerate()
-                .filter_map(|(index, line)| (*line == expected).then_some(index));
-            let position = matches
-                .next()
-                .unwrap_or_else(|| panic!("deb guard missing exact shell line: {expected}"));
-            assert!(
-                matches.next().is_none(),
-                "deb guard must contain one exact shell line: {expected}"
-            );
-            position
+                .position(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("publish job must carry {name}"))
         };
-
-        unique_position("set -euo pipefail");
-        let manifest = unique_position(r#"dpkg-deb -c "$src" > "$manifest""#);
-        let runner_entry_check = unique_position(
-            r#"awk '$NF == "./usr/bin/velnor-runner" { count++; if (substr($1, 1, 1) != "-") type_ok=0; else if (count == 1) type_ok=1 } END { exit !(count == 1 && type_ok == 1) }' "$manifest""#,
-        );
-        let build_binary =
-            unique_position(r#"build_binary="target/${{ matrix.target }}/release/velnor-runner""#);
-        let recorded_binary_sha = unique_position(
-            r#"recorded_binary_sha="$(read_sha "velnor-runner-${{ matrix.arch }}.bin.sha256")""#,
-        );
-        assert!(guard.contains("stat -c%s"));
-        assert!(guard.contains("token_count != 1"));
-        let build_binary_sha = unique_position(
-            r#"build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')""#,
-        );
-        let streaming_verification = unique_position(
-            r#"packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')""#,
-        );
-        let sidecar_check = unique_position(
-            r#"[ "$build_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::runner binary sidecar does not match target build" >&2; exit 1; }"#,
-        );
-        let package_build_check = unique_position(
-            r#"[ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }"#,
-        );
-        let package_sidecar_check = unique_position(
-            r#"[ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }"#,
-        );
-        assert!(
-            !shell_lines
-                .iter()
-                .any(|line| line.contains("dpkg-deb --extract")),
-            "deb guard must not fully extract the package"
-        );
-        assert!(
-            !shell_lines.iter().any(|line| line.contains("package_root")),
-            "deb guard must not create a package root"
-        );
-        assert!(
-            !shell_lines.iter().any(|line| line.contains("trap ")),
-            "deb guard must not install an extraction cleanup trap"
-        );
-
-        let copy = unique_position(r#"cp "$src" "$dst""#);
-        assert!(
-            manifest < runner_entry_check
-                && build_binary < recorded_binary_sha
-                && recorded_binary_sha < build_binary_sha
-                && build_binary_sha < sidecar_check
-                && sidecar_check < streaming_verification
-                && runner_entry_check < streaming_verification
-                && streaming_verification < package_build_check
-                && package_build_check < package_sidecar_check
-                && package_sidecar_check < copy,
-            "all package provenance checks must precede copying the package"
-        );
-    }
-
-    #[test]
-    fn release_creation_binds_packaged_runner_to_recorded_binary() {
-        let Some(workflow_text) = release_workflow_text() else {
-            return;
-        };
-        let workflow: serde_yaml::Value =
-            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
-        let steps = workflow["jobs"]["release"]["steps"]
-            .as_sequence()
-            .expect("release job steps");
-        let verify_index = steps
-            .iter()
-            .position(|step| {
-                step.get("name")
-                    .and_then(serde_yaml::Value::as_str)
-                    .is_some_and(|name| {
-                        name == "Verify packaged runner identity before release creation"
-                    })
-            })
-            .expect("release job must verify packaged runner identity");
-        let create_index = steps
+        let tarball_provenance = position("Verify tarball provenance");
+        let deb_provenance = position("Verify deb provenance");
+        let checksums = position("Assemble independent checksums");
+        let identity = position("Verify packaged runner identity before release creation");
+        let create = steps
             .iter()
             .position(|step| {
                 step.get("run")
                     .and_then(serde_yaml::Value::as_str)
                     .is_some_and(|run| run.contains("gh release create"))
             })
-            .expect("release job must create the release");
-        let verify = steps[verify_index]
-            .get("run")
-            .and_then(serde_yaml::Value::as_str)
-            .expect("identity verification must be a shell step");
-
-        assert!(verify.contains("for arch in amd64 arm64"));
-        assert!(verify.contains("jq -er --arg arch \"$arch\""));
-        assert!(verify.contains("release-record.json"));
-        assert!(verify.contains("dpkg-deb --fsys-tarfile \"$deb\""));
-        assert!(verify.contains("tar -xOf - ./usr/bin/velnor-runner"));
-        assert!(verify.contains("packaged_binary_sha"));
-        assert!(verify.contains("[ \"$packaged_binary_sha\" = \"$record_bin\" ]"));
-        assert!(verify_index < create_index);
+            .expect("publish job must create the release");
+        for (name, index) in [
+            ("Verify tarball provenance", tarball_provenance),
+            ("Verify deb provenance", deb_provenance),
+            ("Assemble independent checksums", checksums),
+            (
+                "Verify packaged runner identity before release creation",
+                identity,
+            ),
+        ] {
+            let run = steps[index]
+                .get("run")
+                .and_then(serde_yaml::Value::as_str)
+                .unwrap_or_else(|| panic!("{name} must be a shell step"));
+            if name.contains("provenance") {
+                assert!(
+                    run.contains("gh attestation verify"),
+                    "{name} must verify attestations: {run}"
+                );
+            }
+            assert!(index < create, "{name} must precede release creation");
+        }
     }
 
     #[test]
-    fn release_record_derives_manifest_version_from_compiled_artifact() {
-        let Some(workflow) = release_workflow_text() else {
-            return;
-        };
-        assert!(
-            workflow.contains("manifest_version=\"$(jq -er '.version"),
-            "release assembly must read the compiled manifest version"
-        );
-        assert!(
-            workflow.contains("--argjson mv \"$manifest_version\""),
-            "release record must bind the derived manifest version"
-        );
-        assert!(
-            !workflow.contains("--argjson mv 7"),
-            "release assembly must not retain a stale schema literal"
-        );
-    }
-
-    #[test]
-    fn release_record_downloads_compiled_tool_before_independent_verification() {
+    fn publish_creates_exactly_one_verified_release() {
+        // The native pipeline creates the release once, from the verified
+        // artifact surface, with generated notes: no second creation path
+        // and no stale record literal may linger beside it.
         let Some(workflow_text) = release_workflow_text() else {
             return;
         };
         let workflow: serde_yaml::Value =
             serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
-        let steps = workflow["jobs"]["release"]["steps"]
+        let steps = workflow["jobs"]["publish"]["steps"]
             .as_sequence()
-            .expect("release job steps");
+            .expect("publish job steps");
+        let creates: Vec<_> = steps
+            .iter()
+            .filter_map(|step| step.get("run").and_then(serde_yaml::Value::as_str))
+            .filter(|run| run.contains("gh release create"))
+            .collect();
+        assert_eq!(
+            creates.len(),
+            1,
+            "publish job must create the release exactly once"
+        );
+        assert!(
+            creates[0].contains("--generate-notes"),
+            "release creation must generate notes: {}",
+            creates[0]
+        );
+        for asset in [
+            "release-record.json",
+            "SHA256SUMS",
+            "artifacts/velnor-runner-",
+        ] {
+            assert!(
+                creates[0].contains(asset),
+                "release creation must publish the verified artifact surface ({asset}): {}",
+                creates[0]
+            );
+        }
+    }
+
+    #[test]
+    fn publish_downloads_artifacts_before_verification() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
+        let steps = workflow["jobs"]["publish"]["steps"]
+            .as_sequence()
+            .expect("publish job steps");
         let download = steps
             .iter()
             .position(|step| {
@@ -2357,19 +2595,21 @@ mod tests {
                     .and_then(serde_yaml::Value::as_str)
                     .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
             })
-            .expect("release job must download the compiled release tool");
-        let verify = steps
-            .iter()
-            .position(|step| {
-                step.get("run")
-                    .and_then(serde_yaml::Value::as_str)
-                    .is_some_and(|run| run.contains("release assemble"))
-            })
-            .expect("release job must independently verify the release");
-        assert!(
-            download < verify,
-            "compiled release tool must be downloaded before record verification"
-        );
+            .expect("publish job must download the recorded artifacts");
+        for name in [
+            "Verify tarball provenance",
+            "Verify deb provenance",
+            "Assemble independent checksums",
+        ] {
+            let verify = steps
+                .iter()
+                .position(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("publish job must carry {name}"));
+            assert!(
+                download < verify,
+                "recorded artifacts must be downloaded before {name}"
+            );
+        }
     }
 
     #[test]

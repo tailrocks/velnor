@@ -229,10 +229,63 @@ impl std::fmt::Display for NotFound {
 
 impl std::error::Error for NotFound {}
 
+/// The daemon reported that an object is present but not running. Callers may
+/// treat this as an idempotent no-op only where their operation's contract
+/// says so (BuildKit maintenance and cancellation do); it is not a generic
+/// Docker failure category.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NotRunning {
+    pub object: String,
+}
+
+impl std::fmt::Display for NotRunning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "docker object '{}' is not running", self.object)
+    }
+}
+
+impl std::error::Error for NotRunning {}
+
+/// Buildx reports a missing client-side builder differently from the Engine's
+/// `No such ...` vocabulary. Keep that distinction typed at the Docker
+/// boundary so BuildKit maintenance never has to re-match formatted errors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BuildkitBuilderNotFound {
+    pub builder: String,
+}
+
+impl std::fmt::Display for BuildkitBuilderNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "BuildKit builder '{}' does not exist",
+            self.builder
+        )
+    }
+}
+
+impl std::error::Error for BuildkitBuilderNotFound {}
+
 /// True when `error` is a daemon positive-missing answer surfaced through this
 /// client — the only signal any caller may treat as proof of absence.
 pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<NotFound>().is_some()
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<NotFound>().is_some())
+}
+
+/// True when a Docker command positively reported its target as stopped.
+pub(crate) fn is_not_running(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<NotRunning>().is_some())
+}
+
+/// True when Buildx positively reported the requested builder as absent.
+pub(crate) fn is_buildkit_builder_not_found(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<BuildkitBuilderNotFound>().is_some())
 }
 
 /// The daemon's missing-object vocabulary, both generations: modern Engines
@@ -279,8 +332,6 @@ const DOCKER_TRANSIENT_NEEDLES: &[&str] = &[
     "toomanyrequests",
     "too many requests",
     "http status: 429",
-    "http status: 5",
-    "service unavailable",
     "bad gateway",
     "gateway timeout",
     "internal server error",
@@ -311,6 +362,8 @@ pub(crate) fn classify_docker_stderr(stderr: &str) -> DockerErrorCategory {
     if DOCKER_TRANSIENT_NEEDLES
         .iter()
         .any(|needle| lower.contains(needle))
+        || contains_http_5xx_status(&lower)
+        || contains_registry_service_unavailable(&lower)
     {
         DockerErrorCategory::Transient
     } else if DOCKER_CONFLICT_NEEDLES
@@ -321,6 +374,39 @@ pub(crate) fn classify_docker_stderr(stderr: &str) -> DockerErrorCategory {
     } else {
         DockerErrorCategory::Terminal
     }
+}
+
+/// Match an actual three-digit HTTP 5xx status, not the former broad
+/// `http status: 5` substring. The status may be followed by punctuation or
+/// prose, but never another digit.
+fn contains_http_5xx_status(lower: &str) -> bool {
+    let marker = "http status:";
+    let mut rest = lower;
+    while let Some(index) = rest.find(marker) {
+        let after = &rest[index + marker.len()..];
+        let digits = after.trim_start().as_bytes();
+        if digits.len() >= 3
+            && digits[..3].iter().all(u8::is_ascii_digit)
+            && digits[0] == b'5'
+            && digits.get(3).is_none_or(|byte| !byte.is_ascii_digit())
+        {
+            return true;
+        }
+        rest = &after[1.min(after.len())..];
+    }
+    false
+}
+
+/// `service unavailable` is useful when it is part of a registry/HTTP
+/// response, but too broad as a free-standing substring: repository names,
+/// labels, and operator prose can contain it without describing a retryable
+/// transfer failure.
+fn contains_registry_service_unavailable(lower: &str) -> bool {
+    let phrase = "service unavailable";
+    lower.contains(phrase)
+        && (lower.contains("http")
+            || lower.contains("registry")
+            || lower.contains("response from daemon"))
 }
 
 /// A failed `docker` invocation with its retry category attached at the
@@ -359,15 +445,33 @@ impl DockerCommandError {
 /// created, so a missing answer means another writer removed the object
 /// mid-flight, and one stale cleanup plus a single retry recovers the race.
 pub(crate) fn docker_error_category(error: &anyhow::Error) -> DockerErrorCategory {
+    let mut category = DockerErrorCategory::Terminal;
     for cause in error.chain() {
-        if let Some(command) = cause.downcast_ref::<DockerCommandError>() {
-            return command.category();
-        }
-        if cause.downcast_ref::<NotFound>().is_some() {
-            return DockerErrorCategory::Conflict;
+        let candidate = cause.downcast_ref::<DockerCommandError>().map_or_else(
+            || {
+                cause
+                    .downcast_ref::<NotFound>()
+                    .map_or(DockerErrorCategory::Terminal, |_| {
+                        DockerErrorCategory::Conflict
+                    })
+            },
+            DockerCommandError::category,
+        );
+        if candidate.precedence() > category.precedence() {
+            category = candidate;
         }
     }
-    DockerErrorCategory::Terminal
+    category
+}
+
+impl DockerErrorCategory {
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Terminal => 0,
+            Self::Conflict => 1,
+            Self::Transient => 2,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,8 +1259,7 @@ pub(crate) fn container_rm_args_with_claimed_ids(
     args: NonEmptyDockerArgs<'_>,
     ids: &[String],
 ) -> Vec<String> {
-    let first = args.first;
-    let mut claimed = vec![first.clone()];
+    let mut claimed = vec![args.first.clone()];
     claimed.extend(args.rest.iter().filter(|arg| arg.starts_with('-')).cloned());
     claimed.extend(ids.iter().cloned());
     claimed
@@ -1202,8 +1305,6 @@ pub(crate) fn claim_docker_container_rm(args: &[String]) -> Option<DockerContain
 // Host transport (maintenance, startup, doctor, cancellation)
 // ---------------------------------------------------------------------------
 
-const HOST_DOCKER_ENDPOINT: &str = "unix:///var/run/docker.sock";
-
 /// Host maintenance runs no job step, so a payload-classified command reaching
 /// the host transport has no step deadline to inherit. Thirty minutes is the
 /// registry-transfer bound: long enough for any maintenance pull, finite.
@@ -1212,9 +1313,6 @@ pub(crate) const MAINTENANCE_PAYLOAD_DEADLINE: Duration = Duration::from_secs(18
 fn host_docker_command(args: &[String]) -> Result<std::process::Command> {
     let mut command = std::process::Command::new("docker");
     crate::executor::configure_host_docker_command(&mut command, "docker", args)?;
-    command
-        .env("DOCKER_HOST", HOST_DOCKER_ENDPOINT)
-        .env_remove("DOCKER_CONTEXT");
     Ok(command)
 }
 
@@ -1341,6 +1439,22 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.to_ascii_lowercase();
+        if daemon_reports_missing(&stderr) {
+            return Err(anyhow::Error::new(NotFound {
+                object: args.join(" "),
+            }));
+        }
+        if let Some(builder) =
+            buildkit_builder_from_args(args).filter(|_| detail.contains("no builder"))
+        {
+            return Err(anyhow::Error::new(BuildkitBuilderNotFound { builder }));
+        }
+        if is_not_running_command(args, &detail) {
+            return Err(anyhow::Error::new(NotRunning {
+                object: args.join(" "),
+            }));
+        }
         // Another writer already owns this object (Conflict): when that
         // writer is a concurrent `rm` of the same object, the desired end
         // state is in flight — report success. Narrow to the in-progress
@@ -1360,6 +1474,24 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
         .into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn buildkit_builder_from_args(args: &[String]) -> Option<String> {
+    if !args.first().is_some_and(|arg| arg == "buildx")
+        || !args.get(1).is_some_and(|arg| arg == "du" || arg == "prune")
+    {
+        return None;
+    }
+    args.windows(2)
+        .find(|pair| pair[0] == "--builder")
+        .map(|pair| pair[1].clone())
+}
+
+fn is_not_running_command(args: &[String], lower_stderr: &str) -> bool {
+    lower_stderr.contains("is not running")
+        && (args.first().is_some_and(|arg| arg == "kill")
+            || (args.first().is_some_and(|arg| arg == "buildx")
+                && args.get(1).is_some_and(|arg| arg == "du")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,15 +1569,7 @@ impl<'r> Docker<'r> {
 
     fn call_as(&mut self, args: &[String], object: &str, action: &str) -> Result<String> {
         match &mut self.transport {
-            Transport::Host => host_call(args).map_err(|error| {
-                if daemon_reports_missing(&format!("{error:#}")) {
-                    anyhow::Error::new(NotFound {
-                        object: object.to_string(),
-                    })
-                } else {
-                    error
-                }
-            }),
+            Transport::Host => host_call(args),
             Transport::Job(runner) => {
                 let result: CommandResult = runner
                     .run("docker", args)
@@ -1522,7 +1646,20 @@ impl<'r> Docker<'r> {
             "engine fast path serves control-plane calls only"
         );
         let budget = super::engine::api_budget(class_deadline);
-        let engine = super::engine::EngineClient::new(super::engine::socket_path());
+        let socket = match super::engine::socket_path() {
+            Ok(socket) => socket,
+            Err(error) => {
+                tracing::warn!(
+                    target: "velnor.docker",
+                    docker_op = op.label(),
+                    docker_transport = "cli-fallback",
+                    reason = %error,
+                    "unable to resolve Docker Engine endpoint; falling back to docker cli"
+                );
+                return None;
+            }
+        };
+        let engine = super::engine::EngineClient::new(socket);
         let started = std::time::Instant::now();
         let attempt =
             super::engine::block_on_engine(super::engine::cancel_race(run(engine, budget)));
@@ -1625,7 +1762,10 @@ impl<'r> Docker<'r> {
         }
         let (op, step_deadline) = crate::docker::deadline_for(cli_args, timeout);
         debug_assert_eq!(op, crate::docker::DockerOp::Payload);
-        let engine = super::engine::EngineClient::new(super::engine::socket_path());
+        let Ok(socket) = super::engine::socket_path() else {
+            return ScriptExecRoute::UseCli;
+        };
+        let engine = super::engine::EngineClient::new(socket);
         let started = std::time::Instant::now();
         let mut output = super::engine::ExecOutput::default();
         // The timeout builds inside the async block: `tokio::time::timeout`
@@ -2023,7 +2163,7 @@ mod tests {
     /// invocation of the exact argument vector the parser consumes.
 
     #[test]
-    fn docker_rm_helpers_enforce_non_empty_argv() {
+    fn empty_argv_cannot_form_a_claimed_rm_argument_view() {
         assert!(NonEmptyDockerArgs::new(&[]).is_none());
         let argv = vec!["rm".to_string(), "-f".to_string(), "stale".to_string()];
         assert_eq!(
@@ -2788,7 +2928,10 @@ Total:\t\t6.054MB
     fn live_engine_latency_bench() {
         use std::os::unix::net::UnixStream;
         const ITERATIONS: usize = 25;
-        let socket = super::super::engine::socket_path();
+        let Ok(socket) = super::super::engine::socket_path() else {
+            println!("live_engine_latency_bench: SKIP, Docker endpoint did not resolve");
+            return;
+        };
         if UnixStream::connect(&socket).is_err() {
             println!(
                 "live_engine_latency_bench: SKIP, no live daemon at {}",
@@ -3888,7 +4031,10 @@ Total:\t\t6.054MB
         use std::process::Command;
         const ITERATIONS: usize = 10;
         const NAME: &str = "velnor-eng4-bench";
-        let socket = super::super::engine::socket_path();
+        let Ok(socket) = super::super::engine::socket_path() else {
+            println!("live_exec_latency_bench: SKIP, Docker endpoint did not resolve");
+            return;
+        };
         if UnixStream::connect(&socket).is_err() {
             println!(
                 "live_exec_latency_bench: SKIP, no live daemon at {}",
@@ -4026,7 +4172,12 @@ Total:\t\t6.054MB
         use std::os::unix::net::UnixStream;
         use std::process::Command;
         const NAME: &str = "velnor-eng4-expiry";
-        let socket = super::super::engine::socket_path();
+        let Ok(socket) = super::super::engine::socket_path() else {
+            println!(
+                "live_exec_expiry_leaves_container_running: SKIP, Docker endpoint did not resolve"
+            );
+            return;
+        };
         if UnixStream::connect(&socket).is_err() {
             println!(
                 "live_exec_expiry_leaves_container_running: SKIP, no live daemon at {}",

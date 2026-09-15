@@ -27,6 +27,7 @@ mod capacity;
 mod checkout;
 mod command_files;
 mod config;
+pub use config::config_dir;
 mod container;
 pub mod docker;
 mod docker_argv;

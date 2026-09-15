@@ -244,6 +244,7 @@ pub struct DaemonArgs {
 pub struct RunArgs {
     /// Validated number of slots provisioned by the owning daemon.
     pub slot_count: NonZeroU32,
+    pub state_db: Option<PathBuf>,
     pub config_dir: Option<PathBuf>,
     pub pat: Option<String>,
     pub max_idle_slot_age_seconds: Option<u64>,
@@ -540,6 +541,7 @@ impl From<RunArgs> for crate::args::RunArgs {
     fn from(a: RunArgs) -> Self {
         Self {
             slot_count: a.slot_count,
+            state_db: a.state_db,
             config_dir: a.config_dir,
             pat: a.pat,
             max_idle_slot_age_seconds: a.max_idle_slot_age_seconds,
@@ -562,6 +564,37 @@ impl From<RunArgs> for crate::args::RunArgs {
             require_docker_socket: a.require_docker_socket,
         }
     }
+}
+
+/// Binary used to spawn node-local guardian/controller/slot/job children.
+///
+/// Packaged hosts execute `velnor-runner` directly. When the control plane is
+/// launched through `velnorctl` (for example `velnorctl host start`), slot and
+/// job workers must still exec the service binary beside it.
+pub fn node_service_executable() -> std::io::Result<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("VELNOR_SERVICE_BINARY")
+        && !path.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let current = std::env::current_exe()?;
+    let file_name = current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if (file_name == "velnorctl" || file_name.starts_with("velnorctl-"))
+        && let Some(dir) = current.parent()
+    {
+        let candidate = dir.join(if cfg!(windows) {
+            "velnor-runner.exe"
+        } else {
+            "velnor-runner"
+        });
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Ok(current)
 }
 
 /// Service entry point: unconditional strict-capability admission, manifest

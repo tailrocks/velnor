@@ -670,8 +670,6 @@ fn register_process_group(
     )
 }
 
-const PACKAGE_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
-
 /// Deadline and operation class for one host process invocation.
 ///
 /// A non-`docker` program keeps the caller's deadline. A `docker` invocation
@@ -710,74 +708,9 @@ pub(crate) fn configure_host_docker_command(
     program: &str,
     args: &[String],
 ) -> Result<()> {
-    if program != "docker" {
-        return Ok(());
+    if program == "docker" {
+        crate::docker::engine::configure_host_docker_command(command, args)?;
     }
-    let mut index = 0;
-    while let Some(argument) = args.get(index) {
-        // Docker global options end at the first subcommand. A command passed
-        // to `docker run`, such as `sh -c ...`, is opaque payload and must not
-        // be mistaken for Docker's global `-c` context option.
-        if argument == "--" || !argument.starts_with('-') {
-            break;
-        }
-        if argument == "--host" || argument == "-H" {
-            let host = args
-                .get(index + 1)
-                .ok_or_else(|| anyhow::anyhow!("docker {argument} is missing its endpoint"))?;
-            if host != PACKAGE_DOCKER_HOST {
-                bail!("refusing remote Docker endpoint {host:?}; only {PACKAGE_DOCKER_HOST} is package-owned");
-            }
-            index += 2;
-            continue;
-        }
-        if argument == "--context"
-            || argument.starts_with("--context=")
-            || argument == "-c"
-            || argument.starts_with("-c=")
-            || (argument.starts_with("-c") && argument.len() > 2)
-        {
-            bail!("refusing explicit Docker context; only the package-owned local socket is supported");
-        }
-        if let Some(host) = argument
-            .strip_prefix("--host=")
-            .or_else(|| argument.strip_prefix("-H="))
-            .or_else(|| argument.strip_prefix("-H").filter(|host| !host.is_empty()))
-        {
-            if host != PACKAGE_DOCKER_HOST {
-                bail!("refusing remote Docker endpoint {host:?}; only {PACKAGE_DOCKER_HOST} is package-owned");
-            }
-            index += 1;
-            continue;
-        }
-        let value_option = argument == "--config"
-            || argument == "-l"
-            || argument == "--log-level"
-            || argument == "--tlscacert"
-            || argument == "--tlscert"
-            || argument == "--tlskey";
-        let attached_value_option = argument.starts_with("--config=")
-            || argument.starts_with("--log-level=")
-            || argument.starts_with("--tlscacert=")
-            || argument.starts_with("--tlscert=")
-            || argument.starts_with("--tlskey=")
-            || argument.starts_with("-l=")
-            || (argument.starts_with("-l") && argument.len() > 2);
-        if value_option {
-            if args.get(index + 1).is_none() {
-                bail!("docker {argument} is missing its value");
-            }
-            index += 2;
-        } else {
-            index += 1;
-        }
-        if attached_value_option {
-            continue;
-        }
-    }
-    command
-        .env("DOCKER_HOST", PACKAGE_DOCKER_HOST)
-        .env_remove("DOCKER_CONTEXT");
     Ok(())
 }
 
@@ -5709,9 +5642,16 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
-        if container.mount_docker_socket {
+        if container.mount_docker_socket
+            && crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease()
+        {
+            container.validate_docker_host_path_mapping()?;
+            let lease_paths = container.docker_lease_paths()?;
             self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
-                container.guest_docker_socket_host(),
+                // The runner owns the listener on its host-visible path.
+                // Docker gets the separately mapped daemon-visible source in
+                // the job container's -v argument.
+                lease_paths.host_visible,
                 container.name.clone(),
                 container.daemon_id.clone(),
             )?);
@@ -5903,7 +5843,7 @@ where
                     std::slice::from_ref(&container.network),
                 )) {
                     Ok(_) => true,
-                    Err(error) => error.to_string().contains("not found"),
+                    Err(error) => crate::docker::client::is_not_found(&error),
                 };
             if removed {
                 self.defuse_job_network_guard();
@@ -14207,7 +14147,11 @@ mod tests {
     }
 
     #[test]
-    fn host_docker_commands_are_pinned_to_the_package_socket() {
+    fn host_docker_commands_use_the_resolved_local_socket() {
+        let _guard = crate::docker::engine::EngineTestGuard::serve(
+            PathBuf::from("/tmp/velnor-test-docker.sock"),
+            None,
+        );
         let mut command = Command::new("sh");
         command.env("DOCKER_HOST", "tcp://docker.example:2376");
         configure_host_docker_command(&mut command, "docker", &[]).unwrap();
@@ -14215,7 +14159,10 @@ mod tests {
             .args(["-c", "printf %s \"$DOCKER_HOST\""])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout), PACKAGE_DOCKER_HOST);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "unix:///tmp/velnor-test-docker.sock"
+        );
     }
 
     #[test]
@@ -14248,7 +14195,11 @@ mod tests {
             let mut command = Command::new("true");
             let error = configure_host_docker_command(&mut command, "docker", &args)
                 .expect_err("remote Docker target must fail closed");
-            assert!(error.to_string().contains("refusing"), "{error}");
+            assert!(
+                error.to_string().contains("refusing")
+                    || error.to_string().contains("Docker context"),
+                "{error}"
+            );
         }
     }
 
@@ -24896,64 +24847,6 @@ fi"#
         );
     }
 
-    /// Requests job cancellation on the Nth `docker exec`, then optionally
-    /// throws on later execs — the production shape where the termination
-    /// ladder kills the running step's process group mid-step and every
-    /// remaining condition is re-evaluated against the cancelled status.
-    struct CancelDuringExecRunner {
-        calls: Vec<(String, Vec<String>)>,
-        token: crate::execution::cancel::JobCancellation,
-        cancel_on_exec: usize,
-        fail_after_cancel: usize,
-        execs: usize,
-    }
-
-    impl CommandRunner for CancelDuringExecRunner {
-        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
-            let args: &[String] = &crate::execution::expand_env_file_args(args);
-            if is_seed_probe(args) {
-                return Ok(CommandResult {
-                    code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
-            self.calls.push((program.to_string(), args.to_vec()));
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-
-        fn run_streaming_timeout_with_env(
-            &mut self,
-            program: &str,
-            args: &[String],
-            _env: &[(String, String)],
-            _timeout: Duration,
-            _on_output: &mut dyn FnMut(CommandStream, &str),
-        ) -> Result<CommandResult> {
-            self.calls.push((program.to_string(), args.to_vec()));
-            if args.first().is_some_and(|arg| arg == "exec") {
-                self.execs += 1;
-                if self.execs == self.cancel_on_exec {
-                    self.token
-                        .request(crate::execution::cancel::CancelReason::ServerRequested);
-                }
-                if self.token.is_cancelled() && self.fail_after_cancel > 0 {
-                    self.fail_after_cancel -= 1;
-                    anyhow::bail!("process terminated by signal");
-                }
-            }
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-    }
-
     fn script_step(id: &str, script: &str, condition: Option<&str>) -> ExecutableStep {
         ExecutableStep::Script(ScriptStep {
             id: id.into(),
@@ -25664,6 +25557,64 @@ fi"#
         assert_eq!(summary.step_results[1].exit_code, 0);
         assert_eq!(summary.step_results[2].exit_code, 0);
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Requests job cancellation on the Nth `docker exec`, then optionally
+    /// throws on later execs — the production shape where the termination
+    /// ladder kills the running step's process group mid-step and every
+    /// remaining condition is re-evaluated against the cancelled status.
+    struct CancelDuringExecRunner {
+        calls: Vec<(String, Vec<String>)>,
+        token: crate::execution::cancel::JobCancellation,
+        cancel_on_exec: usize,
+        fail_after_cancel: usize,
+        execs: usize,
+    }
+
+    impl CommandRunner for CancelDuringExecRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.first().is_some_and(|arg| arg == "exec") {
+                self.execs += 1;
+                if self.execs == self.cancel_on_exec {
+                    self.token
+                        .request(crate::execution::cancel::CancelReason::ServerRequested);
+                }
+                if self.token.is_cancelled() && self.fail_after_cancel > 0 {
+                    self.fail_after_cancel -= 1;
+                    anyhow::bail!("process terminated by signal");
+                }
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
     }
 
     #[test]
@@ -26812,6 +26763,16 @@ fi"#
         fs::create_dir_all(&temp).unwrap();
         let filename = std::ffi::OsString::from_vec(b"bad-\xff.txt".to_vec());
         if fs::write(temp.join(&filename), "content").is_err() {
+            fs::remove_dir_all(temp).unwrap();
+            return;
+        }
+        // virtiofs/APFS (macOS Docker Desktop/OrbStack job mounts) may persist
+        // a UTF-8 replacement instead of the raw 0xff byte. The production
+        // check is `OsStr::to_str()` on the name the filesystem returns.
+        let persisted_non_utf8 = fs::read_dir(&temp)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name().to_str().is_none());
+        if !persisted_non_utf8 {
             fs::remove_dir_all(temp).unwrap();
             return;
         }
@@ -28086,6 +28047,20 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    fn guest_docker_socket_mount_is_expected(args: &[String]) -> bool {
+        if crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
+            args.iter().any(|arg| {
+                arg.contains("vdl-")
+                    && arg.contains(".sock:/var/run/docker.sock")
+                    && !arg.starts_with("/tmp/vdl-")
+                    && !arg.starts_with("/var/run/docker.sock:")
+            })
+        } else {
+            args.iter()
+                .any(|arg| arg.ends_with(".sock:/var/run/docker.sock") && !arg.contains("vdl-"))
+        }
+    }
+
     #[test]
     fn target_docker_javascript_actions_receive_socket_and_cli_mounts() {
         let temp = temp_dir();
@@ -28234,12 +28209,7 @@ fi"#
         assert_eq!(node_calls.len(), 6);
         for call in &node_calls {
             assert!(
-                call.iter().any(|arg| {
-                    arg.contains("vdl-")
-                        && arg.contains(".sock:/var/run/docker.sock")
-                        && !arg.starts_with("/tmp/vdl-")
-                        && !arg.starts_with("/var/run/docker.sock:")
-                }),
+                guest_docker_socket_mount_is_expected(call),
                 "guest Docker must use the job lease socket, got {call:?}"
             );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
@@ -28621,12 +28591,7 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
         assert_eq!(node_calls.len(), 5);
         for call in &node_calls {
             assert!(
-                call.iter().any(|arg| {
-                    arg.contains("vdl-")
-                        && arg.contains(".sock:/var/run/docker.sock")
-                        && !arg.starts_with("/tmp/vdl-")
-                        && !arg.starts_with("/var/run/docker.sock:")
-                }),
+                guest_docker_socket_mount_is_expected(call),
                 "guest Docker must use the job lease socket, got {call:?}"
             );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
@@ -28734,12 +28699,7 @@ bitcoin-processor-app.push=true")
             .map(|(_, args)| args)
             .unwrap();
         assert!(
-            node_call.iter().any(|arg| {
-                arg.contains("vdl-")
-                    && arg.contains(".sock:/var/run/docker.sock")
-                    && !arg.starts_with("/tmp/vdl-")
-                    && !arg.starts_with("/var/run/docker.sock:")
-            }),
+            guest_docker_socket_mount_is_expected(node_call),
             "guest Docker must use the job lease socket, got {node_call:?}"
         );
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));

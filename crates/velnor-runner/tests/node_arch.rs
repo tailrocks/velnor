@@ -503,7 +503,14 @@ fn contaminated_capacity_fails_closed_across_controller_restart_reconcile() {
 }
 
 fn cmd_err(dir: &Path) -> String {
-    std::fs::read_to_string(dir.join("cmd.err")).unwrap_or_default()
+    let cmd = std::fs::read_to_string(dir.join("cmd.err")).unwrap_or_default();
+    let controller = std::fs::read_to_string(dir.join("controller.err")).unwrap_or_default();
+    match (cmd.is_empty(), controller.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => cmd,
+        (true, false) => controller,
+        (false, false) => format!("{cmd}\n{controller}"),
+    }
 }
 
 fn assert_no_owned_slot_processes(dir: &Path, scope: &str) {
@@ -653,39 +660,11 @@ impl Drop for SupervisedProcessGuard {
 }
 
 fn wait_for_supervised_slots(guard: &mut SupervisedProcessGuard, expected: usize) -> Vec<u32> {
-    let dir = guard.dir.clone();
-    let scope = guard.scope.clone();
-    for _ in 0..100 {
-        assert!(
-            guard.controller_is_running(),
-            "supervised controller exited before N={expected} slots: {}",
-            cmd_err(&dir)
-        );
-        if let Ok(state) =
-            Journal::open(dir.join("journal.db")).and_then(|journal| journal.load_state())
-        {
-            let pids = state
-                .slots
-                .iter()
-                .filter_map(|slot| slot.pid)
-                .collect::<Vec<_>>();
-            guard.record_slot_pids(&pids);
-            if state.slots.len() == expected
-                && pids.len() == expected
-                && pids
-                    .iter()
-                    .all(|pid| process_is_owned_and_live(*pid, &dir, &scope))
-                && (1..=expected).all(|index| heartbeat_path(&dir, index).is_file())
-            {
-                return pids;
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    panic!(
-        "timed out waiting for N={expected} supervised slots: {}",
-        cmd_err(&dir)
-    );
+    // 5s (100×50ms) is not a correctness bound: nextest runs this beside
+    // 20s siblings, so a short poll times out while the controller is still
+    // spawning. Timeout must mean supervision failed, not that CI was busy.
+    wait_for_supervised_slots_with_timeout(guard, expected, std::time::Duration::from_secs(30))
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn wait_for_supervised_slots_with_timeout(
