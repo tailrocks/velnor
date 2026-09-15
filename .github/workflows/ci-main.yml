@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   plan:
-    name: Planning
+    name: "Control / Planning"
     runs-on: ubuntu-24.04
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
@@ -100,8 +100,18 @@ jobs:
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
+  velnor-lane-admission:
+    name: "Control / Velnor admission"
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Refuse unpaired Velnor lane
+        run: |
+          echo '::error::runners=both cannot omit the Velnor lane for an untrusted fork pull request' >&2
+          exit 1
   policy:
-    name: Advisory policy
+    name: Control / Policy
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -165,7 +175,7 @@ jobs:
           VELNOR_WORKFLOW_POLICY_REVISION: 3bfd459772bc24161551e755a63a5a02517c63e4
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
   group-bun:
-    name: "Bun / Packages"
+    name: "Control / Bun"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.bun_matrix != '[]' }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-unit-bun.yml
@@ -176,7 +186,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
   group-docker:
-    name: "Docker / Images"
+    name: "Control / Docker"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.docker_matrix != '[]' }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-unit-docker.yml
@@ -187,7 +197,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
   group-docs:
-    name: Documentation
+    name: "Control / Documentation"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.docs_matrix != '[]' }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-unit-docs.yml
@@ -198,7 +208,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
   group-opentofu:
-    name: OpenTofu
+    name: "Control / OpenTofu"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.opentofu_matrix != '[]' }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-unit-opentofu.yml
@@ -209,7 +219,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
   group-rust:
-    name: Rust
+    name: "Control / Rust"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.rust_matrix != '[]' }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-unit-rust.yml
@@ -220,9 +230,9 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
   ci-required:
-    name: ci-required
+    name: "Control / Aggregate"
     if: ${{ always() }}
-    needs: [plan, policy, group-bun, group-docker, group-docs, group-opentofu, group-rust]
+    needs: [plan, velnor-lane-admission, policy, group-bun, group-docker, group-docs, group-opentofu, group-rust]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -245,6 +255,11 @@ jobs:
             echo "required CI prerequisite policy did not pass: $result" >&2
             exit 1
           fi
+          result="$(result_for_job velnor-lane-admission)"
+          case "$result" in
+            success|skipped) ;;
+            *) echo "required CI prerequisite velnor-lane-admission did not pass: $result" >&2; exit 1 ;;
+          esac
           matrix="$(jq -r --arg key 'bun_matrix' --arg empty '[]' '.plan.outputs[$key] // $empty' <<<"$NEEDS_JSON")"
           result="$(result_for_job group-bun)"
           if [[ "$matrix" != '[]' ]]; then
@@ -311,7 +326,7 @@ jobs:
             esac
           fi
   required:
-    name: Required
+    name: "Control / Required"
     if: ${{ always() }}
     needs: [ci-required]
     runs-on: ubuntu-24.04

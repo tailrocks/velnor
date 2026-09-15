@@ -234,10 +234,11 @@ fn load_durable_resources(
 ) -> Result<Vec<AnyResource>, PortError> {
     let mut resources = Vec::new();
 
-    if let Some(row) = store
+    let instance_host = if let Some(row) = store
         .instance_row(instance_slug)
         .map_err(store_query_error)?
     {
+        let host = row.host.clone();
         resources.push(AnyResource::Host(Host {
             meta: ResourceMeta::new(&row.host, Source::Local, row.updated_at),
             hostname: row.host.clone(),
@@ -252,7 +253,10 @@ fn load_durable_resources(
             slots_configured: row.slots_configured,
             slots_busy: row.slots_busy,
         }));
-    }
+        Some(host)
+    } else {
+        None
+    };
 
     for row in store.slot_rows(instance_slug).map_err(store_query_error)? {
         resources.push(AnyResource::Slot(Slot {
@@ -289,7 +293,7 @@ fn load_durable_resources(
         if let Some(run_id) = summary.run_id {
             runs.entry(run_id).or_insert_with(|| summary.clone());
         }
-        let job = job_resource(summary)?;
+        let job = job_resource(summary, instance_host.as_deref())?;
         if matches!(summary.phase.as_str(), "queued" | "waiting") {
             let last_transition_time = job.meta.last_transition_time;
             resources.push(AnyResource::QueueEntry(QueueEntry {
@@ -335,7 +339,16 @@ fn load_durable_resources(
     Ok(resources)
 }
 
-fn job_resource(summary: &JobSummary) -> Result<Job, PortError> {
+fn identity_slug(raw: &str) -> String {
+    let slug: String = raw
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    slug.trim_matches('-').to_owned()
+}
+
+fn job_resource(summary: &JobSummary, instance_host: Option<&str>) -> Result<Job, PortError> {
     let repository = repository_ref(&summary.repository)?;
     let last_transition_time =
         parse_optional_timestamp(summary.acquired_at.as_deref(), "acquired_at")?
@@ -344,6 +357,11 @@ fn job_resource(summary: &JobSummary) -> Result<Job, PortError> {
                 "queued_at",
             )?)
             .unwrap_or(Timestamp::UNIX_EPOCH);
+    let host = identity_slug(
+        instance_host
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&summary.instance_slug),
+    );
     Ok(Job {
         meta: ResourceMeta::new(&summary.job_uid, Source::Merged, last_transition_time),
         repository,
@@ -353,6 +371,11 @@ fn job_resource(summary: &JobSummary) -> Result<Job, PortError> {
         queued_ms: None,
         duration_ms: None,
         conclusion: summary.conclusion.clone(),
+        host: Some(host),
+        instance: Some(summary.instance_slug.clone()),
+        slot: summary.slot_name.clone(),
+        runner: summary.runner_name.clone(),
+        execution_backend: None,
     })
 }
 
@@ -812,7 +835,16 @@ mod tests {
         assert_eq!(query("instances")[0].kind(), "Instance");
         assert_eq!(query("slots")[0].kind(), "Slot");
         assert_eq!(query("runners")[0].kind(), "RunnerRegistration");
-        assert_eq!(query("jobs")[0].kind(), "Job");
+        let jobs = query("jobs");
+        assert_eq!(jobs[0].kind(), "Job");
+        let AnyResource::Job(job) = &jobs[0] else {
+            panic!("expected Job");
+        };
+        assert_eq!(job.host.as_deref(), Some("macbook-local"));
+        assert_eq!(job.instance.as_deref(), Some("primary"));
+        assert_eq!(job.slot.as_deref(), Some("slot-0"));
+        assert_eq!(job.runner.as_deref(), Some("runner-7"));
+        assert_eq!(job.execution_backend, None);
         assert_eq!(query("runs")[0].kind(), "Run");
         assert_eq!(query("queues")[0].kind(), "QueueEntry");
 

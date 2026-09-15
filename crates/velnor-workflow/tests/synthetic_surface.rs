@@ -486,7 +486,7 @@ fn a_declared_release_lane_adds_exactly_the_release_files() {
     );
     let release = with.workflow("release.yml");
     assert!(release.contains("name: Release"), "{release}");
-    assert!(release.contains("Publish GitHub release"), "{release}");
+    assert!(release.contains("Control / Publish"), "{release}");
     assert!(
         release.contains("target: x86_64-unknown-linux-gnu"),
         "{release}"

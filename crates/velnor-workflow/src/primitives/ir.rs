@@ -114,7 +114,7 @@ mod tests {
             (PullRequestFork, true, false),
             (Push, true, true),
             (Schedule, true, true),
-            (MergeGroup, true, false),
+            (MergeGroup, true, true),
         ];
         for (event, github, velnor) in cases {
             assert_eq!(
@@ -1105,7 +1105,8 @@ fn automatic_event_selects_lane(
                 velnor_pull_request == VelnorPullRequest::Automatic
             }
             AutomaticEvent::Push | AutomaticEvent::Schedule => true,
-            AutomaticEvent::PullRequestFork | AutomaticEvent::MergeGroup => false,
+            AutomaticEvent::MergeGroup => velnor_pull_request == VelnorPullRequest::Automatic,
+            AutomaticEvent::PullRequestFork => false,
         },
         RunnerMode::Both => false,
     }
@@ -1440,6 +1441,7 @@ impl WorkflowIr {
         let trusted_event = kind != WorkflowKind::PullRequest;
         let runners = self.runners;
         self.render_plan(&mut output, runners, runners == RunnerMode::Velnor);
+        self.render_velnor_lane_admission(&mut output);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output, runners, runners == RunnerMode::Velnor);
         }
@@ -1534,6 +1536,7 @@ impl WorkflowIr {
         let mut plan = String::new();
         self.render_plan(&mut plan, self.runners, self.runners == RunnerMode::Velnor);
         output.push_str(&plan);
+        self.render_velnor_lane_admission(&mut output);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(
                 &mut output,
@@ -1633,13 +1636,13 @@ impl WorkflowIr {
             }
             conditions.push(format!("needs.plan.outputs.{matrix_output} != '[]'"));
             let group_name = match kind_from_unit_workflow_file(file) {
-                Some(kind) => unit_group(kind),
-                None => job_id,
+                Some(kind) => crate::control_job_name(crate::lane_kind_label(kind)),
+                None => crate::control_job_name(job_id),
             };
             let _ = writeln!(
                 output,
                 "  {job_id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
-                yaml_scalar(group_name),
+                group_name,
                 conditions.join(" && "),
                 needs.join(", "),
             );
@@ -1666,11 +1669,18 @@ impl WorkflowIr {
             }
         }
         let mut needs = vec!["plan".to_owned()];
+        if self.emits_velnor_lane_admission() {
+            needs.push("velnor-lane-admission".to_owned());
+        }
         if include_policy {
             needs.push("policy".to_owned());
         }
         needs.extend(units);
-        let display_name = check_name;
+        let display_name = match check_name {
+            "ci-required" => crate::control_job_name("Aggregate"),
+            "nightly-required" => crate::control_job_name("Nightly aggregate"),
+            other => yaml_scalar(other),
+        };
         let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
             format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
@@ -1705,6 +1715,11 @@ impl WorkflowIr {
                 "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
         }
+        if needs.iter().any(|job| job == "velnor-lane-admission") {
+            output.push_str(
+                "          result=\"$(result_for_job velnor-lane-admission)\"\n          case \"$result\" in\n            success|skipped) ;;\n            *) echo \"required CI prerequisite velnor-lane-admission did not pass: $result\" >&2; exit 1 ;;\n          esac\n",
+            );
+        }
         let mut seen = BTreeSet::new();
         for (job_id, file) in nodes
             .iter()
@@ -1729,7 +1744,8 @@ impl WorkflowIr {
             };
             let _ = writeln!(
                 output,
-                "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                "  required:\n    name: {}\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                crate::control_job_name("Required"),
                 self.runner_for(self.control_plane_lane())
             );
         }
@@ -1746,7 +1762,8 @@ impl WorkflowIr {
         };
         let _ = writeln!(
             output,
-            "  nightly-alert:\n    name: Nightly red-to-signal\n    if: ${{{{ {if_condition} }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
+            "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
+            crate::control_job_name("Nightly red-to-signal"),
             self.runner_for(self.control_plane_lane())
         );
         let bad_body = r#"          body="nightly-required result: $NIGHTLY_RESULT
@@ -1954,7 +1971,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 continue;
             }
             let prep_id = format!("{}-prepare-cargo-sources", lane.as_str());
-            let prep_name = format!("{} / Prepare Cargo sources", lane.display_name());
+            let prep_name = "Control / Rust / prepare-cargo";
             let prep_gate = format!("({if_gate}) && ({})", self.lane_event_expression(lane));
             let _ = writeln!(
                 output,
@@ -2078,7 +2095,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let cache_save = job.cache_save && contract.cache_save;
         let name = input_unit.map_or_else(
             || lane.display_name().to_owned(),
-            |unit_id| format!("{} / {unit_id}", lane.display_name()),
+            |_| crate::comparison_job_name(lane, unit),
         );
         let _ = writeln!(output, "  {id}:\n    name: {}", yaml_scalar(&name));
         let lane_gate = self.lane_event_expression(lane);
@@ -2123,6 +2140,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
             self.pins.checkout
         );
+        if lane == RunnerMode::Velnor {
+            render_velnor_runner_identity_step(output);
+        }
         self.render_unit_runtime(output, lane, unit);
         render_ci_runner_setup_end_marker(output);
         let units_source =
@@ -2404,7 +2424,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            crate::control_job_name("Planning"),
             self.runner_for(runners),
             outputs.join("\n"),
             self.pins.checkout,
@@ -2419,7 +2440,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if runners == RunnerMode::Velnor {
             let gate = self.trusted_runner_gate(runners, trusted);
             output.push_str(&crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 VELNOR_POLICY_WORKFLOW_REV,
                 &self.runner_for(runners),
                 "local",
@@ -2427,7 +2448,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             ));
         } else {
             output.push_str(&crate::inline_policy_job(
-                "Advisory policy",
+                "Control / Policy",
                 VELNOR_POLICY_WORKFLOW_REV,
             ));
         }
@@ -2477,13 +2498,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             RunnerMode::Velnor,
             self.pull_request_on_velnor,
         ));
-        debug_assert!(!automatic_event_selects_lane(
+        debug_assert!(automatic_event_selects_lane(
             AutomaticEvent::MergeGroup,
             RunnerMode::Velnor,
             self.pull_request_on_velnor,
         ));
         format!(
-            "{} || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+            "{} || github.event_name == 'merge_group' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
             "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository",
             self.default_branch
         )
@@ -2645,7 +2666,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             .collect::<BTreeSet<_>>();
         for kind in kinds {
             let group_id = stack_group_job_id(kind);
-            let group_name = yaml_scalar(unit_group(kind));
+            let group_name = crate::control_job_name(crate::lane_kind_label(kind));
             let _ = writeln!(output, "  {group_id}:\n    name: {group_name}");
             let needs = if include_policy {
                 "[plan, policy]"
@@ -2693,7 +2714,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             .filter(|unit| lane_supports_unit(lane, unit))
         {
             let id = unit_job_id(lane, &unit.id);
-            let lane_label = lane.display_name();
             let mut needs = unit_needs(
                 lane,
                 unit,
@@ -2706,13 +2726,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 velnor_rust_workspace_check_needs(lane, unit, &self.units),
             );
             let runner = self.runner_for_unit(lane, unit);
-            let group = unit_group(unit.kind);
-            let label = unit
-                .label
-                .strip_prefix("Rust crate (")
-                .and_then(|value| value.strip_suffix(')'))
-                .unwrap_or(&unit.label);
-            let job_name = yaml_scalar(&format!("{lane_label} / {group} / {label}"));
+            let job_name = yaml_scalar(&crate::comparison_job_name(lane, unit));
             let verify_name = yaml_scalar(&unit.label);
             let _ = writeln!(output, "  {id}:\n    name: {job_name}");
             if let Some(condition) = condition {
@@ -2729,6 +2743,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 self.pins.checkout,
             );
+            if lane == RunnerMode::Velnor {
+                render_velnor_runner_identity_step(output);
+            }
             self.render_unit_runtime(output, lane, unit);
             render_ci_runner_setup_end_marker(output);
             output.push_str(&workflow_selection_file_materialize(
@@ -3144,13 +3161,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         trusted: bool,
         include_policy: bool,
     ) {
-        let display_name = "ci-required";
+        let display_name = crate::control_job_name("Aggregate");
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
             RunnerMode::Both => vec![RunnerMode::Github, RunnerMode::Velnor],
         };
         let mut needs = vec!["plan".to_owned()];
+        if self.emits_velnor_lane_admission() {
+            needs.push("velnor-lane-admission".to_owned());
+        }
         if include_policy {
             needs.push("policy".to_owned());
         }
@@ -3188,6 +3208,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
         }
+        if needs.iter().any(|job| job == "velnor-lane-admission") {
+            output.push_str(
+                "          result=\"$(result_for_job velnor-lane-admission)\"\n          case \"$result\" in\n            success|skipped) ;;\n            *) echo \"required CI prerequisite velnor-lane-admission did not pass: $result\" >&2; exit 1 ;;\n          esac\n",
+            );
+        }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         for (unit, job, allow_selected_skip) in job_checks {
             let selected_case = if allow_selected_skip {
@@ -3207,8 +3232,42 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         };
         let _ = writeln!(
             output,
-            "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+            "  required:\n    name: {}\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+            crate::control_job_name("Required"),
             self.runner_for(self.control_plane_lane())
         );
     }
+
+    fn emits_velnor_lane_admission(&self) -> bool {
+        self.runners == RunnerMode::Both
+    }
+
+    fn render_velnor_lane_admission(&self, output: &mut String) {
+        if !self.emits_velnor_lane_admission() {
+            return;
+        }
+        let (if_expr, reason) = if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
+            (
+                "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository",
+                "runners=both cannot omit the Velnor lane for an untrusted fork pull request",
+            )
+        } else {
+            (
+                "github.event_name == 'pull_request' || github.event_name == 'merge_group'",
+                "runners=both cannot omit the Velnor lane on pull_request or merge_group without pull_request_on_velnor = true",
+            )
+        };
+        let _ = writeln!(
+            output,
+            "  velnor-lane-admission:\n    name: {}\n    if: ${{{{ {if_expr} }}}}\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Refuse unpaired Velnor lane\n        run: |\n          echo '::error::{reason}' >&2\n          exit 1",
+            crate::control_job_name("Velnor admission"),
+            self.runner_for(self.control_plane_lane()),
+        );
+    }
+}
+
+pub(crate) fn render_velnor_runner_identity_step(output: &mut String) {
+    output.push_str(
+        "      - name: Velnor runner identity\n        shell: bash\n        run: |\n          set -euo pipefail\n          {\n            echo '## Velnor runner identity'\n            echo\n            echo \"- Host: ${VELNOR_HOST:-unset}\"\n            echo \"- Instance: ${VELNOR_INSTANCE:-unset}\"\n            echo \"- Slot: ${VELNOR_SLOT:-unset}\"\n            echo \"- GitHub runner: ${RUNNER_NAME:-unset}\"\n            echo \"- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}\"\n            echo \"- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}\"\n            echo \"- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}\"\n          } | tee -a \"${GITHUB_STEP_SUMMARY:-/dev/null}\"\n",
+    );
 }

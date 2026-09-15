@@ -798,6 +798,10 @@ fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
 /// units, so the excluded callers stay green instead of failing a selection
 /// they can never satisfy. Units of an unknown kind are kept: dropping a
 /// unit the planner does not recognize would silently skip verification.
+///
+/// A both-lane plan keeps pairable kinds. A GitHub-only kind (Swift) stays
+/// selected so an explicit `jobs = ["github"]` opt-out still runs on the
+/// hosted lane when the plan admits GitHub.
 fn selection_for_lanes<'a>(
     config: &'a CiConfig,
     selection: UnitSelection<'a>,
@@ -809,7 +813,14 @@ fn selection_for_lanes<'a>(
         .map(|unit| (unit.id.as_str(), unit.kind.as_str()))
         .collect::<BTreeMap<_, _>>();
     let supported = |kind: &str| {
-        UnitKind::from_prefix(kind).is_none_or(|parsed| lanes_support_unit_kind(lanes, parsed))
+        UnitKind::from_prefix(kind).is_none_or(|parsed| {
+            if lanes_support_unit_kind(lanes, parsed) {
+                return true;
+            }
+            lanes == RunnerMode::Both
+                && (crate::lane_supports_unit_kind(RunnerMode::Github, parsed)
+                    || crate::lane_supports_unit_kind(RunnerMode::Velnor, parsed))
+        })
     };
     UnitSelection {
         units: selection
@@ -5242,7 +5253,7 @@ jobs:
         // The base-owned entrypoint carries the `Policy` variant.
         let workflow = format!(
             "name: Advisory caller\non: push\njobs:\n{}",
-            crate::inline_policy_job("Advisory policy", POLICY_REVISION)
+            crate::inline_policy_job("Control / Policy", POLICY_REVISION)
         );
         let root = policy_fixture("inline-advisory", &workflow, "github")?;
         assert!(run_policy(root)?);
@@ -5252,7 +5263,7 @@ jobs:
         let workflow = format!(
             "name: Advisory caller\non: push\njobs:\n{}",
             crate::inline_policy_job(
-                "Advisory policy",
+                "Control / Policy",
                 "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33"
             )
         );
@@ -5272,7 +5283,7 @@ jobs:
         let workflow = format!(
             "name: Velnor caller\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-runner]",
                 "local",
@@ -5286,7 +5297,7 @@ jobs:
         let workflow = format!(
             "name: Velnor pull request policy\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5300,7 +5311,7 @@ jobs:
         let workflow = format!(
             "name: Velnor dispatch policy\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5314,7 +5325,7 @@ jobs:
         let workflow = format!(
             "name: Velnor unit policy\non: workflow_call\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-velnor]",
                 "local",
@@ -5329,7 +5340,7 @@ jobs:
         let workflow = format!(
             "name: Velnor wrong pin\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33",
                 "[self-hosted, example-runner]",
                 "local",
@@ -5342,7 +5353,7 @@ jobs:
         let workflow = format!(
             "name: Velnor untrusted\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
-                "Advisory policy",
+                "Control / Policy",
                 POLICY_REVISION,
                 "[self-hosted, example-runner]",
                 "local",

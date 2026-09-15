@@ -4,8 +4,30 @@ use serde_json::{Map, Value};
 
 pub(crate) const RUN_STARTED_AT_ENV: &str = "VELNOR_RUN_STARTED_AT";
 pub(crate) const JOB_QUEUED_AT_ENV: &str = "VELNOR_JOB_QUEUED_AT";
+pub(crate) const VELNOR_HOST_ENV: &str = "VELNOR_HOST";
+pub(crate) const VELNOR_INSTANCE_ENV: &str = "VELNOR_INSTANCE";
+pub(crate) const VELNOR_SLOT_ENV: &str = "VELNOR_SLOT";
 
+/// Job-visible Velnor node identity. Non-secret; `runner_name` is the GitHub
+/// registration / stored `agent_name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRunnerIdentity {
+    pub runner_name: String,
+    pub host: String,
+    pub instance: String,
+    pub slot: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
+    job_runtime_env_with_identity(job, None)
+}
+
+pub(crate) fn job_runtime_env_with_identity(
+    job: &AgentJobRequestMessage,
+    identity: Option<&JobRunnerIdentity>,
+) -> Vec<(String, String)> {
+    let resolved = resolved_identity(identity);
     let mut env = vec![
         ("CI".to_string(), "true".to_string()),
         ("GITHUB_ACTIONS".to_string(), "true".to_string()),
@@ -15,9 +37,11 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         ("HOME".to_string(), "/github/home".to_string()),
         ("GITHUB_JOB".to_string(), job.job_name()),
         ("GITHUB_WORKSPACE".to_string(), "/__w".to_string()),
+        // Guest jobs run in Linux containers even when the physical host is
+        // macOS. Host identity is `VELNOR_HOST`, not `RUNNER_OS`.
         ("RUNNER_OS".to_string(), "Linux".to_string()),
         ("RUNNER_ARCH".to_string(), runner_arch().to_string()),
-        ("RUNNER_NAME".to_string(), runner_name()),
+        ("RUNNER_NAME".to_string(), resolved.runner_name.clone()),
         ("RUNNER_ENVIRONMENT".to_string(), "self-hosted".to_string()),
         ("RUNNER_TEMP".to_string(), "/__t".to_string()),
         ("RUNNER_TOOL_CACHE".to_string(), "/__tool".to_string()),
@@ -33,6 +57,9 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
             "VELNOR_MANIFEST_VERSION".to_string(),
             crate::manifest::MANIFEST_VERSION.to_string(),
         ),
+        (VELNOR_HOST_ENV.to_string(), resolved.host),
+        (VELNOR_INSTANCE_ENV.to_string(), resolved.instance),
+        (VELNOR_SLOT_ENV.to_string(), resolved.slot),
         // Emit runner-owned timing names even when the broker omitted a
         // value, so repository-controlled environment cannot fill a missing
         // value with a spoof.
@@ -372,6 +399,9 @@ fn is_protected_default_env(name: &str) -> bool {
             name,
             "VELNOR_SOURCE_SHA"
                 | "VELNOR_MANIFEST_VERSION"
+                | VELNOR_HOST_ENV
+                | VELNOR_INSTANCE_ENV
+                | VELNOR_SLOT_ENV
                 | RUN_STARTED_AT_ENV
                 | JOB_QUEUED_AT_ENV
         )
@@ -557,7 +587,19 @@ fn runner_arch() -> &'static str {
 }
 
 fn runner_name() -> String {
-    std::env::var("VELNOR_RUNNER_NAME").unwrap_or_else(|_| "velnor".to_string())
+    std::env::var("VELNOR_RUNNER_NAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "velnor".to_string())
+}
+
+fn resolved_identity(identity: Option<&JobRunnerIdentity>) -> JobRunnerIdentity {
+    identity.cloned().unwrap_or_else(|| JobRunnerIdentity {
+        runner_name: runner_name(),
+        host: crate::runner::github_runner_host_slug(),
+        instance: "local".to_string(),
+        slot: "0".to_string(),
+    })
 }
 
 trait JobRuntimeExt {
@@ -804,6 +846,45 @@ mod tests {
         // No VELNOR_ prefix rule: legitimate job-carried vars pass through.
         assert!(env.contains(&("VELNOR_APP_ID".into(), "12345".into())));
         assert!(env.contains(&("VELNOR_APP_PRIVATE_KEY".into(), "secret".into())));
+    }
+
+    #[test]
+    fn runner_name_matches_registration_identity_when_known() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "environmentVariables": [{
+                "VELNOR_HOST": "spoofed-host",
+                "VELNOR_INSTANCE": "spoofed-instance",
+                "VELNOR_SLOT": "99",
+                "RUNNER_NAME": "spoofed-runner",
+            }],
+        }))
+        .unwrap();
+        let identity = JobRunnerIdentity {
+            runner_name: "velnor-sentry-primary-2".into(),
+            host: "sentry".into(),
+            instance: "primary".into(),
+            slot: "2".into(),
+        };
+
+        let env = job_runtime_env_with_identity(&job, Some(&identity));
+
+        assert!(env.contains(&("RUNNER_NAME".into(), "velnor-sentry-primary-2".into())));
+        assert!(env.contains(&(VELNOR_HOST_ENV.into(), "sentry".into())));
+        assert!(env.contains(&(VELNOR_INSTANCE_ENV.into(), "primary".into())));
+        assert!(env.contains(&(VELNOR_SLOT_ENV.into(), "2".into())));
+        assert!(!env.contains(&("RUNNER_NAME".into(), "spoofed-runner".into())));
+        assert!(!env.contains(&(VELNOR_HOST_ENV.into(), "spoofed-host".into())));
+        assert!(!env.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                || value.contains("ghp_")
+                || value.contains("github_pat_")
+        }));
     }
 
     #[test]

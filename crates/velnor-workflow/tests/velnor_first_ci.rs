@@ -226,11 +226,11 @@ fn pull_request_and_merge_group_publish_required() {
     assert!(pr.contains("  merge_group:"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
-    assert!(pr.contains("    name: ci-required"));
+    assert!(pr.contains("    name: \"Control / Aggregate\""));
     assert!(pr.contains("  required:"));
-    assert!(pr.contains("    name: Required"));
+    assert!(pr.contains("    name: \"Control / Required\""));
     assert!(!pr.contains("default: velnor"), "{pr}");
-    assert!(pr.contains("default: github"), "{pr}");
+    assert!(pr.contains("default: both"), "{pr}");
     assert!(pr.contains("runs-on: ubuntu-24.04"));
 }
 
@@ -246,18 +246,22 @@ fn automatic_pr_schedules_github_hosted_unit_jobs() {
         "automatic PR must enable the GitHub-hosted lane: {unit}"
     );
     assert!(
-        unit.contains(
-            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
-        ),
-        "Velnor jobs must be dispatch-only: {unit}"
+        unit.contains("github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'"),
+        "Velnor jobs must stay dispatch-selectable: {unit}"
+    );
+    assert!(
+        unit.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'"),
+        "inferred automatic=both runs Velnor on trusted push/schedule: {unit}"
     );
     assert!(
         !unit.contains("default: velnor"),
         "generated YAML must not default to velnor: {unit}"
     );
     assert!(
-        unit.contains("github.event_name == 'pull_request'"),
-        "automatic PR must enable the Velnor lane: {unit}"
+        !unit.contains(
+            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"
+        ),
+        "without pull_request_on_velnor, Velnor must not admit PRs: {unit}"
     );
 }
 
@@ -271,13 +275,13 @@ fn dispatch_defaults_to_github_and_omitted_runner_selects_github() {
     for name in ["ci-pr.yml", "ci-main.yml"] {
         let workflow = generated.workflow(name);
         assert!(workflow.contains("workflow_dispatch:"), "{name}");
-        assert!(workflow.contains("default: github"), "{name}");
+        assert!(workflow.contains("default: both"), "{name}");
         assert!(!workflow.contains("default: velnor"), "{name}");
         assert!(workflow.contains("- github"), "{name}");
         assert!(workflow.contains("- both"), "{name}");
         assert!(
-            workflow.contains("default: github"),
-            "omitted dispatch runner must default to GitHub: {name}"
+            workflow.contains("default: both"),
+            "omitted dispatch runner must default to both: {name}"
         );
         assert!(
             workflow.contains("options:\n          - affected"),
@@ -753,8 +757,16 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
-    assert_eq!(unit.matches("    name: \"Velnor / rust-crate").count(), 8);
-    assert_eq!(unit.matches("    name: \"GitHub / rust-crate").count(), 8);
+    assert_eq!(
+        unit.matches("    name: \"Velnor / Rust / rust-crate")
+            .count(),
+        8
+    );
+    assert_eq!(
+        unit.matches("    name: \"GitHub / Rust / rust-crate")
+            .count(),
+        8
+    );
     let pr = generated.workflow("ci-pr.yml");
     assert_eq!(
         pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
@@ -809,11 +821,11 @@ units = ["rust-crate01"]
 
     let generated = generate(&root);
     let workflow = generated.workflow("ci-unit-rust.yml");
-    assert!(workflow.contains("name: \"GitHub / rust-crate00\""));
+    assert!(workflow.contains("name: \"GitHub / Rust / rust-crate00\""));
     assert!(workflow.contains("timeout-minutes: 17"));
-    assert!(workflow.contains("name: \"Velnor / rust-crate01\""));
-    assert!(workflow.contains("name: \"GitHub / rust-crate01\""));
-    assert!(!workflow.contains("name: \"Velnor / rust-crate00\""));
+    assert!(workflow.contains("name: \"Velnor / Rust / rust-crate01\""));
+    assert!(workflow.contains("name: \"GitHub / Rust / rust-crate01\""));
+    assert!(!workflow.contains("name: \"Velnor / Rust / rust-crate00\""));
 }
 
 #[test]

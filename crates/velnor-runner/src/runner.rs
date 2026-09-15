@@ -65,7 +65,6 @@ use crate::{
         TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, TimelineRecordState,
         RUNNER_JOB_REQUEST,
     },
-    runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
     slot_log::{self, SlotForensics},
 };
@@ -1976,11 +1975,30 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
             runner.id,
             runner.runner_group_id.unwrap_or(runner_group_id)
         );
+        persist_runner_registration(&stored, runner.id);
     } else {
         println!("Dry run: skipped JIT config request.");
     }
 
     Ok(())
+}
+
+fn persist_runner_registration(stored: &StoredRunnerConfig, runner_id: i64) {
+    let Some(sink) = crate::ops::global() else {
+        return;
+    };
+    if let Err(error) = sink.upsert_runner_registration(
+        runner_id,
+        &stored.settings.agent_name,
+        &stored.settings.labels,
+        stored.settings.ephemeral,
+        true,
+    ) {
+        eprintln!(
+            "Warning: JIT runner '{}' id {runner_id} is registered with GitHub but the operational store write failed: {error:#}",
+            stored.settings.agent_name
+        );
+    }
 }
 
 fn pending_jit_registration_path(dir: &Path) -> PathBuf {
@@ -4234,12 +4252,18 @@ fn daemon_slot_successor_config_dir(
 fn daemon_slot_successor_agent_name(
     base_name: Option<&str>,
     slot_index: usize,
-    slot_count: usize,
+    _slot_count: usize,
     cycle: u64,
 ) -> String {
-    let current = daemon_slot_agent_name(base_name, slot_index, slot_count)
-        .unwrap_or_else(default_agent_name);
-    format!("{current}-next-{}-{cycle}", std::process::id())
+    let host = github_runner_host_slug();
+    let instance = instance_slug_from_operator_name(base_name, &host);
+    compose_github_runner_successor_name(
+        &host,
+        &instance,
+        zero_based_slot_index(slot_index),
+        std::process::id(),
+        cycle,
+    )
 }
 
 async fn cleanup_failed_daemon_slot(
@@ -5626,18 +5650,197 @@ fn daemon_slot_name(slot_index: usize) -> String {
 fn daemon_slot_agent_name(
     base_name: Option<&str>,
     slot_index: usize,
-    slot_count: usize,
+    _slot_count: usize,
 ) -> Option<String> {
-    match (base_name, slot_count) {
-        (None, 1) => None,
-        (Some(name), 1) => Some(name.to_string()),
-        (Some(name), _) => Some(format!("{name}-{}", daemon_slot_name(slot_index))),
-        (None, _) => Some(format!(
-            "{}-{}",
-            default_agent_name(),
-            daemon_slot_name(slot_index)
-        )),
+    let host = github_runner_host_slug();
+    let instance = instance_slug_from_operator_name(base_name, &host);
+    Some(compose_github_runner_name(
+        &host,
+        &instance,
+        zero_based_slot_index(slot_index),
+    ))
+}
+
+/// GitHub runner names are alphanumeric + hyphen, max 64 characters.
+const GITHUB_RUNNER_NAME_MAX: usize = 64;
+
+fn zero_based_slot_index(one_based: usize) -> usize {
+    one_based.saturating_sub(1)
+}
+
+/// Hostname slug for GitHub runner names. Uses `uname` so Linux and macOS
+/// share one path; never the guest container OS.
+#[must_use]
+pub fn github_runner_host_slug() -> String {
+    #[cfg(unix)]
+    let host = String::from_utf8_lossy(rustix::system::uname().nodename().to_bytes()).into_owned();
+    #[cfg(not(unix))]
+    let host = std::env::var("HOSTNAME").unwrap_or_default();
+    let slug = github_identity_slug(&host);
+    if slug.is_empty() {
+        "host".to_owned()
+    } else {
+        slug
     }
+}
+
+/// Canonical GitHub registration name: `velnor-{host}-{instance}-{slot}`.
+///
+/// `slot` is the 0-based store `Slot.index`. If `instance` is already a full
+/// composed name for this host, the host prefix is not repeated.
+#[must_use]
+pub fn compose_github_runner_name(host: &str, instance: &str, slot: usize) -> String {
+    let host = github_identity_slug(host);
+    let host = if host.is_empty() {
+        "host".to_owned()
+    } else {
+        host
+    };
+    let instance = instance_slug_from_operator_name(Some(instance), &host);
+    assemble_github_runner_name(&host, &instance, slot, None)
+}
+
+#[must_use]
+pub fn compose_github_runner_successor_name(
+    host: &str,
+    instance: &str,
+    slot: usize,
+    pid: u32,
+    cycle: u64,
+) -> String {
+    let host = github_identity_slug(host);
+    let host = if host.is_empty() {
+        "host".to_owned()
+    } else {
+        host
+    };
+    let instance = instance_slug_from_operator_name(Some(instance), &host);
+    assemble_github_runner_name(&host, &instance, slot, Some((pid, cycle)))
+}
+
+fn instance_slug_from_operator_name(base_name: Option<&str>, host: &str) -> String {
+    let slug = base_name
+        .map(github_identity_slug)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "local".to_owned());
+    strip_composed_instance(&slug, host)
+}
+
+fn strip_composed_instance(slug: &str, host: &str) -> String {
+    let host_prefix = format!("velnor-{host}-");
+    let rest = if let Some(rest) = slug.strip_prefix(&host_prefix) {
+        rest
+    } else if slug == format!("velnor-{host}") {
+        return "local".to_owned();
+    } else if slug == format!("velnor-local-{host}") {
+        return "local".to_owned();
+    } else {
+        return slug.to_owned();
+    };
+    let core = rest.split("-next-").next().unwrap_or(rest);
+    if let Some((instance, slot)) = core.rsplit_once('-')
+        && !instance.is_empty()
+        && slot.chars().all(|c| c.is_ascii_digit())
+    {
+        return instance.to_owned();
+    }
+    if core.is_empty() {
+        "local".to_owned()
+    } else {
+        core.to_owned()
+    }
+}
+
+fn github_identity_slug(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_dash = true;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_owned()
+}
+
+fn assemble_github_runner_name(
+    host: &str,
+    instance: &str,
+    slot: usize,
+    successor: Option<(u32, u64)>,
+) -> String {
+    let slot_s = slot.to_string();
+    let suffix = match successor {
+        Some((pid, cycle)) => format!("-{slot_s}-next-{pid}-{cycle}"),
+        None => format!("-{slot_s}"),
+    };
+    // `velnor-` + host + `-` + instance + suffix. Never drop host or slot.
+    let reserved = 7 + suffix.len() + 1;
+    let budget = GITHUB_RUNNER_NAME_MAX.saturating_sub(reserved);
+    let (mut host, mut instance) = fit_host_instance(host, instance, budget.max(1));
+    if host.is_empty() {
+        host = "host".to_owned();
+    }
+    if instance.is_empty() {
+        instance = "local".to_owned();
+    }
+    format!("velnor-{host}-{instance}{suffix}")
+}
+
+fn fit_host_instance(host: &str, instance: &str, budget: usize) -> (String, String) {
+    if host.len() + instance.len() <= budget {
+        return (host.to_owned(), instance.to_owned());
+    }
+    let min_host = 1;
+    let host_keep = host.len().min(budget.saturating_sub(1).max(min_host));
+    let instance_keep = budget.saturating_sub(host_keep).max(1);
+    let host_keep = budget.saturating_sub(instance_keep).max(min_host);
+    (
+        truncate_slug(host, host_keep),
+        truncate_slug(instance, instance_keep),
+    )
+}
+
+fn truncate_slug(raw: &str, max: usize) -> String {
+    if raw.len() <= max {
+        return raw.to_owned();
+    }
+    raw.chars()
+        .take(max)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_owned()
+}
+
+pub(crate) fn identity_from_agent_name(agent_name: &str) -> crate::runtime_env::JobRunnerIdentity {
+    let host = github_runner_host_slug();
+    if let Some((instance, slot)) = parse_instance_and_slot(agent_name, &host) {
+        return crate::runtime_env::JobRunnerIdentity {
+            runner_name: agent_name.to_owned(),
+            host,
+            instance,
+            slot,
+        };
+    }
+    crate::runtime_env::JobRunnerIdentity {
+        runner_name: agent_name.to_owned(),
+        host,
+        instance: "local".to_owned(),
+        slot: "0".to_owned(),
+    }
+}
+
+fn parse_instance_and_slot(agent_name: &str, host: &str) -> Option<(String, String)> {
+    let rest = agent_name.strip_prefix(&format!("velnor-{host}-"))?;
+    let core = rest.split("-next-").next().unwrap_or(rest);
+    let (instance, slot) = core.rsplit_once('-')?;
+    if instance.is_empty() || !slot.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((instance.to_owned(), slot.to_owned()))
 }
 
 fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<()> {
@@ -5694,11 +5897,17 @@ fn resource_policy_label(cpus: &str, memory: &str) -> String {
 }
 
 fn canonical_slot_name(config_dir: &Path) -> String {
-    config_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| name.starts_with("slot-"))
-        .map_or_else(|| "slot-0".to_owned(), ToOwned::to_owned)
+    let Some(name) = config_dir.file_name().and_then(|value| value.to_str()) else {
+        return "slot-0".to_owned();
+    };
+    let Some(index) = name.strip_prefix("slot-") else {
+        return "slot-0".to_owned();
+    };
+    let Ok(one_based) = index.parse::<usize>() else {
+        return name.to_owned();
+    };
+    // Daemon directories are 1-based; Job.slot and runner names use Slot.index.
+    format!("slot-{}", one_based.saturating_sub(1))
 }
 
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
@@ -7566,6 +7775,7 @@ async fn handle_job_request(
         // which previously produced `teardown: None` and left them running.
         let teardown_slot: TeardownSlot = Arc::new(Mutex::new(None));
         let execution_teardown_slot = Arc::clone(&teardown_slot);
+        let runner_name = runner_name.to_owned();
         let job_result = run_on_job_execution_thread(&job.job_id, move || {
             execute_script_job(
                 &config_dir,
@@ -7587,6 +7797,7 @@ async fn handle_job_request(
                 reserved_bytes,
                 execution_telemetry_admission,
                 &execution_teardown_slot,
+                &runner_name,
             )
         })
         .await;
@@ -9556,6 +9767,7 @@ fn execute_script_job(
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
     teardown_slot: &TeardownSlot,
+    runner_name: &str,
 ) -> Result<ScriptJobResult> {
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -9584,6 +9796,7 @@ fn execute_script_job(
         telemetry_admission,
         execution_backend,
         teardown_slot,
+        runner_name,
     );
     if result.is_err()
         && !has_teardown_owner(teardown_slot)
@@ -10081,6 +10294,7 @@ fn execute_script_job_inner(
     telemetry_admission: Option<crate::ops::JobAdmission>,
     execution_backend: velnor_model::ExecutionBackendKind,
     teardown_slot: &TeardownSlot,
+    runner_name: &str,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         return execute_microvm_script_job(
@@ -10138,7 +10352,7 @@ fn execute_script_job_inner(
     if repaired > 0 {
         eprintln!("forensics.lifecycle: removed {repaired} orphaned Cargo git checkout(s)");
     }
-    let container = github_job_container_spec(
+    let mut container = github_job_container_spec(
         job,
         GitHubJobContainerPaths {
             workspace_host: workspace.clone(),
@@ -10156,6 +10370,8 @@ fn execute_script_job_inner(
         daemon_id,
         effective_trust_scope,
     )?;
+    let identity = identity_from_agent_name(runner_name);
+    crate::github_adapter::push_runner_identity_env(&mut container.env, &identity);
     seed_mise_store_from_image(&container);
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
@@ -10174,7 +10390,7 @@ fn execute_script_job_inner(
         order: 1,
         started_at: setup_ts.clone(),
         completed_at: setup_ts,
-        lines: setup_job_lines(job, docker_image),
+        lines: setup_job_lines(job, docker_image, Some(&identity), Some(execution_backend)),
         masks: Vec::new(),
         annotations: Vec::new(),
         telemetry: Vec::new(),
@@ -10214,7 +10430,7 @@ fn execute_script_job_inner(
     let (runtime_checkout_plans, eager_checkout_plans): (Vec<_>, Vec<_>) = checkout_plans
         .into_iter()
         .partition(CheckoutPlan::requires_runtime_context);
-    let mut base_env = job_runtime_env(job);
+    let mut base_env = crate::runtime_env::job_runtime_env_with_identity(job, Some(&identity));
     base_env.extend(crate::runtime_env::cache_authority_env(
         job,
         reserved_bytes,
@@ -12474,13 +12690,53 @@ fn blob_log_lines(timestamp: &str, lines: &[String]) -> Vec<String> {
 
 /// Build the "Set up job" log lines — mirrors the GitHub-hosted runner's
 /// provisioning block. Uses `::group::` sections so they collapse in the UI.
-fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<String> {
+fn setup_job_lines(
+    job: &AgentJobRequestMessage,
+    docker_image: &str,
+    identity: Option<&crate::runtime_env::JobRunnerIdentity>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
     lines.push(format!(
         "Current runner version: '{}'",
         crate::protocol::velnor_runner_display()
     ));
+
+    let host = identity
+        .map(|value| value.host.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let host = if host.is_empty() {
+        github_runner_host_slug()
+    } else {
+        host
+    };
+    let runner_name = identity
+        .map(|value| value.runner_name.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("velnor");
+    let instance = identity
+        .map(|value| value.instance.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("local");
+    let slot = identity
+        .map(|value| value.slot.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("0");
+    lines.push("##[group]Runner".to_string());
+    lines.push(format!("Runner name: '{runner_name}'"));
+    lines.push(format!("Machine name: '{host}'"));
+    lines.push(format!("Instance: '{instance}'"));
+    lines.push(format!("Slot: '{slot}'"));
+    if let Some(backend) = backend {
+        lines.push(format!("Backend: '{}'", backend.as_str()));
+    }
+    lines.push(format!(
+        "Version: '{}'",
+        crate::protocol::velnor_runner_display()
+    ));
+    lines.push("##[endgroup]".to_string());
 
     // Operating System (fixed: Velnor jobs always run in Ubuntu 24.04).
     lines.push("##[group]Operating System".to_string());
@@ -14903,14 +15159,19 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .await
         .context("list runners for doctor probe")?;
 
-    let slot_prefix = format!("{}-slot-", args.name);
+    let host = github_runner_host_slug();
+    let instance = instance_slug_from_operator_name(Some(&args.name), &host);
+    let composed_prefix = format!("velnor-{host}-{instance}");
+    let legacy_slot_prefix = format!("{}-slot-", args.name);
     let mine: Vec<_> = runners
         .iter()
         .filter(|runner| {
-            runner
-                .name
-                .as_deref()
-                .is_some_and(|name| name == args.name || name.starts_with(&slot_prefix))
+            runner.name.as_deref().is_some_and(|name| {
+                name == args.name
+                    || name == composed_prefix
+                    || name.starts_with(&format!("{composed_prefix}-"))
+                    || name.starts_with(&legacy_slot_prefix)
+            })
         })
         .collect();
     let online = mine
@@ -18157,10 +18418,11 @@ jobs:
         args.pool_name = Some("Default".into());
 
         let configure_args = daemon_slot_configure_args(&args, Path::new("/config"), 2, 2).unwrap();
+        let expected = compose_github_runner_name(&github_runner_host_slug(), "velnor-ci", 1);
 
         assert_eq!(configure_args.url, "https://github.com/owner/repo");
         assert_eq!(configure_args.pat.as_deref(), Some("pat"));
-        assert_eq!(configure_args.name.as_deref(), Some("velnor-ci-slot-2"));
+        assert_eq!(configure_args.name.as_deref(), Some(expected.as_str()));
         assert_eq!(
             configure_args.config_dir,
             Some(Path::new("/config/slots/slot-2").to_path_buf())
@@ -18676,11 +18938,77 @@ jobs:
         args.name = Some("velnor-ci".into());
 
         let configure_args = daemon_slot_configure_args(&args, Path::new("/config"), 1, 1).unwrap();
+        let expected = compose_github_runner_name(&github_runner_host_slug(), "velnor-ci", 0);
 
-        assert_eq!(configure_args.name.as_deref(), Some("velnor-ci"));
+        assert_eq!(configure_args.name.as_deref(), Some(expected.as_str()));
         assert_eq!(
             configure_args.config_dir,
             Some(Path::new("/config").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn github_runner_names_are_canonical_collision_safe_and_non_secret() {
+        let cases = [
+            ("sentry", "primary", 2, "velnor-sentry-primary-2"),
+            ("macbook", "local", 0, "velnor-macbook-local-0"),
+            ("MacBook-Pro.local", "local", 0, "velnor-macbook-pro-local-local-0"),
+            ("build host 1", "ci", 1, "velnor-build-host-1-ci-1"),
+            ("sentry", "velnor-sentry-primary", 2, "velnor-sentry-primary-2"),
+            ("sentry", "velnor-sentry-primary-2", 2, "velnor-sentry-primary-2"),
+            ("sentry", "velnor-local-sentry", 0, "velnor-sentry-local-0"),
+        ];
+        for (host, instance, slot, expected) in cases {
+            assert_eq!(
+                compose_github_runner_name(host, instance, slot),
+                expected,
+                "host={host} instance={instance} slot={slot}"
+            );
+        }
+        let a = compose_github_runner_name("sentry", "primary", 0);
+        let b = compose_github_runner_name("sentry", "primary", 1);
+        assert_ne!(a, b, "two slots on one host must not collide");
+        let linux = compose_github_runner_name("sentry", "primary", 0);
+        let macos = compose_github_runner_name("macbook", "primary", 0);
+        assert_ne!(linux, macos, "two hosts must not collide");
+        assert!(linux.starts_with("velnor-sentry-"));
+        assert!(macos.starts_with("velnor-macbook-"));
+        let successor = compose_github_runner_successor_name("sentry", "primary", 2, 99, 3);
+        assert!(
+            successor.starts_with("velnor-sentry-primary-2-next-"),
+            "{successor}"
+        );
+        assert!(successor.contains("-99-3"));
+        let long = compose_github_runner_name(
+            "very-long-hostname-that-should-be-truncated-for-github",
+            "very-long-instance-name-that-also-needs-room",
+            12,
+        );
+        assert!(long.len() <= GITHUB_RUNNER_NAME_MAX, "{long}");
+        assert!(long.starts_with("velnor-"));
+        assert!(long.ends_with("-12"));
+        for name in [&a, &b, &linux, &macos, &successor, &long] {
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+            assert!(!name.contains("ghp_"));
+            assert!(!name.contains("github_pat_"));
+            assert!(!name.contains('@'));
+        }
+    }
+
+    #[test]
+    fn daemon_slot_agent_names_match_admission_and_do_not_collide() {
+        let host = github_runner_host_slug();
+        let first = daemon_slot_agent_name(Some("primary"), 1, 2).unwrap();
+        let second = daemon_slot_agent_name(Some("primary"), 2, 2).unwrap();
+        assert_eq!(first, compose_github_runner_name(&host, "primary", 0));
+        assert_eq!(second, compose_github_runner_name(&host, "primary", 1));
+        assert_ne!(first, second);
+        let other_host = compose_github_runner_name("other-host", "primary", 0);
+        assert_ne!(first, other_host);
+        let admission_name = first.clone();
+        assert_eq!(
+            identity_from_agent_name(&admission_name).runner_name,
+            admission_name
         );
     }
 
@@ -23430,11 +23758,29 @@ runs:
             "RequestId": 1
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
+        let identity = crate::runtime_env::JobRunnerIdentity {
+            runner_name: "velnor-sentry-primary-2".into(),
+            host: "sentry".into(),
+            instance: "primary".into(),
+            slot: "2".into(),
+        };
+        let lines = setup_job_lines(
+            &job,
+            "velnor/job-ubuntu:26.04",
+            Some(&identity),
+            Some(velnor_model::ExecutionBackendKind::Docker),
+        );
         let joined = lines.join("\n");
         assert!(joined.contains("Current runner version:"));
         assert!(joined.contains("velnor/job-ubuntu:26.04"));
         assert!(joined.contains("Complete job name: build (app-a)"));
+        assert!(joined.contains("Runner name: 'velnor-sentry-primary-2'"));
+        assert!(joined.contains("Machine name: 'sentry'"));
+        assert!(joined.contains("Instance: 'primary'"));
+        assert!(joined.contains("Slot: '2'"));
+        assert!(joined.contains("Backend: 'docker'"));
+        assert!(!joined.contains("ghp_"));
+        assert!(!joined.contains("github_pat_"));
         assert!(joined.contains("##[group]Operating System"));
         assert!(joined.contains("##[endgroup]"));
         assert!(joined.contains("Prepare workflow directory"));
@@ -23462,7 +23808,7 @@ runs:
             }
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04", None, None);
         let joined = lines.join("\n");
         assert!(
             joined.contains("##[group]GITHUB_TOKEN Permissions"),
@@ -23510,7 +23856,7 @@ runs:
             ]
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04", None, None);
         let joined = lines.join("\n");
         // Tag ref: no SHA suffix.
         assert!(
@@ -23543,7 +23889,7 @@ runs:
             }]
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04", None, None);
         let joined = lines.join("\n");
         // Full 40-char SHA ref: show SHA suffix matching GitHub UI format.
         assert!(

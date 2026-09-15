@@ -498,7 +498,7 @@ fn effective_host_name(globals: &GlobalArgs, args: &HostStartArgs) -> Result<Str
         .instance
         .clone()
         .or_else(|| args.name.clone())
-        .unwrap_or_else(|| format!("velnor-local-{}", hostname_slug())))
+        .unwrap_or_else(|| "local".to_owned()))
 }
 
 #[derive(Debug, Clone)]
@@ -1267,25 +1267,6 @@ fn github_pat() -> Option<String> {
     env::var("GITHUB_TOKEN")
         .ok()
         .filter(|value| !value.is_empty())
-}
-
-fn hostname_slug() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| {
-            value
-                .chars()
-                .flat_map(|ch| ch.to_lowercase())
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .take(24)
-                .collect::<String>()
-                .trim_matches('-')
-                .to_owned()
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "host".into())
 }
 
 fn docker_endpoint_display() -> String {
