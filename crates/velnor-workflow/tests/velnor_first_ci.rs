@@ -664,6 +664,58 @@ fn velnor_lane_installs_declared_mise_tools() {
 }
 
 #[test]
+fn regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only() {
+    let root = unique_dir("regen-gate-policy-runtime");
+    write_rust_fixture(&root, 2);
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let mut contents = fs::read_to_string(&config).unwrap();
+    contents.push_str(
+        "\n[[declare]]\nprimitive = \"regen-gate\"\nunits = [\"rust-crate00\"]\n\n[declare.args]\ncommand = \"cd -- 'crates/crate00' && cargo run --locked -- --plain --check ../..\"\n",
+    );
+    fs::write(&config, contents).unwrap();
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    let provision = "      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ inputs.policy_runtime }}\n";
+    assert_eq!(
+        unit.matches(provision).count(),
+        1,
+        "the Velnor lane job provisions the pinned policy binary behind the input gate exactly once: {unit}"
+    );
+    let (hosted, velnor) = unit
+        .split_once("\n  verify-velnor:\n")
+        .expect("both lane jobs render");
+    assert!(
+        !hosted.contains("Provision pinned Velnor workflow policy runtime"),
+        "the hosted lane carries the pinned binary in the Planning runtime artifact: {hosted}"
+    );
+    assert!(
+        velnor.contains("cargo install --locked --git ")
+            && velnor.contains(" --rev \"$PINNED_REVISION\" --root \"$root\" velnor-workflow --bin velnor-workflow")
+            && velnor.contains("echo \"VELNOR_WORKFLOW_PINNED_BINARY=$binary\" >> \"$GITHUB_ENV\""),
+        "the Velnor lane builds the named binary once into the host store and exports it for the D19 guard: {velnor}"
+    );
+    assert!(
+        unit.contains("      policy_runtime:\n        required: false\n        type: boolean\n        default: false\n"),
+        "the callee declares the flag: {unit}"
+    );
+    let pr = generated.workflow("ci-pr.yml");
+    let velnor_caller = pr
+        .split("\n  velnor-rust-crate00:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  velnor-rust-crate01:\n").next())
+        .expect("the Velnor caller of the regen-gate unit renders");
+    assert!(
+        velnor_caller.contains("      policy_runtime: true\n"),
+        "only the regen-gate unit's Velnor caller passes the flag: {velnor_caller}"
+    );
+    assert_eq!(
+        pr.matches("policy_runtime: true").count(),
+        1,
+        "no other caller (hosted lane, other units) passes the flag: {pr}"
+    );
+}
+
+#[test]
 fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     let root = unique_dir("per-unit-capabilities");
     write_rust_fixture(&root, 2);

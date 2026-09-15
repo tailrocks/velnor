@@ -92,6 +92,10 @@ on:
         required: false
         type: string
         default: ""
+      policy_runtime:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   verify-github:

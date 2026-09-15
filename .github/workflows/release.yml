@@ -2506,6 +2506,23 @@ jobs:
             echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
             echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
           } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+      - name: Provision pinned Velnor workflow policy runtime
+        shell: bash
+        env:
+          PINNED_REVISION: c0d04300a4f7bd26caeccf5764d66eae3703c75e
+        run: |
+          set -euo pipefail
+          binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
+          reported="$("$binary" --revision 2>/dev/null || true)"
+          if [[ "$reported" != "$PINNED_REVISION" ]]; then
+            root="$RUNNER_TEMP/velnor-workflow-policy-$PINNED_REVISION"
+            env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+              cargo install --locked --git https://github.com/tailrocks/velnor --rev "$PINNED_REVISION" --root "$root" velnor-workflow --bin velnor-workflow
+            install -Dm0755 "$root/bin/velnor-workflow" "$binary"
+            reported="$("$binary" --revision)"
+          fi
+          [[ "$reported" == "$PINNED_REVISION" ]] || { echo "::error::pinned workflow policy runtime reports revision $reported, expected $PINNED_REVISION" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
       - name: Install declared Mise tools
         run: |
           set -euo pipefail

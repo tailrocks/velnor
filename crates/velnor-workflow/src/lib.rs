@@ -3482,9 +3482,25 @@ fn workflow_pinned_policy_runtime_setup(repository: &str) -> String {
     )
 }
 
-/// Hosted Planning runtime: the pinned policy runtime first when the event
-/// runtime may differ from it, then the event runtime.
-pub(crate) fn workflow_planning_runtime_setup(repository: &str) -> String {
+/// Velnor lane: the job home is the packaged runtime, whose revision follows
+/// the fleet release rather than the generator pin, so a unit that runs the
+/// generator's `--check` builds the pinned binary itself. `$CARGO_HOME/bin`
+/// is the host-persistent (trust-scoped) executable store, so one build per
+/// slot per pin serves every later job; the binary proves itself through
+/// `--revision` before and after the install, and the step exports it for
+/// the guard (`VELNOR_WORKFLOW_PINNED_BINARY`) so the offline check never
+/// reaches for `cargo install`.
+pub(crate) fn workflow_pinned_policy_runtime_velnor() -> String {
+    format!(
+        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          PINNED_REVISION: {VELNOR_POLICY_WORKFLOW_REV}\n        run: |\n          set -euo pipefail\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          reported=\"$(\"$binary\" --revision 2>/dev/null || true)\"\n          if [[ \"$reported\" != \"$PINNED_REVISION\" ]]; then\n            root=\"$RUNNER_TEMP/velnor-workflow-policy-$PINNED_REVISION\"\n            env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \\\n              cargo install --locked --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} --rev \"$PINNED_REVISION\" --root \"$root\" velnor-workflow --bin velnor-workflow\n            install -Dm0755 \"$root/bin/velnor-workflow\" \"$binary\"\n            reported=\"$(\"$binary\" --revision)\"\n          fi\n          [[ \"$reported\" == \"$PINNED_REVISION\" ]] || {{ echo \"::error::pinned workflow policy runtime reports revision $reported, expected $PINNED_REVISION\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
+    )
+}
+
+/// Hosted runtime for a job that also runs the pinned policy binary (Planning,
+/// and release jobs of the generator's own unit): the pinned policy runtime
+/// first when the event runtime may differ from it, then the event runtime,
+/// so the event runtime is what ends up on PATH.
+pub(crate) fn workflow_runtime_setup_with_pinned_policy(repository: &str) -> String {
     let install_rev = workflow_setup_install_rev(repository);
     let mut setup = String::new();
     if install_rev != VELNOR_WORKFLOW_SOURCE_REV {
@@ -6589,7 +6605,7 @@ mod tests {
 
     #[test]
     fn owner_planning_provisions_the_pinned_policy_runtime_before_the_event_runtime() {
-        let owner = workflow_planning_runtime_setup(workflow_setup_action_repository());
+        let owner = workflow_runtime_setup_with_pinned_policy(workflow_setup_action_repository());
         let pinned = must_some(
             owner.find("name: Set up pinned Velnor workflow policy runtime"),
             "pinned policy runtime step",
@@ -6627,7 +6643,7 @@ mod tests {
             "the owner never pins itself by remote path: {owner}"
         );
 
-        let foreign = workflow_planning_runtime_setup("example/consumer");
+        let foreign = workflow_runtime_setup_with_pinned_policy("example/consumer");
         assert!(
             !foreign.contains("pinned Velnor workflow policy runtime"),
             "a consumer installs the pin as its runtime, so PATH already is the pin: {foreign}"

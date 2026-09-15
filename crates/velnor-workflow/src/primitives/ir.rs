@@ -790,6 +790,13 @@ fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
         .chain(unit.velnor_full_commands.iter().flatten())
 }
 
+/// Whether the unit runs the generator's own regeneration gate
+/// (`--plain --check`), whose D19 guard needs the pinned policy binary while
+/// the checks run with the network restricted.
+pub(crate) fn unit_runs_workflow_plain_check(unit: &Unit) -> bool {
+    unit_commands(unit).any(|command| command.contains("--plain --check"))
+}
+
 /// Whether any of the unit's commands drive the test runner through Cargo or
 /// Mr. Boxington. One predicate feeds both the `ToolRequirement` selection and
 /// the mise install list, so the two can never disagree about what a unit
@@ -1822,6 +1829,10 @@ pub(crate) mod lane_input {
     pub(crate) const CARGO_NET_OFFLINE: &str = "cargo_net_offline";
     /// Comma-separated host-warm layers the Velnor lane reports.
     pub(crate) const HOST_WARM_LAYERS: &str = "host_warm_layers";
+    /// `true` when the Velnor lane must provision the pinned policy runtime
+    /// for the unit's generator `--check`; hosted lanes carry it in the
+    /// Planning runtime artifact unconditionally.
+    pub(crate) const POLICY_RUNTIME: &str = "policy_runtime";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -1842,6 +1853,7 @@ pub(crate) mod lane_input {
         CARGO_FETCH_SKIP_WHEN_WARM,
         CARGO_NET_OFFLINE,
         HOST_WARM_LAYERS,
+        POLICY_RUNTIME,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -1851,7 +1863,7 @@ pub(crate) mod lane_input {
     pub(crate) fn is_flag(name: &str) -> bool {
         matches!(
             name,
-            MISE_RUNNER | CARGO_FETCH_SKIP_WHEN_WARM | CARGO_NET_OFFLINE
+            MISE_RUNNER | CARGO_FETCH_SKIP_WHEN_WARM | CARGO_NET_OFFLINE | POLICY_RUNTIME
         )
     }
 
@@ -1901,6 +1913,10 @@ pub(crate) struct SnapshotFacts {
 /// caller turns it into `with:` values and the callee unions it over the
 /// kind's members to decide which steps exist and which need a presence gate.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent `type: boolean` workflow_call input"
+)]
 pub(crate) struct LaneStepFacts {
     pub(crate) mise_tools: Vec<String>,
     pub(crate) mise_runner: bool,
@@ -1916,6 +1932,7 @@ pub(crate) struct LaneStepFacts {
     pub(crate) cargo_fetch_skip_when_warm: bool,
     pub(crate) cargo_net_offline: bool,
     pub(crate) host_warm_layers: Vec<&'static str>,
+    pub(crate) policy_runtime: bool,
 }
 
 impl LaneStepFacts {
@@ -1975,6 +1992,9 @@ impl LaneStepFacts {
                 lane_input::HOST_WARM_LAYERS,
                 self.host_warm_layers.join(","),
             ));
+        }
+        if self.policy_runtime {
+            values.push((lane_input::POLICY_RUNTIME, "true".to_owned()));
         }
         values
     }
@@ -3156,6 +3176,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             } else {
                 Vec::new()
             },
+            policy_runtime: lane == RunnerMode::Velnor && unit_runs_workflow_plain_check(unit),
         }
     }
 
@@ -3253,6 +3274,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
             prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
         };
+
+        // The pinned policy runtime for units that run the generator's own
+        // `--check`: hosted lanes carry it in the Planning runtime artifact,
+        // the Velnor lane builds it into the host's persistent store.
+        let policy_runtime = FeatureCoverage::over(&facts, |facts| facts.policy_runtime);
+        if !github_lane && policy_runtime.any {
+            output.push_str(&gated(
+                crate::workflow_pinned_policy_runtime_velnor(),
+                policy_runtime,
+                lane_input::POLICY_RUNTIME,
+            ));
+        }
 
         // Tool provisioning, in the literal lane job's order.
         let mise_tools = FeatureCoverage::over(&facts, |facts| !facts.mise_tools.is_empty());
@@ -3937,7 +3970,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
-            crate::workflow_planning_runtime_setup(&self.repository)
+            crate::workflow_runtime_setup_with_pinned_policy(&self.repository)
         };
         let base_sha = self.base_sha_expression();
         // Both-mode planning consumes the admitted lanes: a velnor-only

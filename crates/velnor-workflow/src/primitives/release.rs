@@ -1792,6 +1792,15 @@ fn render_release_unit_job(
         super::render_velnor_runner_identity_step(output);
     }
     workflow.render_workflow_runtime_setup(output, lane);
+    // The generator's own unit runs `--plain --check` with the network
+    // restricted, so its D19 guard needs the pinned policy binary before the
+    // first command. Hosted release jobs already install the runtime at the
+    // pin (the guard finds it on PATH by revision); the Velnor lane runs the
+    // packaged fleet runtime and builds the pinned binary into the host's
+    // persistent executable store instead.
+    if lane == crate::RunnerMode::Velnor && super::ir::unit_runs_workflow_plain_check(unit) {
+        output.push_str(&crate::workflow_pinned_policy_runtime_velnor());
+    }
     workflow.render_tool_provisioning(output, lane, unit, false);
     let cargo_cache_restored = CacheBackend::Detected
         .lane_enables_actions_cache(lane, workflow, unit)

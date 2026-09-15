@@ -1003,6 +1003,7 @@ jobs:
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
+      policy_runtime: true
   github-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
