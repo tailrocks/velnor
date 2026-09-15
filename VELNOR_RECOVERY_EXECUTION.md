@@ -9,22 +9,25 @@ Operator contract (2026-09-15): finish only after this sequence is independently
 | # | Gate | Status |
 |---|---|---|
 | 1 | macOS-hosted Velnor executes real `tailrocks/velnor` GHA jobs (not GitHub-hosted substitution) | **PASS** — run `34894567066` job `104145226224` on `velnor-macos-recovery-slot-1` @ `363d727b`; Docker precreate + Policy job **Succeeded** |
-| 2 | Merge **#809, #812, #814, #815** using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **IN PROGRESS** — #816; this Mac ran rust-velnor-control + rust-production-topology on `velnor-macos-recovery-slot-*` (run `34901667088`). Both slots then fenced (`SlotStale` immediately after `RemoteAcked`) while waiters kept the broker session, so successor acquires were rejected (`slot must still be Ready`). Controller fix: do not fence an acting slot; terminate waiters on fence so generation can recover. |
+| 2 | Merge **#809, #812, #814, #815** using that macOS Velnor as the Velnor-lane runner; required checks green; no protection/DCO/signing bypass | **NOT YET** — #809 `466de1a6` run `34930642603` rerun: 7 Velnor jobs now on `velnor-macos-recovery-slot-*` (progress). Need `ci-required` green + recovery Velnor-lane proof. Do not merge. |
 | 3 | `main` fully green after the merge stack | **NOT YET** |
 | 4 | New release: Debian apt (`tailrocks/velnor-apt`) **and** Homebrew; artifacts install and operate | **NOT YET** — today Linux debs only; no Homebrew channel |
 | 5 | Deploy that verified release to Sentry (not a rescue build) | **NOT YET** — do not deploy until gate 4 |
 | 6 | Sentry executes real repository jobs; all PRs green, `main` green, release process proven | **NOT YET** |
 
-## Live snapshot (2026-09-15)
+## Live snapshot (2026-09-15 ~05:35 UTC)
 
 | Item | Value |
 |---|---|
-| **main** | `ad5fc59d` |
-| **PR #809** | `fb9a31a6` `codex/merge-all-velnor-20260914` — OPEN, BLOCKED |
-| **PR #812** | `991d86bd` `codex/velnor-macos-action-portability-20260915` — OPEN, BLOCKED, DCO fail |
-| **PR #814** | macOS `velnorctl` + host start — `codex/velnorctl-macos-support-20260915` — OPEN, BLOCKED |
-| **PR #815** | #812 + #814 combo `recovery/pr812` — OPEN, BLOCKED, DCO fail |
-| **Focused branch** | **`velnor-macos-host`** — continue macOS Docker-backed Velnor here |
+| **main** | `701fbdd1` (#817). Not `ad5fc59d`. |
+| **PR #809** | `466de1a6` — OPEN — run `34930642603` rerun. **28 SUCCESS reused**; 7 Velnor jobs now on `velnor-macos-recovery-slot-*` (gate 2 progress). `ci-required` not posted. Do not merge. |
+| **PR #812** | `4db23c0f` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
+| **PR #814** | `a67e4c28` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
+| **PR #815** | `e5049452` — OPEN — DCO pass; `ci-required` fail (latest completed run) |
+| **PR #816** | `94b02ab4` — OPEN — DCO pass; run `34930408749` completed failure (bootstrap/setup pattern) |
+| **Focused branch** | `origin/velnor-macos-host` @ `2e5d299b` — `6a88a77d` (workflow CI telemetry/cache/selection), `2e5d299b` (slot acting PID fix) |
+| **Host** | relaunched ~05:25 UTC pid `16577`; **12/12 ready**. Running host is old rescue binary. |
+| **Lifecycle** | Root cause documented: `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
 | **Sentry** | `velnor-runner 0.1.274~preview.145+d3e441f` @ `d3e441fb`; tailrocks fleet down |
 
 ## Related PR stack
@@ -55,13 +58,14 @@ Merge order: **#809 → #812 → refresh #814/#815**. Do not close any as redund
 
 | Surface | Result | Cause |
 |---|---|---|
-| #809 Velnor jobs | cancelled/queued | `group: velnor-trusted` empty (all org runners offline) |
-| #812 GitHub rust-velnor-workflow @ 21822888 | fail | scan input `a2f70c15` → `861def8a` because `21822888` added `scripts/test-setup-velnor-workflow-action.sh` without recording it |
-| #812 `991d86bd` generator | **verified** | Independent clean-tree `--check` and `--force` at `991d86bd`: byte-stable, scan `861def8a` is the real `RepositoryShape` digest. Not a hash overwrite. |
-| #812/#814/#815 Velnor jobs | queued | same org-group dependency |
-| #812/#815 DCO | fail | `991d86bd` still lacks `Signed-off-by` (operator force-with-lease to replace) |
+| #809 run `34930642603` attempt 1 | 28 SUCCESS later reused on attempt 2; 3 fails replaced | this-Mac workflow + workflow-contract SUCCESS. 3 container-death fails replaced by attempt 2. |
+| #809 run `34930642603` attempt 2 | hung `in_progress` | 7 this-Mac Velnor jobs idle mbx/no rustc ~36min (not compiling). Superseded by rerun. |
+| #809 run `34930642603` rerun | in progress | 7 Velnor jobs now on `velnor-macos-recovery-slot-*` (gate 2 progress). `ci-required` not posted. Do not merge. |
+| #812 `4db23c0f` / #814 `a67e4c28` / #815 `e5049452` | DCO pass; `ci-required` fail | latest completed runs |
+| #816 `94b02ab4` run `34930408749` | completed failure | bootstrap/setup pattern |
+| Host lifecycle | root cause documented | `child_owns_slot` ignored persisted waiter PIDs after controller restart. OAuth `release_in_flight_after_registration_gone` on branch. Marker release when `runner.json` gone still missing. |
+| `velnor-macos-host` | `2e5d299b` | `6a88a77d` workflow CI telemetry/cache/selection; `2e5d299b` slot acting PID fix |
 | Sentry tailrocks | fleet down | JIT wedge, 0/8 registered after 15:11 restart |
-| Repo-scoped dogfood | this branch claimable | `velnor-macos-host` emits label-only `runs-on`; #809/#812/#814/#815 still require `velnor-trusted` |
 
 ## Decisions
 
@@ -119,7 +123,7 @@ repo-scoped runner that is not in `velnor-trusted`.
 
 ## Next
 
-1. Restart `velnor-macos-recovery` via launchd onto the acting-slot fence fix. Prove a **second** acquire on `velnor-macos-recovery-slot-*` after a completed job.
-2. Prove Docker / Velnor on this Mac (not dogfood). Host already runs `VELNOR_TRUST_SCOPE=trusted`.
-3. Rebase/regen #809/#812/#814/#815 onto labels-only. Operator DCO-sign `991d86bd`.
-4. Sentry deploy only from the final merged/released SHA.
+1. Watch #809 run `34930642603` rerun — 7 Velnor jobs on recovery slots. Preserve the 28 greens.
+2. Gate 2 **NOT YET** until `ci-required` green + recovery Velnor-lane proof. Do not merge #809.
+3. Land `2e5d299b` slot acting PID fix on recovery host; rebuild/relaunch if needed.
+4. Do not deploy Sentry.
