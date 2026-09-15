@@ -54,12 +54,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-8e438e06855e10b4bfe5072912f47d2ae9dc5a02-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-e6fabca85499be62f939243d4452438449b69c53-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
+          EXPECTED_REVISION: e6fabca85499be62f939243d4452438449b69c53
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -138,9 +138,9 @@ jobs:
         with:
           path: |
             ~/.bun/install/cache
-          key: ci-${{ runner.os }}-bun-${{ hashFiles('package.json', 'bun.lock') }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('package.json', 'bun.lock') }}
           restore-keys: |
-            ci-${{ runner.os }}-bun-
+            ci-${{ runner.os }}-${{ runner.arch }}-bun-
       - name: Mark cache prep end
         if: ${{ inputs.unit == 'bun-velnor' && (always()) }}
         run: |
@@ -206,7 +206,7 @@ jobs:
         with:
           path: |
             ~/.bun/install/cache
-          key: ci-${{ runner.os }}-bun-${{ hashFiles('package.json', 'bun.lock') }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('package.json', 'bun.lock') }}
       - name: Mark cleanup end
         if: ${{ inputs.unit == 'bun-velnor' && (always()) }}
         run: |
@@ -221,6 +221,10 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: ${{ inputs.unit == 'bun-velnor' && (always()) }}
+        env:
+          VELNOR_CI_LANE: github
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: bun-velnor
@@ -390,6 +394,9 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: ${{ inputs.unit == 'bun-velnor' && (always()) }}
+        env:
+          VELNOR_CI_LANE: velnor
+          VELNOR_HOST_WARM_LAYERS: cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: bun-velnor

@@ -5637,6 +5637,7 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard("cleanup")?;
+        crate::storage::teardown_store_overlays(container);
         mark_job_container_done(container);
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
@@ -16410,6 +16411,9 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             store_trust_scope: "trusted".to_owned(),
+            store_read_through_scope: None,
+            store_overlay_mounts: Vec::new(),
+            prepared_cargo_store: None,
             mbx_store_host: None,
             sccache_store_host: None,
         }

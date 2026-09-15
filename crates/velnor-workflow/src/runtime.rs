@@ -24,7 +24,7 @@ use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};
 
 use super::primitives::snapshot::{
-    plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
+    budget_report, plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
 use super::{lanes_support_unit_kind, GeneratorError, RunnerMode, UnitKind};
 
@@ -367,7 +367,11 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 )));
             }
             if mode == "budget" {
-                println!("{}", RetentionPolicy::default_policy().total_bytes);
+                if let Some(entries_path) = options.get("entries") {
+                    cache_budget_report(entries_path)?;
+                } else {
+                    println!("{}", retention_policy_for_plan().total_bytes);
+                }
                 return Ok(true);
             }
             cache_plan(
@@ -432,6 +436,48 @@ where
     deserializer.deserialize_any(CacheIdVisitor)
 }
 
+fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, GeneratorError> {
+    let entries_text = fs::read_to_string(entries_path).map_err(|error| {
+        GeneratorError::io("read cache account snapshot", Path::new(entries_path), &error)
+    })?;
+    let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
+        GeneratorError::usage(format!(
+            "the cache account snapshot is not an array of cache records: {error}"
+        ))
+    })?;
+    Ok(records
+        .into_iter()
+        .map(|record| SnapshotCacheEntry {
+            id: record.id,
+            key: record.key,
+            size_in_bytes: record.size_in_bytes,
+            created_at: record.created_at,
+        })
+        .collect())
+}
+
+/// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
+/// when present, otherwise the generator default.
+fn retention_policy_for_plan() -> RetentionPolicy {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten())
+        .map(|config| RetentionPolicy::from_config(config.cache_github()))
+        .unwrap_or_else(RetentionPolicy::default_policy)
+}
+
+/// Emit per-class totals and headroom for the maintenance budget step.
+fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
+    let entries = read_cache_entries(entries_path)?;
+    let report = budget_report(&entries, &retention_policy_for_plan());
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    serde_json::to_writer(&mut handle, &report)
+        .map_err(|error| GeneratorError::usage(format!("write budget report: {error}")))?;
+    writeln!(handle).map_err(|error| GeneratorError::usage(format!("write budget report: {error}")))?;
+    Ok(())
+}
+
 /// Compute the retention eviction plan for the Actions cache account: the same
 /// [`RetentionPolicy`] and the same `plan_evictions` the generator's tests
 /// exercise, run against the account snapshot the maintenance job collects.
@@ -440,31 +486,28 @@ where
 ///
 /// `--now` pins the clock for tests; a live run uses the system clock.
 fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), GeneratorError> {
-    let entries_text = if let Some(path) = entries_path {
-        fs::read_to_string(path).map_err(|error| {
-            GeneratorError::io("read cache account snapshot", Path::new(path), &error)
-        })?
+    let entries = if let Some(path) = entries_path {
+        read_cache_entries(path)?
     } else {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
             GeneratorError::usage(format!("read cache account snapshot: {error}"))
         })?;
-        text
+        let records: Vec<CacheEntryRecord> = serde_json::from_str(&text).map_err(|error| {
+            GeneratorError::usage(format!(
+                "the cache account snapshot is not an array of cache records: {error}"
+            ))
+        })?;
+        records
+            .into_iter()
+            .map(|record| SnapshotCacheEntry {
+                id: record.id,
+                key: record.key,
+                size_in_bytes: record.size_in_bytes,
+                created_at: record.created_at,
+            })
+            .collect()
     };
-    let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
-        GeneratorError::usage(format!(
-            "the cache account snapshot is not an array of cache records: {error}"
-        ))
-    })?;
-    let entries = records
-        .into_iter()
-        .map(|record| SnapshotCacheEntry {
-            id: record.id,
-            key: record.key,
-            size_in_bytes: record.size_in_bytes,
-            created_at: record.created_at,
-        })
-        .collect::<Vec<_>>();
     let now_epoch = match now {
         Some(pinned) => parse_pinned_epoch(pinned)?,
         None => std::time::SystemTime::now()
@@ -473,7 +516,7 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
             .as_secs()
             .cast_signed(),
     };
-    let plan = plan_evictions(&entries, &RetentionPolicy::default_policy(), now_epoch);
+    let plan = plan_evictions(&entries, &retention_policy_for_plan(), now_epoch);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &plan)

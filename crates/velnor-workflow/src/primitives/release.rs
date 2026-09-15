@@ -2413,20 +2413,25 @@ jobs:
             echo "No merge-ref cache entries found for $ref"
             exit 0
           fi
-          # shellcheck disable=SC2016
-          if ! printf '%s\n' "$cache_ids" | xargs -r -P 4 -n 1 bash -c '
-            repo="$1"
-            id="$2"
+          failed=0
+          while IFS= read -r id; do
+            [[ -z "$id" ]] && continue
+            deleted=false
             for delay in 1 2 4 8; do
-              if gh api --method DELETE "repos/$repo/actions/caches/$id" >/dev/null 2>&1; then
-                exit 0
+              if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                deleted=true
+                break
               fi
               sleep "$delay"
             done
-            printf "::warning::failed to delete cache id %s after retries\\n" "$id" >&2
+            if [[ "$deleted" != true ]]; then
+              failed=$((failed + 1))
+              echo "::error::failed to delete cache id $id after retries" >&2
+            fi
+          done <<< "$cache_ids"
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
             exit 1
-          ' _ "$GITHUB_REPOSITORY"; then
-            echo "::warning::some closed-PR cache entries could not be deleted; rerun maintenance"
           fi
   cache-budget:
     name: Cache retention
@@ -2436,8 +2441,70 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read
     steps:
-VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
+      - name: Skip while CI producers are running
+        id: retention-gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in ci-main.yml nightly.yml; do
+            if [[ "$(gh run list --workflow "$workflow" --status in_progress --limit 1 --jq 'length')" != "0" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "$workflow is in_progress; skipping cache retention" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+VELNOR_RUNTIME_SETUP_STEPS      - name: Sweep closed-PR merge-ref caches
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          failed=0
+          mapfile -t refs < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].ref' | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
+          if ((${#refs[@]} == 0)); then
+            echo "No merge-ref cache scopes found"
+            exit 0
+          fi
+          for ref in "${refs[@]}"; do
+            pr="${ref#refs/pull/}"
+            pr="${pr%/merge}"
+            state="$(gh pr view "$pr" --json state --jq .state 2>/dev/null || echo unknown)"
+            if [[ "$state" != "CLOSED" ]]; then
+              continue
+            fi
+            encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+            mapfile -t cache_ids < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
+              --jq '.actions_caches[].id')
+            if ((${#cache_ids[@]} == 0)); then
+              continue
+            fi
+            echo "Sweeping $ref ($pr): ${#cache_ids[@]} entries"
+            for id in "${cache_ids[@]}"; do
+              deleted=false
+              for delay in 1 2 4 8; do
+                if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                  deleted=true
+                  break
+                fi
+                sleep "$delay"
+              done
+              if [[ "$deleted" != true ]]; then
+                failed=$((failed + 1))
+                echo "::error::failed to delete cache id $id for $ref after retries" >&2
+              fi
+            done
+          done
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR merge-ref cache entries could not be deleted; rerun maintenance" >&2
+            exit 1
+          fi
+      - name: Collect Actions cache account
+        if: steps.retention-gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2448,19 +2515,31 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
             > "$RUNNER_TEMP/cache-retention/entries.jsonl"
           jq -s '.' "$RUNNER_TEMP/cache-retention/entries.jsonl" \
             > "$RUNNER_TEMP/cache-retention/entries.json"
+          velnor-workflow cache-plan --mode=budget --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/budget.json"
           # `gh api --paginate --jq` runs the filter once per page and
           # concatenates the outputs: summing inside the filter prints one
           # number per page, and the total silently understates the account.
           # Slurp the page stream first, then take one total over every entry.
-          total="$(jq '[.[].size_in_bytes] | add // 0' "$RUNNER_TEMP/cache-retention/entries.json")"
+          total="$(jq '.total_held_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
           count="$(jq 'length' "$RUNNER_TEMP/cache-retention/entries.json")"
-          headroom="$(( "$(velnor-workflow cache-plan --mode=budget)" - total ))"
+          headroom="$(jq '.headroom_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
+          if (( headroom >= 0 && headroom < 536870912 )); then
+            echo "::warning::Actions cache headroom below 512 MiB ($headroom bytes remaining)" >&2
+          fi
           jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
+            --slurpfile budget "$RUNNER_TEMP/cache-retention/budget.json" \
             --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, headroom_bytes: $headroom}' \
+            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, headroom_bytes: $headroom, classes: $budget[0].classes}' \
             > "$RUNNER_TEMP/cache-retention/summary.json"
-          cat "$RUNNER_TEMP/cache-retention/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          {
+            cat "$RUNNER_TEMP/cache-retention/summary.json"
+            echo "Per-class totals:"
+            jq -r '.classes[] | "  \(.id): \(.entry_count) entries, \(.held_bytes) bytes (budget \(.budget_bytes))"' \
+              "$RUNNER_TEMP/cache-retention/budget.json"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Plan retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
         run: |
           set -euo pipefail
           # The plan is the generator's own retention policy, executed - never
@@ -2486,6 +2565,7 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
             echo "Retention plan: nothing to evict" >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Apply retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2526,6 +2606,7 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
             exit 1
           fi
       - name: Publish retention evidence
+        if: steps.retention-gate.outputs.skip != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cache-retention-${{ github.run_id }}
@@ -2533,6 +2614,7 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           if-no-files-found: error
           retention-days: 14
       - name: Enforce cache budget
+        if: steps.retention-gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2575,10 +2657,19 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'".to_owned()
     };
     let setup = if cache_lane == RunnerMode::Github {
-        workflow_runtime_setup_with_install_rev(
+        let mut setup = workflow_runtime_setup_with_install_rev(
             RunnerMode::Github,
             &workflow_setup_install_rev(&config.repository),
-        )
+        );
+        setup = setup.replace(
+            "if: ${{ runner.environment == 'github-hosted' }}",
+            "if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}",
+        );
+        setup = setup.replace(
+            "      - name: Set trusted workflow policy revision\n        run:",
+            "      - name: Set trusted workflow policy revision\n        if: steps.retention-gate.outputs.skip != 'true'\n        run:",
+        );
+        setup
     } else {
         String::new()
     };
@@ -2689,8 +2780,10 @@ mod tests {
             "cache-budget must be the Cache retention job: {job}"
         );
         assert!(
-            job.contains("permissions:\n      contents: read\n      actions: write"),
-            "Cache retention must grant actions: write: {job}"
+            job.contains(
+                "permissions:\n      contents: read\n      actions: write\n      pull-requests: read"
+            ),
+            "Cache retention must grant actions: write and pull-requests: read: {job}"
         );
     }
 
@@ -2803,6 +2896,7 @@ mod tests {
             authenticated.as_slice(),
             [
                 "Delete merge-ref cache namespace",
+                "Sweep closed-PR merge-ref caches",
                 "Collect Actions cache account",
                 "Apply retention evictions",
                 "Enforce cache budget",
@@ -3008,6 +3102,8 @@ mod tests {
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            github_cache: crate::config::CacheGithubSection::default(),
+            velnor_host_cache: crate::config::CacheVelnorSection::default(),
         }
     }
 
@@ -3067,15 +3163,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "0e817ef7751f66f64dcf57d781c822a79f29f668ea6956a800dbb921c2d93a0c",
+                "f0f3d19afe7f4494f25cecd8b89586d479f5c52a20f1a44ad6d566adeb7471fb",
             ),
             (
                 "preview.yml",
-                "4a2d99bb0bbf272f23937bb6b2ea05a389f13a70e5bc2e3d81f4df887aa0580d",
+                "4cbd56dfce8164cfe20557bff5256941f25c185c01f52639d17c29b321f677a8",
             ),
             (
                 "maintenance.yml",
-                "0bc8b3df7c5be81d52f745348378894d0a2de8d896092c9186bca8f2e87415e7",
+                "87efbbb92830695ab2ff52edb5021a94a761b64b0a65f5b22152b296409f2668",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3143,11 +3239,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "ae1857a010505f56aea813daab6b8ccf957a863f9a6f980b2a77d0bf613fd062",
+                "3b97320663eccfe4c9cb28c02d5581085242e8e5ab704a4ddae6da53505b02ae",
             ),
             (
                 "preview.yml",
-                "2aea4c0e698177f45b063c9cabda8b49f6025efb5de88643f42daab232627c11",
+                "ff034c961c193a8b4ee512e2c743b93f2e8c025dc0224489c271cb83792af0ba",
             ),
         ];
         let root = scanned_root("identity-pinned");

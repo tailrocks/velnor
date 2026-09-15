@@ -220,6 +220,14 @@ pub struct JobContainerSpec {
     /// the lease side and the mount side instead of collapsing to `untrusted`
     /// on one of them.
     pub store_trust_scope: String,
+    /// Trusted scope read through beneath [`Self::store_trust_scope`] for PR
+    /// jobs on trusted pools (D18). Absent for single-namespace stores.
+    pub store_read_through_scope: Option<String>,
+    /// Merged overlay mount points to unmount at job teardown.
+    pub store_overlay_mounts: Vec<PathBuf>,
+    /// Overlay-resolved Cargo store root when [`Self::prepare_store_overlays`]
+    /// ran; otherwise [`start_args`] resolves directly.
+    pub(crate) prepared_cargo_store: Option<PathBuf>,
     /// Docker-only Mr Boxington store. `None` for MicroVM jobs.
     pub mbx_store_host: Option<PathBuf>,
     /// Docker-only explicit sccache action store.
@@ -254,6 +262,53 @@ const MBX_CONTAINER_EXEC_PATH: &str =
     "/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 impl JobContainerSpec {
+    /// Resolve a trust-scoped store root, layering `store_read_through_scope`
+    /// beneath `store_trust_scope` when configured (D18).
+    pub(crate) fn overlay_aware_store<F>(&mut self, class: &str, resolve: F) -> PathBuf
+    where
+        F: Fn(&Path, &str) -> PathBuf,
+    {
+        let upper = resolve(&self.temp_host, self.store_trust_scope.as_str());
+        let Some(lower_scope) = self.store_read_through_scope.as_deref() else {
+            return upper;
+        };
+        let lower = resolve(&self.temp_host, lower_scope);
+        let overlay_dir = self
+            .temp_host
+            .join("_store-overlay")
+            .join(sanitize_store_key(class));
+        match crate::storage::prepare_read_through_overlay(&overlay_dir, &upper, &lower) {
+            Ok(merged) if merged != upper => {
+                self.store_overlay_mounts.push(merged.clone());
+                merged
+            }
+            Ok(merged) => merged,
+            Err(error) => {
+                tracing::warn!(
+                    class,
+                    ?error,
+                    "read-through store overlay unavailable; using PR scope only"
+                );
+                upper
+            }
+        }
+    }
+
+    /// Prepare read-through store overlays for PR-scoped jobs (D18). No-op
+    /// when [`Self::store_read_through_scope`] is absent.
+    pub fn prepare_store_overlays(&mut self) {
+        if self.store_read_through_scope.is_none() {
+            return;
+        }
+        self.prepared_cargo_store = Some(self.overlay_aware_store("cargo", cargo_store_host));
+    }
+
+    fn cargo_store_mount_root(&self) -> PathBuf {
+        self.prepared_cargo_store.clone().unwrap_or_else(|| {
+            cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
+        })
+    }
+
     /// The tightest valid `--cpus` limit declared by the operator
     /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or workflow createOptions.
     fn declared_container_cpus(&self) -> Option<f64> {
@@ -584,19 +639,17 @@ impl JobContainerSpec {
             // lock does not serialize that mutation across container jobs).
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
-                    .join("registry/cache"),
+                &self.cargo_store_mount_root().join("registry/cache"),
                 "/github/home/.cargo/registry/cache",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
-                    .join("registry/index"),
+                &self.cargo_store_mount_root().join("registry/index"),
                 "/github/home/.cargo/registry/index",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("git/db"),
+                &self.cargo_store_mount_root().join("git/db"),
                 "/github/home/.cargo/git/db",
             ),
             // $CARGO_HOME/bin holds executable proxies on PATH, so it is
@@ -2283,6 +2336,9 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             store_trust_scope: "trusted".to_owned(),
+            store_read_through_scope: None,
+            store_overlay_mounts: Vec::new(),
+            prepared_cargo_store: None,
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
         }

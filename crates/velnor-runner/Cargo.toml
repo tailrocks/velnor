@@ -76,6 +76,10 @@ assets = [
   ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
   ["../velnor-tools/debian/velnor-fleet-policy-audit.service", "lib/systemd/system/velnor-fleet-policy-audit.service", "644"],
   ["../velnor-tools/debian/velnor-fleet-policy-audit.timer", "lib/systemd/system/velnor-fleet-policy-audit.timer", "644"],
+  ["../velnor-tools/debian/velnor-cache-gc.service", "lib/systemd/system/velnor-cache-gc.service", "644"],
+  ["../velnor-tools/debian/velnor-cache-gc.timer", "lib/systemd/system/velnor-cache-gc.timer", "644"],
+  ["../../config/fleet/buildkitd.gc.toml", "usr/share/velnor/fleet/buildkitd.gc.toml", "644"],
+  ["../../config/fleet/RUNBOOK.md", "usr/share/velnor/fleet/RUNBOOK.md", "644"],
   ["../../config/fleet/release-refs.toml", "usr/share/velnor/fleet/release-refs.toml", "644"],
   # Generated desired-policy allowlists for org-scoped daemons. A runner host
   # never runs the fleet publisher, so the packaged copy is the only guarantee

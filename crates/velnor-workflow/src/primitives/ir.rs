@@ -18,7 +18,8 @@ use super::{
     MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::{
-    config_rust_toolchain, github_expression, hosted_mold_setup, kind_reusable_lane_display_name,
+    config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_setup, hosted_mold_setup,
+    kind_reusable_lane_display_name,
     kind_unit_workflow_shard_file, lane_supports_unit, nested_unit_workflow_file,
     prepare_cargo_caller_job_id, rendered_cache_values, sidebar_group_name, stack_group_job_id,
     unit_group, unit_group_job_id, unit_job_display_name, unit_job_id, unit_needs, velnor_runner,
@@ -165,6 +166,49 @@ fn closure_members<'a>(unit: &'a Unit, units: &'a [Unit]) -> Vec<&'a Unit> {
     members
 }
 
+/// Lockfile-scoped inputs for the shared Cargo source bundle cache (RC-11).
+/// Workspace members share one key; independent manifest trees keep their own
+/// lockfile path.
+pub(crate) fn cargo_source_lockfile_key_files(unit: &Unit) -> Vec<String> {
+    let lockfile = cargo_lockfile_root(unit);
+    let lockfile_key = if lockfile == "." {
+        "Cargo.lock".to_owned()
+    } else {
+        format!("{lockfile}/Cargo.lock")
+    };
+    vec![
+        ".cargo/**".to_owned(),
+        lockfile_key,
+        "rust-toolchain.toml".to_owned(),
+        "rust-toolchain".to_owned(),
+    ]
+}
+
+fn cargo_source_cache_hash_expression(unit: &Unit) -> String {
+    let key_files = unit
+        .cache
+        .as_ref()
+        .filter(|cache| cache.purpose == CachePurpose::CargoSources)
+        .map_or_else(
+            || unit.cache.as_ref().map(|cache| cache.key_files.clone()),
+            |_| Some(cargo_source_lockfile_key_files(unit)),
+        )
+        .unwrap_or_default();
+    key_files
+        .iter()
+        .map(|path| format!("'{}'", path.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_cargo_bundle_cache_key(id_segment: &str, hash_expression: &str) -> (String, String) {
+    let cache_key = format!(
+        "ci-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{id_segment}-${{{{ hashFiles({hash_expression}) }}}}"
+    );
+    let restore_prefix = format!("ci-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{id_segment}-");
+    (cache_key, restore_prefix)
+}
+
 /// Source-state inputs a unit snapshot hashes into its freshness segment: the
 /// compiled sources of the dependency closure plus every watched file a build
 /// embeds or copies (a Rust unit's `include_str!` data, a Docker unit's build
@@ -172,6 +216,17 @@ fn closure_members<'a>(unit: &'a Unit, units: &'a [Unit]) -> Vec<&'a Unit> {
 /// dependency inputs and ride the other segment; hashing them again here would
 /// cold-restart the closure on a metadata-only edit without advancing state.
 fn snapshot_state_files(members: &[&Unit], unit: &Unit) -> Vec<String> {
+    if !cargo_network_is_restricted(unit) {
+        let mut files = vec!["Cargo.lock".to_owned(), "deny.toml".to_owned()];
+        for watched in &unit.watch {
+            if watched.ends_with("deny.toml") || watched.ends_with("audit.toml") {
+                files.push(watched.clone());
+            }
+        }
+        files.sort();
+        files.dedup();
+        return files;
+    }
     let mut files: Vec<String> = Vec::new();
     for member in members {
         if member.kind == UnitKind::Rust {
@@ -365,13 +420,98 @@ pub(crate) const VELNOR_CI_REPORT_ACTION: &str = "./.github/actions/report-velno
 ///
 /// `job_display_name` is the Actions API job name for this job (the workflow
 /// `jobs.<id>.name` value), which queue-time lookup matches on exactly.
-pub(crate) fn render_phase_report_step(output: &mut String, job_display_name: &str) {
+pub(crate) fn render_phase_report_step(
+    output: &mut String,
+    job_display_name: &str,
+    lane: RunnerMode,
+    unit: &Unit,
+    ir: &WorkflowIr,
+) {
     output.push_str("      - name: Report phase timings and cache outcomes\n");
     output.push_str("        if: always()\n");
+    render_cache_outcome_report_env(output, lane, unit, ir);
     let _ = writeln!(
         output,
         "        uses: {VELNOR_CI_REPORT_ACTION}\n        with:\n          job_label: {job_display_name}"
     );
+}
+
+fn render_cache_outcome_report_env(
+    output: &mut String,
+    lane: RunnerMode,
+    unit: &Unit,
+    ir: &WorkflowIr,
+) {
+    let lane_name = match lane {
+        RunnerMode::Github | RunnerMode::Both => "github",
+        RunnerMode::Velnor => "velnor",
+    };
+    output.push_str("        env:\n");
+    let _ = writeln!(output, "          VELNOR_CI_LANE: {lane_name}");
+    let tools = WorkflowIr::tools_for_unit(unit, ir.mise_present, ir.mr_boxington);
+    if lane == RunnerMode::Velnor {
+        let mut host_warm = Vec::<&'static str>::new();
+        if velnor_skips_pinned_rust_toolchain(lane) && unit.toolchain.is_some() {
+            host_warm.push("rustup");
+        }
+        if tools.contains(&ToolRequirement::Mold) {
+            host_warm.push("mold");
+        }
+        if tools.contains(&ToolRequirement::MrBoxington) {
+            host_warm.push("mbx");
+        }
+        if unit
+            .cache
+            .as_ref()
+            .is_some_and(cache_is_velnor_host_persistent)
+        {
+            host_warm.push("cargo");
+        }
+        if unit
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.mutable_mount_seed)
+        {
+            host_warm.push("docker_seed");
+        }
+        if !host_warm.is_empty() {
+            let _ = writeln!(
+                output,
+                "          VELNOR_HOST_WARM_LAYERS: {}",
+                host_warm.join(",")
+            );
+        }
+        return;
+    }
+    if !velnor_skips_pinned_rust_toolchain(lane) && unit.toolchain.is_some() {
+        output.push_str("          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}\n");
+        output.push_str("          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}\n");
+    }
+    if tools.contains(&ToolRequirement::Mold) {
+        output.push_str("          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}\n");
+        output.push_str("          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}\n");
+    }
+    if tools.contains(&ToolRequirement::MrBoxington) {
+        output.push_str("          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}\n");
+        output.push_str("          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}\n");
+    }
+    let uses_cargo_restore = unit.cache.as_ref().is_some_and(|cache| {
+        !cache.mutable_mount_seed
+            && CacheBackend::Detected.lane_enables_actions_cache(lane, ir, unit)
+    });
+    if uses_cargo_restore {
+        output.push_str("          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}\n");
+        output.push_str("          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}\n");
+    }
+    if unit
+        .cache
+        .as_ref()
+        .is_some_and(|cache| cache.mutable_mount_seed)
+        && lane == RunnerMode::Github
+    {
+        output.push_str("          VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}\n");
+        output.push_str("          VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}\n");
+    }
 }
 
 /// The Cargo subcommands whose inputs are resolved by the command itself:
@@ -2491,17 +2631,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             if CacheBackend::Detected.lane_enables_actions_cache(lane, self, cache_unit)
                 && let Some(cache) = &cache_unit.cache
             {
-                let (paths, key) = rendered_cache_values(cache);
-                let cache_key = format!(
-                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                    cache_unit.kind.id_prefix()
-                );
+                let (paths, _) = rendered_cache_values(cache);
+                let id_segment = cache_unit.kind.id_prefix();
+                let hash = cargo_source_cache_hash_expression(cache_unit);
+                let (cache_key, restore_prefix) = format_cargo_bundle_cache_key(id_segment, &hash);
                 let _ = writeln!(
                     output,
-                    "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
+                    "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
                     yaml_scalar(&cache_unit.label),
                     self.pins.cache_restore,
-                    cache_unit.kind.id_prefix()
                 );
             }
             let cache_hit_gate =
@@ -2715,17 +2853,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             && let Some(cache) = &unit.cache
         {
             render_retained_output_cache_note(write_target, self, unit, cache);
-            let (paths, key) = rendered_cache_values(cache);
-            let cache_key = format!(
-                "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                unit.kind.id_prefix()
-            );
+            let (paths, _) = rendered_cache_values(cache);
+            let id_segment = unit.kind.id_prefix();
+            let hash = cargo_source_cache_hash_expression(unit);
+            let (cache_key, restore_prefix) = format_cargo_bundle_cache_key(id_segment, &hash);
             let _ = writeln!(
                 write_target,
-                "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
+                "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
                 yaml_scalar(&unit.label),
                 self.pins.cache_restore,
-                unit.kind.id_prefix()
             );
             true
         } else {
@@ -2776,11 +2912,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             && contract.cache.lane_enables_actions_cache(lane, self, unit)
             && let Some(cache) = unit.cache.as_ref()
         {
-            let (paths, key) = rendered_cache_values(cache);
-            let cache_key = format!(
-                "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                unit.kind.id_prefix()
-            );
+            let (paths, _) = rendered_cache_values(cache);
+            let id_segment = unit.kind.id_prefix();
+            let hash = cargo_source_cache_hash_expression(unit);
+            let (cache_key, _) = format_cargo_bundle_cache_key(id_segment, &hash);
             let _ = writeln!(
                 write_target,
                 "      - name: Save {} cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
@@ -2790,7 +2925,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
         render_ci_cleanup_end_marker(write_target);
-        render_phase_report_step(write_target, &yaml_scalar(&report_label));
+        render_phase_report_step(write_target, &yaml_scalar(&report_label), lane, unit, self);
         if steps_only {
             output.push_str(&prefix_step_block_with_if(&fragment, step_guard.as_deref()));
         } else {
@@ -3310,17 +3445,19 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && let Some(cache) = &unit.cache
             {
                 render_retained_output_cache_note(output, self, unit, cache);
-                let (paths, key) = rendered_cache_values(cache);
-                let cache_key = format!(
-                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                    unit.id
-                );
+                let (paths, _) = rendered_cache_values(cache);
+                let id_segment = if cache.purpose == CachePurpose::CargoSources {
+                    unit.kind.id_prefix()
+                } else {
+                    unit.id.as_str()
+                };
+                let hash = cargo_source_cache_hash_expression(unit);
+                let (cache_key, restore_prefix) = format_cargo_bundle_cache_key(id_segment, &hash);
                 let _ = writeln!(
                         output,
-                        "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
+                        "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            {restore_prefix}",
                         verify_name,
                         self.pins.cache_restore,
-                        unit.id,
                     );
                 true
             } else {
@@ -3359,11 +3496,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && CacheBackend::Detected.lane_enables_actions_cache(lane, self, unit)
                 && let Some(cache) = &unit.cache
             {
-                let (paths, key) = rendered_cache_values(cache);
-                let cache_key = format!(
-                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                    unit.id
-                );
+                let (paths, _) = rendered_cache_values(cache);
+                let id_segment = if cache.purpose == CachePurpose::CargoSources {
+                    unit.kind.id_prefix()
+                } else {
+                    unit.id.as_str()
+                };
+                let hash = cargo_source_cache_hash_expression(unit);
+                let (cache_key, _) = format_cargo_bundle_cache_key(id_segment, &hash);
                 let _ = writeln!(
                     output,
                     "      - name: Save {} cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
@@ -3373,7 +3513,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 );
             }
             render_ci_cleanup_end_marker(output);
-            render_phase_report_step(output, &job_name);
+            render_phase_report_step(output, &job_name, lane, unit, self);
             output.push('\n');
         }
     }
@@ -3607,7 +3747,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 let (cache_key, restore_keys) = unit_snapshot(self, unit, UNIT_SNAPSHOT_NAMESPACE);
                 let _ = writeln!(
                     output,
-                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
+                    "      - name: Set up Mr. Boxington\n        id: mbx-cache\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
                     self.pins.mr_boxington
                 );
             } else {
@@ -3618,7 +3758,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 // release download on every job instead of reusing PATH mbx.
                 let _ = writeln!(
                     output,
-                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: local",
+                    "      - name: Set up Mr. Boxington\n        id: mbx-cache\n        uses: {}\n        with:\n          backend: local",
                     self.pins.mr_boxington
                 );
             }
@@ -3661,24 +3801,41 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 self.pins.node
             );
         }
+        let install_action_tools = [
+            (!self.mise_present && tools.contains(&ToolRequirement::Nextest))
+                .then_some("cargo-nextest"),
+            tools.contains(&ToolRequirement::CargoDeny)
+                .then_some("cargo-deny"),
+            tools.contains(&ToolRequirement::CargoAudit)
+                .then_some("cargo-audit"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if github_lane && !install_action_tools.is_empty() {
+            output.push_str(&hosted_cargo_bin_toolchain_setup(
+                &self.default_branch,
+                cache_save,
+            ));
+        }
         if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_present {
             let _ = writeln!(
                 output,
-                "      - name: Set up cargo-nextest\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
+                "      - name: Set up cargo-nextest\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
                 self.pins.rust_tool
             );
         }
         if github_lane && tools.contains(&ToolRequirement::CargoDeny) {
             let _ = writeln!(
                 output,
-                "      - name: Set up cargo-deny\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
+                "      - name: Set up cargo-deny\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
                 self.pins.rust_tool
             );
         }
         if github_lane && tools.contains(&ToolRequirement::CargoAudit) {
             let _ = writeln!(
                 output,
-                "      - name: Set up cargo-audit\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
+                "      - name: Set up cargo-audit\n        if: ${{{{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}}}\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
                 self.pins.rust_tool
             );
         }

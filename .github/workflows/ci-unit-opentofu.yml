@@ -54,12 +54,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-8e438e06855e10b4bfe5072912f47d2ae9dc5a02-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-e6fabca85499be62f939243d4452438449b69c53-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
+          EXPECTED_REVISION: e6fabca85499be62f939243d4452438449b69c53
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -141,9 +141,9 @@ jobs:
         with:
           path: |
             ~/.terraform.d/plugin-cache
-          key: ci-${{ runner.os }}-opentofu-${{ hashFiles('**/.terraform.lock.hcl') }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-opentofu-${{ hashFiles('**/.terraform.lock.hcl') }}
           restore-keys: |
-            ci-${{ runner.os }}-opentofu-
+            ci-${{ runner.os }}-${{ runner.arch }}-opentofu-
       - name: Mark cache prep end
         if: ${{ inputs.unit == 'opentofu' && (always()) }}
         run: |
@@ -209,7 +209,7 @@ jobs:
         with:
           path: |
             ~/.terraform.d/plugin-cache
-          key: ci-${{ runner.os }}-opentofu-${{ hashFiles('**/.terraform.lock.hcl') }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-opentofu-${{ hashFiles('**/.terraform.lock.hcl') }}
       - name: Mark cleanup end
         if: ${{ inputs.unit == 'opentofu' && (always()) }}
         run: |
@@ -224,6 +224,10 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: ${{ inputs.unit == 'opentofu' && (always()) }}
+        env:
+          VELNOR_CI_LANE: github
+          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: opentofu
@@ -393,6 +397,9 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: ${{ inputs.unit == 'opentofu' && (always()) }}
+        env:
+          VELNOR_CI_LANE: velnor
+          VELNOR_HOST_WARM_LAYERS: cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: opentofu

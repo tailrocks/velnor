@@ -198,7 +198,7 @@ Canonical root `<VELNOR_STORAGE_ROOT>/cache/velnor/v1/<trust_scope>/<class>` —
 | RC-7 | Live GHA account 10.54 GB, over 8 GiB and at 98 % of platform cap | GitHub | Phase 4 |
 | RC-8 | Plan conflated 8 GiB with Velnor | Docs | Fixed |
 | RC-9 | No scheduled `velnorctl cache gc` on fleet | Velnor | Phase 6 |
-| RC-10 | `cache-plan --check` not implemented (only `--mode=plan\|budget`, `runtime.rs:361-378`); (rev 2) it is referenced **only by this plan**, not by `content/docs` | GitHub | Phase 4: drop the item |
+| RC-10 | `cache-plan --check` not implemented (only `--mode=plan\|budget`, `runtime.rs:361-378`); referenced only by this plan | GitHub | Dropped — use `--mode=plan` / `--mode=budget` |
 | RC-11 | (rev 2) **Cargo cache key is per-unit**: `key_files` include `crates/<unit>/Cargo.toml`, so 13 Rust units mint 13 distinct exact keys for the **same** `~/.cargo/registry`+`git` payload; every trusted run uploads ~13 near-duplicate bundles into a 1.5 GiB class (live: 9 entries / 1.46 GiB). Key also lacks `runner.arch` (rustup/mold/mbx/docker have it) | GitHub | Phase 3: one workspace-scoped key per lockfile (`velnor-workflow-contract` has its own lockfile → second key) |
 | RC-12 | (rev 2) mbx action never saves on `schedule`/`merge_group`; `save-on-workflow-dispatch` ignores ref (feature-branch dispatch saves into branch scope) | GitHub | P0-8 / D15 |
 | RC-13 | (rev 2) Docker hosted PR build never consumes the restored seed (PR command `docker build --target ci …` has no `--build-context velnor-cache-seed=…`, `.github/ci/project.toml:56`), and there is **no** buildx layer cache (`--cache-from/--cache-to` absent everywhere) — every hosted PR Docker build is fully cold | GitHub | Phase 3 |
@@ -416,7 +416,7 @@ Pre-req: Phase 0 green.
 
 - [ ] Confirm org GHA cache limit (API exposes none; org total 52.97 GB / 14 repos, none > 10 GiB — consistent with default)
 - [ ] Keep `RetentionPolicy.total_bytes = 8589934592`
-- [ ] **Remove `cache-plan --check` from this plan** (not implemented, not referenced anywhere else)
+- [x] **Drop `cache-plan --check`** (not implemented; use `--mode=plan` / `--mode=budget` only)
 - [ ] Classify every emitted key family (§2.1 unclassified list) — either give each a class or stop emitting it (`velnor-cargo-` dead marker; `ci-release-*` anchored-matcher bug at `snapshot.rs:286-293`)
 - [ ] Daily sweep: delete all entries on `refs/pull/N/merge` for closed PRs (`gh cache delete --ref`) — fixes the prune race (RC-14)
 - [ ] `compiler-snapshots`: verify generation grouping yields ≤ 2 per unit; live count is 22 entries for 13 units
