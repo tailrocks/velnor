@@ -406,7 +406,7 @@ fn automatic_both_gates_pair_except_fork_pr_admission() {
         "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository"
     ));
     assert_eq!(lane_token(&job_name(&pr["plan"])), "Control");
-    assert_eq!(lane_token(&job_name(&pr["ci-required"])), "Control");
+    assert_eq!(job_name(&pr["ci-required"]), "ci-required");
     assert_eq!(job_name(&pr["group-rust-github"]), "GitHub / Rust");
     assert_eq!(
         job_name(&pr[&kind_lane_caller("rust", "velnor")]),

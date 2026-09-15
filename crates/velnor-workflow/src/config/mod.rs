@@ -147,6 +147,11 @@ struct WorkflowSection {
     /// digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     velnor_trusted_label: Option<String>,
+    /// When set, pins whether trust-gated Velnor jobs render or skip at
+    /// generation time. Absent values probe `gh api …/runners` once per
+    /// generation; probe failure skips instead of queueing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_trusted_runner_available: Option<bool>,
     /// The repository profile recorded in the generated `project.toml`. A free
     /// label: it describes the surface, it never selects one.
     profile: Option<String>,
@@ -331,6 +336,10 @@ struct PolicySection {
     dco_required: Option<bool>,
     /// Require the generated policy workflow to conclude on a pull request.
     ci_required: Option<bool>,
+    /// Repository-ruleset status-check contexts that `ci-pr.yml` must expose as
+    /// top-level job `name:` values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ruleset_required_status_checks: Vec<String>,
     /// Admission rule for actions that are not pinned to a full commit SHA.
     action_pin_admission: Option<String>,
     /// Emit `config-variables: null` in the generated actionlint config.
@@ -600,6 +609,11 @@ impl RepoGenerationConfig {
         self.workflow.velnor_trusted_label.as_deref()
     }
 
+    /// The declared trust-gated runner availability pin.
+    pub(crate) fn velnor_trusted_runner_available(&self) -> Option<bool> {
+        self.workflow.velnor_trusted_runner_available
+    }
+
     /// The declared default `workflow_dispatch` runner choice.
     pub(crate) fn default_dispatch_runner(&self) -> Option<&str> {
         self.workflow.default_dispatch_runner.as_deref()
@@ -679,6 +693,12 @@ impl RepoGenerationConfig {
     /// Whether the generated CI aggregate should be required.
     pub(crate) fn ci_required(&self) -> Option<bool> {
         self.policy.ci_required
+    }
+
+    /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
+    /// must expose as job display names.
+    pub(crate) fn ruleset_required_status_checks(&self) -> &[String] {
+        &self.policy.ruleset_required_status_checks
     }
 
     /// Workflow basenames excluded from static policy validation.

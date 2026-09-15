@@ -999,6 +999,8 @@ pub(crate) struct WorkflowIr {
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) velnor_trusted_label: Option<String>,
+    pub(crate) velnor_trusted_runner_online: bool,
+    pub(crate) velnor_trusted_runner_skip_reason: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
     pub(crate) repository: String,
     pub(crate) default_dispatch_runner: String,
@@ -1224,7 +1226,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "true",
+            "false",
         ),
         WorkflowKind::Nightly => (
             "Nightly",
@@ -1240,7 +1242,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "true",
+            "false",
         ),
     }
 }
@@ -1362,6 +1364,7 @@ impl WorkflowIr {
         {
             tools.insert(ToolRequirement::DockerBuildx);
         }
+        let trusted_runner = crate::runners::resolve_trusted_runner_availability(config);
         Self {
             default_branch: config.default_branch.clone(),
             github_runner: config.github_runner.clone(),
@@ -1370,6 +1373,8 @@ impl WorkflowIr {
             ci_required: config.ci_required,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
             velnor_trusted_label: config.velnor_trusted_label.clone(),
+            velnor_trusted_runner_online: trusted_runner.online,
+            velnor_trusted_runner_skip_reason: trusted_runner.skip_reason,
             pull_request_on_velnor: if config.pull_request_on_velnor {
                 VelnorPullRequest::Automatic
             } else {
@@ -1535,7 +1540,7 @@ impl WorkflowIr {
         self.render_node_callers(nodes, &mut output, kind != WorkflowKind::PullRequest);
         if kind == WorkflowKind::Nightly {
             self.render_nodes_required(nodes, &mut output, true, "nightly-required", true);
-            self.render_nightly_alert(&mut output);
+            self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
             self.render_nodes_required(
                 nodes,
@@ -1545,6 +1550,53 @@ impl WorkflowIr {
                 false,
             );
         }
+        while output.ends_with("\n\n") {
+            output.pop();
+        }
+        output
+    }
+
+    /// Nightly is a scheduled dispatcher of `ci-main.yml` on the default branch.
+    /// `workflow_dispatch` on ci-main is trusted for mbx saves; schedule alone is not.
+    pub(crate) fn render_nightly_dispatcher(&self) -> String {
+        let mut output = String::from(GENERATED_HEADER);
+        let (workflow_name, run_name, triggers, _) = aggregate_triggers(
+            WorkflowKind::Nightly,
+            &self.default_branch,
+            self.runners,
+            self.automatic,
+            &self.default_dispatch_runner,
+        );
+        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, "false");
+        let default_branch = yaml_scalar(&self.default_branch);
+        let default_runner = match self.runners {
+            RunnerMode::Github => "github",
+            RunnerMode::Velnor => self.default_dispatch_runner.as_str(),
+            RunnerMode::Both => self.automatic.as_str(),
+        };
+        let runner = self.runner_for(self.control_plane_lane());
+        let dispatch_if =
+            "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure";
+        let simulate_if = "github.event_name == 'workflow_dispatch' && inputs.simulate_failure";
+        let _ = writeln!(
+            output,
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
+        );
+        let _ = writeln!(
+            output,
+            "  dispatch-ci-main:\n    name: {}\n    if: ${{{{ {dispatch_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    permissions:\n      actions: write\n      contents: read\n    steps:\n      - name: Dispatch ci-main on default branch\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DISPATCH_RUNNER: ${{{{ github.event.inputs.runner || '{default_runner}' }}}}\n          DISPATCH_SCOPE: ${{{{ github.event.inputs.scope || 'full' }}}}\n          DISPATCH_BASE_SHA: ${{{{ github.event.inputs.base_sha || format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          gh workflow run ci-main.yml \\\n            --ref \"$DEFAULT_BRANCH\" \\\n            -f runner=\"$DISPATCH_RUNNER\" \\\n            -f scope=\"$DISPATCH_SCOPE\" \\\n            -f base_sha=\"$DISPATCH_BASE_SHA\"",
+            crate::control_job_name("Dispatch ci-main"),
+        );
+        let _ = writeln!(
+            output,
+            "  nightly-red-to-signal:\n    name: {}\n    if: ${{{{ {simulate_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Simulate nightly failure\n        shell: bash\n        run: |\n          set -euo pipefail\n          echo \"nightly red-to-signal simulation requested\" >&2\n          exit 1",
+            crate::control_job_name("Nightly red-to-signal"),
+        );
+        self.render_nightly_alert(
+            &mut output,
+            "nightly-red-to-signal",
+            Some("always() && needs.nightly-red-to-signal.result == 'failure'"),
+        );
         while output.ends_with("\n\n") {
             output.pop();
         }
@@ -1732,7 +1784,7 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let display_name = match check_name {
-            "ci-required" => crate::control_job_name("Aggregate"),
+            "ci-required" => yaml_scalar("ci-required"),
             "nightly-required" => crate::control_job_name("Nightly aggregate"),
             other => yaml_scalar(other),
         };
@@ -1798,27 +1850,38 @@ impl WorkflowIr {
         }
     }
 
-    pub(crate) fn render_nightly_alert(&self, output: &mut String) {
-        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!(
-                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-                self.default_branch
-            )
-        } else {
-            "always()".to_owned()
-        };
+    pub(crate) fn render_nightly_alert(
+        &self,
+        output: &mut String,
+        needs_job: &str,
+        if_override: Option<&str>,
+    ) {
+        let if_condition = if_override.map(str::to_owned).unwrap_or_else(|| {
+            if self.control_plane_lane() == RunnerMode::Velnor {
+                format!(
+                    "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+                    self.default_branch
+                )
+            } else {
+                "always()".to_owned()
+            }
+        });
         let _ = writeln!(
             output,
-            "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
+            "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
             crate::control_job_name("Nightly red-to-signal"),
             self.runner_for(self.control_plane_lane())
         );
-        let bad_body = r#"          body="nightly-required result: $NIGHTLY_RESULT
-Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
-        let good_body = r#"          body="$(printf '%s\n%s\n' \
-            "nightly-required result: $NIGHTLY_RESULT" \
-            "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")""#;
-        *output = output.replace(bad_body, good_body);
+        let bad_body = format!(
+            r#"          body="{needs_job} result: $NIGHTLY_RESULT
+Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
+        );
+        let good_body = format!(
+            r#"          body="$(printf '%s\n%s\n' \
+            "{needs_job} result: $NIGHTLY_RESULT" \
+            "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")""#
+        );
+        *output = output.replace(&bad_body, &good_body);
     }
 
     /// The legacy default unit contract: every supported lane, the default
@@ -2146,11 +2209,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             |unit_id| unit_job_id(lane, unit_id),
         );
         let cache_save = job.cache_save && contract.cache_save;
-        let name = if input_unit.is_some() {
+        let report_label = if input_unit.is_some() {
             unit.id.clone()
         } else {
             lane.display_name().to_owned()
         };
+        let name = self.trusted_unit_display_name(lane, unit, report_label.clone());
+        if self.trust_gated_velnor_job_skipped(lane, unit)
+            && let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref()
+        {
+            let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
+        }
         let _ = writeln!(output, "  {id}:\n    name: {}", yaml_scalar(&name));
         let lane_gate = self.lane_event_expression(lane);
         let gate = input_unit.map_or(lane_gate.clone(), |unit_id| {
@@ -2160,6 +2229,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 reusable_selected_unit_selector(unit_id)
             )
         });
+        let gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
         let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
         // Both-mode prep lives on the Control caller, a separate workflow_call
         // invocation. Inner `needs` cannot cross that boundary.
@@ -2297,7 +2367,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
         }
         render_ci_cleanup_end_marker(output);
-        render_phase_report_step(output, &yaml_scalar(&name));
+        render_phase_report_step(output, &yaml_scalar(&report_label));
         output.push('\n');
     }
 
@@ -2884,6 +2954,39 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
     }
 
+    pub(crate) fn trust_gated_velnor_job_skipped(&self, lane: RunnerMode, unit: &Unit) -> bool {
+        lane == RunnerMode::Velnor && unit.requires_trusted && !self.velnor_trusted_runner_online
+    }
+
+    pub(crate) fn append_trusted_runner_availability_gate(
+        &self,
+        lane: RunnerMode,
+        unit: &Unit,
+        gate: String,
+    ) -> String {
+        if self.trust_gated_velnor_job_skipped(lane, unit) {
+            format!("({gate}) && false")
+        } else {
+            gate
+        }
+    }
+
+    pub(crate) fn trusted_unit_display_name(
+        &self,
+        lane: RunnerMode,
+        unit: &Unit,
+        name: String,
+    ) -> String {
+        if !self.trust_gated_velnor_job_skipped(lane, unit) {
+            return name;
+        }
+        let label = self
+            .velnor_trusted_label
+            .as_deref()
+            .unwrap_or("trusted runner");
+        format!("{name} · skipped (no online {label} runner)")
+    }
+
     pub(crate) fn runner_for_unit(&self, lane: RunnerMode, unit: &Unit) -> String {
         if unit.kind == UnitKind::Swift && lane == RunnerMode::Github {
             return yaml_scalar(&self.macos_runner);
@@ -3209,7 +3312,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         trusted: bool,
         include_policy: bool,
     ) {
-        let display_name = crate::control_job_name("Aggregate");
+        let display_name = yaml_scalar("ci-required");
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],

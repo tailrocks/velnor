@@ -1761,15 +1761,33 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     .map(|_| format!("release-{}-{}", lane.as_str(), dependency))
             }));
             let runner = workflow.runner_for_unit(lane, unit);
-            let job_name = yaml_scalar(&crate::comparison_job_name(lane, unit));
+            let job_name = yaml_scalar(&workflow.trusted_unit_display_name(
+                lane,
+                unit,
+                crate::comparison_job_name(lane, unit),
+            ));
             let verify_name = yaml_scalar(&unit.label);
-            let dispatch_gate = if lane == RunnerMode::Velnor {
-                format!(
-                    "    if: ${{{{ {} }}}}\n",
-                    trusted_release_runner_gate(&config.default_branch)
-                )
+            let mut dispatch_gate = if lane == RunnerMode::Velnor {
+                trusted_release_runner_gate(&config.default_branch)
             } else {
                 String::new()
+            };
+            if lane == RunnerMode::Velnor {
+                dispatch_gate = workflow.append_trusted_runner_availability_gate(
+                    lane,
+                    unit,
+                    dispatch_gate,
+                );
+            }
+            if workflow.trust_gated_velnor_job_skipped(lane, unit)
+                && let Some(reason) = workflow.velnor_trusted_runner_skip_reason.as_deref()
+            {
+                let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
+            }
+            let dispatch_gate = if dispatch_gate.is_empty() {
+                String::new()
+            } else {
+                format!("    if: ${{{{ {dispatch_gate} }}}}\n")
             };
             let _ = writeln!(
                 output,
@@ -2692,10 +2710,6 @@ mod tests {
             workflow.contains("setup-velnor-workflow"),
             "maintenance must install the hosted workflow runtime: {workflow}"
         );
-        assert_eq!(
-            crate::VELNOR_WORKFLOW_SOURCE_REV,
-            "7fa4a0731ee8bedc5b02d90507d6dbe8b719153a"
-        );
         let uses_line = must_some(
             workflow.lines().find(|line| {
                 line.contains(&format!("uses: {}", crate::VELNOR_WORKFLOW_SETUP_ACTION))
@@ -2703,7 +2717,7 @@ mod tests {
             "setup-velnor-workflow uses line",
         );
         assert!(
-            uses_line.contains("@7fa4a0731ee8bedc5b02d90507d6dbe8b719153a"),
+            uses_line.contains(&format!("@{}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
             "uses: must pin SOURCE_REV: {uses_line}"
         );
         assert!(
@@ -2980,9 +2994,11 @@ mod tests {
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
             ci_required: true,
+            ruleset_required_status_checks: Vec::new(),
             package_update_channels: None,
             velnor_runner_group: None,
             velnor_trusted_label: None,
+            velnor_trusted_runner_available: None,
             pull_request_on_velnor: false,
             default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
@@ -3051,15 +3067,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "da6753909b8bad49cf83380211ceb47ab618c91387ae19f5efc892442f9fdcb8",
+                "cb0f40f6e234c505b1e4b2f3f8c70c989f3b5c100e272d831b0d9165f1c416e0",
             ),
             (
                 "preview.yml",
-                "91a609c4bb3390278fc69db5346480bf65dddf6b612c2cbcd8fb889a3ec9d037",
+                "6bdd478443cd880e07726b2c91c6a4e4154e088e7a52c10b5cff2c6aa30ae866",
             ),
             (
                 "maintenance.yml",
-                "45a73307ee156dbe490207aa83ca7c02c343320d324f488e9859105021f29163",
+                "339f6a57fb3e9d602993bd1ebc633923a3c712e16fac0f19031986c57e9e764a",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3127,11 +3143,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5bd720c4ee4b682a76bb6d9c94cf9dad205753a03992b9b4ec52334de6de8873",
+                "aea82038cdecef251dc5287b583ed2d88b3c7df7ba9f17c9d428cb31a063bca6",
             ),
             (
                 "preview.yml",
-                "4f2ce7aad3622060e00749efbd1a450dd26f7c17772c84eaeb4d083f82534384",
+                "78b6bbbd8f63860e867743a5fbb3f61c4bbfb4c8a9f9b081ffb6ca44701f1c6b",
             ),
         ];
         let root = scanned_root("identity-pinned");
