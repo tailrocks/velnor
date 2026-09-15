@@ -226,6 +226,7 @@ fn resume_host_state(
             format!("cannot read lifecycle instance {api_instance}: {error}"),
         )
     })?;
+    let mut desired = fresh.desired.clone();
 
     if fresh.desired == "draining" {
         lifecycle
@@ -251,6 +252,7 @@ fn resume_host_state(
                     format!("cannot resume lifecycle instance {api_instance}: {error}"),
                 )
             })?;
+        desired = "ready".to_owned();
         println!("  lifecycle         resumed durable drain for {api_instance}");
     } else if fresh.desired != "ready" && fresh.desired != "cordoned" {
         return Err(CommandError::new(
@@ -273,15 +275,19 @@ fn resume_host_state(
         })?;
         println!("  lifecycle         cleared durable drain marker");
     }
-    if journal_state.admission_blocked && fresh.desired == "ready" {
-        journal.clear_admission_blocked().map_err(|error| {
-            CommandError::new(
-                ExitClass::Operation,
-                "host.resume_failed",
-                format!("cannot clear durable admission fence: {error}"),
-            )
-        })?;
-        println!("  lifecycle         cleared durable admission fence");
+    if journal_state.admission_blocked && desired == "ready" {
+        let cleared = journal
+            .clear_admission_blocked_if(Some(journal_state.admission_version))
+            .map_err(|error| {
+                CommandError::new(
+                    ExitClass::Operation,
+                    "host.resume_failed",
+                    format!("cannot clear durable admission fence: {error}"),
+                )
+            })?;
+        if cleared {
+            println!("  lifecycle         cleared durable admission fence");
+        }
     }
     Ok(())
 }

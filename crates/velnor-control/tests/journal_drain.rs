@@ -49,7 +49,7 @@ fn drain_marker_is_visible_across_handles_and_gates_the_second_writer() {
     let state = second.materialized_state().unwrap();
     assert!(state.drain_active);
     assert_eq!(state.drain_version, 6);
-    let marker = read_drain_state(&path).unwrap();
+    let marker = read_drain_state(&path).unwrap().unwrap();
     assert!(marker.active);
     assert_eq!(marker.version, 6);
 
@@ -77,7 +77,7 @@ fn drain_marker_is_visible_across_handles_and_gates_the_second_writer() {
             .rejected
     );
     // The rejections persisted nothing, so the marker still reads back.
-    assert_eq!(read_drain_state(&path).unwrap().version, 6);
+    assert_eq!(read_drain_state(&path).unwrap().unwrap().version, 6);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
