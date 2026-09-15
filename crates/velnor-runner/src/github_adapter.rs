@@ -447,6 +447,9 @@ fn backend_advertising_env(
         name != "VELNOR_EXECUTION_BACKEND"
             && name != "VELNOR_SOURCE_SHA"
             && name != "VELNOR_MANIFEST_VERSION"
+            && name != crate::runtime_env::VELNOR_HOST_ENV
+            && name != crate::runtime_env::VELNOR_INSTANCE_ENV
+            && name != crate::runtime_env::VELNOR_SLOT_ENV
             && !is_docker_control_env(name)
             && !is_runner_owned_env(name)
     });
@@ -463,6 +466,31 @@ fn backend_advertising_env(
         crate::manifest::MANIFEST_VERSION.to_string(),
     ));
     env
+}
+
+/// Inject host/instance/slot after repository-controlled container env is
+/// filtered. Values must already be non-secret composed identity fields.
+pub(crate) fn push_runner_identity_env(
+    env: &mut Vec<(String, String)>,
+    identity: &crate::runtime_env::JobRunnerIdentity,
+) {
+    env.retain(|(name, _)| {
+        name != crate::runtime_env::VELNOR_HOST_ENV
+            && name != crate::runtime_env::VELNOR_INSTANCE_ENV
+            && name != crate::runtime_env::VELNOR_SLOT_ENV
+    });
+    env.push((
+        crate::runtime_env::VELNOR_HOST_ENV.to_string(),
+        identity.host.clone(),
+    ));
+    env.push((
+        crate::runtime_env::VELNOR_INSTANCE_ENV.to_string(),
+        identity.instance.clone(),
+    ));
+    env.push((
+        crate::runtime_env::VELNOR_SLOT_ENV.to_string(),
+        identity.slot.clone(),
+    ));
 }
 
 fn job_container_options(job: &AgentJobRequestMessage, trust_scope: &str) -> Vec<String> {
@@ -1894,6 +1922,12 @@ mod tests {
                 ),
                 ("VELNOR_SOURCE_SHA".to_string(), "spoofed".to_string()),
                 ("VELNOR_MANIFEST_VERSION".to_string(), "spoofed".to_string()),
+                ("VELNOR_HOST".to_string(), "spoofed-host".to_string()),
+                (
+                    "VELNOR_INSTANCE".to_string(),
+                    "spoofed-instance".to_string(),
+                ),
+                ("VELNOR_SLOT".to_string(), "99".to_string()),
             ],
             velnor_model::ExecutionBackendKind::Docker,
         );
