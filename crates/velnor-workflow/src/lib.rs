@@ -25,6 +25,7 @@ mod primitives;
 mod runners;
 mod runtime;
 mod scan;
+mod template_memory;
 mod tui;
 
 use crate::primitives::{WorkflowIr, WorkflowKind};
@@ -3710,6 +3711,10 @@ fn generated_files_with_surface(
         config::render_velnor_host_env(&config.velnor_host_cache),
     );
     validate_ruleset_required_status_checks(&config, &files)?;
+    // GitHub loads every reusable workflow once per calling job into one
+    // 10 MiB template budget; refuse a surface whose expansion passes the
+    // generator's 5 MiB ceiling before it can fail every run at startup.
+    template_memory::validate_template_memory(&files)?;
     Ok(files)
 }
 
@@ -4085,6 +4090,37 @@ fn render_report(
         let _ = writeln!(output, "\n{}\n", style.paint("1;36", "Boundaries"));
         for limitation in &config.analysis.limitations {
             let _ = writeln!(output, "  {} {limitation}", style.paint("33", "!"));
+        }
+    }
+    if let Ok(reports) = template_memory::template_memory_reports(files)
+        && !reports.is_empty()
+    {
+        let _ = writeln!(
+            output,
+            "\n{} (ceiling {}, GitHub limit 10 MiB)\n",
+            style.paint("1;36", "Template memory"),
+            template_memory::format_bytes(template_memory::TEMPLATE_MEMORY_CEILING)
+        );
+        for report in reports {
+            let callers = report
+                .callees
+                .iter()
+                .map(|(file, (callers, cost))| {
+                    format!(
+                        "{callers}×{file} @ {}",
+                        template_memory::format_bytes(*cost)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                output,
+                "  {} {}: {} expanded (own {}; {callers})",
+                style.paint("36", "→"),
+                report.workflow.display(),
+                template_memory::format_bytes(report.total()),
+                template_memory::format_bytes(report.own),
+            );
         }
     }
     let result = match outcome {
