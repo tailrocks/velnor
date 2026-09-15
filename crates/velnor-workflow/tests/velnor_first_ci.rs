@@ -482,7 +482,10 @@ fn pull_request_on_velnor_rejects_an_arbitrary_runner_contract() {
     let outcome = generator_output(&root);
     assert!(!outcome.status.success());
     assert!(
-        String::from_utf8_lossy(&outcome.stderr).contains("exact approved Velnor runner contract")
+        String::from_utf8_lossy(&outcome.stderr)
+            .contains("pull_request_on_velnor requires the approved Velnor runner contract"),
+        "unexpected rejection:\n{}",
+        String::from_utf8_lossy(&outcome.stderr)
     );
 }
 
