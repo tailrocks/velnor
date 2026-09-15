@@ -1097,14 +1097,10 @@ fn workflow_dispatch_inputs(
     )
 }
 
-fn aggregate_concurrency_block(
-    ir: &WorkflowIr,
-    cancel_in_progress: &str,
-) -> String {
-    let group = ir
-        .velnor_concurrency_group
-        .as_deref()
-        .unwrap_or("ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}");
+fn aggregate_concurrency_block(ir: &WorkflowIr, cancel_in_progress: &str) -> String {
+    let group = ir.velnor_concurrency_group.as_deref().unwrap_or(
+        "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+    );
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
 }
 
@@ -2835,7 +2831,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             // this unit's commands need — never the whole root manifest.
             render_velnor_mise_install(output, unit, &self.mise_lock_keys);
         }
-        if !velnor_skips_pinned_rust_toolchain(lane) && let Some(toolchain) = &unit.toolchain {
+        if !velnor_skips_pinned_rust_toolchain(lane)
+            && let Some(toolchain) = &unit.toolchain
+        {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
         }
         if github_lane && tools.contains(&ToolRequirement::Mise) {

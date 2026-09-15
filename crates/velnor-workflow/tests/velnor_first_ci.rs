@@ -625,8 +625,7 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
         "GitHub jobs must retain their per-job Cargo cache: {github_job}"
     );
     assert!(
-        github_job.contains("Prepare Cargo sources")
-            && github_job.contains("cargo fetch --locked"),
+        github_job.contains("Prepare Cargo sources") && github_job.contains("cargo fetch --locked"),
         "GitHub jobs must fetch Cargo sources in their own workspace: {github_job}"
     );
     assert!(
