@@ -18,7 +18,6 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     sync::{mpsc::Receiver, oneshot, Semaphore},
     task::JoinHandle,
@@ -44,8 +43,7 @@ use crate::{
     execution::condition_is_statically_false,
     executor::{
         BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
-        ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
-        STEP_PUBLISH_CHANNEL_CAPACITY,
+        ProcessCommandRunner, StepLog, StepStartEvent, STEP_PUBLISH_QUEUE_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -7510,21 +7508,16 @@ async fn handle_job_request(
             config_dir,
             &job.job_id,
         );
-        let step_start_spill = StepPublishSpill::new();
         let (step_start_tx, step_start_receiver) =
-            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_start_sender =
-            BoundedStepSender::with_spill(step_start_tx, Arc::clone(&step_start_spill));
+            tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
+        let step_start_sender = BoundedStepSender::new(step_start_tx);
         // Counter handles only: cloning the senders here would hold the
         // channels open past execution and the publishers would never drain.
         let step_start_drops = step_start_sender.drops_handle();
-        let step_timeline =
-            start_step_timeline_publisher(job.clone(), step_start_receiver, step_start_spill);
-        let step_log_spill = StepPublishSpill::new();
+        let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
         let (step_log_tx, step_log_receiver) =
-            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let step_log_sender =
-            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill));
+            tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
+        let step_log_sender = BoundedStepSender::new(step_log_tx);
         let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
@@ -7542,7 +7535,6 @@ async fn handle_job_request(
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
-            step_log_spill,
             console_log_path,
             Arc::clone(&streamed_step_logs),
         );
@@ -8673,7 +8665,6 @@ fn step_log_mirror_bytes(log: &StepLog) -> u64 {
 fn start_step_timeline_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepStartEvent>,
-    spill: Arc<StepPublishSpill<StepStartEvent>>,
 ) -> JoinHandle<()> {
     // Build Twirp client for Results Service step status updates if available.
     let twirp_client = job
@@ -8694,7 +8685,7 @@ fn start_step_timeline_publisher(
 
     tokio::spawn(async move {
         let mut change_order: i64 = 1;
-        while let Some(event) = recv_published(&mut receiver, &spill).await {
+        while let Some(event) = receiver.recv().await {
             // Send step "in-progress" update via Twirp Results Service
             if let Some(client) = &twirp_client {
                 let step = crate::protocol::TwirpStep {
@@ -8744,7 +8735,6 @@ fn start_step_timeline_publisher(
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepLog>,
-    spill: Arc<StepPublishSpill<StepLog>>,
     console_log_path: Option<PathBuf>,
     streamed_step_logs: Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
 ) -> JoinHandle<()> {
@@ -8840,30 +8830,11 @@ fn start_step_log_publisher(
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         'publish: loop {
             let first_log = loop {
-                match receiver.try_recv() {
-                    Ok(log) => break log,
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => {
-                        if let Some(log) = spill.take_front() {
-                            break log;
-                        }
-                        break 'publish;
-                    }
-                }
-                if let Some(log) = spill.take_front() {
-                    break log;
-                }
                 tokio::select! {
                     maybe = receiver.recv() => match maybe {
                         Some(log) => break log,
-                        None => {
-                            if let Some(log) = spill.take_front() {
-                                break log;
-                            }
-                            break 'publish;
-                        }
+                        None => break 'publish,
                     },
-                    _ = spill.notified() => continue,
                     _ = ping_interval.tick() => {
                         if let Some(ws) = ws_conn.as_mut()
                             && let Err(e) = publish_with_timeout(
@@ -8881,7 +8852,7 @@ fn start_step_log_publisher(
                     }
                 }
             };
-            let logs = step_log_batch(first_log, &mut receiver, &spill);
+            let logs = step_log_batch(first_log, &mut receiver);
             let mut processed = Vec::with_capacity(logs.len());
             let mut live_batches = Vec::new();
             for log in logs {
@@ -9064,42 +9035,9 @@ struct LiveFeedBatch {
     start_line: i64,
 }
 
-async fn recv_published<T>(receiver: &mut Receiver<T>, spill: &StepPublishSpill<T>) -> Option<T> {
-    loop {
-        match receiver.try_recv() {
-            Ok(value) => return Some(value),
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => return spill.take_front(),
-        }
-        if let Some(value) = spill.take_front() {
-            return Some(value);
-        }
-        tokio::select! {
-            maybe = receiver.recv() => {
-                return match maybe {
-                    Some(value) => Some(value),
-                    None => spill.take_front(),
-                };
-            }
-            _ = spill.notified() => {}
-        }
-    }
-}
-
-fn step_log_batch(
-    first: StepLog,
-    receiver: &mut Receiver<StepLog>,
-    spill: &StepPublishSpill<StepLog>,
-) -> Vec<StepLog> {
+fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepLog> {
     let mut logs = vec![first];
-    loop {
-        match receiver.try_recv() {
-            Ok(log) => logs.push(log),
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => break,
-        }
-    }
-    while let Some(log) = spill.take_front() {
+    while let Ok(log) = receiver.try_recv() {
         logs.push(log);
     }
     logs
@@ -15333,7 +15271,6 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
-    use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
 
@@ -25066,15 +25003,9 @@ runs:
         }))
         .unwrap();
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
-        let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
         let held = mirror.lock().await;
-        let mut publisher = start_step_log_publisher(
-            job,
-            receiver,
-            StepPublishSpill::new(),
-            None,
-            Arc::clone(&mirror),
-        );
+        let mut publisher = start_step_log_publisher(job, receiver, None, Arc::clone(&mirror));
         sender
             .send(partial_step_log("contended", &["line"], ""))
             .await
@@ -25095,6 +25026,34 @@ runs:
             .expect("publisher must drain after unlock")
             .unwrap();
         assert_eq!(mirror.lock().await.len(), 1);
+    }
+
+    #[test]
+    fn step_log_batch_preserves_fifo_when_queue_reopens_after_full() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .try_send(partial_step_log("step-0", &["line-0"], ""))
+            .unwrap();
+        sender
+            .try_send(partial_step_log("step-1", &["line-1"], ""))
+            .unwrap();
+
+        // Consume one item to reopen the single FIFO, then enqueue a later
+        // item. The former overflow position is represented by the queued
+        // item itself, so it must still be batched before the later send.
+        let first = receiver.try_recv().unwrap();
+        sender
+            .try_send(partial_step_log("step-2", &["line-2"], ""))
+            .unwrap();
+        drop(sender);
+
+        let logs = step_log_batch(first, &mut receiver);
+        assert_eq!(
+            logs.iter()
+                .map(|log| log.step_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step-0", "step-1", "step-2"]
+        );
     }
 
     #[tokio::test]
@@ -25198,9 +25157,8 @@ runs:
         // publisher (no receiver progress). The bounded channel must absorb
         // the burst as counted drops and the mirror must hold the ceiling —
         // neither may grow with the number of emitted events.
-        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
-        let spill = StepPublishSpill::new();
-        let sender = BoundedStepSender::with_spill(tx, Arc::clone(&spill));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_QUEUE_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let started = Instant::now();
         let events: u64 = 100_000;
@@ -25222,12 +25180,12 @@ runs:
             mirror_guard.len(),
             mirror_guard.bytes(),
         );
-        let retained = STEP_PUBLISH_CHANNEL_CAPACITY as u64 + STEP_PUBLISH_OVERFLOW_CAPACITY as u64;
+        let retained = STEP_PUBLISH_QUEUE_CAPACITY as u64;
         assert_eq!(sender.drops(), events - retained);
         assert!(mirror_guard.len() <= STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
         assert!(mirror_guard.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
-        // The soak's overflow is fully accounted: every record past the
-        // entry cap was counted as an oldest-first eviction.
+        // Every record past the mirror entry cap was counted as an
+        // oldest-first eviction.
         assert_eq!(
             mirror_guard.evicted(),
             events - STREAMED_STEP_LOG_MIRROR_MAX_LOGS as u64
@@ -25238,14 +25196,13 @@ runs:
             elapsed < Duration::from_secs(60),
             "soak sender blocked: {elapsed:?}"
         );
-        // The stalled publisher still drains the live channel plus the
-        // ordered overflow once it makes progress — nothing was lost except
-        // the counted drops past both buffers.
+        // The stalled publisher still drains the bounded FIFO once it makes
+        // progress — nothing was lost except the counted drops past its
+        // capacity.
         let mut drained = 0u64;
         while rx.try_recv().is_ok() {
             drained += 1;
         }
-        drained += spill.take_all().len() as u64;
         assert_eq!(drained, retained);
     }
 
