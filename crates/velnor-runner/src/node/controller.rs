@@ -2172,11 +2172,7 @@ async fn recover_one_orphaned_job(
                             // slot to Ready. The dead worker's containers must
                             // not strand behind that Ready slot.
                             if abandon_if_budget_spent(args, journal, &row)? {
-                                teardown_orphaned_job_containers(
-                                    &job.job_id.0,
-                                    docker_backend,
-                                    docker,
-                                );
+                                teardown(&job.job_id.0);
                             }
                         }
                         return Ok(());

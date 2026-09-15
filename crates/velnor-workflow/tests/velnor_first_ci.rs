@@ -226,7 +226,7 @@ fn pull_request_and_merge_group_publish_required() {
     assert!(pr.contains("  merge_group:"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
-    assert!(pr.contains("    name: \"Control / Aggregate\""));
+    assert!(pr.contains("    name: ci-required"));
     assert!(pr.contains("  required:"));
     assert!(pr.contains("    name: \"Control / Required\""));
     assert!(!pr.contains("default: velnor"), "{pr}");
@@ -385,7 +385,7 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let main = generated.workflow("ci-main.yml");
     assert!(
-        main.contains("rev: 7fa4a0731ee8bedc5b02d90507d6dbe8b719153a"),
+        main.contains("rev: 91a900bed611cfd3c7e176fcd90a4bd2d4b741d6"),
         "foreign Planning installs the published pin: {main}"
     );
     assert!(
@@ -889,7 +889,7 @@ fn trust_gated_unit_appends_trusted_label_on_velnor_lane_only() {
     let mut config = fs::read_to_string(&path).unwrap();
     let _ = writeln!(
         config,
-        "velnor_trusted_label = \"example-trusted\"\n\n[[units]]\nid = \"{gated}\"\nrequires_trusted = true"
+        "velnor_trusted_label = \"example-trusted\"\nvelnor_trusted_runner_available = true\n\n[[units]]\nid = \"{gated}\"\nrequires_trusted = true"
     );
     fs::write(&path, config).unwrap();
     let generated = generate(&root);

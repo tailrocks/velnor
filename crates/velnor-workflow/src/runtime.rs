@@ -3025,6 +3025,9 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         .split_whitespace()
         .collect::<String>()
         .replace("github.event.inputs.lanes", "github.event.inputs.runner");
+    if value.ends_with("&&false") {
+        return true;
+    }
     if value == "github.event_name=='pull_request_target'"
         || value == "always()&&github.event_name=='pull_request_target'"
     {
@@ -3059,6 +3062,9 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let velnor_lane_gate = format!(
         "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
+    let velnor_lane_gate_with_default_runner = format!(
+        "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
+    );
     let velnor_dispatch_only_gate = format!(
         "github.ref=='refs/heads/{branch}'&&github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
     );
@@ -3066,6 +3072,8 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         || value == format!("always()&&{ci_gate}")
         || value == velnor_lane_gate
         || value == format!("always()&&{velnor_lane_gate}")
+        || value == velnor_lane_gate_with_default_runner
+        || value == format!("always()&&{velnor_lane_gate_with_default_runner}")
         || value == velnor_dispatch_only_gate
         || value == format!("always()&&{velnor_dispatch_only_gate}")
         || value == release_gate
@@ -4401,56 +4409,6 @@ workspace_check = true
             &[(changed, base_contents, head_contents)],
             config_text,
         )
-    }
-
-    fn current_project_selection_git_fixture_with_changes(
-        name: &str,
-        changes: &[(&str, &str, &str)],
-        config_text: &str,
-    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "velnor-workflow-current-project-selection-{name}-{}-{id}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root)?;
-        let init = |args: &[&str]| -> Result<String, Box<dyn Error>> {
-            let output = std::process::Command::new("git")
-                .current_dir(&root)
-                .args(args)
-                .output()?;
-            assert!(
-                output.status.success(),
-                "git command failed: {args:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-        };
-        init(&["init", "-q"])?;
-        init(&["config", "user.email", "test@example.invalid"])?;
-        init(&["config", "user.name", "Velnor test"])?;
-
-        let config = root.join(".github/ci/project.toml");
-        std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
-        std::fs::write(&config, config_text)?;
-
-        for (changed, base_contents, _) in changes {
-            let changed_path = root.join(changed);
-            std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
-            std::fs::write(changed_path, base_contents)?;
-        }
-        init(&["add", "."])?;
-        init(&["commit", "-qm", "base"])?;
-        let base = init(&["rev-parse", "HEAD"])?;
-
-        for (changed, _, head_contents) in changes {
-            std::fs::write(root.join(changed), head_contents)?;
-        }
-        init(&["add", "."])?;
-        init(&["commit", "-qm", "change"])?;
-        let head = init(&["rev-parse", "HEAD"])?;
-        Ok((root, base, head))
     }
 
     fn current_project_selection_git_fixture_with_changes(
