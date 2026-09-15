@@ -2093,6 +2093,7 @@ async fn reclaim_orphaned_jobs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn recover_one_orphaned_job(
     args: &ControllerArgs,
     journal: &mut Journal,
