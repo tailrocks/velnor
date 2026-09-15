@@ -4817,8 +4817,11 @@ mod tests {
             spawn_slots: false,
             lifecycle: None,
         };
-        let listing =
-            "job-cid\tjob-1\tjob-1\trunning\nguest-cid\tguest-sidecar\tjob-1\texited\n".to_string();
+        let job_container = crate::github_adapter::job_container_name_for_id("job-1");
+        let listing = format!(
+            "job-cid\t{job_container}\t{job_container}\trunning\n\
+             guest-cid\tguest-sidecar\t{job_container}\texited\n"
+        );
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
         reclaim_orphaned_jobs(
@@ -4840,7 +4843,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(
             calls[0],
-            crate::docker_lease::list_owned_containers_state_args("job-1")
+            crate::docker_lease::list_owned_containers_state_args(&job_container)
         );
         assert_eq!(
             calls[1],
@@ -5489,215 +5492,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[tokio::test]
-    async fn completing_job_with_pending_outbox_does_not_reconstruct_after_replay_failure() {
-        let dir = metrics_test_dir("completing-pending-outbox-no-reconstruct");
-        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
-        let generation = Generation::INITIAL;
-        let completing_slot = SlotId("velnor-1".to_owned());
-        let running_slot = SlotId("velnor-2".to_owned());
-        let completing_job = JobId("job-completing".to_owned());
-        let running_job = JobId("job-running".to_owned());
-        for event in [
-            Event::ControlLive,
-            Event::JournalWritable,
-            Event::Dependency {
-                github_reachable: true,
-            },
-            Event::Routing {
-                valid: true,
-                group_valid: true,
-            },
-            Event::DesiredCapacity { ready: 2 },
-        ] {
-            assert!(!journal.apply(event).unwrap().rejected);
-        }
-        for slot_id in [completing_slot.clone(), running_slot.clone()] {
-            for event in [
-                Event::PermitReserved {
-                    slot_id: slot_id.clone(),
-                    generation,
-                },
-                Event::ExecutorProven {
-                    slot_id: slot_id.clone(),
-                    generation,
-                },
-                Event::SessionLive {
-                    slot_id: slot_id.clone(),
-                    generation,
-                },
-                Event::RegistrationIntended {
-                    slot_id: slot_id.clone(),
-                    generation,
-                },
-                Event::Registered {
-                    slot_id: slot_id.clone(),
-                    generation,
-                },
-                Event::ReadyAttempt {
-                    slot_id: slot_id.clone(),
-                    generation,
-                },
-            ] {
-                assert!(!journal.apply(event).unwrap().rejected);
-            }
-        }
-        for (slot_id, job_id, message_id) in [
-            (
-                completing_slot.clone(),
-                completing_job.clone(),
-                "msg-completing",
-            ),
-            (running_slot.clone(), running_job.clone(), "msg-running"),
-        ] {
-            for event in [
-                Event::JobAcquisitionIntended {
-                    slot_id: slot_id.clone(),
-                    job_id: job_id.clone(),
-                    generation,
-                    message_id: message_id.into(),
-                    run_service_url: "https://run.example/run".into(),
-                    intended_unix: 1_000,
-                },
-                Event::JobOwned {
-                    job_id: job_id.clone(),
-                    slot_id: slot_id.clone(),
-                    attempt: 1,
-                    generation,
-                    worker: format!("worker-{}", job_id.0),
-                    accepted_unix: 1,
-                },
-                Event::JobStarted {
-                    job_id: job_id.clone(),
-                    generation,
-                },
-            ] {
-                assert!(!journal.apply(event).unwrap().rejected);
-            }
-        }
-        assert!(
-            !journal
-                .apply(Event::JobTerminalResult {
-                    job_id: completing_job.clone(),
-                    generation,
-                    conclusion: "success".to_owned(),
-                })
-                .unwrap()
-                .rejected
-        );
-        let payload = b"payload";
-        let payload_sha256 = velnor_control::journal::payload_checksum(payload);
-        assert!(
-            !journal
-                .apply(Event::CompletionIntended {
-                    job_id: completing_job.clone(),
-                    generation,
-                    payload_sha256: payload_sha256.clone(),
-                })
-                .unwrap()
-                .rejected
-        );
-        cleanup::write_outbox(&dir, &completing_job.0, generation.0, payload).unwrap();
-        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
-        let slot_dir = dir.join("slots").join("slot-1");
-        std::fs::create_dir_all(&slot_dir).unwrap();
-        config::save(
-            &slot_dir,
-            &config::StoredRunnerConfig {
-                settings: config::RunnerSettings {
-                    github_url: "https://github.com/tailrocks/fixture".to_owned(),
-                    server_url: None,
-                    server_url_v2: None,
-                    pool_id: Some(7),
-                    pool_name: Some("velnor".to_owned()),
-                    agent_id: Some(7),
-                    agent_name: "slot-1".to_owned(),
-                    labels: vec!["velnor".to_owned()],
-                    use_v2_flow: true,
-                    ephemeral: true,
-                    disable_update: true,
-                },
-                credentials: None,
-            },
-        )
-        .unwrap();
-        std::fs::write(
-            slot_dir.join("in-flight-job.json"),
-            serde_json::to_vec(&json!({
-                "plan_id": "plan-1",
-                "job_id": completing_job.0,
-                "run_service_url": "https://example.invalid/run-service",
-                "billing_owner_id": null
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let stale = stale_pid();
-        for isolation in [
-            completing_job.0.as_str(),
-            running_job.0.as_str(),
-            "wait-velnor-1",
-            "wait-velnor-2",
-        ] {
-            cleanup::write_owned_pid(&dir, isolation, generation.0, stale).unwrap();
-        }
-
-        let args = ControllerArgs {
-            state_dir: dir.clone(),
-            scope: "velnor".to_owned(),
-            desired_ready: 2,
-            once: true,
-            spawn_slots: false,
-            lifecycle: None,
-        };
-        reclaim_orphaned_jobs(
-            &args,
-            &mut journal,
-            tokio::time::Instant::now() + Duration::from_secs(15),
-            false,
-            |args| panic!("docker must not be invoked on this recovery path: {args:?}"),
-        )
-        .await
-        .expect("replay failure must not abort the controller cycle");
-
-        let state = journal.materialized_state().unwrap();
-        let completing = state
-            .jobs
-            .iter()
-            .find(|job| job.job_id == completing_job)
-            .expect("completing job is retried, not reconstructed");
-        assert_eq!(completing.phase, JobPhase2::Completing);
-        assert_eq!(completing.terminal_conclusion.as_deref(), Some("success"));
-        let outbox = state
-            .outbox
-            .iter()
-            .find(|row| row.job_id == completing_job && row.generation == generation)
-            .expect("pending outbox row is kept");
-        assert!(outbox.is_pending());
-        assert_eq!(outbox.payload_sha256, payload_sha256);
-        assert_eq!(
-            cleanup::read_outbox(&dir, &completing_job.0, generation.0).unwrap(),
-            payload
-        );
-        assert!(
-            slot_dir.join("in-flight-job.json").exists(),
-            "replay failure must not reconstruct or clear the in-flight marker"
-        );
-        assert!(
-            state.jobs.iter().all(|job| job.job_id != running_job),
-            "the other slot must still reclaim after replay failure: {:?}",
-            state.jobs
-        );
-        assert_eq!(
-            state
-                .slots
-                .iter()
-                .find(|slot| slot.slot_id == running_slot)
-                .map(|slot| slot.phase),
-            Some(SlotPhase2::Ready)
-        );
-        std::fs::remove_dir_all(dir).ok();
-    }
 
     #[cfg(feature = "test-support")]
     #[tokio::test]

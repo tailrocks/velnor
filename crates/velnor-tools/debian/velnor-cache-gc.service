@@ -1,0 +1,15 @@
+[Unit]
+Description=Velnor scheduled host cache garbage collection
+Documentation=https://github.com/tailrocks/velnor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RuntimeDirectory=velnor
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+Environment=VELNOR_WORK_DIR=/var/lib/velnor/work
+EnvironmentFile=/etc/velnor/velnor.env
+EnvironmentFile=-/etc/velnor/secrets.env
+ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnorctl cache --work-dir ${VELNOR_WORK_DIR} gc --yes

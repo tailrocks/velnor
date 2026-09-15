@@ -4353,7 +4353,7 @@ jobs:
     #[test]
     fn fleet_policy_surface_names_toml_parse_failure_class() {
         let root = TestRepo::new();
-        std::fs::create_dir_all(root.path.join("fleet")).unwrap();
+        std::fs::create_dir_all(root.path.join("config/fleet")).unwrap();
         std::fs::write(
             root.path.join("config/fleet/release-refs.toml"),
             "schema_version = 1\n[[entries\nowner = \"tailrocks\"\n",
@@ -4383,7 +4383,7 @@ jobs:
             .expect("skip")
             .is_empty());
 
-        std::fs::create_dir_all(root.path.join("fleet")).unwrap();
+        std::fs::create_dir_all(root.path.join("config/fleet")).unwrap();
         std::fs::write(
             root.path.join("config/fleet/release-refs.toml"),
             "schema_version = 1\n\n[[entries]]\nowner = \"tailrocks\"\nrepository = \"ruxel\"\nworkflow_path = \".github/workflows/ci.yml\"\ngit_ref = \"refs/heads/main\"\nadmission_reason = \"test\"\napproving_change = \"test\"\nreview_state = \"approved\"\n",

@@ -42,6 +42,10 @@ pub const FAIL_CLOSED: &str = "untrusted";
 /// compares against exactly this, case-insensitively.
 pub const TRUSTED: &str = "trusted";
 
+/// Store namespace for same-repo pull-request jobs on a trusted pool. Writes
+/// land here; reads may overlay the trusted scope (D18).
+pub const PR_STORE_SCOPE: &str = "pr";
+
 const HELP: &str = "Trust boundary for this daemon/pool. \"trusted\" keeps full capabilities; \
      any other value disables shared Docker socket access, privileged container options, \
      privileged service containers, host port publishing, and user secrets. \

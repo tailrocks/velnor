@@ -47,6 +47,17 @@ version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust
 [policy]
 ruleset_required_status_checks = ["ci-required"]
 
+# Generator-only dual-lane cache budgets (never written to .github/ci/project.toml).
+[cache.github]
+budget_bytes = 8589934592
+producer_window_seconds = 7200
+mbx_generation_bound = 2
+
+[cache.velnor]
+budget_bytes = 53687091200
+producer_window_seconds = 86400
+mbx_generation_bound = 6
+
 # Release contract: typed native publisher + rolling preview. Guest-seed
 # restore/save is derived from the microvm recipe, not a pasted workflow body.
 
@@ -269,6 +280,10 @@ mutable_mount_seed = true
 [[static_files]]
 file = ".github/actions/setup-velnor-workflow/action.yml"
 source = ".github-gen/sources/actions/setup-velnor-workflow/action.yml"
+
+[[static_files]]
+file = ".github/actions/report-velnor-ci-outcomes/action.yml"
+source = ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml"
 
 [[static_files]]
 file = ".github/workflows/AGENTS.md"

@@ -54,12 +54,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-8e438e06855e10b4bfe5072912f47d2ae9dc5a02-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-e6fabca85499be62f939243d4452438449b69c53-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 8e438e06855e10b4bfe5072912f47d2ae9dc5a02
+          EXPECTED_REVISION: e6fabca85499be62f939243d4452438449b69c53
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -141,10 +141,10 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
+          key: velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
           restore-keys: |
-            velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
-            velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-
+            velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
+            velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-
       - name: Prepare Docker build seed context
         if: ${{ inputs.unit == 'docker' }}
         env:
@@ -248,7 +248,7 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-18be41a925da-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
+          key: velnor-docker-seed-v3-5eeb8272326f-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
       - name: Mark cleanup end
         if: ${{ inputs.unit == 'docker' && (always()) }}
         run: |
@@ -263,6 +263,10 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: ${{ inputs.unit == 'docker' && (always()) }}
+        env:
+          VELNOR_CI_LANE: github
+          VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: docker
@@ -432,6 +436,9 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: ${{ inputs.unit == 'docker' && (always()) }}
+        env:
+          VELNOR_CI_LANE: velnor
+          VELNOR_HOST_WARM_LAYERS: docker_seed
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: docker
