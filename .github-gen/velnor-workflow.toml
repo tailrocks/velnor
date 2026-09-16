@@ -2,6 +2,7 @@ schema = 1
 
 [generator]
 repository = "tailrocks/velnor"
+revision = "1279c4f92c97b75dc4cc627f122e119f8a5eae16"
 
 [workflow]
 runners = "both"
