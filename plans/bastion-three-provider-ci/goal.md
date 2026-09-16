@@ -1,15 +1,15 @@
-/goal Execute the bastion three-provider CI campaign: deliver source changes, generated workflows, coherent releases, signed APT deployment, real three-provider verification, sequential repository migrations, and operating evidence through every ordered gate. Do not stop at planning, registration, or an author saying tests pass.
+# /goal Execute the bastion three-provider CI campaign: deliver source changes, generated workflows, coherent releases, signed APT deployment, real three-provider verification, sequential repository migrations, and operating evidence through every ordered gate. Do not stop at planning, registration, or an author saying tests pass
 
 ## Starting state (authoritative, verify before acting)
 
-- Repo: https://github.com/tailrocks/velnor (origin), branch `docs/bastion-final-plan`, PR #912.
+- Repo: <https://github.com/tailrocks/velnor> (origin), branch `docs/bastion-final-plan`, PR #912.
 - Campaign authority (this branch): `plans/bastion-three-provider-ci/spec.md` (target state, §1–§9),
   `plans/bastion-three-provider-ci/work-plan.md` (ordered steps A0–G2),
   `plans/bastion-three-provider-ci/checklist.md` (acceptance, 1:1 with step IDs),
   `plans/bastion-three-provider-ci/evidence.md` (audit facts as revalidation inputs only).
 - Target: `root@37.27.110.241` (bastion), Debian 13, AMD EPYC 9454P, 48 physical / 96 logical CPUs,
   ~128 GB RAM. Delivery dependency: `tailrocks/velnor-apt`, signed feed at
-  https://velnor-apt.tailrocks.com/. Consumers in HARD order: `tailrocks/velnor`, then
+  <https://velnor-apt.tailrocks.com/>. Consumers in HARD order: `tailrocks/velnor`, then
   `jackin-project/jackin`, then `ChainArgos/java-monorepo`, then generic onboarding.
   Read-only consumer research may run early; consumer mutation/activation waits for its gate.
 - Retained baselines to re-resolve (never pins): Velnor `3353310c…` (17 units), Jackin `92f347ac…`
@@ -119,7 +119,7 @@
    zero fixture weakening. Then full parity (counts/engines/digests/caches/no-quotas/cleanup) +
    PR + main; remeasure N iff the mix changed; prove Velnor non-regression for any generic fix.
 9. **G1–G2: ONLY AFTER F — migrate + qualify ChainArgos, then close.** Same drill: auth + scope
-   + typed config, published pin, same controller + global N, regenerate; ownership/trust +
+   - typed config, published pin, same controller + global N, regenerate; ownership/trust +
    missing local actions FIRST; 71-unit/213-execution ledger; job-local PostgreSQL with
    graph-justified dedup of the 16 `flywayMigrate jooqCodegen` preparations, same job DB via
    build-supported vars (`POSTGRESQL_DB_HOST/PORT`), never prod/shared; Testcontainers

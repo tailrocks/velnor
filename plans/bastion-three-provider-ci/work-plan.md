@@ -633,6 +633,3 @@ A later generic fix returns to its affected author/verifier pair. Tooling is pub
 **Dependencies:** G1 (and transitively every prior step).
 
 **Outputs:** Mechanical no-regression proofs, fresh-fixture onboarding proof, pin/identity record, runbooks, final N evidence, signed acceptance report.
-
-
-
