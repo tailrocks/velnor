@@ -1571,7 +1571,6 @@ const RELEASE_KINDS: &[&str] = &[
     "apt",
 ];
 
-
 pub(crate) fn validate_renovate_token_name(token: &str) -> Result<(), GeneratorError> {
     if token == "GITHUB_TOKEN" {
         return Err(GeneratorError::usage(
@@ -1661,7 +1660,12 @@ impl RepoGenerationConfig {
                 "[renovate] enabled = true requires [workflow] velnor_trusted_runner_available",
             ));
         }
-        if self.workflow.velnor_labels.as_ref().is_none_or(Vec::is_empty) {
+        if self
+            .workflow
+            .velnor_labels
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        {
             return Err(GeneratorError::usage(
                 "[renovate] enabled = true requires [workflow] velnor_labels for the writer job",
             ));
@@ -2746,7 +2750,9 @@ mod tests {
         )
         .validate(&unit_ids, &[], &BTreeSet::new())
         .expect_err("enabled renovate without declare must fail");
-        assert!(error.to_string().contains("[[declare]] primitive = \"renovate\""));
+        assert!(error
+            .to_string()
+            .contains("[[declare]] primitive = \"renovate\""));
         let _ = fs::remove_dir_all(root);
     }
 

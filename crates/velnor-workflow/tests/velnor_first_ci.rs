@@ -720,9 +720,7 @@ fn declared_mise_tools_propagate_to_non_rust_kind_reusables() {
     );
     let unit = generated.workflow("ci-unit-docs.yml");
     assert!(
-        unit.contains(
-            "uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@"
-        ),
+        unit.contains("uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@"),
         "consumer kind reusables must reference the published report action: {unit}"
     );
 }

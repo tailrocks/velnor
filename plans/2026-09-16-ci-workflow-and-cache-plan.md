@@ -1,6 +1,6 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — `main` @ [`285f2cdb`](https://github.com/tailrocks/velnor/commit/285f2cdb) (rev 22: pin [`7e74aa07`](https://github.com/tailrocks/velnor/commit/7e74aa07); policy 11/11 PASS locally; PR [#878](https://github.com/tailrocks/velnor/pull/878)/[#879](https://github.com/tailrocks/velnor/pull/879) wipe restored).
+Status: **in progress** — `main` @ [`500d1cf3`](https://github.com/tailrocks/velnor/commit/500d1cf3) (rev 23: Phase 1 mbx `host_warm` VERIFIED; Phase 0 3× `ci-main` re-opened after 35084377541/35084452873/35085897617 failed; maintenance `--repo` + nightly `-R` @ generator rev 49; cache ~9.7 GiB pending retention).
 Date: 2026-09-16 (rev 18: D18 read-through overlay replaced by a copy seed of the `pr` Cargo store, PR writes persist and are host-shared; rev 17: post-push verifier 4/4 PASS @ `c23d7e8a`; P0-8 pre-merge FAIL superseded; ci-main 35059608031 Planning `--force` fix; YAML drift gate literals expected expansion; rev 16: PR #872 merged @ `364347e9`; P0-8 nightly dispatcher on `main` @ `7171fe01`; rev 15: third green `ci-required` rollup @ `1e552afe`; rev 14: pin-decoupled policy validator + config-only trust-gated emission + `velnor-host-docker` online; rev 13: DCO sign-off restored; rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
@@ -513,7 +513,7 @@ Pre-req: Phase 0 green.
 
 - [x] `cargo check -p velnor-runner` and `cargo test -p velnor-workflow` compile and pass on `main`
 - [x] P0-8: `nightly.yml` dispatches `ci-main@main` (`Control / Dispatch ci-main`) — **VERIFIED @ rev 17 on `main`:** post-push verifier 4/4 PASS @ [`c23d7e8a`](https://github.com/tailrocks/velnor/commit/c23d7e8a) (112 lines, no `pull_request` in mbx save `if`, `--check` green); pre-merge FAIL from Phase 0 verifier superseded; landed [`4a1ab4a1`](https://github.com/tailrocks/velnor/commit/4a1ab4a1) + pin [`7171fe01`](https://github.com/tailrocks/velnor/commit/7171fe01)
-- [x] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green — **VERIFIED @ rev 20:** runs [35066240941](https://github.com/tailrocks/velnor/actions/runs/35066240941) @ `03f9409b`, [35069637566](https://github.com/tailrocks/velnor/actions/runs/35069637566) @ `8a29a9f2`, [35070325902](https://github.com/tailrocks/velnor/actions/runs/35070325902) @ `8c5ce050`; each: Planning + Policy + `ci-required` success
+- [ ] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green — **RE-OPENED @ rev 23:** runs [35084377541](https://github.com/tailrocks/velnor/actions/runs/35084377541) @ `285f2cdb`, [35084452873](https://github.com/tailrocks/velnor/actions/runs/35084452873) @ `500d1cf3`, [35085897617](https://github.com/tailrocks/velnor/actions/runs/35085897617) **failed** (supersedes rev 20 3/3 VERIFIED)
 - [x] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup` — **VERIFIED:** PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup `ci-required` + `Control / Required` SUCCESS on runs [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442), [35047497124](https://github.com/tailrocks/velnor/actions/runs/35047497124), [35048456675](https://github.com/tailrocks/velnor/actions/runs/35048456675); DCO SUCCESS
 - [ ] Nightly completes in < 2 h (no 24 h queue)
 - [ ] `actions/cache/usage` ≤ 8 GiB after one maintenance run
@@ -539,7 +539,7 @@ Pre-req: Phase 0 green.
 - [x] Zero `actions/cache*` in every Velnor job (all kinds)
 - [x] `Control / Prepare Cargo` ordering preserved at caller level
 - [x] Consecutive Velnor jobs: `Cargo sources warm; skipping fetch` — **PARTIAL @ rev 21 (pre-fix telemetry):** run [35075927349](https://github.com/tailrocks/velnor/actions/runs/35075927349) `Control / Prepare Cargo / prepare-cargo` log: `Cargo sources warm; skipping fetch` (×2 packages); full Velnor unit re-verify after [`3a0829fc`](https://github.com/tailrocks/velnor/commit/3a0829fc) host_warm passthrough fix
-- [ ] mbx local hits > 0 classified `host_warm` on unchanged source on the same slot — **PARTIAL @ rev 21 (pre-fix):** run 35075927349 Velnor jobs show mbx compiler hits (e.g. `rust-velnor-render`: 5 hits/0 misses) but `VELNOR_CI_REPORT` classified `mbx: cold` because composite action did not inherit `VELNOR_HOST_WARM_LAYERS`; fixed @ [`3a0829fc`](https://github.com/tailrocks/velnor/commit/3a0829fc)
+- [x] mbx local hits > 0 classified `host_warm` on unchanged source on the same slot — **VERIFIED @ rev 23:** runs [35084377541](https://github.com/tailrocks/velnor/actions/runs/35084377541) @ [`285f2cdb`](https://github.com/tailrocks/velnor/commit/285f2cdb), [35084452873](https://github.com/tailrocks/velnor/actions/runs/35084452873) @ [`500d1cf3`](https://github.com/tailrocks/velnor/commit/500d1cf3); Velnor jobs report mbx classified `host_warm`
 
 ### Phase 4 — GitHub budget
 
@@ -1095,3 +1095,13 @@ PR [#872](https://github.com/tailrocks/velnor/pull/872) merged into `main` as me
 | §16 Phase 1 `host_warm` telemetry | P | pending post-push `ci-main` |
 | Maintenance dispatched after `--json` fix | V | [35084343322](https://github.com/tailrocks/velnor/actions/runs/35084343322) |
 | Live GHA cache account | U | **~10.4 GiB / 113 entries** — still > 8 GiB budget |
+
+#### Rev 23 delta @ `500d1cf3` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| §16 Phase 1 mbx `host_warm` | V | runs [35084377541](https://github.com/tailrocks/velnor/actions/runs/35084377541) @ [`285f2cdb`](https://github.com/tailrocks/velnor/commit/285f2cdb), [35084452873](https://github.com/tailrocks/velnor/actions/runs/35084452873) @ [`500d1cf3`](https://github.com/tailrocks/velnor/commit/500d1cf3); Velnor jobs classify mbx `host_warm` |
+| §16 Phase 0 gate: 3× consecutive green `ci-main` | C | re-opened: [35084377541](https://github.com/tailrocks/velnor/actions/runs/35084377541), [35084452873](https://github.com/tailrocks/velnor/actions/runs/35084452873), [35085897617](https://github.com/tailrocks/velnor/actions/runs/35085897617) **failed** (supersedes rev 20 3/3) |
+| Maintenance `cache-plan --repo` fix | V | generator rev 49: `maintenance.yml` `cache-budget` passes `--repo ${{ github.repository }}` to `velnor-workflow cache-plan` (was missing → wrong-repo eviction scope) |
+| Nightly dispatch `-R` fix | V | generator rev 49: `nightly.yml` `gh workflow run ci-main.yml -R ${{ github.repository }} --ref main` (was missing `-R` → dispatch to wrong repo) |
+| Live GHA cache account | U | `gh api …/actions/cache/usage` @ rev 23: **~9.7 GiB**; retention pending post-fix maintenance run |

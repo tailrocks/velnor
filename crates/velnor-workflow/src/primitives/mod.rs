@@ -17,8 +17,8 @@ mod lanes;
 mod pipeline;
 mod plan;
 mod regen;
-pub(crate) mod renovate;
 pub(crate) mod release;
+pub(crate) mod renovate;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
 
@@ -971,12 +971,9 @@ fn rows_for(
     rows.extend(contracts.iter().map(ResolvedRow::declared));
     // Declared release-side families: the file rows they name, rendered by the
     // family's primitive.
-    for row in declared
-        .iter()
-        .filter(|row| {
-            release::is_release_side(&row.primitive) || renovate::is_renovate_side(&row.primitive)
-        })
-    {
+    for row in declared.iter().filter(|row| {
+        release::is_release_side(&row.primitive) || renovate::is_renovate_side(&row.primitive)
+    }) {
         rows.push(ResolvedRow::declared(row));
     }
     // Release-side families: a default row per owned file, rendered by the
@@ -1013,10 +1010,7 @@ fn rows_for(
                 continue;
             }
             if *family == RENOVATE_VALIDATE
-                && !config
-                    .renovate
-                    .as_ref()
-                    .is_some_and(|spec| spec.validate)
+                && !config.renovate.as_ref().is_some_and(|spec| spec.validate)
             {
                 continue;
             }
