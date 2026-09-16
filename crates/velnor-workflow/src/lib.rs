@@ -3833,6 +3833,9 @@ fn audited_pin_script() -> &'static str {
 /// considered. The same-repository select compares the embedded
 /// `.head_repository.id` object: the runs-list endpoint exposes no
 /// `.head_repository_id` scalar, and selecting on it matches nothing.
+/// The artifact check pipes the listing through real jq for the same
+/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
+/// never report the match.
 fn policy_candidate_step(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
