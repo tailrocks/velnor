@@ -63,12 +63,12 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 17b441c1211cf305d19486c33587882aca1c60c3
+          rev: 75707ac45c9213388d287518a5894ad6196e1a12
       - name: Stage pinned Velnor workflow policy runtime
         if: ${{ runner.environment == 'github-hosted' }}
         shell: bash
         env:
-          PINNED_REVISION: 17b441c1211cf305d19486c33587882aca1c60c3
+          PINNED_REVISION: 75707ac45c9213388d287518a5894ad6196e1a12
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-policy"
@@ -80,9 +80,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '17b441c1211cf305d19486c33587882aca1c60c3' }}
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '75707ac45c9213388d287518a5894ad6196e1a12' }}
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=17b441c1211cf305d19486c33587882aca1c60c3" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -99,7 +99,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 17b441c1211cf305d19486c33587882aca1c60c3
+          EXPECTED_REVISION: 75707ac45c9213388d287518a5894ad6196e1a12
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -117,7 +117,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-17b441c1211cf305d19486c33587882aca1c60c3-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-75707ac45c9213388d287518a5894ad6196e1a12-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
