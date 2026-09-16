@@ -22,10 +22,9 @@ use crate::trust_class::TrustClass;
 use rusqlite::Connection;
 use velnor_control::store::{
     EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
-    RetentionMaintenanceBudget, RunnerRegistrationRow, SlotIdentity, SlotTransitionRequest,
-    SlotTransitionRequestKey, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
+    RetentionMaintenanceBudget, RunnerRegistrationRow, SlotIdentity, SlotTransitionRequest, Store,
+    StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
-#[cfg(test)]
 use velnor_model::ExitClass;
 use velnor_model::{
     EventReason, Generation, JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
@@ -255,6 +254,19 @@ fn sanitize_slug(raw: &str) -> String {
     } else {
         trimmed
     }
+}
+
+/// The durable slot projection as seen by one actor generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotCursor {
+    /// No row, or a row owned by an older generation: this generation
+    /// establishes fresh ownership and has no `from` edge to validate.
+    Fresh,
+    /// This generation owns the row; edges project from `phase`, and the
+    /// next request key follows `sequence`.
+    Owned { phase: SlotPhase, sequence: u64 },
+    /// A newer generation owns the slot; this actor must not mutate it.
+    Superseded { owner: Generation },
 }
 
 /// Lifetime of one job's secret masks inside the sink.
@@ -739,22 +751,41 @@ impl OpsSink {
         }
     }
 
-    pub(crate) fn latest_slot_transition_request_key(
+    /// Where the durable slot projection stands for one actor generation.
+    ///
+    /// The daemon derives every slot edge from this cursor, so it can only
+    /// ever declare edges the closed graph permits from the phase the store
+    /// actually holds.
+    pub(crate) fn slot_cursor(
         &self,
         slot_id: &SlotId,
         slot_index: u32,
         generation: Generation,
-    ) -> Result<Option<SlotTransitionRequestKey>, StoreError> {
-        self.store.latest_slot_transition_request_key(
-            &SlotIdentity {
-                instance_slug: self.instance_slug.clone(),
-                slot_id: slot_id.clone(),
-                host: self.instance_slug.clone(),
-                slot_index,
-                slot_kind: SlotKind::Stable,
+    ) -> Result<SlotCursor, StoreError> {
+        let Some(row) = self.store.slot(&self.instance_slug, slot_id)? else {
+            return Ok(SlotCursor::Fresh);
+        };
+        if row.identity.host != self.instance_slug
+            || row.identity.slot_index != slot_index
+            || row.identity.slot_kind != SlotKind::Stable
+        {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.slot.identity.mismatch")
+                    .with_remediation(
+                    "reuse the original host, index, and slot kind for this stable slot identity",
+                ),
+            );
+        }
+        Ok(match row.generation.cmp(&generation) {
+            std::cmp::Ordering::Less => SlotCursor::Fresh,
+            std::cmp::Ordering::Equal => SlotCursor::Owned {
+                phase: row.phase,
+                sequence: row.transition_sequence,
             },
-            generation,
-        )
+            std::cmp::Ordering::Greater => SlotCursor::Superseded {
+                owner: row.generation,
+            },
+        })
     }
 
     /// Best-effort idempotent job transition; replaying `(job, token)` is a
@@ -1300,10 +1331,6 @@ impl OpsSink {
             .lock()
             .unwrap()
             .replace(StoreError::new(class, reason));
-    }
-
-    pub(crate) fn record_slot_transition_lookup_failure(&self, error: &StoreError) {
-        self.absorb("store.slot.transition.lookup", &error.to_string());
     }
 
     #[cfg(any(test, feature = "test-support"))]

@@ -13,7 +13,7 @@ use std::{
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
@@ -24,7 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{Generation, SlotId, SlotPhase, Slug, TelemetryEvent, Timestamp};
+use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
 
 use crate::job_claim::JobClaim;
 use crate::{
@@ -3583,12 +3583,19 @@ pub(crate) async fn run_daemon_slot(
         return run_with_jit_prewarmer(slot_args, None, storage_mode).await;
     }
 
-    let slot_config_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
     // Let the normal job-runner preflight classify missing, corrupt, or
     // incomplete runner.json as LocalRunnerIdentityUnavailable. That error is
     // handled below by the existing JIT reconfiguration loop. Loading the
     // config here would bypass that recovery path before the loop exists.
-    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation, slot_config_dir)?;
+    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation)?;
+    // A worker starts ready to acquire. Declaring it converges the durable
+    // projection from wherever the previous worker of this generation left
+    // it (a drain or fence exit ends in `teardown`) instead of letting the
+    // first post-job teardown collide with that stale phase.
+    let _ = durable_slot.transition(
+        SlotPhase::Idle,
+        format!("slot worker started pid={}", std::process::id()),
+    );
 
     // The controller launches this loop in a separate job-worker process. A
     // signal listener in the controller alone cannot cancel that process's
@@ -3918,30 +3925,39 @@ pub(crate) async fn run_daemon_slot(
     }
 }
 
+/// The daemon's durable slot cursor: the phases it declares for one slot
+/// generation, projected onto the store's closed [`SlotPhase`] graph.
+///
+/// The daemon never issues an edge blind. Every declaration reads the
+/// materialized phase of its generation first and converges toward the
+/// target along legal edges only: a target equal to the current phase is a
+/// no-op, a directly legal edge is written as is, and anything else walks
+/// the daemon's own lifecycle ring (`idle → teardown → recycling → idle`)
+/// through the intermediate phases it skipped — for instance a worker that
+/// exited in `teardown` and was respawned for the same generation. Illegal
+/// edges are therefore impossible to issue from here by construction, not by
+/// catching the store's conflict after the fact.
+///
+/// Request keys are derived from the store's own per-generation transition
+/// sequence, so no two declarations ever share a key: a JIT agent id is not
+/// unique across lifecycle passes (the promoted successor is later the torn
+/// down predecessor), and keying by it silently dropped writes as
+/// `idempotency_conflict`, which is what let the projection drift into
+/// `teardown → teardown` and `teardown → idle` in the first place.
 #[derive(Debug, Clone)]
 struct DurableSlotLifecycle {
     slot_id: SlotId,
     slot_index: u32,
     generation: Generation,
-    config_dir: PathBuf,
-    agent_id: Arc<AtomicI64>,
-    agent_id_available: Arc<AtomicBool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunnerIdentityState {
-    Available(i64),
-    Configless,
-    Unavailable,
-}
+/// Phases the daemon itself declares, in ring order. Every consecutive pair
+/// (wrapping) is a legal edge of the closed slot graph.
+const DAEMON_SLOT_RING: [SlotPhase; 3] =
+    [SlotPhase::Idle, SlotPhase::Teardown, SlotPhase::Recycling];
 
 impl DurableSlotLifecycle {
-    fn new(
-        slot_id: SlotId,
-        one_based_index: usize,
-        generation: Generation,
-        config_dir: PathBuf,
-    ) -> Result<Self> {
+    fn new(slot_id: SlotId, one_based_index: usize, generation: Generation) -> Result<Self> {
         let zero_based_index = one_based_index.checked_sub(1).ok_or_else(|| {
             anyhow::anyhow!("durable slot index must be one-based at the runner boundary")
         })?;
@@ -3951,130 +3967,137 @@ impl DurableSlotLifecycle {
             slot_id,
             slot_index,
             generation,
-            config_dir,
-            agent_id: Arc::new(AtomicI64::new(0)),
-            agent_id_available: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    /// Refresh the registration identity used for durable transition keys.
-    ///
-    /// A missing runner.json is the expected configless gap while a consumed
-    /// JIT registration is being torn down. Preserve the prior identity only
-    /// for that gap. Existing-but-invalid JSON and valid config without an
-    /// agent id clear the identity and fail closed.
-    fn refresh_agent_id(&self) -> RunnerIdentityState {
-        let config_path = self.config_dir.join("runner.json");
-        // Teardown temporarily removes runner.json. Keep the prior identity
-        // for that boundary, then adopt the replacement as soon as configure
-        // or promotion makes the live config available again.
-        match config::load(&self.config_dir) {
-            Ok(stored) => {
-                if let Some(agent_id) = stored.settings.agent_id {
-                    self.agent_id.store(agent_id, Ordering::Release);
-                    self.agent_id_available.store(true, Ordering::Release);
-                    RunnerIdentityState::Available(agent_id)
-                } else {
-                    self.agent_id_available.store(false, Ordering::Release);
-                    RunnerIdentityState::Unavailable
-                }
-            }
-            Err(_) => {
-                let configless = fs::symlink_metadata(&config_path)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-                if configless {
-                    if self.agent_id_available.load(Ordering::Acquire) {
-                        RunnerIdentityState::Available(self.agent_id.load(Ordering::Acquire))
-                    } else {
-                        RunnerIdentityState::Configless
-                    }
-                } else {
-                    self.agent_id_available.store(false, Ordering::Release);
-                    RunnerIdentityState::Unavailable
-                }
-            }
-        }
-    }
-
-    fn request_key(&self, target: SlotPhase) -> Option<String> {
-        self.request_key_with_sink(crate::ops::global().map(AsRef::as_ref), target)
-    }
-
-    fn request_key_with_sink(
-        &self,
-        sink: Option<&crate::ops::OpsSink>,
-        target: SlotPhase,
-    ) -> Option<String> {
-        match self.refresh_agent_id() {
-            RunnerIdentityState::Available(agent_id) => Some(format!(
-                "jit-agent-{agent_id}-generation-{}-{}",
-                self.generation.0,
-                target.as_str()
-            )),
-            RunnerIdentityState::Configless => {
-                let sink = sink?;
-                let intent = match sink.latest_slot_transition_request_key(
-                    &self.slot_id,
-                    self.slot_index,
-                    self.generation,
-                ) {
-                    Ok(Some(intent)) => intent,
-                    Ok(None) => return None,
-                    Err(error) => {
-                        sink.record_slot_transition_lookup_failure(&error);
-                        eprintln!(
-                            "forensics.ops event=slot-transition-rejected reason=store-request-ledger-unavailable slot={} generation={} phase={}",
-                            self.slot_id.0,
-                            self.generation.0,
-                            target.as_str()
-                        );
-                        return None;
-                    }
-                };
-                if intent.target == target {
-                    return Some(intent.request_key);
-                }
-                recover_following_request_key(&intent.request_key, intent.target, target)
-            }
-            RunnerIdentityState::Unavailable => None,
-        }
-    }
-
     fn transition(&self, target: SlotPhase, message: impl Into<String>) -> bool {
-        let Some(request_key) = self.request_key(target) else {
-            eprintln!(
-                "forensics.ops event=slot-transition-rejected reason=runner-identity-unavailable slot={} generation={} phase={}",
-                self.slot_id.0,
-                self.generation.0,
-                target.as_str()
-            );
-            return false;
-        };
         let Some(sink) = crate::ops::global() else {
             return false;
         };
-        let applied = sink.transition_slot(
-            &self.slot_id,
-            self.slot_index,
-            self.generation,
-            &request_key,
-            target,
-            Some(message.into()),
-        );
-        if !applied {
-            // Best-effort observation, never a job outcome: a stale
-            // generation, an illegal edge, or a replayed request key leaves
-            // control state behind instead of failing work. The line exists
-            // to measure how often that happens.
-            eprintln!(
-                "forensics.ops event=slot-transition-not-applied slot={} generation={} phase={} request_key={request_key}",
-                self.slot_id.0,
-                self.generation.0,
-                target.as_str()
-            );
-        }
-        applied
+        self.transition_with_sink(sink, target, message)
     }
+
+    /// Converge the durable projection onto `target`; see the type docs.
+    ///
+    /// Best-effort observation, never a job outcome: a store read failure, a
+    /// stale generation, or a refused write leaves control state behind and
+    /// emits one forensic line so drift is measured instead of hidden.
+    fn transition_with_sink(
+        &self,
+        sink: &crate::ops::OpsSink,
+        target: SlotPhase,
+        message: impl Into<String>,
+    ) -> bool {
+        let message = message.into();
+        let cursor = match sink.slot_cursor(&self.slot_id, self.slot_index, self.generation) {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                eprintln!(
+                    "forensics.ops event=slot-transition-rejected reason=store-cursor-unavailable slot={} generation={} phase={}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    target.as_str()
+                );
+                return false;
+            }
+        };
+        let (current, mut sequence) = match cursor {
+            crate::ops::SlotCursor::Owned { phase, sequence } => (Some(phase), sequence),
+            crate::ops::SlotCursor::Fresh => (None, 0),
+            crate::ops::SlotCursor::Superseded { owner } => {
+                eprintln!(
+                    "forensics.ops event=slot-transition-rejected reason=generation-superseded slot={} generation={} owner={} phase={}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    owner.0,
+                    target.as_str()
+                );
+                return false;
+            }
+        };
+        for step in slot_lifecycle_path(current, target) {
+            sequence = sequence.saturating_add(1);
+            let request_key = format!("slot-g{}-s{sequence}-{}", self.generation.0, step.as_str());
+            let step_message = if step == target {
+                message.clone()
+            } else {
+                eprintln!(
+                    "forensics.ops event=slot-lifecycle-catch-up slot={} generation={} from={} via={} target={}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    current.map_or("none", SlotPhase::as_str),
+                    step.as_str(),
+                    target.as_str()
+                );
+                format!("lifecycle catch-up toward {}: {message}", target.as_str())
+            };
+            let applied = sink.transition_slot(
+                &self.slot_id,
+                self.slot_index,
+                self.generation,
+                &request_key,
+                step,
+                Some(step_message),
+            );
+            if !applied {
+                eprintln!(
+                    "forensics.ops event=slot-transition-not-applied slot={} generation={} phase={} request_key={request_key}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    step.as_str()
+                );
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// The legal edges that take a slot from `current` to `target`.
+///
+/// Empty when the slot is already there. A fresh generation (`None`) has no
+/// `from` edge to validate and declares `target` directly. Otherwise a
+/// directly legal edge is used; anything else enters the daemon ring at the
+/// phase the closed graph permits from `current` and walks it to `target`.
+/// Total over every `(SlotPhase, ring target)` pair, and every returned step
+/// is a legal edge from its predecessor — asserted exhaustively in tests.
+fn slot_lifecycle_path(current: Option<SlotPhase>, target: SlotPhase) -> Vec<SlotPhase> {
+    let Some(current) = current else {
+        return vec![target];
+    };
+    if current == target {
+        return Vec::new();
+    }
+    if velnor_model::slot_transition_allowed(current, target) || !DAEMON_SLOT_RING.contains(&target)
+    {
+        // A legal edge is declared as is. A target outside the daemon ring
+        // has no catch-up path here; declare it and let the store adjudicate
+        // rather than walk toward a phase the ring can never reach.
+        return vec![target];
+    }
+    let mut path = Vec::new();
+    let mut phase = if DAEMON_SLOT_RING.contains(&current) {
+        current
+    } else {
+        // Every phase outside the ring has exactly one legal ring entry:
+        // configuring/parked may become idle; every active or faulted
+        // phase must pass through teardown.
+        let entry = match current {
+            SlotPhase::Configuring | SlotPhase::Parked => SlotPhase::Idle,
+            _ => SlotPhase::Teardown,
+        };
+        path.push(entry);
+        entry
+    };
+    while phase != target {
+        let position = DAEMON_SLOT_RING
+            .iter()
+            .position(|candidate| *candidate == phase)
+            .unwrap_or(0);
+        phase = DAEMON_SLOT_RING[(position + 1) % DAEMON_SLOT_RING.len()];
+        path.push(phase);
+    }
+    path
 }
 
 /// Best-effort job transition with a forensics line when the store refuses
@@ -4104,23 +4127,6 @@ fn record_job_transition(
         );
     }
     applied
-}
-
-fn recover_following_request_key(
-    previous_key: &str,
-    previous_target: SlotPhase,
-    target: SlotPhase,
-) -> Option<String> {
-    let expected_target = match (previous_target, target) {
-        (SlotPhase::Teardown, SlotPhase::Recycling) | (SlotPhase::Recycling, SlotPhase::Idle) => {
-            target
-        }
-        _ => return None,
-    };
-    let suffix = format!("-{}", previous_target.as_str());
-    let prefix = previous_key.strip_suffix(&suffix)?;
-    let key = format!("{prefix}-{}", expected_target.as_str());
-    Slug::validate("request_key", &key).ok().map(|_| key)
 }
 
 /// Re-create this slot's JIT config, retrying forever with capped backoff.
@@ -22476,67 +22482,6 @@ jobs:
     }
 
     #[test]
-    fn durable_slot_request_key_tracks_live_jit_agent_identity() {
-        let config_dir = unique_temp_dir("durable-slot-request-key");
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".to_owned()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-42-generation-7-recycling")
-        );
-
-        stored.settings.agent_id = Some(43);
-        config::save(&config_dir, &stored).unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-43-generation-7-recycling")
-        );
-
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
-    fn durable_slot_request_key_rejects_invalid_identity_but_keeps_gap_identity() {
-        let config_dir = unique_temp_dir("durable-slot-request-key-invalid");
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".to_owned()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-
-        assert!(lifecycle.request_key(SlotPhase::Teardown).is_some());
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-42-generation-7-recycling")
-        );
-
-        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
-        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
-
-        config::save(&config_dir, &stored).unwrap();
-        stored.settings.agent_id = None;
-        config::save(&config_dir, &stored).unwrap();
-        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
-
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
     fn record_job_transition_reports_rejected_edges() {
         let base = unique_temp_dir("transition-verdict");
         fs::create_dir_all(&base).unwrap();
@@ -22568,167 +22513,177 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[test]
-    fn configless_request_key_reports_request_ledger_read_failure() {
-        let root = unique_temp_dir("configless-request-ledger-read-failure");
+    fn lifecycle_sink(label: &str) -> (std::path::PathBuf, Arc<crate::ops::OpsSink>) {
+        let root = unique_temp_dir(label);
         fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap(),
+        );
+        (root, sink)
+    }
 
-        let connection = rusqlite::Connection::open(root.join("state.db")).unwrap();
-        connection
-            .execute_batch("DROP TABLE slot_transition_requests;")
+    fn durable_phase(root: &Path, slot_id: &SlotId) -> SlotPhase {
+        velnor_control::store::Store::open(root.join("state.db"))
+            .unwrap()
+            .slot("test-instance", slot_id)
+            .unwrap()
+            .unwrap()
+            .phase
+    }
+
+    /// Every daemon target is reachable from every phase through legal edges
+    /// only, and the ring itself is legal. This is the proof that the daemon
+    /// can no longer issue an illegal slot edge.
+    #[test]
+    fn slot_lifecycle_path_is_total_and_every_step_is_a_legal_edge() {
+        for target in DAEMON_SLOT_RING {
+            assert_eq!(slot_lifecycle_path(None, target), vec![target]);
+            for current in SlotPhase::ALL {
+                let path = slot_lifecycle_path(Some(current), target);
+                if current == target {
+                    assert!(path.is_empty(), "{current:?} -> {target:?} must be a no-op");
+                    continue;
+                }
+                assert_eq!(path.last(), Some(&target), "{current:?} -> {target:?}");
+                let mut from = current;
+                for step in path {
+                    assert!(
+                        velnor_model::slot_transition_allowed(from, step),
+                        "{current:?} -> {target:?} walks illegal edge {from:?} -> {step:?}"
+                    );
+                    from = step;
+                }
+            }
+        }
+        for (index, from) in DAEMON_SLOT_RING.iter().enumerate() {
+            let next = DAEMON_SLOT_RING[(index + 1) % DAEMON_SLOT_RING.len()];
+            assert!(velnor_model::slot_transition_allowed(*from, next));
+        }
+        // Targets outside the ring are declared directly for the store to
+        // adjudicate rather than walked toward forever.
+        assert_eq!(
+            slot_lifecycle_path(Some(SlotPhase::Idle), SlotPhase::Draining),
+            vec![SlotPhase::Draining]
+        );
+    }
+
+    /// Sentry dogfood slot-5 (pid 2535037 → 2641434): the previous worker
+    /// exited in `teardown` after a capacity fence and the controller
+    /// respawned the same generation; the new worker's first post-job
+    /// teardown was refused as `teardown → teardown`. A repeated declaration
+    /// is a no-op, and the restarted worker converges to idle legally.
+    #[test]
+    fn durable_slot_repeated_teardown_is_a_noop_and_restart_converges_to_idle() {
+        let (root, sink) = lifecycle_sink("durable-slot-double-teardown");
+        let slot_id = SlotId("slot-1".to_owned());
+        let exited = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(exited.transition_with_sink(&sink, SlotPhase::Idle, "started"));
+        assert!(exited.transition_with_sink(&sink, SlotPhase::Teardown, "fence exit"));
+        let events_after_exit = sink
+            .store_for_tests()
+            .event_count("test-instance", "slot-1")
             .unwrap();
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            root.join("config"),
-        )
-        .unwrap();
 
-        assert!(lifecycle
-            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
-            .is_none());
-        assert!(sink.degraded());
-        assert!(sink
-            .forensic_failures()
-            .iter()
-            .any(|line| line.contains("store.slot.transition.lookup")));
+        let restarted = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(restarted.transition_with_sink(&sink, SlotPhase::Teardown, "again"));
+        assert_eq!(
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            events_after_exit,
+            "a repeated declaration writes nothing"
+        );
+        assert_eq!(durable_phase(&root, &slot_id), SlotPhase::Teardown);
 
+        // The restarted worker declares idle: teardown → recycling → idle.
+        assert!(restarted.transition_with_sink(&sink, SlotPhase::Idle, "worker started"));
+        assert_eq!(durable_phase(&root, &slot_id), SlotPhase::Idle);
+        assert_eq!(
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            events_after_exit + 2
+        );
+        assert_eq!(sink.store_for_tests().illegal_transition_edges(), 0);
+        assert!(!sink.degraded());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Sentry dogfood slot-4 (pid 2535016): recycle after cycle 8, the
+    /// registration of the promoted agent disappeared in cycle 9, cleanup +
+    /// reconfigure, then recycle after cycle 10. With agent-id request keys
+    /// the reconfigure's `recycling` collided with cycle 8's and the slot
+    /// stranded in `teardown`; the sequence-derived keys never collide.
+    #[test]
+    fn durable_slot_lifecycle_passes_never_collide_or_strand() {
+        let (root, sink) = lifecycle_sink("durable-slot-lifecycle-passes");
+        let slot_id = SlotId("slot-1".to_owned());
+        let slot = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(slot.transition_with_sink(&sink, SlotPhase::Idle, "started"));
+        for (target, message) in [
+            (
+                SlotPhase::Teardown,
+                "tearing down consumed JIT identity after cycle 8",
+            ),
+            (SlotPhase::Recycling, "recycling JIT identity after cycle 8"),
+            (
+                SlotPhase::Idle,
+                "promoted prewarmed JIT identity after cycle 8",
+            ),
+            (
+                SlotPhase::Teardown,
+                "cleaning failed JIT identity after cycle 9",
+            ),
+            (
+                SlotPhase::Recycling,
+                "reconfiguring JIT identity after cycle 9",
+            ),
+            (SlotPhase::Idle, "JIT identity ready after cycle 9"),
+            (
+                SlotPhase::Teardown,
+                "tearing down consumed JIT identity after cycle 10",
+            ),
+            (
+                SlotPhase::Recycling,
+                "recycling JIT identity after cycle 10",
+            ),
+            (
+                SlotPhase::Idle,
+                "promoted prewarmed JIT identity after cycle 10",
+            ),
+        ] {
+            assert!(
+                slot.transition_with_sink(&sink, target, message),
+                "{message} must apply"
+            );
+            assert_eq!(durable_phase(&root, &slot_id), target);
+        }
+        assert_eq!(sink.store_for_tests().illegal_transition_edges(), 0);
+        assert!(sink.forensic_failures().is_empty());
+        assert_eq!(
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            10
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn fresh_process_configless_recycling_to_idle_recovers_durable_key() {
-        let root = unique_temp_dir("fresh-process-slot-recovery");
-        let config_dir = root.join("config");
-        fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-
-        let restarted = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        let recycling_key = restarted
-            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
-            .expect("durable predecessor recovers recycling key");
-        assert_eq!(recycling_key, "jit-agent-42-generation-7-recycling");
-        assert!(sink.transition_slot(
-            &restarted.slot_id,
-            restarted.slot_index,
-            restarted.generation,
-            &recycling_key,
-            SlotPhase::Recycling,
-            None,
-        ));
-
-        let idle_key = restarted
-            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-            .expect("durable recycling intent recovers idle key during configless gap");
-        assert_eq!(idle_key, "jit-agent-42-generation-7-idle");
-        assert!(sink.transition_slot(
-            &restarted.slot_id,
-            restarted.slot_index,
-            restarted.generation,
-            &idle_key,
-            SlotPhase::Idle,
-            None,
-        ));
-        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
+    fn durable_slot_never_mutates_a_superseded_generation() {
+        let (root, sink) = lifecycle_sink("durable-slot-superseded");
+        let slot_id = SlotId("slot-1".to_owned());
+        let newer = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(2)).unwrap();
+        assert!(newer.transition_with_sink(&sink, SlotPhase::Idle, "generation 2 started"));
+        let stale = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(!stale.transition_with_sink(&sink, SlotPhase::Teardown, "stale worker"));
+        assert_eq!(durable_phase(&root, &slot_id), SlotPhase::Idle);
         assert_eq!(
-            reopened
-                .slot("test-instance", &restarted.slot_id)
-                .unwrap()
-                .unwrap()
-                .phase,
-            SlotPhase::Idle
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            1
         );
-
-        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
-        let invalid = DurableSlotLifecycle::new(
-            restarted.slot_id.clone(),
-            1,
-            restarted.generation,
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert!(invalid
-            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-            .is_none());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn fresh_process_configless_rejects_skipping_recycling() {
-        let root = unique_temp_dir("fresh-process-slot-recovery-negative");
-        let config_dir = root.join("config");
-        fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-
-        let restarted = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert!(
-            restarted
-                .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-                .is_none(),
-            "configless recovery must not synthesize an illegal Teardown -> Idle edge"
-        );
-        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
-        assert_eq!(
-            reopened
-                .slot("test-instance", &restarted.slot_id)
-                .unwrap()
-                .unwrap()
-                .phase,
-            SlotPhase::Teardown
-        );
-        assert_eq!(reopened.event_count("test-instance", "slot-1").unwrap(), 1);
-
         fs::remove_dir_all(root).unwrap();
     }
 

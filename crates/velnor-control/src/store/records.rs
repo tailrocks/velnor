@@ -77,14 +77,6 @@ pub struct SlotTransitionRequest {
     pub transition_time: Timestamp,
 }
 
-/// Durable identity of the newest transition request for one slot generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlotTransitionRequestKey {
-    pub request_key: String,
-    pub generation: Generation,
-    pub target: SlotPhase,
-}
-
 /// Maximum number of allocator requests retained for each instance/slot.
 ///
 /// After a successful transition, rows older by `(generation, sequence,
@@ -812,57 +804,6 @@ impl Store {
                     .ok_or_else(|| StoreError::new(ExitClass::Operation, "store.slot.disappeared"))
             })
             .collect()
-    }
-
-    /// Recover the newest caller intent for one slot generation.
-    ///
-    /// The request ledger survives a worker-process restart and is used by
-    /// the runner while its ephemeral `runner.json` identity is absent.
-    pub fn latest_slot_transition_request_key(
-        &self,
-        identity: &SlotIdentity,
-        generation: Generation,
-    ) -> StoreResult<Option<SlotTransitionRequestKey>> {
-        validate_slot_identity(identity)?;
-        let generation = i64::try_from(generation.0)
-            .map_err(|_| StoreError::new(ExitClass::Usage, "store.slot.generation.range"))?;
-        let conn = self.lock_conn()?;
-        let Some(current) = query_slot_state(&conn, &identity.instance_slug, &identity.slot_id)?
-        else {
-            return Ok(None);
-        };
-        if current.identity.host != identity.host
-            || current.identity.slot_index != identity.slot_index
-            || current.identity.slot_kind != identity.slot_kind
-        {
-            return Err(
-                StoreError::new(ExitClass::Conflict, "store.slot.identity.mismatch")
-                    .with_remediation(
-                    "reuse the original host, index, and slot kind for this stable slot identity",
-                ),
-            );
-        }
-        conn.query_row(
-            "SELECT request_key, generation, target
-             FROM slot_transition_requests
-             WHERE instance_slug = ?1 AND slot_id = ?2 AND generation = ?3
-             ORDER BY allocated_sequence DESC, request_key DESC
-             LIMIT 1",
-            params![identity.instance_slug, identity.slot_id.0, generation],
-            |row| {
-                let stored_generation = u64::try_from(row.get::<_, i64>(1)?)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, 0))?;
-                let target = SlotPhase::try_from(row.get::<_, String>(2)?.as_str())
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                Ok(SlotTransitionRequestKey {
-                    request_key: row.get(0)?,
-                    generation: Generation(stored_generation),
-                    target,
-                })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
     }
 
     /// Insert or refresh one runner registration.

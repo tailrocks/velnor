@@ -28,7 +28,7 @@ pub use records::{
     EventRow, EventWindow, IllegalJobEdge, IllegalSlotEdge, InstanceRow, JobRow, JobSummary,
     LifecycleInstanceRow, LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow,
     RunnerRegistrationRow, SlotIdentity, SlotRow, SlotTransition, SlotTransitionRequest,
-    SlotTransitionRequestKey, StoredEvent, Transition, SLOT_TRANSITION_REQUEST_CAP,
+    StoredEvent, Transition, SLOT_TRANSITION_REQUEST_CAP,
 };
 pub use retention::{
     PhysicalBudgetStatus, PrunePhase, PruneReport, RetentionBudget, RetentionLease,
