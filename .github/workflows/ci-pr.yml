@@ -64,9 +64,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: a70d5bdbdde6a3c5b815897ae2825969da47d6c5
+          rev: f16cc51aa12b5545475819425cb25377e9a0e3b3
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=a70d5bdbdde6a3c5b815897ae2825969da47d6c5" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f16cc51aa12b5545475819425cb25377e9a0e3b3" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -83,7 +83,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: a70d5bdbdde6a3c5b815897ae2825969da47d6c5
+          EXPECTED_REVISION: f16cc51aa12b5545475819425cb25377e9a0e3b3
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -102,7 +102,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-a70d5bdbdde6a3c5b815897ae2825969da47d6c5-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-f16cc51aa12b5545475819425cb25377e9a0e3b3-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -117,7 +117,7 @@ jobs:
           echo '::notice::Velnor lane omitted for fork pull request; validating GitHub lane only.'
   github-bun-velnor:
     name: "Bun · Bun package (velnor)"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-bun.yml
     with:
@@ -134,7 +134,7 @@ jobs:
         bun.lock
   velnor-bun-velnor:
     name: "Bun · Bun package (velnor)"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-bun.yml
     with:
@@ -148,7 +148,7 @@ jobs:
       host_warm_layers: cargo
   github-docker:
     name: "Docker · Docker"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-docker.yml
     with:
@@ -172,7 +172,7 @@ jobs:
         deny.toml
   velnor-docker:
     name: "Docker · Docker"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-docker.yml
     with:
@@ -186,7 +186,7 @@ jobs:
       host_warm_layers: docker_seed
   github-docs:
     name: "Documentation · Documentation"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-docs.yml
     with:
@@ -203,7 +203,7 @@ jobs:
         bun.lock
   velnor-docs:
     name: "Documentation · Documentation"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-docs.yml
     with:
@@ -217,7 +217,7 @@ jobs:
       host_warm_layers: cargo
   github-opentofu:
     name: "OpenTofu · OpenTofu"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
@@ -232,7 +232,7 @@ jobs:
       cache_key_files: "**/.terraform.lock.hcl"
   velnor-opentofu:
     name: "OpenTofu · OpenTofu"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
@@ -246,7 +246,7 @@ jobs:
       host_warm_layers: cargo
   prepare-cargo:
     name: "Control / Prepare Cargo"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') }}
+    if: ${{ always() && needs.plan.result == 'success' && (contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') || contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -259,7 +259,7 @@ jobs:
       head_sha: ${{ needs.plan.outputs.head_sha }}
   github-rust-policy:
     name: "Rust · Rust dependency policy"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -292,7 +292,7 @@ jobs:
         rust-toolchain
   velnor-rust-policy:
     name: "Rust · Rust dependency policy"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -307,7 +307,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-unit-collector:
     name: "Rust · unit-collector"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -347,7 +347,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-unit-collector:
     name: "Rust · unit-collector"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -363,7 +363,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-bench:
     name: "Rust · velnor-bench"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -455,7 +455,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-bench:
     name: "Rust · velnor-bench"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -471,7 +471,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-client:
     name: "Rust · velnor-client"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -515,7 +515,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-client:
     name: "Rust · velnor-client"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -531,7 +531,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-control:
     name: "Rust · velnor-control"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -575,7 +575,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-control:
     name: "Rust · velnor-control"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -591,7 +591,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-model:
     name: "Rust · velnor-model"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -630,7 +630,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-model:
     name: "Rust · velnor-model"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -646,7 +646,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-render:
     name: "Rust · velnor-render"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -690,7 +690,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-render:
     name: "Rust · velnor-render"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -706,7 +706,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-runner:
     name: "Rust · velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -793,7 +793,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-runner:
     name: "Rust · velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-control, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -809,7 +809,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-tools:
     name: "Rust · velnor-tools"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -860,7 +860,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-tools:
     name: "Rust · velnor-tools"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -876,7 +876,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnor-workflow:
     name: "Rust · velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -976,7 +976,7 @@ jobs:
       candidate_publish: true
   velnor-rust-velnor-workflow:
     name: "Rust · velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -993,7 +993,7 @@ jobs:
       policy_runtime: true
   github-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1031,7 +1031,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1047,7 +1047,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-velnorctl:
     name: "Rust · velnorctl"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1150,7 +1150,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnorctl:
     name: "Rust · velnorctl"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1166,7 +1166,7 @@ jobs:
       host_warm_layers: "rustup,mold,mbx,cargo"
   github-rust-production-topology:
     name: "Rust · Rust production topology"
-    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') }}
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1200,7 +1200,7 @@ jobs:
       cargo_net_offline: true
   velnor-rust-production-topology:
     name: "Rust · Rust production topology"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     needs: [plan, prepare-cargo]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
@@ -1224,7 +1224,9 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
           SELECTED_UNITS: ${{ needs.plan.outputs.units }}
-          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          LANE_ADMITTED_GITHUB: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')) }}
+          LANE_ADMITTED_VELNOR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')) }}
+          LANE_ADMITTED_VELNOR_TRUSTED: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1244,10 +1246,17 @@ jobs:
           selected=",$SELECTED_UNITS,"
           if [[ "$selected" == *",bun-velnor,"* ]]; then
             result="$(result_for_job github-bun-velnor)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-bun-velnor did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-bun-velnor did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-bun-velnor ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-bun-velnor)"
             case "$result" in
@@ -1257,15 +1266,15 @@ jobs:
           fi
           if [[ "$selected" == *",bun-velnor,"* ]]; then
             result="$(result_for_job velnor-bun-velnor)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-bun-velnor ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1277,10 +1286,17 @@ jobs:
           fi
           if [[ "$selected" == *",docker,"* ]]; then
             result="$(result_for_job github-docker)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-docker did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-docker did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-docker ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-docker)"
             case "$result" in
@@ -1290,15 +1306,15 @@ jobs:
           fi
           if [[ "$selected" == *",docker,"* ]]; then
             result="$(result_for_job velnor-docker)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR_TRUSTED" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-docker ran outside its lane admission (LANE_ADMITTED_VELNOR_TRUSTED=$LANE_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1310,10 +1326,17 @@ jobs:
           fi
           if [[ "$selected" == *",docs,"* ]]; then
             result="$(result_for_job github-docs)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-docs did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-docs did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-docs ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-docs)"
             case "$result" in
@@ -1323,15 +1346,15 @@ jobs:
           fi
           if [[ "$selected" == *",docs,"* ]]; then
             result="$(result_for_job velnor-docs)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-docs ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1343,10 +1366,17 @@ jobs:
           fi
           if [[ "$selected" == *",opentofu,"* ]]; then
             result="$(result_for_job github-opentofu)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-opentofu did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-opentofu did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-opentofu ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-opentofu)"
             case "$result" in
@@ -1356,15 +1386,15 @@ jobs:
           fi
           if [[ "$selected" == *",opentofu,"* ]]; then
             result="$(result_for_job velnor-opentofu)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-opentofu ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1374,11 +1404,18 @@ jobs:
               *) echo "unselected CI job velnor-opentofu failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-policy,"* ]]; then
+          if [[ "$selected" == *",rust-unit-collector,"* || "$selected" == *",rust-velnor-bench,"* || "$selected" == *",rust-velnor-client,"* || "$selected" == *",rust-velnor-control,"* || "$selected" == *",rust-velnor-model,"* || "$selected" == *",rust-velnor-render,"* || "$selected" == *",rust-velnor-runner,"* || "$selected" == *",rust-velnor-tools,"* || "$selected" == *",rust-velnor-workflow,"* || "$selected" == *",rust-velnor-workflow-contract,"* || "$selected" == *",rust-velnorctl,"* || "$selected" == *",rust-production-topology,"* ]]; then
             result="$(result_for_job prepare-cargo)"
-            if [[ "$result" != success ]]; then
-              echo "selected CI prerequisite prepare-cargo did not pass: $result" >&2
-              exit 1
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI prerequisite prepare-cargo did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI prerequisite prepare-cargo ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
+              esac
             fi
           else
             result="$(result_for_job prepare-cargo)"
@@ -1389,10 +1426,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-policy,"* ]]; then
             result="$(result_for_job github-rust-policy)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-policy did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-policy did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-policy ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-policy)"
             case "$result" in
@@ -1402,15 +1446,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-policy,"* ]]; then
             result="$(result_for_job velnor-rust-policy)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-policy ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1422,10 +1466,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-unit-collector,"* ]]; then
             result="$(result_for_job github-rust-unit-collector)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-unit-collector ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-unit-collector)"
             case "$result" in
@@ -1435,15 +1486,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-unit-collector,"* ]]; then
             result="$(result_for_job velnor-rust-unit-collector)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-unit-collector ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1455,10 +1506,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-bench,"* ]]; then
             result="$(result_for_job github-rust-velnor-bench)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-bench ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-bench)"
             case "$result" in
@@ -1468,15 +1526,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-bench,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-bench)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-bench ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1488,10 +1546,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-client,"* ]]; then
             result="$(result_for_job github-rust-velnor-client)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-client ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-client)"
             case "$result" in
@@ -1501,15 +1566,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-client,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-client)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-client ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1521,10 +1586,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-control,"* ]]; then
             result="$(result_for_job github-rust-velnor-control)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-control ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-control)"
             case "$result" in
@@ -1534,15 +1606,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-control,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-control)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-control ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1554,10 +1626,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-model,"* ]]; then
             result="$(result_for_job github-rust-velnor-model)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-model ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-model)"
             case "$result" in
@@ -1567,15 +1646,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-model,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-model)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-model ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1587,10 +1666,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-render,"* ]]; then
             result="$(result_for_job github-rust-velnor-render)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-render ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-render)"
             case "$result" in
@@ -1600,15 +1686,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-render,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-render)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-render ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1620,10 +1706,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-runner,"* ]]; then
             result="$(result_for_job github-rust-velnor-runner)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-runner ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-runner)"
             case "$result" in
@@ -1633,15 +1726,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-runner,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-runner)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-runner ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1653,10 +1746,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-tools,"* ]]; then
             result="$(result_for_job github-rust-velnor-tools)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-tools ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-tools)"
             case "$result" in
@@ -1666,15 +1766,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-tools,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-tools)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-tools ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1686,10 +1786,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow,"* ]]; then
             result="$(result_for_job github-rust-velnor-workflow)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-workflow ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-workflow)"
             case "$result" in
@@ -1699,15 +1806,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-workflow)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-workflow ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1719,10 +1826,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
             result="$(result_for_job github-rust-velnor-workflow-contract)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnor-workflow-contract ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnor-workflow-contract)"
             case "$result" in
@@ -1732,15 +1846,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
             result="$(result_for_job velnor-rust-velnor-workflow-contract)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnor-workflow-contract ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1752,10 +1866,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then
             result="$(result_for_job github-rust-velnorctl)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-velnorctl ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-velnorctl)"
             case "$result" in
@@ -1765,15 +1886,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then
             result="$(result_for_job velnor-rust-velnorctl)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-velnorctl ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
@@ -1785,10 +1906,17 @@ jobs:
           fi
           if [[ "$selected" == *",rust-production-topology,"* ]]; then
             result="$(result_for_job github-rust-production-topology)"
-            case "$result" in
-              success) ;;
-              *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-rust-production-topology ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job github-rust-production-topology)"
             case "$result" in
@@ -1798,15 +1926,15 @@ jobs:
           fi
           if [[ "$selected" == *",rust-production-topology,"* ]]; then
             result="$(result_for_job velnor-rust-production-topology)"
-            if [[ "$FORK_PR" == true ]]; then
+            if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then
               case "$result" in
-                success|skipped) ;;
+                success) ;;
                 *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;
               esac
             else
               case "$result" in
-                success) ;;
-                *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-production-topology ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;
               esac
             fi
           else
