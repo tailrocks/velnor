@@ -247,6 +247,7 @@ case "$1" in
     echo "activate a coherent release and start:"
     echo "  sudo velnor-runner release activate --record <release-record.json>"
     echo "  sudo systemctl enable --now velnor-daemon@<name>  # operator-selected instance"
+    echo "  sudo systemctl enable --now velnor-cache-gc.timer  # weekly gc of every instance's stores"
     ;;
 esac
 

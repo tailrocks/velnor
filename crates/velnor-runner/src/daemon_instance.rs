@@ -886,4 +886,62 @@ mod tests {
             ["A=1", "B=two words", "C=x y"]
         );
     }
+    /// The packaged gc timer must run a command that can reclaim every
+    /// instance: no single instance's env file, no hard-wired work dir, so
+    /// `velnorctl cache gc` enumerates `/etc/velnor/*.env` itself and applies
+    /// each instance's storage root and trust scope. Both units must be in the
+    /// deb's asset list, or the timer the runbook tells operators to enable
+    /// does not exist on the host (as on Sentry at v0.1.158).
+    #[test]
+    fn packaged_cache_gc_unit_reclaims_every_instance_and_is_shipped() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let unit_path = manifest_dir.join("../velnor-tools/debian/velnor-cache-gc.service");
+        let unit = fs::read_to_string(&unit_path).unwrap();
+        let exec_start = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .expect("ExecStart=");
+        assert!(
+            exec_start.ends_with("/usr/bin/velnorctl cache gc --yes"),
+            "gc must let velnorctl enumerate the instances: {exec_start}"
+        );
+        assert!(
+            exec_start.contains("flock --shared --no-fork /run/velnor/package-transaction.lock"),
+            "gc must not run during a package transaction: {exec_start}"
+        );
+        let directives = unit
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "EnvironmentFile=",
+            "--work-dir",
+            "VELNOR_WORK_DIR",
+            "--instance",
+        ] {
+            assert!(
+                !directives.contains(forbidden),
+                "{} pins gc to one instance via {forbidden}",
+                unit_path.display()
+            );
+        }
+        let timer =
+            fs::read_to_string(manifest_dir.join("../velnor-tools/debian/velnor-cache-gc.timer"))
+                .unwrap();
+        assert!(timer.contains("WantedBy=timers.target"), "{timer}");
+
+        let cargo_toml = fs::read_to_string(manifest_dir.join("Cargo.toml")).unwrap();
+        for asset in [
+            "[\"../velnor-tools/debian/velnor-cache-gc.service\", \"lib/systemd/system/velnor-cache-gc.service\", \"644\"]",
+            "[\"../velnor-tools/debian/velnor-cache-gc.timer\", \"lib/systemd/system/velnor-cache-gc.timer\", \"644\"]",
+        ] {
+            assert!(cargo_toml.contains(asset), "deb assets do not ship {asset}");
+        }
+        // Enablement is the operator's (postinst refuses to configure while any
+        // velnor timer is active, so it cannot enable one itself); the install
+        // message must name the timer so it is not forgotten.
+        let postinst = fs::read_to_string(manifest_dir.join("debian/postinst")).unwrap();
+        assert!(postinst.contains("systemctl enable --now velnor-cache-gc.timer"));
+    }
 }
