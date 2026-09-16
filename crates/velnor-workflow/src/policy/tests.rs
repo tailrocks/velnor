@@ -820,6 +820,43 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     let _ = fs::remove_dir_all(ungated);
 }
 
+/// The dual-lane Velnor gate admits a lane-selecting dispatch on any ref —
+/// dispatch authorship is write-authorized — and keeps admitting the older
+/// ref-gated dispatch shapes for trees rendered before lane admission.
+#[test]
+fn velnor_pr_gate_admits_dispatch_on_any_ref() {
+    let automatic = "github.event_name == 'pull_request' && \
+        github.event.pull_request.head.repo.full_name == github.repository || \
+        (github.ref == 'refs/heads/main' && (github.event_name == 'push' || \
+        github.event_name == 'schedule'))";
+    for dispatch in [
+        "(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && \
+            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))",
+        "(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && \
+            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || \
+            github.event.inputs.runner == '')))",
+        "(github.event_name == 'workflow_dispatch' && \
+            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))",
+        "(github.event_name == 'workflow_dispatch' && \
+            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || \
+            github.event.inputs.runner == ''))",
+    ] {
+        let gate = format!("${{{{ ({automatic} || {dispatch}) }}}}");
+        assert!(
+            is_generated_velnor_pr_gate(&gate, "main"),
+            "dispatch shape admitted: {dispatch}"
+        );
+    }
+    let github_only = format!(
+        "${{{{ ({automatic} || (github.event_name == 'workflow_dispatch' && \
+            (github.event.inputs.runner == 'github'))) }}}}",
+    );
+    assert!(
+        !is_generated_velnor_pr_gate(&github_only, "main"),
+        "a dispatch selecting only the hosted lane is not a Velnor gate",
+    );
+}
+
 #[test]
 fn a_second_pull_request_target_workflow_is_refused() {
     let root = velnor_tree("semantic-prt", &gated_trusted_job());
