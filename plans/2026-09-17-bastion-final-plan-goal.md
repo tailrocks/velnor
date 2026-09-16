@@ -4,8 +4,10 @@ Paste-ready `/goal` prompt for the consolidated Velnor-first bastion campaign. C
 
 ```text
 /goal Execute the consolidated Velnor-first bastion campaign in
-velnor-bastion-final-plan.md. Deliver source changes, generated workflows,
-coherent releases, signed APT deployment, real three-provider verification,
+plans/2026-09-17-bastion-final-plan.md through the ordered gates in
+plans/2026-09-17-bastion-final-plan-gates.md. Deliver source changes,
+generated workflows, coherent releases, signed APT deployment, real
+three-provider verification,
 sequential repository migrations, and operating evidence. Do not stop at
 planning, registration, or an author saying tests pass.
 
