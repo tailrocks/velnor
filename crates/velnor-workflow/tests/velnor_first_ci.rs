@@ -687,6 +687,40 @@ fn velnor_lane_installs_declared_mise_tools() {
 }
 
 #[test]
+fn declared_mise_tools_propagate_to_non_rust_kind_reusables() {
+    let root = unique_dir("mise-non-rust-kind");
+    fs::write(
+        root.join("mise.toml"),
+        "[settings]\nlockfile = true\n\n[tools]\npython = \"3.13.0\"\n\"pipx:reuse\" = \"5.0.2\"\n\n[tasks.ci]\nrun = \"reuse lint\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("mise.lock"),
+        "[[tools.python]]\nversion = \"3.13.0\"\n\n[[tools.\"pipx:reuse\"]]\nversion = \"5.0.2\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("REUSE.toml"), "version = 1\n").unwrap();
+    fs::create_dir_all(root.join(".github-gen")).unwrap();
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/docs-mise\"\n\n[workflow]\nrunners = \"github\"\nautomatic = \"github\"\ndefault_dispatch_runner = \"github\"\nautomatic_lanes = \"github\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\n\n[[units]]\nid = \"reuse\"\nkind = \"docs\"\nroot = \".\"\nwatch = [\"REUSE.toml\", \"mise.toml\", \"mise.lock\"]\nci_tasks = [\"ci\"]\nmise_tools = [\"python\", \"pipx:reuse\"]\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-docs.yml");
+    assert!(
+        unit.contains("Set up Mise tools")
+            && unit.contains("install_args: ${{ inputs.mise_tools }}"),
+        "the docs kind reusable must bootstrap declared mise tools through inputs: {unit}"
+    );
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(
+        pr.contains("mise_tools: \"python pipx:reuse\""),
+        "the aggregate caller must pass declared mise tools for non-Rust units: {pr}"
+    );
+}
+
+#[test]
 fn regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only() {
     let root = unique_dir("regen-gate-policy-runtime");
     write_rust_fixture(&root, 2);

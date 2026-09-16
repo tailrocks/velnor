@@ -2169,14 +2169,20 @@ impl WorkflowIr {
             }
             tools.insert(ToolRequirement::Mold);
         }
-        // The detection fact only says mise is configured; the mise surface
-        // matters here only where Rust units exist to run through it.
-        let mise_present = config
+        // The detection fact only says mise is configured; the renderer needs
+        // it wherever a unit runs through mise or declares tools the scan
+        // cannot see (docs, homebrew, Swift, and Rust alike).
+        let mise_detected = config
             .analysis
             .detected
             .iter()
-            .any(|item| item == "mise-present")
-            && config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
+            .any(|item| item == "mise-present");
+        let mise_surface_needed = config.units.iter().any(|unit| {
+            unit.kind == UnitKind::Rust
+                || !unit.mise_tools.is_empty()
+                || commands_invoke_mise(unit)
+        });
+        let mise_present = mise_detected && mise_surface_needed;
         if mise_present {
             tools.insert(ToolRequirement::Mise);
         }
@@ -3123,7 +3129,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             } else {
                 Vec::new()
             }
-        } else if self.mise_present {
+        } else if tools.contains(&ToolRequirement::Mise) {
             velnor_mise_install_tool_ids(unit, &self.mise_lock_keys)
         } else {
             Vec::new()
@@ -4559,11 +4565,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             UnitKind::Docs => {}
         }
-        // Declared tools provision through mise whatever the kind: the scan
-        // cannot see tools a test invokes at runtime, so the repository
-        // declares them and the job installs them. Versions always resolve
-        // from the repository's mise manifest, never ad hoc.
-        if mise_present && !unit.mise_tools.is_empty() {
+        // Declared tools and mise-run commands provision through mise whatever
+        // the kind: the scan cannot see tools a test invokes at runtime, so
+        // the repository declares them and the job installs them. This path
+        // must not depend on the Rust-scoped `mise_present` flag — docs,
+        // Homebrew, and other non-Rust units carry their own `mise_tools`.
+        if !unit.mise_tools.is_empty() || commands_invoke_mise(unit) {
             tools.insert(ToolRequirement::Mise);
         }
         tools
@@ -4649,7 +4656,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // action surface and hoping the runner can ignore the other lane.
         let github_lane = lane == RunnerMode::Github;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
-        if !github_lane && self.mise_present {
+        if !github_lane && tools.contains(&ToolRequirement::Mise) {
             // Hosted mise-action is not admitted on Velnor. Auto-install is
             // off on the checks step, so declared lockfile tools must be
             // installed explicitly or shims fail closed. Install only what
