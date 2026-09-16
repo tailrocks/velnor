@@ -14,7 +14,9 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
         shape.detected.push("cargo-nextest-policy".to_owned());
     }
     if context.file_set.contains("renovate.json")
+        || context.file_set.contains("renovate.json5")
         || context.root.join(".github/renovate.json").is_file()
+        || context.root.join(".github/renovate.json5").is_file()
     {
         shape.detected.push("renovate-configuration".to_owned());
         shape.limitations.push(

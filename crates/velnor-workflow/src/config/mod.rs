@@ -102,6 +102,8 @@ pub(crate) struct RepoGenerationConfig {
     #[serde(default)]
     release: ReleaseSection,
     #[serde(default)]
+    renovate: RenovateSection,
+    #[serde(default)]
     units: Vec<UnitSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     static_files: Vec<StaticFileSection>,
@@ -253,6 +255,21 @@ struct WorkflowSection {
     velnor_serial_stack_groups: Option<bool>,
 }
 
+/// The Renovate contract a repository declares for self-hosted dependency
+/// updates. Credentials and runner placement cannot be inferred from scan
+/// evidence alone, so emission stays explicit and fail-closed.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RenovateSection {
+    enabled: Option<bool>,
+    reason: Option<String>,
+    schedule: Option<String>,
+    token: Option<String>,
+    config: Option<String>,
+    validate: Option<bool>,
+    cache: Option<bool>,
+}
+
 /// The release contract a repository declares for itself. `kind` names the
 /// publisher the renderer implements; every other field is the contract that
 /// publisher renders from, so an incomplete contract is a configuration error
@@ -395,6 +412,36 @@ struct PolicySection {
     /// Workflow basenames skipped by `velnor-workflow policy` until migrated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     exclude_workflows: Vec<String>,
+}
+
+impl RenovateSection {
+    pub(crate) fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    pub(crate) fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
+    }
+
+    pub(crate) fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    pub(crate) fn config(&self) -> Option<&str> {
+        self.config.as_deref()
+    }
+
+    pub(crate) fn validate(&self) -> Option<bool> {
+        self.validate
+    }
+
+    pub(crate) fn cache(&self) -> Option<bool> {
+        self.cache
+    }
 }
 
 impl ReleaseSection {
@@ -751,6 +798,11 @@ impl RepoGenerationConfig {
         &self.release
     }
 
+    /// The declared Renovate contract.
+    pub(crate) fn renovate(&self) -> &RenovateSection {
+        &self.renovate
+    }
+
     /// The declared unit rows, in the order the config declares them.
     pub(crate) fn units(&self) -> &[UnitSection] {
         &self.units
@@ -889,6 +941,7 @@ impl RepoGenerationConfig {
         )?;
         validate_static_files(&self.static_files)?;
         self.validate_release()?;
+        self.validate_renovate()?;
         Ok(())
     }
 
@@ -1518,10 +1571,118 @@ const RELEASE_KINDS: &[&str] = &[
     "apt",
 ];
 
+
+pub(crate) fn validate_renovate_token_name(token: &str) -> Result<(), GeneratorError> {
+    if token == "GITHUB_TOKEN" {
+        return Err(GeneratorError::usage(
+            "[renovate] token must name a dedicated PAT secret, not GITHUB_TOKEN",
+        ));
+    }
+    let valid = !token.is_empty()
+        && token.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        && token
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase());
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] token must be an uppercase secret name such as GH_RENOVATE_TOKEN, found `{token}`"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_renovate_cron(schedule: &str) -> Result<(), GeneratorError> {
+    let fields = schedule.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] schedule must be a 5-field cron expression, found `{schedule}`"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_renovate_config_path(config: &str) -> Result<(), GeneratorError> {
+    if config.is_empty()
+        || config.starts_with('/')
+        || config.contains('\\')
+        || config.contains("..")
+    {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] config must be a repository-relative Renovate config path, found `{config}`"
+        )));
+    }
+    Ok(())
+}
+
 /// A `kind` the renderer does not implement has no rendered `release.yml`: it
 /// is accepted only from a repository that renders its own publisher verbatim
 /// as a `static-workflow` row, and is a configuration error anywhere else.
 impl RepoGenerationConfig {
+    fn validate_renovate(&self) -> Result<(), GeneratorError> {
+        let renovate = &self.renovate;
+        if renovate.enabled != Some(true) {
+            return Ok(());
+        }
+        let reason = renovate.reason.as_deref().unwrap_or_default();
+        if reason.is_empty() {
+            return Err(GeneratorError::usage(
+                "[renovate] enabled = true requires `reason` documenting why Renovate runs on trusted Velnor runners",
+            ));
+        }
+        if !self
+            .declare
+            .iter()
+            .any(|row| row.primitive() == crate::primitives::RENOVATE)
+        {
+            return Err(GeneratorError::usage(
+                "[renovate] enabled = true requires `[[declare]] primitive = \"renovate\" file = \"renovate.yml\"`",
+            ));
+        }
+        if renovate.validate == Some(true)
+            && !self
+                .declare
+                .iter()
+                .any(|row| row.primitive() == crate::primitives::RENOVATE_VALIDATE)
+        {
+            return Err(GeneratorError::usage(
+                "[renovate] validate = true requires `[[declare]] primitive = \"renovate-validate\" file = \"renovate-validate.yml\"`",
+            ));
+        }
+        if self.workflow.velnor_trusted_label.is_none() {
+            return Err(GeneratorError::usage(
+                "[renovate] enabled = true requires [workflow] velnor_trusted_label for the writer job",
+            ));
+        }
+        if self.workflow.velnor_trusted_runner_available.is_none() {
+            return Err(GeneratorError::usage(
+                "[renovate] enabled = true requires [workflow] velnor_trusted_runner_available",
+            ));
+        }
+        if self.workflow.velnor_labels.as_ref().is_none_or(Vec::is_empty) {
+            return Err(GeneratorError::usage(
+                "[renovate] enabled = true requires [workflow] velnor_labels for the writer job",
+            ));
+        }
+        if self.workflow.runners.as_deref() == Some("github") {
+            return Err(GeneratorError::usage(
+                "[renovate] enabled = true requires a Velnor runner lane; [workflow] runners = \"github\" cannot execute the Renovate writer",
+            ));
+        }
+        if let Some(token) = renovate.token.as_deref() {
+            validate_renovate_token_name(token)?;
+        }
+        if let Some(schedule) = renovate.schedule.as_deref() {
+            validate_renovate_cron(schedule)?;
+        }
+        if let Some(config) = renovate.config.as_deref() {
+            validate_renovate_config_path(config)?;
+        }
+        Ok(())
+    }
+
     fn validate_release(&self) -> Result<(), GeneratorError> {
         let release = &self.release;
         if release.enabled != Some(true) {
@@ -2572,5 +2733,33 @@ mod tests {
             Some(value) => value.to_string(),
             None => panic!("{context}"),
         }
+    }
+
+    #[test]
+    fn renovate_enabled_requires_declare_row_and_trusted_runners() {
+        let root = scanned_root("renovate-validate-config");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let error = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [renovate]\nenabled = true\nreason = \"test\"\n",
+        )
+        .validate(&unit_ids, &[], &BTreeSet::new())
+        .expect_err("enabled renovate without declare must fail");
+        assert!(error.to_string().contains("[[declare]] primitive = \"renovate\""));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renovate_unknown_field_fails_closed() {
+        let error = must_some_error(
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [renovate]\nenabled = true\nreason = \"test\"\nunknown = true\n",
+            )
+            .err(),
+            "unknown renovate field must fail",
+        );
+        assert!(error.contains("unknown field"), "{error}");
     }
 }

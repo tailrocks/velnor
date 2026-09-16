@@ -48,6 +48,45 @@ primitives. Generation is a function of the scanned repository shape, this
 config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
+
+## `[renovate]` — self-hosted dependency updates
+
+Scan evidence alone (`renovate.json`, `renovate.json5`, or `.github/renovate.json*`)
+records `renovate-configuration` but does not emit workflows. A repository opts
+in explicitly:
+
+```toml
+[workflow]
+runners = "velnor"
+velnor_labels = ["self-hosted", "example-lane"]
+velnor_trusted_label = "example-trusted"
+velnor_trusted_runner_available = true
+files = [..., "renovate.yml", "renovate-validate.yml"]
+
+[renovate]
+enabled = true
+reason = "Repository-local Renovate on trusted Velnor runners."
+# schedule = "0 6 * * *"   # optional; default daily at 06:00 UTC
+# token = "GH_RENOVATE_TOKEN" # optional; default GH_RENOVATE_TOKEN
+# validate = true           # optional; default true — emits renovate-validate.yml
+# cache = true              # optional; default true — repository-scoped actions cache
+
+[[declare]]
+primitive = "renovate"
+file = "renovate.yml"
+
+[[declare]]
+primitive = "renovate-validate"
+file = "renovate-validate.yml"
+```
+
+Generated `renovate.yml` runs on trusted Velnor runners only (`schedule` and
+default-branch `workflow_dispatch`), uses `secrets.GH_RENOVATE_TOKEN` by default,
+pins `renovatebot/github-action` and Renovate OSS `44.93.6`, and keys the
+repository cache under `velnor-renovate-${{ github.repository }}-`. The
+`renovate-validate.yml` job validates the config with
+`ghcr.io/renovatebot/renovate:44.93.6` on the hosted runner. Renovate settings
+are generation-time only and are not written into `.github/ci/project.toml`.
 The scan reads the git index (tracked files only), so untracked CI runtime
 artifacts, scratch files, and linked-worktree `.git` files never enter the
 recorded scan input. A sidecar written by an older schema is never parsed:

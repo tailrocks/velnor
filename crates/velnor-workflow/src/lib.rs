@@ -180,6 +180,7 @@ pub enum ActionPin {
     ConfigurePages,
     UploadPages,
     DeployPages,
+    Renovate,
 }
 
 impl ActionPin {
@@ -279,6 +280,10 @@ impl ActionPin {
             // actions/deploy-pages v5.0.1
             Self::DeployPages => {
                 "actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1"
+            }
+            // renovatebot/github-action v46.3.1
+            Self::Renovate => {
+                "renovatebot/github-action@dcfba84a42d1b5d5e49bf131b1bf53511851a123 # v46.3.1"
             }
         }
     }
@@ -717,6 +722,17 @@ impl CacheSpec {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RenovateSpec {
+    pub(crate) enabled: bool,
+    pub(crate) reason: String,
+    pub(crate) schedule: String,
+    pub(crate) token: String,
+    pub(crate) config_path: String,
+    pub(crate) validate: bool,
+    pub(crate) cache: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct ReleaseSpec {
     /// The publisher this contract renders, as the config declares it. The
     /// renderer implements a fixed set; anything else renders nothing.
@@ -786,6 +802,9 @@ pub struct ProjectConfig {
     pub(crate) release_enabled: bool,
     pub(crate) release_reason: String,
     pub(crate) release: Option<ReleaseSpec>,
+    pub(crate) renovate_enabled: bool,
+    pub(crate) renovate_reason: String,
+    pub(crate) renovate: Option<RenovateSpec>,
     pub(crate) units: Vec<Unit>,
     pub(crate) workflow_templates: BTreeMap<String, String>,
     pub(crate) adopted_workflow_surface: bool,
@@ -1723,6 +1742,7 @@ fn apply_generation_config(
         config.actionlint_config_variables_null = null;
     }
     apply_release(config, generation.release());
+    apply_renovate(config, generation.renovate(), root)?;
     apply_unit_rows(config, generation.units());
     materialize_capability_commands(config, root)?;
     read_static_files(config, generation.static_files(), root)?;
@@ -1758,6 +1778,70 @@ fn validate_velnor_pull_request_contract(config: &ProjectConfig) -> Result<(), G
             estate::approved_velnor_runner_group()
         )));
     }
+    Ok(())
+}
+
+
+fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<String, GeneratorError> {
+    if let Some(path) = explicit {
+        let full = root.join(path);
+        if !full.is_file() {
+            return Err(GeneratorError::usage(format!(
+                "[renovate] config path `{path}` does not exist in the repository"
+            )));
+        }
+        return Ok(path.to_owned());
+    }
+    const CANDIDATES: &[&str] = &[
+        "renovate.json",
+        "renovate.json5",
+        ".github/renovate.json",
+        ".github/renovate.json5",
+    ];
+    for candidate in CANDIDATES {
+        if root.join(candidate).is_file() {
+            return Ok((*candidate).to_owned());
+        }
+    }
+    Err(GeneratorError::usage(
+        "[renovate] enabled = true requires a Renovate config file; add renovate.json or declare `[renovate] config`",
+    ))
+}
+
+fn apply_renovate(
+    config: &mut ProjectConfig,
+    renovate: &config::RenovateSection,
+    root: &Path,
+) -> Result<(), GeneratorError> {
+    if let Some(enabled) = renovate.enabled() {
+        config.renovate_enabled = enabled;
+    }
+    if let Some(reason) = renovate.reason() {
+        reason.clone_into(&mut config.renovate_reason);
+    }
+    if renovate.enabled() != Some(true) {
+        return Ok(());
+    }
+    let config_path = discover_renovate_config(root, renovate.config())?;
+    if !config.analysis.detected.iter().any(|tag| tag == "renovate-configuration") {
+        config.analysis.detected.push("renovate-configuration".to_owned());
+    }
+    config.analysis.limitations.retain(|limitation| {
+        !limitation.starts_with("Renovate credentials, runner placement, and write permissions")
+    });
+    let token = renovate.token().unwrap_or("GH_RENOVATE_TOKEN").to_owned();
+    config::validate_renovate_token_name(&token)?;
+    let schedule = renovate.schedule().unwrap_or("0 6 * * *").to_owned();
+    config::validate_renovate_cron(&schedule)?;
+    config.renovate = Some(RenovateSpec {
+        enabled: true,
+        reason: config.renovate_reason.clone(),
+        schedule,
+        token,
+        config_path,
+        validate: renovate.validate().unwrap_or(true),
+        cache: renovate.cache().unwrap_or(true),
+    });
     Ok(())
 }
 
@@ -4308,6 +4392,10 @@ fn generated_files_with_surface(
                     "maintenance.yml" => Some(generated_maintenance(&config)),
                     "preview.yml" => Some(generated_preview(&config)),
                     "release.yml" => generated_release(&config),
+                    "renovate.yml" => primitives::renovate::renovate_content(&config),
+                    "renovate-validate.yml" => {
+                        primitives::renovate::renovate_validate_content(&config)
+                    }
                     _ => None,
                 }
             });
@@ -7122,6 +7210,9 @@ mod tests {
             release_enabled: false,
             release_reason: String::new(),
             release: None,
+            renovate_enabled: false,
+            renovate_reason: String::new(),
+            renovate: None,
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: true,
@@ -12012,6 +12103,9 @@ channel = "stable"
             release_enabled: false,
             release_reason: String::new(),
             release: None,
+            renovate_enabled: false,
+            renovate_reason: String::new(),
+            renovate: None,
             units: vec![
                 unit("a", format!("sleep 0.2; printf a >> {marker}"), Vec::new()),
                 unit("b", format!("printf b >> {marker}"), Vec::new()),
@@ -15665,6 +15759,112 @@ channel = "stable"
                 .as_deref(),
             Some("affected")
         );
+    }
+
+
+    const RENOVATE_GENERATION_CONFIG: &str = "schema = 1\n\n\
+         [generator]\n\
+         repository = \"example/fixture\"\n\n\
+         [workflow]\n\
+         runners = \"velnor\"\n\
+         velnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+         velnor_trusted_label = \"example-trusted\"\n\
+         velnor_trusted_runner_available = true\n\
+         files = [\"ci-pr.yml\", \"ci-policy.yml\", \"ci-main.yml\", \"nightly.yml\", \"maintenance.yml\", \"renovate.yml\", \"renovate-validate.yml\"]\n\n\
+         [renovate]\n\
+         enabled = true\n\
+         reason = \"Self-hosted Renovate for repository dependencies.\"\n\n\
+         [[declare]]\n\
+         primitive = \"renovate\"\n\
+         file = \"renovate.yml\"\n\n\
+         [[declare]]\n\
+         primitive = \"renovate-validate\"\n\
+         file = \"renovate-validate.yml\"\n";
+
+    fn renovate_repository(name: &str, config: Option<&str>) -> PathBuf {
+        let root = configured_repository(name, config);
+        must(
+            fs::write(root.join("renovate.json"), "{}\n"),
+            "write renovate config",
+        );
+        root
+    }
+
+    #[test]
+    fn repository_without_renovate_contract_omits_renovate_workflows() {
+        let root = configured_repository("no-renovate", None);
+        must(
+            fs::write(root.join("renovate.json"), "{}\n"),
+            "write renovate config",
+        );
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan repository without renovate contract",
+        );
+        assert!(scanned.config.analysis.detected.contains(&"renovate-configuration".to_owned()));
+        assert!(scanned.config.renovate.is_none());
+        let files = must(
+            generated_files(&scanned.config),
+            "render repository without renovate contract",
+        );
+        assert!(
+            !files.contains_key(&PathBuf::from(".github/workflows/renovate.yml")),
+            "scan evidence alone must not emit renovate.yml"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_renovate_contract_generates_pinned_workflows() {
+        let root = renovate_repository("renovate-enabled", Some(RENOVATE_GENERATION_CONFIG));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Velnor, "main"),
+            "scan renovate repository",
+        );
+        let files = must(
+            generated_files(&scanned.config),
+            "render renovate repository",
+        );
+        let renovate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate.yml")),
+            "generated renovate.yml",
+        );
+        let validate = must_some(
+            files.get(&PathBuf::from(".github/workflows/renovate-validate.yml")),
+            "generated renovate-validate.yml",
+        );
+        assert!(renovate.contains("secrets.GH_RENOVATE_TOKEN"));
+        assert!(renovate.contains(ActionPin::Renovate.reference()));
+        assert!(renovate.contains("example-trusted"));
+        assert!(renovate.contains("velnor-renovate-"));
+        assert!(renovate.contains("44.93.6"));
+        assert!(!renovate.contains("pull_request"));
+        assert!(validate.contains("renovate-config-validator"));
+        assert!(validate.contains("ghcr.io/renovatebot/renovate:44.93.6"));
+        assert!(!validate.contains("GH_RENOVATE_TOKEN"));
+        let second = must(
+            generated_files(&scanned.config),
+            "regenerate renovate repository",
+        );
+        assert_eq!(files, second, "renovate output must be byte-stable");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_renovate_generation_config_fails_closed() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [renovate]\nenabled = true\nreason = \"missing declare row\"\n";
+        let root = renovate_repository("renovate-invalid", Some(config));
+        let error = must_some(
+            check_repository(&root).err(),
+            "invalid renovate config must stop generation",
+        )
+        .to_string();
+        assert!(
+            error.contains("[[declare]] primitive = \"renovate\""),
+            "error must require the renovate declare row: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     fn configured_repository(name: &str, config: Option<&str>) -> PathBuf {
