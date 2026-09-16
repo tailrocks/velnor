@@ -103,7 +103,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
             CacheKey {
                 layer: "cargo_bin",
                 paths: &["~/.cargo/bin"],
-                primary: "velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}",
+                primary: "velnor-cargo-bin-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}",
                 restore_keys: &[
                 ],
             },
