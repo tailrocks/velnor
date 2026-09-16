@@ -154,11 +154,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: policy-setup-action
           sparse-checkout: .github/actions/setup-velnor-workflow
           fetch-depth: 1
           persist-credentials: false
       - name: Set up Velnor workflow runtime
-        uses: ./.github/actions/setup-velnor-workflow
+        uses: ./policy-setup-action/.github/actions/setup-velnor-workflow
         with:
           rev: cea85658ea7e7046445e69e84808b315f7658016
           checkout-path: ${{ github.workspace }}/policy-checkout

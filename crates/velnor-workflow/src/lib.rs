@@ -77,6 +77,13 @@ pub(crate) const VELNOR_WORKFLOW_SETUP_ACTION: &str =
 /// runtime.
 pub(crate) const VELNOR_WORKFLOW_LOCAL_SETUP_ACTION: &str =
     "./.github/actions/setup-velnor-workflow";
+/// The same composite resolved out of the policy job's sibling checkout.
+/// The owner policy job never checks the repository out at the workspace
+/// root — a root checkout wipes `policy-checkout/` under `clean: true` —
+/// so it checks the BASE tree's action directory out under
+/// `policy-setup-action/` and runs the composite from there.
+pub(crate) const VELNOR_WORKFLOW_POLICY_SETUP_ACTION: &str =
+    "./policy-setup-action/.github/actions/setup-velnor-workflow";
 pub(crate) const VELNOR_CI_REPORT_ACTION: &str =
     "tailrocks/velnor/.github/actions/report-velnor-ci-outcomes";
 pub(crate) const VELNOR_CI_LOCAL_REPORT_ACTION: &str =
@@ -3718,8 +3725,8 @@ fn policy_renderer_steps(repository: &str, revision: &str) -> String {
 /// pinned validator as an immutable prebuilt product, resolves the live
 /// ruleset contexts, and runs `velnor-workflow policy` with explicit
 /// `--head-sha` / `--base-sha`. The owner lane additionally checks out the
-/// base tree's setup-action directory sparsely at the workspace root first,
-/// so the local `./…` setup step resolves. The validator regenerates the
+/// base tree's setup-action directory sparsely under `policy-setup-action/`
+/// first, so the local `./…` setup step resolves. The validator regenerates the
 /// tree with the generator the tree declares and evaluates its own semantic
 /// rules; see `policy.rs`.
 ///
@@ -3753,25 +3760,32 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         ""
     };
     let validator = if hosted {
-        format!(
-            "      - name: Set up Velnor workflow runtime\n        uses: {}\n        with:\n          rev: {revision}\n          checkout-path: ${{{{ github.workspace }}}}/policy-checkout\n",
+        let setup_uses = if owner {
+            VELNOR_WORKFLOW_POLICY_SETUP_ACTION.to_owned()
+        } else {
             workflow_setup_action_uses(repository, revision)
+        };
+        format!(
+            "      - name: Set up Velnor workflow runtime\n        uses: {setup_uses}\n        with:\n          rev: {revision}\n          checkout-path: ${{{{ github.workspace }}}}/policy-checkout\n"
         )
     } else {
         workflow_pinned_policy_runtime_velnor(revision, "${{ github.workspace }}/policy-checkout")
     };
     // The owner runs the setup action from its own checkout (`./…`), but the
     // policy job checks the repository out only under `policy-checkout/`, so
-    // without a root checkout the setup step's `uses:` cannot resolve and the
-    // job dies at setup. The sparse checkout provisions exactly the composite
-    // action directory from the BASE tree at the workspace root: never the PR
-    // head, and never resolved out of `policy-checkout/`, either of which
-    // would execute fork-controlled action code under pull_request_target.
+    // without a second checkout the setup step's `uses:` cannot resolve and
+    // the job dies at setup. The sparse checkout provisions exactly the
+    // composite action directory from the BASE tree under the sibling
+    // `policy-setup-action/`: never the PR head, and never resolved out of
+    // `policy-checkout/`, either of which would execute fork-controlled
+    // action code under pull_request_target. It must not land at the
+    // workspace root: a root checkout wipes `policy-checkout/` under
+    // `clean: true` and the Acquire step then has no working directory.
     // Consumers pin the published action and the Velnor lane provisions its
-    // slot, so neither needs a root checkout.
+    // slot, so neither needs this checkout.
     let setup_checkout = if hosted && owner {
         format!(
-            "      - name: Check out base setup action\n        uses: {}\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          sparse-checkout: .github/actions/setup-velnor-workflow\n          fetch-depth: 1\n          persist-credentials: false\n",
+            "      - name: Check out base setup action\n        uses: {}\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          path: policy-setup-action\n          sparse-checkout: .github/actions/setup-velnor-workflow\n          fetch-depth: 1\n          persist-credentials: false\n",
             ActionPin::Checkout.reference()
         )
     } else {
@@ -12847,14 +12861,14 @@ channel = "stable"
 
     /// The owner policy job runs the setup action from its own checkout
     /// (`./…`) while checking the repository out only under
-    /// `policy-checkout/`: without a root checkout the setup step's `uses:`
+    /// `policy-checkout/`: without a second checkout the setup step's `uses:`
     /// cannot resolve and the job dies at setup. The sparse checkout ahead of
     /// it provisions exactly the composite action directory from the BASE
-    /// tree — never the PR head, and never resolved out of
-    /// `policy-checkout/`, either of which would execute fork-controlled
-    /// action code under `pull_request_target`. Consumers pin the published
-    /// action and the Velnor lane provisions its slot, so neither carries a
-    /// root checkout.
+    /// tree under the sibling `policy-setup-action/` — never the PR head,
+    /// and never resolved out of `policy-checkout/`, either of which would
+    /// execute fork-controlled action code under `pull_request_target`.
+    /// Consumers pin the published action and the Velnor lane provisions its
+    /// slot, so neither carries this checkout.
     #[test]
     fn owner_policy_job_checks_out_base_setup_action_before_setup() {
         let owner = hosted_policy_job("abc123");
@@ -12863,37 +12877,41 @@ channel = "stable"
             "the owner policy job checks out the base setup action",
         );
         let setup = must_some(
-            owner.find(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n")),
-            "the owner setup step runs the local composite",
+            owner.find(&format!("uses: {VELNOR_WORKFLOW_POLICY_SETUP_ACTION}\n")),
+            "the owner setup step runs the local composite out of the sibling checkout",
         );
         assert!(
             checkout < setup,
-            "the root checkout precedes the setup step: {owner}"
+            "the sibling checkout precedes the setup step: {owner}"
         );
         let block = &owner[checkout..setup];
         assert!(
             block.contains(&format!("uses: {}\n", ActionPin::Checkout.reference())),
-            "the root checkout pins actions/checkout: {owner}"
+            "the sibling checkout pins actions/checkout: {owner}"
         );
         assert!(
             block.contains("ref: ${{ github.event.pull_request.base.sha || github.sha }}\n"),
-            "the root checkout pins the BASE tree: {owner}"
+            "the sibling checkout pins the BASE tree: {owner}"
+        );
+        assert!(
+            block.contains("path: policy-setup-action\n"),
+            "the sibling checkout lands beside the audited tree, never at the root: {owner}"
         );
         assert!(
             !block.contains("head.sha"),
-            "the root checkout never names the PR head: {owner}"
+            "the sibling checkout never names the PR head: {owner}"
         );
         assert!(
             block.contains("sparse-checkout: .github/actions/setup-velnor-workflow\n"),
-            "the root checkout provisions exactly the composite directory: {owner}"
+            "the sibling checkout provisions exactly the composite directory: {owner}"
         );
         assert!(
             block.contains("fetch-depth: 1\n"),
-            "the root checkout is shallow: {owner}"
+            "the sibling checkout is shallow: {owner}"
         );
         assert!(
             block.contains("persist-credentials: false\n"),
-            "the root checkout persists no credentials: {owner}"
+            "the sibling checkout persists no credentials: {owner}"
         );
         assert!(
             !owner.contains("policy-checkout/.github/actions"),
@@ -12905,10 +12923,35 @@ channel = "stable"
         ] {
             assert!(
                 !job.contains("Check out base setup action"),
-                "only the owner lane needs a root checkout: {job}"
+                "only the owner lane checks out the setup action: {job}"
             );
             assert!(!job.contains("sparse-checkout"), "{job}");
         }
+    }
+
+    /// Every checkout in the owner policy job lands in a sibling directory:
+    /// a root checkout wipes `policy-checkout/` under `clean: true` and the
+    /// Acquire step then dies with "No such file or directory". The setup
+    /// step resolves the composite out of the sibling checkout.
+    #[test]
+    fn owner_policy_job_never_checks_out_workspace_root() {
+        let owner = hosted_policy_job("abc123");
+        let checkout = format!("uses: {}\n", ActionPin::Checkout.reference());
+        let mut checkouts = 0;
+        for step in owner.split("      - name: ").skip(1) {
+            if step.contains(&checkout) {
+                checkouts += 1;
+                assert!(
+                    step.contains("\n          path: "),
+                    "every policy-job checkout carries a path, never the root: {step}"
+                );
+            }
+        }
+        assert_eq!(checkouts, 2, "history plus base setup action: {owner}");
+        assert!(
+            owner.contains(&format!("uses: {VELNOR_WORKFLOW_POLICY_SETUP_ACTION}\n")),
+            "the setup step resolves out of the sibling checkout: {owner}"
+        );
     }
 
     /// No generated policy job passes `--pin-build`: an unprovisioned pin
