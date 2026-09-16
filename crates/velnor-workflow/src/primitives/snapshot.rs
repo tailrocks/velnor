@@ -406,6 +406,13 @@ impl RetentionPolicy {
                     generation_bound: 1,
                 },
                 ClassPolicy {
+                    id: "renovate-repository",
+                    purpose: CachePurpose::Generic,
+                    markers: &[CacheKeyMatcher::Contains("velnor-renovate-")],
+                    budget_bytes: GIBIBYTE / 2,
+                    generation_bound: 2,
+                },
+                ClassPolicy {
                     id: "docker-seed",
                     purpose: CachePurpose::DockerSeed,
                     markers: &[

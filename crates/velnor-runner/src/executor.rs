@@ -5082,6 +5082,8 @@ where
         if let Some(repository) = action_state.env.get("GITHUB_REPOSITORY") {
             set_env_value(&mut env, "RENOVATE_REPOSITORIES", repository);
         }
+        set_env_default(&mut env, "RENOVATE_BASE_DIR", "/tmp/renovate");
+        set_env_default(&mut env, "RENOVATE_REPOSITORY_CACHE", "enabled");
         let secret_masks = action_state.secret_masks(&self.secret_masks);
         let args = container.prepare_run_docker_action_args(
             "/github/workspace",
@@ -6449,6 +6451,12 @@ fn set_env_value(env: &mut Vec<(String, String)>, name: &str, value: &str) {
     if let Some((_, existing)) = env.iter_mut().find(|(key, _)| key == name) {
         *existing = value.to_string();
     } else {
+        env.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn set_env_default(env: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if !env.iter().any(|(key, _)| key == name) {
         env.push((name.to_string(), value.to_string()));
     }
 }

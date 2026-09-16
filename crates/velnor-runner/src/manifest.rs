@@ -251,6 +251,7 @@ const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     ),
 ];
 const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("dcfba84a42d1b5d5e49bf131b1bf53511851a123", "v46.3.1"),
     allowed("37beffda261423addd537c33f2d126df7f6ffbab", "v46.2.6"),
     allowed("39b914146caeff8cd512e61c8992f1d5913af85c", "v46.2.5"),
     allowed("5402b206248e5a8c8427a15102702eb9c1793efc", "v46.2.4"),
