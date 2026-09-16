@@ -58,7 +58,7 @@ jobs:
       - name: Set up Velnor workflow runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: d2523b160a6bf50716445613f845514306e2a03d
+          rev: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
           checkout-path: ${{ github.workspace }}/policy-checkout
       - name: Acquire candidate generator product
         working-directory: policy-checkout
@@ -66,7 +66,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          BASE_PIN: d2523b160a6bf50716445613f845514306e2a03d
+          BASE_PIN: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
         run: |
           set -euo pipefail
           pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
@@ -139,7 +139,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: d2523b160a6bf50716445613f845514306e2a03d
+          VELNOR_WORKFLOW_POLICY_REVISION: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
         run: |
           set -euo pipefail
           velnor-workflow policy \
