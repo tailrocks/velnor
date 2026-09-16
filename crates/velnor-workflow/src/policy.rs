@@ -2112,7 +2112,10 @@ fn has_safe_runner_gate(
         return true;
     }
     // Dual-lane automatic Velnor jobs admit same-repository pull_request plus
-    // the default-branch push/schedule/dispatch (and merge_group when emitted).
+    // the default-branch push/schedule (and merge_group when emitted) plus a
+    // lane-selecting dispatch on any ref: dispatch needs write access on a
+    // ref of this repository, the authorship the runner already trusts
+    // (`TrustClass::derive`, `velnor_dispatch_selection_expression`).
     // That generated shape is trusted even when the advisory checkout lacks
     // `.github/ci/project.toml` and only carries `.github-gen`.
     is_generated_velnor_pr_gate(condition, &velnor_policy.default_branch)
@@ -2345,10 +2348,26 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     let default_dispatch = format!(
         "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
     );
+    // The lane admission predicate admits a lane-selecting dispatch on any
+    // ref: GitHub only accepts a dispatch from a write-authorized actor onto
+    // a ref of this repository — the same authorship a same-repository
+    // pull-request head carries — and the runner classifies both as
+    // `TrustClass::Trusted` without consulting the ref
+    // (`velnor_dispatch_selection_expression` states the argument). The
+    // ref-gated shapes above stay accepted for older rendered trees.
+    let explicit_dispatch_any_ref =
+        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
+    let default_dispatch_any_ref =
+        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner==''))";
     [automatic.as_str(), automatic_merge_group.as_str()]
         .into_iter()
         .any(|automatic| {
-            for dispatch in [explicit_dispatch.as_str(), default_dispatch.as_str()] {
+            for dispatch in [
+                explicit_dispatch.as_str(),
+                default_dispatch.as_str(),
+                explicit_dispatch_any_ref,
+                default_dispatch_any_ref,
+            ] {
                 let combined = format!("{automatic}||{dispatch}");
                 if value == combined || value == format!("({combined})") {
                     return true;

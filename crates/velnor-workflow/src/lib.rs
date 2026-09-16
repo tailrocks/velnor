@@ -3018,6 +3018,211 @@ pub(crate) fn validate_workflow_runtime_install_roots(
     Ok(())
 }
 
+/// The step name of the aggregate required check's verdict script.
+const REQUIRED_CHECK_STEP: &str = "Validate generated stack results";
+/// The step name of the in-workflow required check's verdict script.
+const REQUIRED_UNIT_CHECK_STEP: &str = "Validate generated unit results";
+/// Prefix of the required check's admission environment variables.
+const LANE_ADMITTED_ENV_PREFIX: &str = "LANE_ADMITTED_";
+
+/// The required check, every job it validates, and every callee lane job
+/// agree on one admission predicate per lane class.
+///
+/// The check expects `success` from a selected job whose class the predicate
+/// admits and `skipped` otherwise, so any surface that evaluates a different
+/// predicate — a callee job gated on an event the caller admits, a caller
+/// gated on one the check does not read, a callee lane the check knows no
+/// class for — makes a green run impossible by construction: a
+/// lane-restricted `workflow_dispatch` once skipped every callee job while
+/// the check demanded `success` from their callers. All three surfaces render
+/// the predicate from `WorkflowIr::lane_admission_expression`; this checks the
+/// rendered tree for drift between them instead of trusting the renderers.
+///
+/// # Errors
+/// Returns a usage error naming the workflow, job, and predicate that drift.
+pub(crate) fn validate_lane_admission_single_source(
+    files: &BTreeMap<PathBuf, String>,
+) -> Result<(), GeneratorError> {
+    for (path, rendered) in rendered_workflow_files(files) {
+        let blocks = static_workflow_job_blocks(rendered);
+        let Some((gate_job, gate)) = blocks.iter().find(|(_, block)| {
+            named_workflow_steps(block)
+                .iter()
+                .any(|(name, _)| name == REQUIRED_CHECK_STEP || name == REQUIRED_UNIT_CHECK_STEP)
+        }) else {
+            continue;
+        };
+        let admissions = required_check_admissions(gate);
+        for (job, admitted) in required_check_verdicts(gate) {
+            let Some(expression) = admissions.get(&admitted) else {
+                return Err(GeneratorError::usage(format!(
+                    "{path}: `{gate_job}` reads `${admitted}` for job `{job}` but declares no \
+                     `{admitted}` in its env; every admission class the verdicts use is \
+                     evaluated once in the check's environment"
+                )));
+            };
+            let Some((_, block)) = blocks.iter().find(|(id, _)| id == &job) else {
+                return Err(GeneratorError::usage(format!(
+                    "{path}: `{gate_job}` validates job `{job}`, which the workflow does not \
+                     render"
+                )));
+            };
+            let clause = format!("({expression})");
+            let gate_line = job_level_if(block).unwrap_or_default();
+            if !gate_line.contains(&clause) {
+                return Err(GeneratorError::usage(format!(
+                    "{path}: job `{job}` is gated on `{gate_line}` while `{gate_job}` expects it \
+                     to run exactly when `{admitted}` = `{expression}` holds; the job's `if:` \
+                     must carry the same admission predicate the check evaluates"
+                )));
+            }
+            let Some(callee) = block
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("uses: ./.github/workflows/"))
+            else {
+                continue;
+            };
+            let Some(lane) = block
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("lane: "))
+            else {
+                return Err(GeneratorError::usage(format!(
+                    "{path}: caller `{job}` invokes `{callee}` without a `lane:` input, so no \
+                     callee job can be matched to its admission"
+                )));
+            };
+            let callee_path = PathBuf::from(".github/workflows").join(callee);
+            let Some(callee_rendered) = files.get(&callee_path) else {
+                return Err(GeneratorError::usage(format!(
+                    "{path}: caller `{job}` invokes `{callee}`, which the tree does not render"
+                )));
+            };
+            let lane_selector = format!("inputs.lane == '{lane}'");
+            let lane_admissions = admissions
+                .iter()
+                .filter(|(name, _)| admission_env_lane(name) == Some(admission_lane_of(lane)))
+                .map(|(_, expression)| format!("({expression})"))
+                .collect::<Vec<_>>();
+            let mut carries_caller_predicate = false;
+            let mut callee_jobs = 0_usize;
+            for (callee_job, callee_block) in static_workflow_job_blocks(callee_rendered) {
+                let callee_if = job_level_if(&callee_block).unwrap_or_default();
+                if !callee_if.contains(&lane_selector) {
+                    continue;
+                }
+                callee_jobs += 1;
+                if callee_if.contains(&clause) {
+                    carries_caller_predicate = true;
+                } else if !lane_admissions
+                    .iter()
+                    .any(|candidate| callee_if.contains(candidate))
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "{callee}: job `{callee_job}` (lane `{lane}`) is gated on `{callee_if}`, \
+                         a predicate `{path}` `{gate_job}` evaluates for no admission class of \
+                         that lane; the callee job's `if:` must carry the lane admission the \
+                         check reads"
+                    )));
+                }
+            }
+            if callee_jobs == 0 {
+                return Err(GeneratorError::usage(format!(
+                    "{callee}: no job is gated on `{lane_selector}`, yet `{path}` caller `{job}` \
+                     invokes it with `lane: {lane}`"
+                )));
+            }
+            if !carries_caller_predicate {
+                return Err(GeneratorError::usage(format!(
+                    "{callee}: no `{lane}` lane job carries the admission `{expression}` that \
+                     `{path}` caller `{job}` and `{gate_job}` evaluate for it"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `LANE_ADMITTED_*` environment of a required-check block, as
+/// `(name, expression)` pairs with the `${{ }}` wrapper removed.
+fn required_check_admissions(gate: &str) -> BTreeMap<String, String> {
+    gate.lines()
+        .filter_map(|line| {
+            let (name, value) = line.trim().split_once(": ")?;
+            if !name.starts_with(LANE_ADMITTED_ENV_PREFIX) {
+                return None;
+            }
+            let expression = value
+                .trim()
+                .strip_prefix("${{ ")
+                .and_then(|value| value.strip_suffix(" }}"))?;
+            Some((name.to_owned(), expression.to_owned()))
+        })
+        .collect()
+}
+
+/// The `(job id, admission env name)` pairs of a required-check block: each
+/// selected-branch `result_for_job` lookup followed by the admission test
+/// its verdict reads.
+fn required_check_verdicts(gate: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = gate.lines().map(str::trim).collect();
+    let mut verdicts = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(job) = line
+            .strip_prefix("result=\"$(result_for_job ")
+            .and_then(|rest| rest.strip_suffix(")\""))
+        else {
+            continue;
+        };
+        let Some(admitted) = lines
+            .get(index + 1)
+            .and_then(|next| next.strip_prefix("if [[ \"$"))
+            .and_then(|rest| rest.strip_suffix("\" == true ]]; then"))
+        else {
+            continue;
+        };
+        if admitted.starts_with(LANE_ADMITTED_ENV_PREFIX) {
+            verdicts.push((job.to_owned(), admitted.to_owned()));
+        }
+    }
+    verdicts
+}
+
+/// The job-level `if:` expression of a rendered job block, `${{ }}` removed.
+fn job_level_if(block: &str) -> Option<String> {
+    block
+        .lines()
+        .find_map(|line| line.strip_prefix("    if: "))
+        .map(|value| {
+            value
+                .trim()
+                .strip_prefix("${{ ")
+                .and_then(|value| value.strip_suffix(" }}"))
+                .unwrap_or(value.trim())
+                .to_owned()
+        })
+}
+
+/// The lane an admission environment variable evaluates.
+fn admission_env_lane(name: &str) -> Option<RunnerMode> {
+    [
+        primitives::LaneAdmission::Github,
+        primitives::LaneAdmission::Velnor,
+        primitives::LaneAdmission::VelnorTrusted,
+    ]
+    .into_iter()
+    .find(|admission| admission.env_name() == name)
+    .map(primitives::LaneAdmission::lane)
+}
+
+/// The lane whose admission a caller's `lane:` input evaluates; the
+/// `control` lane warms the Velnor lane's stores and is admitted with it.
+fn admission_lane_of(lane: &str) -> RunnerMode {
+    match lane {
+        "github" => RunnerMode::Github,
+        _ => RunnerMode::Velnor,
+    }
+}
+
 /// One rendered `cargo install … velnor-workflow` invocation.
 struct WorkflowRuntimeInstall {
     /// The logical command line, continuation lines joined.
@@ -4731,6 +4936,7 @@ fn generated_files_with_surface(
     validate_hosted_mr_boxington_store_budget(&files)?;
     validate_policy_jobs_check_out_full_history(&files)?;
     validate_workflow_runtime_install_roots(&files)?;
+    validate_lane_admission_single_source(&files)?;
     // GitHub loads every reusable workflow once per calling job into one
     // 10 MiB template budget; refuse a surface whose expansion passes the
     // generator's 5 MiB ceiling before it can fail every run at startup.
@@ -8395,30 +8601,322 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// The selected-branch verdict block of one caller in a rendered required
+    /// check: from its selection test through its `result_for_job` lookup to
+    /// the unselected `else`.
+    fn required_verdict_block<'a>(check: &'a str, job: &str) -> &'a str {
+        let marker = format!("result=\"$(result_for_job {job})\"");
+        let lookup = must_some(
+            check.find(&marker),
+            &format!("the required check must validate `{job}`"),
+        );
+        let start = check[..lookup]
+            .rfind("\n          if [[ ")
+            .map_or(lookup, |offset| offset + 1);
+        let end = check[start..]
+            .find("\n          else\n")
+            .map_or(check.len(), |offset| start + offset);
+        &check[start..end]
+    }
+
     #[test]
-    fn trust_gated_velnor_docker_skip_is_accepted_by_ci_required() {
+    fn trust_gated_velnor_docker_offline_is_expected_skipped_by_ci_required() {
         let (mut config, index) = both_runner_docker_config();
         config.velnor_trusted_label = Some("example-trusted".to_owned());
         config.velnor_trusted_runner_available = Some(false);
         config.units[index].requires_trusted = true;
         let docker_id = config.units[index].id.clone();
-        let pr = generated_ci_pr(&WorkflowIr::from_config(&config));
-        let marker = format!("result=\"$(result_for_job velnor-{docker_id})\"");
-        let start = must_some(
-            pr.find(&marker),
-            "ci-required must validate the velnor docker caller",
-        );
-        let end = pr[start..]
-            .find("else")
-            .map_or(pr.len(), |offset| start + offset);
-        let block = &pr[start..end];
+        let workflow = WorkflowIr::from_config(&config);
+        let pr = generated_ci_pr(&workflow);
+        let block = required_verdict_block(&pr, &format!("velnor-{docker_id}"));
         assert!(
-            block.contains("success|skipped"),
-            "trust-gated velnor docker skip must satisfy ci-required without a fork PR: {block}"
+            block.contains("if [[ \"$LANE_ADMITTED_VELNOR_TRUSTED\" == true ]]; then"),
+            "the trust-gated caller is judged by the trusted class's admission: {block}"
         );
         assert!(
-            !block.contains("FORK_PR"),
-            "trust-gated skip must not depend on fork admission: {block}"
+            block.contains("skipped) ;;")
+                && block.contains("ran outside its lane admission (LANE_ADMITTED_VELNOR_TRUSTED="),
+            "an unadmitted lane must be exactly `skipped`, never merely tolerated: {block}"
+        );
+        let admissions = required_check_admissions(&pr);
+        let trusted = must_some(
+            admissions.get("LANE_ADMITTED_VELNOR_TRUSTED"),
+            "ci-required evaluates the trusted class",
+        );
+        assert!(
+            trusted.ends_with(") && false"),
+            "an offline trusted runner makes the class's predicate false: {trusted}"
+        );
+        assert_eq!(
+            trusted,
+            &workflow.lane_admission_expression(primitives::LaneAdmission::VelnorTrusted),
+            "the check evaluates the exact expression the callee is gated on"
+        );
+        assert!(
+            !pr.contains("FORK_PR"),
+            "the fork pull request is a value of the admission predicate, not a gate variable: {pr}"
+        );
+    }
+
+    /// Every aggregate caller, its callee lane job, and the required check
+    /// evaluate one admission predicate per lane class, and the check expects
+    /// `skipped` from a selected caller whose class the predicate denies.
+    #[test]
+    fn required_check_expects_each_caller_by_its_lane_admission() {
+        let mut config = scanned_fixture(RunnerMode::Both);
+        config.automatic = RunnerMode::Both;
+        let files = must(generated_files(&config), "generate");
+        must(
+            validate_lane_admission_single_source(&files),
+            "the rendered tree derives every lane gate from one admission",
+        );
+        let workflow = WorkflowIr::from_config(&config);
+        // The fixture's nightly is the `ci-main` dispatcher; only the two
+        // aggregates own a required check here.
+        for aggregate in ["ci-pr.yml", "ci-main.yml"] {
+            let rendered = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(aggregate)),
+                aggregate,
+            );
+            assert!(!rendered.contains("FORK_PR"), "{aggregate}: {rendered}");
+            let admissions = required_check_admissions(rendered);
+            for admission in [
+                primitives::LaneAdmission::Github,
+                primitives::LaneAdmission::Velnor,
+            ] {
+                let expression = must_some(
+                    admissions.get(admission.env_name()),
+                    &format!("{aggregate} evaluates {}", admission.env_name()),
+                );
+                assert_eq!(
+                    expression,
+                    &workflow.lane_admission_expression(admission),
+                    "{aggregate}: {} is the lane's one predicate",
+                    admission.env_name()
+                );
+            }
+            let verdicts = required_check_verdicts(rendered);
+            assert!(
+                verdicts
+                    .iter()
+                    .any(|(job, env)| job.starts_with("github-") && env == "LANE_ADMITTED_GITHUB"),
+                "{aggregate}: hosted callers read the hosted admission: {verdicts:?}"
+            );
+            assert!(
+                verdicts
+                    .iter()
+                    .any(|(job, env)| job.starts_with("velnor-") && env == "LANE_ADMITTED_VELNOR"),
+                "{aggregate}: Velnor callers read the Velnor admission: {verdicts:?}"
+            );
+            for (job, env) in &verdicts {
+                let expression = &admissions[env];
+                let gate = job_gate(rendered, job);
+                assert!(
+                    gate.contains(&format!("({expression})")),
+                    "{aggregate}: caller `{job}` must skip exactly when `{env}` is false: {gate}"
+                );
+                let block = required_verdict_block(rendered, job);
+                assert!(
+                    block.contains(&format!("if [[ \"${env}\" == true ]]; then"))
+                        && block.contains("skipped) ;;"),
+                    "{aggregate}: `{job}` expects success when admitted and skipped when not: {block}"
+                );
+            }
+        }
+        let callee = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "ci-unit-rust.yml",
+        );
+        for (job, admission) in [
+            ("verify-github", primitives::LaneAdmission::Github),
+            ("verify-velnor", primitives::LaneAdmission::Velnor),
+        ] {
+            let gate = job_gate(callee, job);
+            assert!(
+                gate.contains(&format!(
+                    "&& ({})",
+                    workflow.lane_admission_expression(admission)
+                )),
+                "callee `{job}` is gated on the same predicate the check evaluates: {gate}"
+            );
+        }
+    }
+
+    /// A `workflow_dispatch` selecting the Velnor lane is admitted on any
+    /// ref: the runner classifies every dispatch as trusted without reading
+    /// `github.ref` (`TrustClass::derive`), and only a write-access actor can
+    /// dispatch a ref of this repository.
+    #[test]
+    fn velnor_lane_admits_workflow_dispatch_on_any_ref() {
+        for (runners, automatic, opt_in) in [
+            (RunnerMode::Both, RunnerMode::Both, true),
+            (RunnerMode::Both, RunnerMode::Both, false),
+            (RunnerMode::Velnor, RunnerMode::Velnor, false),
+            (RunnerMode::Velnor, RunnerMode::Github, false),
+        ] {
+            let mut config = scanned_fixture(runners);
+            config.automatic = automatic;
+            config.pull_request_on_velnor = opt_in;
+            let workflow = WorkflowIr::from_config(&config);
+            let velnor = workflow.lane_admission_expression(primitives::LaneAdmission::Velnor);
+            assert!(
+                !velnor.contains("refs/heads/main' && (github.event_name == 'workflow_dispatch'"),
+                "{runners:?}/{automatic:?}/opt-in {opt_in}: dispatch is not ref-gated: {velnor}"
+            );
+            assert!(
+                velnor.contains("github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'"),
+                "{runners:?}/{automatic:?}/opt-in {opt_in}: dispatch selecting the lane admits it: {velnor}"
+            );
+            let automatic_velnor = matches!(automatic, RunnerMode::Velnor | RunnerMode::Both);
+            assert_eq!(
+                velnor.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')"),
+                automatic_velnor,
+                "{runners:?}/{automatic:?}/opt-in {opt_in}: an automatic Velnor lane runs push and schedule on the default branch only, a manual one runs dispatch alone: {velnor}"
+            );
+            let github = workflow.lane_admission_expression(primitives::LaneAdmission::Github);
+            assert!(
+                github.contains("github.event.inputs.runner == 'github'")
+                    && !github.contains("github.event.inputs.runner == 'velnor'"),
+                "a velnor-only dispatch denies the hosted lane: {github}"
+            );
+        }
+    }
+
+    /// The single-source validator refuses a tree whose callee, caller, or
+    /// check evaluates a different predicate than the other two.
+    #[test]
+    fn lane_admission_validator_refuses_drift() {
+        let mut config = scanned_fixture(RunnerMode::Both);
+        config.automatic = RunnerMode::Both;
+        let files = must(generated_files(&config), "generate");
+        must(
+            validate_lane_admission_single_source(&files),
+            "coherent tree",
+        );
+        let pr = PathBuf::from(".github/workflows/ci-pr.yml");
+        let callee = PathBuf::from(".github/workflows/ci-unit-rust.yml");
+        let dispatch =
+            "(github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor'";
+        let ref_gated = "(github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor'";
+
+        // The callee re-introduces the default-branch dispatch gate.
+        let mut drifted = files.clone();
+        let velnor_job = job_gate(&files[&callee], "verify-velnor");
+        assert!(velnor_job.contains(dispatch), "{velnor_job}");
+        drifted.insert(
+            callee.clone(),
+            files[&callee].replace(&velnor_job, &velnor_job.replace(dispatch, ref_gated)),
+        );
+        let error = must_fail(
+            validate_lane_admission_single_source(&drifted),
+            "callee drift",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("ci-unit-rust.yml: job `verify-velnor`")
+                && error.to_string().contains("lane `velnor`"),
+            "{error}"
+        );
+
+        // The caller drifts from the check.
+        let mut drifted = files.clone();
+        let caller_job = job_gate(&files[&pr], "velnor-rust-fixture");
+        assert!(caller_job.contains(dispatch), "{caller_job}");
+        drifted.insert(
+            pr.clone(),
+            files[&pr].replace(&caller_job, &caller_job.replace(dispatch, ref_gated)),
+        );
+        let error = must_fail(
+            validate_lane_admission_single_source(&drifted),
+            "caller drift",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("job `velnor-rust-fixture` is gated on"),
+            "{error}"
+        );
+
+        // The check reads a class it never evaluates.
+        let mut drifted = files.clone();
+        drifted.insert(
+            pr.clone(),
+            files[&pr]
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("LANE_ADMITTED_VELNOR: "))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let error = must_fail(
+            validate_lane_admission_single_source(&drifted),
+            "missing admission env",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("declares no `LANE_ADMITTED_VELNOR` in its env"),
+            "{error}"
+        );
+    }
+
+    /// The `prepare-cargo` caller, its callee job, and the required check
+    /// select on the same set of network-restricted units, so the
+    /// prerequisite never runs for a selection its callee ignores (caller
+    /// `skipped`, check red) nor skips for one its callee needs.
+    #[test]
+    fn prepare_cargo_caller_and_callee_select_the_same_restricted_units() {
+        let files = rendered_repository_files();
+        let pr = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
+            "ci-pr.yml",
+        );
+        let callee = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "ci-unit-rust.yml",
+        );
+        let selectors = |gate: &str, units: &str| {
+            let prefix = format!("contains(format(',{{0}},', {units}), ',");
+            gate.match_indices(&prefix)
+                .filter_map(|(start, _)| {
+                    let rest = &gate[start + prefix.len()..];
+                    rest.split_once(",')").map(|(unit, _)| unit.to_owned())
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let aggregate_units = selectors(&job_gate(pr, "prepare-cargo"), "needs.plan.outputs.units");
+        let reusable_units = selectors(
+            &job_gate(callee, "velnor-prepare-cargo-sources"),
+            "inputs.selected_units",
+        );
+        assert!(
+            aggregate_units.len() > 1,
+            "the restricted set is the whole Rust surface, not one sample unit: {aggregate_units:?}"
+        );
+        assert_eq!(
+            aggregate_units, reusable_units,
+            "caller and callee select the prerequisite on one set"
+        );
+        let block = required_verdict_block(pr, "prepare-cargo");
+        for unit in &aggregate_units {
+            assert!(
+                block.contains(&format!("\"$selected\" == *\",{unit},\"*")),
+                "the check selects `prepare-cargo` on `{unit}` too: {block}"
+            );
+        }
+        assert!(
+            block.contains("if [[ \"$LANE_ADMITTED_VELNOR\" == true ]]; then"),
+            "the prerequisite is admitted with the Velnor lane whose stores it warms: {block}"
+        );
+        let gate = job_gate(pr, "prepare-cargo");
+        let admissions = required_check_admissions(pr);
+        let velnor = must_some(
+            admissions.get("LANE_ADMITTED_VELNOR"),
+            "ci-required evaluates the Velnor admission",
+        );
+        assert!(
+            gate.contains(&format!("({velnor})")),
+            "the caller skips exactly when the Velnor lane is not admitted: {gate}"
         );
     }
 
@@ -13495,7 +13993,7 @@ channel = "stable"
         assert!(!velnor.contains("runs-on: ubuntu-24.04"));
         assert!(velnor.contains(&fixture_lane_selector()));
         assert!(velnor.contains(
-            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))"
+            "(github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
         ));
         assert!(velnor.contains("default: velnor"));
         assert!(!velnor.contains("default: github"));
@@ -13612,7 +14110,7 @@ channel = "stable"
         assert!(main.contains("  velnor-"), "{main}");
         assert!(
             main.contains(
-                "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))"
+                "(github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
             ),
             "automatic=both runs Velnor on trusted push so lanes can be compared: {main}"
         );

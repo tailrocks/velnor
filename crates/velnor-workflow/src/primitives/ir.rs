@@ -2427,6 +2427,74 @@ fn dispatch_lane_expression(lane: RunnerMode, include_omitted: bool) -> String {
     format!("github.event_name == 'workflow_dispatch' && ({selected})")
 }
 
+/// The admission class of a lane caller: which single predicate decides, for
+/// the current event, ref, and dispatch input, whether the lane runs the unit.
+///
+/// Three surfaces need the same decision — the collapsed reusable job's
+/// `if:`, the aggregate caller's `if:`, and the required check's expectation
+/// for that caller (`success` when admitted, `skipped` when not) — and each
+/// renders it from [`WorkflowIr::lane_admission_expression`] on this key. A
+/// fork pull request, a lane-restricted `workflow_dispatch`, and an offline
+/// trusted runner are all just values of that predicate, never special cases
+/// of the gate. [`crate::validate_lane_admission_single_source`] checks the
+/// rendered tree for drift between the three surfaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum LaneAdmission {
+    /// The GitHub-hosted lane.
+    Github,
+    /// The Velnor lane on the base runner labels.
+    Velnor,
+    /// The Velnor lane on the trusted runner label; fails closed while no
+    /// runner claiming that label is online.
+    VelnorTrusted,
+}
+
+impl LaneAdmission {
+    /// The admission class of `unit` on `lane`.
+    pub(crate) fn for_unit(lane: RunnerMode, unit: &Unit) -> Self {
+        match lane {
+            RunnerMode::Velnor if unit.requires_trusted => Self::VelnorTrusted,
+            RunnerMode::Velnor => Self::Velnor,
+            RunnerMode::Github | RunnerMode::Both => Self::Github,
+        }
+    }
+
+    /// The lane whose event predicate this class evaluates.
+    pub(crate) fn lane(self) -> RunnerMode {
+        match self {
+            Self::Github => RunnerMode::Github,
+            Self::Velnor | Self::VelnorTrusted => RunnerMode::Velnor,
+        }
+    }
+
+    /// The required check's environment variable carrying the evaluated
+    /// predicate (`true` / `false`) for this class.
+    pub(crate) fn env_name(self) -> &'static str {
+        match self {
+            Self::Github => "LANE_ADMITTED_GITHUB",
+            Self::Velnor => "LANE_ADMITTED_VELNOR",
+            Self::VelnorTrusted => "LANE_ADMITTED_VELNOR_TRUSTED",
+        }
+    }
+}
+
+/// One caller the required check validates: the aggregate job id, the unit
+/// ids any of which selects it, its admission class, and whether it is a
+/// prerequisite of other callers (which only changes the diagnostic).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RequiredCaller {
+    pub(crate) job_id: String,
+    pub(crate) selected_by: Vec<String>,
+    pub(crate) admission: LaneAdmission,
+    pub(crate) prerequisite: bool,
+}
+
+/// `contains(...)` over the plan's `units` output for one unit id, as the
+/// aggregate callers spell it.
+fn aggregate_selected_unit_selector(unit_id: &str) -> String {
+    format!("contains(format(',{{0}},', needs.plan.outputs.units), ',{unit_id},')")
+}
+
 fn workflow_dispatch_inputs(
     default_scope: &str,
     default_branch: &str,
@@ -2895,48 +2963,55 @@ fn reusable_selected_unit_selector(unit_id: &str) -> String {
     format!("contains(format(',{{0}},', inputs.selected_units), ',{unit_id},')")
 }
 
-/// The per-caller verdict block of the required check: selected callers must
-/// succeed (a Velnor lane job may skip on fork pull requests, and a
-/// trust-gated Velnor job skips outright while the trusted runner is
-/// offline), unselected callers may skip.
-fn render_required_caller_verdicts(
-    output: &mut String,
-    caller_jobs: &[(String, String)],
-    trust_gated_velnor_skip: impl Fn(&str) -> bool,
-) {
-    for (job_id, unit_id) in caller_jobs {
-        if job_id == prepare_cargo_caller_job_id() {
-            let _ = writeln!(
-                output,
-                "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"$result\" != success ]]; then\n              echo \"selected CI prerequisite {job_id} did not pass: $result\" >&2\n              exit 1\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI prerequisite {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-            );
-            continue;
-        }
-        // A Velnor lane job legitimately skips on fork pull requests (the
-        // admission gate withholds self-hosted runners), so only that lane
-        // accepts `skipped` under `FORK_PR`. The hosted lane never has a
-        // legitimate skip for a selected unit, so it renders the strict
-        // branch alone: a shell conditional must not embed a rendered
-        // boolean literal (`[[ ... && false ]]` is a non-empty string test).
-        // A trust-gated Velnor job is skipped whenever the trusted runner is
-        // offline, so its selected verdict accepts `skipped` outright.
-        let velnor_job = job_id.starts_with("velnor-");
-        let selected_verdict = if velnor_job && trust_gated_velnor_skip(unit_id) {
-            format!(
-                "            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
-            )
-        } else if velnor_job {
-            format!(
-                "            if [[ \"$FORK_PR\" == true ]]; then\n              case \"$result\" in\n                success|skipped) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            fi"
-            )
-        } else {
-            format!(
-                "            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI job {job_id} did not pass: $result\" >&2; exit 1 ;;\n            esac"
-            )
-        };
+/// The `env:` entries of the required check carrying each admission class
+/// the callers use, evaluated by GitHub from the same expression the callee's
+/// `if:` and the caller's `if:` render.
+fn render_required_admission_env(workflow: &WorkflowIr, callers: &[RequiredCaller]) -> String {
+    let mut output = String::new();
+    for admission in callers
+        .iter()
+        .map(|caller| caller.admission)
+        .collect::<BTreeSet<_>>()
+    {
         let _ = writeln!(
             output,
-            "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job_id})\"\n{selected_verdict}\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+            "          {}: {}",
+            admission.env_name(),
+            github_expression(&workflow.lane_admission_expression(admission))
+        );
+    }
+    output
+}
+
+/// The per-caller verdict block of the required check.
+///
+/// A selected caller whose lane the admission predicate admits must be
+/// `success`; a selected caller whose lane it does not admit must be
+/// `skipped` (GitHub reports a reusable call whose every job skipped as
+/// `skipped`); an unselected caller may be either. The predicate is the
+/// value GitHub evaluated into the class's environment variable, so a fork
+/// pull request, a lane-restricted dispatch, and an offline trusted runner
+/// all take the same branch. A shell conditional must never embed a rendered
+/// boolean literal (`[[ ... && false ]]` is a non-empty string test), so the
+/// expectation is read from the variable, never inlined.
+fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCaller]) {
+    for caller in callers {
+        let job_id = &caller.job_id;
+        let noun = if caller.prerequisite {
+            "CI prerequisite"
+        } else {
+            "CI job"
+        };
+        let selected = caller
+            .selected_by
+            .iter()
+            .map(|unit_id| format!("\"$selected\" == *\",{unit_id},\"*"))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let admitted = caller.admission.env_name();
+        let _ = writeln!(
+            output,
+            "          if [[ {selected} ]]; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"${admitted}\" == true ]]; then\n              case \"$result\" in\n                success) ;;\n                *) echo \"selected {noun} {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                skipped) ;;\n                *) echo \"selected {noun} {job_id} ran outside its lane admission ({admitted}=${admitted}): $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected {noun} {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
         );
     }
 }
@@ -3074,9 +3149,8 @@ impl WorkflowIr {
             output.push('\n');
         }
         output.push_str("jobs:\n");
-        // Runner mode is global; every self-hosted job receives the
-        // default-branch trusted-event gate needed for Velnor execution.
-        let trusted_event = kind != WorkflowKind::PullRequest;
+        // Runner mode is global; every self-hosted job receives the lane
+        // admission gate needed for Velnor execution.
         let runners = self.runners;
         self.render_plan(&mut output, runners, runners == RunnerMode::Velnor);
         self.render_velnor_lane_admission(&mut output);
@@ -3088,7 +3162,6 @@ impl WorkflowIr {
         match runners {
             RunnerMode::Github => self.render_verify_github(
                 &mut output,
-                None,
                 cache_save,
                 kind != WorkflowKind::PullRequest,
             ),
@@ -3100,7 +3173,6 @@ impl WorkflowIr {
             RunnerMode::Both => {
                 self.render_verify_github(
                     &mut output,
-                    None,
                     cache_save,
                     kind != WorkflowKind::PullRequest,
                 );
@@ -3115,7 +3187,6 @@ impl WorkflowIr {
                 &mut output,
                 runners,
                 kind == WorkflowKind::PullRequest,
-                trusted_event || runners == RunnerMode::Velnor,
                 kind != WorkflowKind::PullRequest,
             );
         }
@@ -3194,11 +3265,19 @@ impl WorkflowIr {
             contracts,
         );
         if kind == WorkflowKind::Nightly {
-            self.render_nodes_required(nodes, &mut output, true, "nightly-required", true);
+            self.render_nodes_required(
+                nodes,
+                contracts,
+                &mut output,
+                true,
+                "nightly-required",
+                true,
+            );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
             self.render_nodes_required(
                 nodes,
+                contracts,
                 &mut output,
                 kind != WorkflowKind::PullRequest,
                 "ci-required",
@@ -3326,12 +3405,43 @@ impl WorkflowIr {
             })
     }
 
+    /// The unit ids whose selection runs the `prepare-cargo` caller of one
+    /// kind file: every network-restricted Rust unit the file holds. The
+    /// callee's `velnor-prepare-cargo-sources` job selects on the same set
+    /// (`restricted_unit_selection_if`), so the caller, the callee, and the
+    /// required check agree on when the prerequisite runs.
+    fn prepare_cargo_selected_by(&self, file: &str) -> Vec<String> {
+        self.units
+            .iter()
+            .filter(|unit| {
+                unit.kind == UnitKind::Rust
+                    && nested_unit_workflow_file(unit) == file
+                    && cargo_network_is_restricted(unit)
+            })
+            .map(|unit| unit.id.clone())
+            .collect()
+    }
+
+    /// The `prepare-cargo` caller as the required check validates it: a
+    /// prerequisite selected by any restricted unit of the file and admitted
+    /// with the Velnor lane, whose stores it warms.
+    fn prepare_cargo_required_caller(&self, file: &str) -> RequiredCaller {
+        RequiredCaller {
+            job_id: prepare_cargo_caller_job_id().to_owned(),
+            selected_by: self.prepare_cargo_selected_by(file),
+            admission: LaneAdmission::Velnor,
+            prerequisite: true,
+        }
+    }
+
     fn render_prepare_cargo_caller(
+        &self,
         output: &mut String,
         file: &str,
         sample_unit: &str,
         include_policy: bool,
     ) {
+        let caller = self.prepare_cargo_required_caller(file);
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
@@ -3344,12 +3454,22 @@ impl WorkflowIr {
             conditions.push("needs.policy.result == 'success'".to_owned());
         }
         conditions.push(format!(
-            "contains(format(',{{0}},', needs.plan.outputs.units), ',{sample_unit},')"
+            "({})",
+            caller
+                .selected_by
+                .iter()
+                .map(|unit_id| aggregate_selected_unit_selector(unit_id))
+                .collect::<Vec<_>>()
+                .join(" || ")
+        ));
+        conditions.push(format!(
+            "({})",
+            self.lane_admission_expression(caller.admission)
         ));
         let _ = writeln!(
             output,
             "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      lane: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
-            prepare_cargo_caller_job_id(),
+            caller.job_id,
             crate::control_job_name("Prepare Cargo"),
             conditions.join(" && "),
             needs.join(", "),
@@ -3398,15 +3518,14 @@ impl WorkflowIr {
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
         }
+        conditions.push(aggregate_selected_unit_selector(&caller.unit_id));
+        // The caller skips exactly when the callee's lane job would: same
+        // predicate, same class, so the aggregate never invokes a reusable
+        // whose every job is gated off.
         conditions.push(format!(
-            "contains(format(',{{0}},', needs.plan.outputs.units), ',{},')",
-            caller.unit_id
+            "({})",
+            self.lane_admission_expression(LaneAdmission::for_unit(lane, unit))
         ));
-        if self.runners == RunnerMode::Both && lane == RunnerMode::Velnor {
-            conditions.push(
-                "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)".to_owned(),
-            );
-        }
         let _ = writeln!(
             output,
             "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      lane: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}{}",
@@ -3439,7 +3558,7 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                Self::render_prepare_cargo_caller(output, file, unit_id, include_policy);
+                self.render_prepare_cargo_caller(output, file, unit_id, include_policy);
             }
             for caller in self.unit_lane_callers(unit, file, contracts) {
                 let extra_needs = if self.runners == RunnerMode::Velnor
@@ -3458,16 +3577,18 @@ impl WorkflowIr {
         }
     }
 
-    /// The aggregate required check over every contributed unit node.
-    pub(crate) fn render_nodes_required(
+    /// The callers the aggregate required check validates, in caller render
+    /// order: the `prepare-cargo` prerequisite of each kind file that needs
+    /// one, then the `(unit, lane)` callers of every contributed unit node.
+    /// The same `contracts` that decide which callers `render_node_callers`
+    /// renders decide which ones the check needs, so a unit declared for one
+    /// lane never leaves the check depending on a job that does not exist.
+    pub(crate) fn required_callers(
         &self,
         nodes: &[GraphNode],
-        output: &mut String,
-        include_policy: bool,
-        check_name: &str,
-        simulate_failure: bool,
-    ) {
-        let mut caller_jobs: Vec<(String, String)> = Vec::new();
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> Vec<RequiredCaller> {
+        let mut callers = Vec::new();
         let mut prepare_cargo_files = BTreeSet::new();
         let mut seen_units = BTreeSet::<&str>::new();
         for (unit_id, _job_id, _name, file) in nodes.iter().filter_map(GraphNode::as_unit) {
@@ -3480,15 +3601,31 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                caller_jobs.push((prepare_cargo_caller_job_id().to_owned(), unit_id.to_owned()));
+                callers.push(self.prepare_cargo_required_caller(file));
             }
-            // The required check needs only the caller job ids; the lane set
-            // (not the per-unit inputs) decides them, so the default contract
-            // suffices here.
-            for caller in self.unit_lane_callers(unit, file, None) {
-                caller_jobs.push((caller.job_id, caller.unit_id));
+            for caller in self.unit_lane_callers(unit, file, contracts) {
+                callers.push(RequiredCaller {
+                    job_id: caller.job_id,
+                    selected_by: vec![caller.unit_id],
+                    admission: LaneAdmission::for_unit(caller.lane, unit),
+                    prerequisite: false,
+                });
             }
         }
+        callers
+    }
+
+    /// The aggregate required check over every contributed unit node.
+    pub(crate) fn render_nodes_required(
+        &self,
+        nodes: &[GraphNode],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        output: &mut String,
+        include_policy: bool,
+        check_name: &str,
+        simulate_failure: bool,
+    ) {
+        let callers = self.required_callers(nodes, contracts);
         let mut needs = vec!["plan".to_owned()];
         if self.emits_velnor_lane_admission() {
             needs.push("velnor-lane-admission".to_owned());
@@ -3496,7 +3633,7 @@ impl WorkflowIr {
         if include_policy {
             needs.push("policy".to_owned());
         }
-        needs.extend(caller_jobs.iter().map(|(job_id, _)| job_id.clone()));
+        needs.extend(callers.iter().map(|caller| caller.job_id.clone()));
         let display_name = match check_name {
             "ci-required" => yaml_scalar("ci-required"),
             "nightly-required" => crate::control_job_name("Nightly aggregate"),
@@ -3509,14 +3646,12 @@ impl WorkflowIr {
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
-        let fork_pr = github_expression(
-            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository",
-        );
-        let _ = writeln!(
+        let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          FORK_PR: {fork_pr}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}",
             needs.join(", "),
-            self.runner_for(self.control_plane_lane())
+            self.runner_for(self.control_plane_lane()),
+            render_required_admission_env(self, &callers),
         );
         if simulate_failure {
             let simulate = github_expression("inputs.simulate_failure");
@@ -3546,12 +3681,7 @@ impl WorkflowIr {
             );
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
-        render_required_caller_verdicts(output, &caller_jobs, |unit_id| {
-            self.units
-                .iter()
-                .find(|unit| unit.id == unit_id)
-                .is_some_and(|unit| self.trust_gated_velnor_job_skipped(RunnerMode::Velnor, unit))
-        });
+        render_required_caller_verdicts(output, &callers);
         if check_name == "ci-required" {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
                 format!("always() && ({})", self.velnor_control_plane_expression())
@@ -3754,14 +3884,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     /// The job gate of a collapsed lane job: the lane the caller selected, the
-    /// unit's membership in the plan's selection, and the lane's event
-    /// admission. Membership is a single `contains` over `inputs.unit`, never
+    /// unit's membership in the plan's selection, and the lane's admission
+    /// predicate. Membership is a single `contains` over `inputs.unit`, never
     /// an enumeration of the kind's units.
-    fn collapsed_lane_gate(&self, lane: RunnerMode) -> String {
+    fn collapsed_lane_gate(&self, admission: LaneAdmission) -> String {
         format!(
             "inputs.lane == '{}' && contains(format(',{{0}},', inputs.selected_units), format(',{{0}},', inputs.unit)) && ({})",
-            lane.as_str(),
-            self.lane_event_expression(lane)
+            admission.lane().as_str(),
+            self.lane_admission_expression(admission)
         )
     }
 
@@ -3877,11 +4007,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         display_name: &str,
         runs_on: &str,
     ) -> Result<(), GeneratorError> {
-        let mut gate = self.collapsed_lane_gate(lane);
+        // Every member of a collapsed job shares one admission class
+        // (`collapsed_lane_members` splits the Velnor lane by trust), so the
+        // first member's class is the job's.
+        let gate = self.collapsed_lane_gate(LaneAdmission::for_unit(lane, members[0]));
         let mut display_name = display_name.to_owned();
         // P0-6: a trust-gated Velnor lane with no online trusted runner fails
-        // closed (`&& false`) and says so in its name, instead of queueing
-        // forever and holding the aggregate's concurrency slot.
+        // closed (the admission predicate carries `&& false`) and says so in
+        // its name, instead of queueing forever and holding the aggregate's
+        // concurrency slot.
         if let Some(unit) = members
             .iter()
             .find(|unit| self.trust_gated_velnor_job_skipped(lane, unit))
@@ -3889,7 +4023,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             if let Some(reason) = self.velnor_trusted_runner_skip_reason.as_deref() {
                 let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
             }
-            gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
             display_name = self.trusted_unit_display_name(lane, unit, display_name);
         }
         let display_name = yaml_scalar(&display_name);
@@ -4445,9 +4578,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             } else {
                 lane.as_str()
             };
+            // The prep job warms the lane's stores, so it is admitted exactly
+            // when the lane's base (non-trust-gated) jobs are.
             let prep_gate = format!(
                 "inputs.lane == '{intended_lane}' && ({if_gate}) && ({})",
-                self.lane_event_expression(lane)
+                self.lane_admission_expression(LaneAdmission::Velnor)
             );
             let _ = writeln!(
                 output,
@@ -4587,15 +4722,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let _ = writeln!(output, "  # Velnor trusted runner unavailable: {reason}");
         }
         let _ = writeln!(output, "  {id}:\n    name: {}", yaml_scalar(&name));
-        let lane_gate = self.lane_event_expression(lane);
-        let gate = input_unit.map_or(lane_gate.clone(), |unit_id| {
-            format!(
-                "inputs.lane == '{}' && {} && ({lane_gate})",
-                lane.as_str(),
-                reusable_selected_unit_selector(unit_id)
-            )
-        });
-        let gate = self.append_trusted_runner_availability_gate(lane, unit, gate);
+        let lane_gate = self.lane_admission_expression(LaneAdmission::for_unit(lane, unit));
+        let gate = input_unit.map_or_else(
+            || format!("({lane_gate})"),
+            |unit_id| {
+                format!(
+                    "inputs.lane == '{}' && {} && ({lane_gate})",
+                    lane.as_str(),
+                    reusable_selected_unit_selector(unit_id)
+                )
+            },
+        );
         let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
         let mut needs = Vec::new();
         if uses_lane_cargo_prep {
@@ -4950,22 +5087,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
 
     fn trusted_event_expression(&self) -> String {
         format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({}))",
+            "(github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule')) || ({})",
             self.default_branch,
             Self::velnor_dispatch_selection_expression()
         )
     }
 
+    /// A `workflow_dispatch` that selects the Velnor lane, on any ref.
+    ///
+    /// Dispatch is not ref-gated: GitHub only accepts a dispatch from an
+    /// actor with write access and only onto a ref of this repository, which
+    /// is the same authorship a same-repository pull-request head carries,
+    /// and the runner classifies both as `TrustClass::Trusted` without
+    /// consulting `github.ref` (`velnor-runner` `trust_class.rs`,
+    /// `TrustClass::derive`: every non-`pull_request*`, non-`workflow_run`
+    /// event executes base-repository code; conformance test
+    /// `trust_class_conformance_non_pr_events_are_trusted` lists
+    /// `workflow_dispatch`). A default-branch gate here would only withhold
+    /// the Velnor lane from a maintainer proving a branch on it.
     fn velnor_dispatch_selection_expression() -> &'static str {
         "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
-    }
-
-    fn velnor_dispatch_expression(&self) -> String {
-        format!(
-            "github.ref == 'refs/heads/{}' && ({})",
-            self.default_branch,
-            Self::velnor_dispatch_selection_expression()
-        )
     }
 
     fn velnor_automatic_event_expression(&self) -> String {
@@ -5035,6 +5176,24 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         )
     }
 
+    /// The one admission predicate of a lane class: the GitHub expression
+    /// that is true exactly when the class's jobs run for the current event,
+    /// ref, and dispatch input. Rendered verbatim into the callee job's
+    /// `if:`, the aggregate caller's `if:`, and the required check's
+    /// `LANE_ADMITTED_*` environment, so the three cannot disagree.
+    ///
+    /// A trust-gated class with no online trusted runner is `&& false`: the
+    /// predicate itself says the lane is not admitted, and the required check
+    /// therefore expects `skipped` for it like any other unadmitted lane.
+    pub(crate) fn lane_admission_expression(&self, admission: LaneAdmission) -> String {
+        let event = self.lane_event_expression(admission.lane());
+        match admission {
+            LaneAdmission::Github | LaneAdmission::Velnor => event,
+            LaneAdmission::VelnorTrusted if self.velnor_trusted_runner_online => event,
+            LaneAdmission::VelnorTrusted => format!("({event}) && false"),
+        }
+    }
+
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
         let omitted_github = matches!(self.automatic, RunnerMode::Github | RunnerMode::Both);
         let omitted_velnor = matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both);
@@ -5051,27 +5210,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     dispatch_github
                 }
             }
+            // Dispatch admits the Velnor lane on any ref; see
+            // `velnor_dispatch_selection_expression` for the trust argument.
             RunnerMode::Velnor => {
-                // Secure opt-in: an opted-in repository admits same-repo PRs
-                // to the Velnor pool, so manual dispatch must also prove the
-                // default-branch ref; without the gate any branch's dispatch
-                // reaches the trusted pool. The non-opt-in arm stays
-                // byte-stable: its outer ref gate already covers dispatch.
-                let dispatch = if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
-                    format!(
-                        "github.ref == 'refs/heads/{}' && ({dispatch_velnor})",
-                        self.default_branch
-                    )
+                if matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both) {
+                    self.velnor_lane_event_expression(&dispatch_velnor)
                 } else {
                     dispatch_velnor
-                };
-                if matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both) {
-                    self.velnor_lane_event_expression(&dispatch)
-                } else {
-                    format!(
-                        "github.ref == 'refs/heads/{}' && {dispatch}",
-                        self.default_branch
-                    )
                 }
             }
             RunnerMode::Both => "github.event_name == 'workflow_dispatch'".to_owned(),
@@ -5083,7 +5228,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             format!(
                 "{} || ({})",
                 self.velnor_automatic_event_expression(),
-                self.velnor_dispatch_expression()
+                Self::velnor_dispatch_selection_expression()
             )
         } else {
             self.trusted_event_expression()
@@ -5098,7 +5243,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             )
         } else {
             format!(
-                "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({dispatch}))",
+                "(github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule')) || ({dispatch})",
                 self.default_branch
             )
         }
@@ -5107,17 +5252,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     pub(crate) fn render_verify_github(
         &self,
         output: &mut String,
-        condition: Option<&str>,
         cache_save: bool,
         include_policy: bool,
     ) {
-        self.render_verify_lane(
-            output,
-            RunnerMode::Github,
-            condition,
-            cache_save,
-            include_policy,
-        );
+        self.render_verify_lane(output, RunnerMode::Github, cache_save, include_policy);
     }
 
     pub(crate) fn render_verify_velnor(
@@ -5126,14 +5264,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         cache_save: bool,
         include_policy: bool,
     ) {
-        let condition = Some(self.lane_event_expression(RunnerMode::Velnor));
-        self.render_verify_lane(
-            output,
-            RunnerMode::Velnor,
-            condition.as_deref(),
-            cache_save,
-            include_policy,
-        );
+        self.render_verify_lane(output, RunnerMode::Velnor, cache_save, include_policy);
     }
 
     pub(crate) fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
@@ -5190,7 +5321,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         &self,
         output: &mut String,
         lane: RunnerMode,
-        condition: Option<&str>,
         cache_save: bool,
         include_policy: bool,
     ) {
@@ -5211,9 +5341,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let job_name = yaml_scalar(&crate::comparison_job_name(lane, unit));
             let verify_name = yaml_scalar(&unit.label);
             let _ = writeln!(output, "  {id}:\n    name: {job_name}");
-            if let Some(condition) = condition {
-                let _ = writeln!(output, "    if: ${{{{ {condition} }}}}");
-            }
+            // The in-workflow job is gated on the same admission the
+            // required check expects it to satisfy.
+            let _ = writeln!(
+                output,
+                "    if: ${{{{ ({}) }}}}",
+                self.lane_admission_expression(LaneAdmission::for_unit(lane, unit))
+            );
             let _ = writeln!(output, "    needs: [{}]", needs.join(", "));
             let _ = writeln!(
                 output,
@@ -5330,10 +5464,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         lane == RunnerMode::Velnor && unit.requires_trusted && !self.velnor_trusted_runner_online
     }
 
-    fn velnor_aggregate_accepts_selected_skip(&self, unit: &Unit, fork_pr_trusted: bool) -> bool {
-        !fork_pr_trusted || self.trust_gated_velnor_job_skipped(RunnerMode::Velnor, unit)
-    }
-
+    /// Fail a release dispatch gate closed while the trusted runner is
+    /// offline. CI lane jobs carry the same `&& false` inside
+    /// [`Self::lane_admission_expression`] for the trusted class.
     pub(crate) fn append_trusted_runner_availability_gate(
         &self,
         lane: RunnerMode,
@@ -5720,7 +5853,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output: &mut String,
         runners: RunnerMode,
         _stable: bool,
-        trusted: bool,
         include_policy: bool,
     ) {
         let display_name = yaml_scalar("ci-required");
@@ -5736,7 +5868,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if include_policy {
             needs.push("policy".to_owned());
         }
-        let mut job_checks = Vec::new();
+        let mut callers = Vec::new();
         for lane in lanes {
             for unit in self
                 .units
@@ -5745,12 +5877,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             {
                 let id = unit_job_id(lane, &unit.id);
                 needs.push(id.clone());
-                job_checks.push((
-                    unit.id.clone(),
-                    id,
-                    lane == RunnerMode::Velnor
-                        && self.velnor_aggregate_accepts_selected_skip(unit, trusted),
-                ));
+                callers.push(RequiredCaller {
+                    job_id: id,
+                    selected_by: vec![unit.id.clone()],
+                    admission: LaneAdmission::for_unit(lane, unit),
+                    prerequisite: false,
+                });
             }
         }
         let gate = if self.control_plane_lane() == RunnerMode::Velnor {
@@ -5762,9 +5894,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let selected_units = github_expression("needs.plan.outputs.units");
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
+            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n{}        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
             self.runner_for(self.control_plane_lane()),
+            render_required_admission_env(self, &callers),
         );
         for job in needs
             .iter()
@@ -5781,17 +5914,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
-        for (unit, job, allow_selected_skip) in job_checks {
-            let selected_case = if allow_selected_skip {
-                "success|skipped"
-            } else {
-                "success"
-            };
-            let _ = writeln!(
-                output,
-                "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
-            );
-        }
+        render_required_caller_verdicts(output, &callers);
         let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
             format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
