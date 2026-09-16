@@ -4322,7 +4322,7 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
         cli.dry_run,
         cli.check,
         cli.force,
-        cli.force,
+        cli.force && !cli.check,
     )?;
     if cli.check {
         // D19: the generator this tree declares must render it byte-identically.
