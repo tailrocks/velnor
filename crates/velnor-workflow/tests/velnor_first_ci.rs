@@ -991,7 +991,7 @@ fn regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only(
     );
     assert!(
         velnor.contains("gh release download \"$tag\" --repo ")
-            && velnor.contains("gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml")
+            && velnor.contains("gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml")
             && velnor.contains("gh attestation verify \"$temporary/manifest.json\"")
             && velnor.contains("if [[ \"$existing\" != \"$expected\" ]]; then")
             && velnor.contains("sha256sum \"$binary\"")

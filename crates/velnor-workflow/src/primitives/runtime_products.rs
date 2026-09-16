@@ -477,8 +477,8 @@ jobs:
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
           gh release download "$TAG" --repo {repository} --pattern "$asset" --pattern manifest.json --dir "$temporary"
-          gh attestation verify "$temporary/$asset" --owner {owner} --signer-repo {repository} --signer-workflow {repository}/.github/workflows/{workflow_file}
-          gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-repo {repository} --signer-workflow {repository}/.github/workflows/{workflow_file}
+          gh attestation verify "$temporary/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file}
+          gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file}
           jq -e --arg closure "$CLOSURE" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
             '{accept_filter}' "$temporary/manifest.json" >/dev/null
           actual="$(sha256sum "$temporary/$asset" | awk '{{print $1}}')"
@@ -1068,15 +1068,14 @@ mod tests {
         let signer =
             format!("--signer-workflow {repository}/.github/workflows/{RUNTIME_PRODUCTS_FILE}");
         let owner_flag = format!("--owner {}", product_owner(repository));
-        let repo_flag = format!("--signer-repo {repository}");
-        for flag in [&signer, &owner_flag, &repo_flag] {
+        for flag in [&signer, &owner_flag] {
             assert!(
                 content.contains(flag),
                 "the smoke test verifies {flag}: {content}"
             );
         }
         let action = setup_action_source();
-        for flag in [&signer, &owner_flag, &repo_flag] {
+        for flag in [&signer, &owner_flag] {
             assert!(
                 action.contains(flag),
                 "the setup action verifies the same {flag}"
@@ -1343,7 +1342,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "983f15a1a544b7c84c863adfd32a3bef345ec133194ae6e7dd8389b80c485a43";
+        const PINNED: &str = "3f8641a7f2da9892976374183530beef7d4fd94d1d056cbbaf868e0336bf3e11";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

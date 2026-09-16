@@ -121,11 +121,9 @@ runs:
         fi
         gh attestation verify "$temporary/$asset" \
           --owner tailrocks \
-          --signer-repo tailrocks/velnor \
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
         gh attestation verify "$temporary/manifest.json" \
           --owner tailrocks \
-          --signer-repo tailrocks/velnor \
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
         jq -e \
           --arg closure "$CLOSURE" \

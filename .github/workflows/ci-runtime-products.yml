@@ -269,8 +269,8 @@ jobs:
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
           gh release download "$TAG" --repo tailrocks/velnor --pattern "$asset" --pattern manifest.json --dir "$temporary"
-          gh attestation verify "$temporary/$asset" --owner tailrocks --signer-repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
-          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
           jq -e --arg closure "$CLOSURE" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" \
             '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
           actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
