@@ -636,6 +636,8 @@ fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
     Ok(content)
 }
 
+/// Test-only view of [`classify_job_name`]: the lane of a comparison job.
+#[cfg(test)]
 fn lane_of_job_name(name: &str) -> Option<Lane> {
     match classify_job_name(name) {
         JobRole::Comparison { lane, .. } => Some(lane),
@@ -833,6 +835,8 @@ fn pair_lane_census(jobs: &[Job]) -> PairingCensus {
     census
 }
 
+/// Test-only view of [`pair_lane_census`]: just the matched pairs.
+#[cfg(test)]
 fn pair_lane_jobs(jobs: &[Job]) -> Vec<(Job, Job)> {
     pair_lane_census(jobs).matched_pairs()
 }
