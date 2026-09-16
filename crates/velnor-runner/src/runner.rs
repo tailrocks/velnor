@@ -26,6 +26,7 @@ use tokio::{
 use tracing::Instrument as _;
 use velnor_model::{Generation, SlotId, SlotPhase, Slug, TelemetryEvent, Timestamp};
 
+use crate::job_claim::JobClaim;
 use crate::{
     action::{
         composite_action_invocations, composite_repository_action_plans,
@@ -417,36 +418,6 @@ struct RunServiceJobContext {
 struct AcquiredJobIdentity {
     plan_id: String,
     job_id: String,
-}
-
-/// Host-wide ownership of one run-service job.
-///
-/// GitHub can deliver the same runner request to sibling JIT slots. The run
-/// service acquisition is not a sufficient exclusion boundary, so claim the
-/// plan/job pair locally before either slot touches its deterministic workspace.
-struct JobClaim {
-    _file: File,
-}
-
-impl JobClaim {
-    fn try_acquire(run_root: &Path, plan_id: &str, job_id: &str) -> Result<Option<Self>> {
-        let claims = run_root.join("job-claims");
-        fs::create_dir_all(&claims)
-            .with_context(|| format!("create job claim directory {}", claims.display()))?;
-        let name = crate::container::sanitize_store_key(&format!("{plan_id}-{job_id}"));
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(claims.join(name))
-            .context("open host job claim")?;
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-            Err(error) => Err(error).context("lock host job claim"),
-        }
-    }
 }
 
 /// Serialize the complete configure transaction for one runner directory.
@@ -16170,26 +16141,6 @@ mod tests {
     }
 
     #[test]
-    fn job_claim_excludes_duplicate_slots_until_owner_drops() {
-        let root = std::env::temp_dir().join(format!("velnor-job-claim-{}", uuid::Uuid::new_v4()));
-
-        let owner = JobClaim::try_acquire(&root, "plan", "job").unwrap();
-        assert!(owner.is_some());
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_none());
-        assert!(JobClaim::try_acquire(&root, "plan", "other-job")
-            .unwrap()
-            .is_some());
-
-        drop(owner);
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_some());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn configure_lock_excludes_concurrent_transactions() {
         let dir = unique_temp_dir("configure-lock");
         let owner = ConfigureLock::acquire(&dir).unwrap();
@@ -24670,32 +24621,6 @@ runs:
             started.elapsed() < Duration::from_secs(1),
             "publisher drain exceeded its bounded deadline"
         );
-    }
-
-    #[test]
-    fn job_claim_remains_exclusive_when_transferred_to_teardown_owner() {
-        let root = unique_temp_dir("job-claim-teardown-owner");
-        let claim = JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .unwrap();
-        let release = Arc::new(AtomicBool::new(false));
-        let release_in_teardown = Arc::clone(&release);
-        let teardown = std::thread::spawn(move || {
-            let _claim = claim;
-            while !release_in_teardown.load(Ordering::SeqCst) {
-                std::thread::yield_now();
-            }
-        });
-
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_none());
-        release.store(true, Ordering::SeqCst);
-        teardown.join().unwrap();
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_some());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

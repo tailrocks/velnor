@@ -56,6 +56,7 @@ pub(crate) mod gha_cache;
 mod git_mirror;
 mod github_adapter;
 pub mod host_capacity;
+mod job_claim;
 mod job_message;
 mod leftover_disk;
 pub mod manifest;

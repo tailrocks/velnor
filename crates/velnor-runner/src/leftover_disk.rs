@@ -67,7 +67,7 @@ impl WorkspaceLiveness {
                 liveness.evidence_incomplete = true;
             }
         }
-        match held_job_claim_ids(run_root) {
+        match crate::job_claim::held_job_claim_ids(run_root) {
             Ok(claimed) => liveness.claimed = claimed,
             Err(error) => {
                 eprintln!("leftover reclaim: cannot read job claims: {error:#}");
@@ -101,58 +101,6 @@ pub fn job_ids_from_lease_scopes(scopes: &BTreeSet<String>) -> BTreeSet<String> 
         .filter(|id| looks_like_job_uuid(id))
         .map(ToOwned::to_owned)
         .collect()
-}
-
-/// Job ids whose host job-claim lock is currently held by a live process.
-///
-/// The claim is taken before the job's workspace exists and released only when
-/// the job process exits, so it covers checkout and teardown. A claim file that
-/// still locks is proof; one that can be locked is stale.
-pub fn held_job_claim_ids(run_root: &Path) -> Result<BTreeSet<String>> {
-    let claims = run_root.join("job-claims");
-    let mut held = BTreeSet::new();
-    let entries = match fs::read_dir(&claims) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(held),
-        Err(error) => {
-            return Err(error).with_context(|| format!("read {}", claims.display()));
-        }
-    };
-    for entry in entries {
-        let entry = entry.with_context(|| format!("read an entry in {}", claims.display()))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&path) else {
-            // Unreadable claim: assume held rather than delete its workspace.
-            held.extend(job_uuids_in(&entry.file_name().to_string_lossy()));
-            continue;
-        };
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => {
-                let _ = rustix::fs::flock(&file, rustix::fs::FlockOperation::Unlock);
-            }
-            Err(rustix::io::Errno::WOULDBLOCK) => {
-                held.extend(job_uuids_in(&entry.file_name().to_string_lossy()));
-            }
-            Err(_) => held.extend(job_uuids_in(&entry.file_name().to_string_lossy())),
-        }
-    }
-    Ok(held)
-}
-
-/// Every job-UUID-shaped substring of a claim file name (`<plan>-<job>`).
-fn job_uuids_in(name: &str) -> BTreeSet<String> {
-    let parts: Vec<&str> = name.split('-').collect();
-    let mut found = BTreeSet::new();
-    for window in parts.windows(5) {
-        let candidate = window.join("-");
-        if looks_like_job_uuid(&candidate) {
-            found.insert(candidate);
-        }
-    }
-    found
 }
 
 fn workspace_idle_for(workspace: &Path, now: SystemTime) -> Option<Duration> {
@@ -1041,17 +989,9 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
             .unwrap(),
         ];
         // Mid checkout: no lease yet, but the host job claim is held.
-        let claims = run_root.join("job-claims");
-        fs::create_dir_all(&claims).unwrap();
-        let claim_path = claims.join(format!("plan-uuid-{checking_out}"));
-        let claim = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&claim_path)
+        let claim = crate::job_claim::JobClaim::try_acquire(&run_root, "plan-uuid", checking_out)
+            .unwrap()
             .unwrap();
-        rustix::fs::flock(&claim, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
 
         let liveness = WorkspaceLiveness::collect(&run_root, BTreeSet::new());
         assert!(!liveness.evidence_incomplete);
