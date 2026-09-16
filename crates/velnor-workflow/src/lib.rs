@@ -11286,6 +11286,7 @@ channel = "stable"
         assert!(nightly_workflow.contains("name: Nightly"));
         assert!(nightly_workflow.contains("cron: '17 3 * * *'"));
         assert!(nightly_workflow.contains("gh workflow run ci-main.yml"));
+        assert!(nightly_workflow.contains("-R \"$GITHUB_REPOSITORY\""));
         assert!(nightly_workflow.contains("cancel-in-progress: false"));
         assert!(files.values().any(|content| {
             content.contains("CI_SCOPE: ${{ inputs.scope }}")
@@ -12301,6 +12302,7 @@ channel = "stable"
         assert!(nightly.contains("cancel-in-progress: false"));
         assert!(!nightly.contains("name: ci-required"));
         assert!(nightly.contains("gh workflow run ci-main.yml"));
+        assert!(nightly.contains("-R \"$GITHUB_REPOSITORY\""));
         assert!(nightly.contains("name: \"Control / Dispatch ci-main\""));
 
         let nested_main =
