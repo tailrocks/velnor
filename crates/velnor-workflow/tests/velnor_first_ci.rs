@@ -385,8 +385,8 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let main = generated.workflow("ci-main.yml");
     assert!(
-        main.contains("rev: 17b441c1211cf305d19486c33587882aca1c60c3"),
-        "foreign Planning installs the published pin: {main}"
+        main.contains(&format!("rev: {}", velnor_workflow::SOURCE_REVISION)),
+        "foreign Planning installs the generator's own revision when the tree declares no pin: {main}"
     );
     assert!(
         !main.contains(
@@ -404,6 +404,11 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
 }
 
+/// The validator on a consumer tree rendered in place: the pin is the
+/// generator's own revision (no `[generator] revision` declared), so the
+/// running binary is the pinned generator and the tree regenerates
+/// byte-identically without a network. Ancestry rules do not apply to a
+/// consumer; the semantic rules do.
 #[test]
 fn dual_lane_automatic_velnor_units_pass_policy() {
     let root = unique_dir("dual-lane-both-policy");
@@ -414,20 +419,23 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
     )
     .unwrap();
     enable_approved_velnor_pull_requests(&root);
-    let generated = generate(&root);
-    let unit = generated.workflow("ci-unit-rust.yml");
+    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args(["--plain", "--force", "--default-branch", "main"])
+        .arg(&root)
+        .output()
+        .expect("run velnor-workflow in place");
+    assert!(
+        outcome.status.success(),
+        "in-place generation failed:\n{}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let unit = fs::read_to_string(root.join(".github/workflows/ci-unit-rust.yml")).unwrap();
     assert!(
         unit.contains("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"),
         "dual-lane Velnor units must emit the same-repo PR gate: {unit}"
     );
-    fs::create_dir_all(generated.output.join(".github-gen")).unwrap();
-    fs::copy(
-        root.join(".github-gen/velnor-workflow.toml"),
-        generated.output.join(".github-gen/velnor-workflow.toml"),
-    )
-    .unwrap();
-    let pin = generated
-        .workflow("ci-policy.yml")
+    let policy = fs::read_to_string(root.join(".github/workflows/ci-policy.yml")).unwrap();
+    let pin = policy
         .lines()
         .find_map(|line| {
             line.trim()
@@ -435,36 +443,51 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
                 .map(str::to_owned)
         })
         .expect("generated policy job must pin VELNOR_WORKFLOW_POLICY_REVISION");
-    let run_policy = |message: &str| {
-        let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
-            .args([
-                "policy",
-                "--workflow-root",
-                generated.output.to_str().unwrap(),
-                "--approved-policy-revision",
-                &pin,
-            ])
-            .output()
-            .expect("run velnor-workflow policy");
+    assert_eq!(pin, velnor_workflow::SOURCE_REVISION);
+    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args([
+            "policy",
+            "--workflow-root",
+            root.to_str().unwrap(),
+            "--base-revision",
+            &pin,
+            "--no-pin-build",
+        ])
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("run velnor-workflow policy");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outcome.stdout),
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    assert!(
+        outcome.status.success(),
+        "policy on rendered dual-lane tree:\n{combined}"
+    );
+    for rule in [
+        "pin-declared",
+        "pin-reachable",
+        "pin-monotonic",
+        "entrypoint-pin",
+        "generated-tree",
+        "pull-request-target",
+        "entrypoint-privileges",
+        "trusted-runners",
+        "action-pins",
+        "workflow-structure",
+        "required-checks",
+    ] {
         assert!(
-            outcome.status.success(),
-            "{message}:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&outcome.stdout),
-            String::from_utf8_lossy(&outcome.stderr)
+            combined.contains(&format!("PASS {rule}")),
+            "rule {rule} must pass on a rendered consumer tree:\n{combined}"
         );
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&outcome.stdout),
-            String::from_utf8_lossy(&outcome.stderr)
-        );
-        assert!(
-            !combined.contains("self-hosted jobs require a default-branch trusted-event gate"),
-            "{message} reported trusted-event findings:\n{combined}"
-        );
-    };
-    run_policy("policy on rendered dual-lane tree");
-    fs::remove_dir_all(generated.output.join(".github/ci")).unwrap();
-    run_policy("policy on advisory sparse checkout without project.toml");
+    }
+    assert!(
+        combined.contains("not applicable: example/monorepo consumes the generator"),
+        "{combined}"
+    );
+    assert!(!combined.contains("FAIL"), "{combined}");
 }
 
 #[test]

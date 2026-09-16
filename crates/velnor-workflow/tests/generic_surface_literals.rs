@@ -85,9 +85,8 @@ const ADMITTED_CARGO_LINE_MARKERS: &[&str] = &["termrock = { git"];
 /// The generator's own distribution paths (`tailrocks/velnor/.github/...`) and
 /// the regeneration marker are generator identity, not consumer knowledge. The
 /// bare slug may appear exactly `BARE_GENERATOR_SLUG_OCCURRENCES` times: the
-/// pinned install URL, the inline policy transport's documentation of the
-/// reusable-call hazard it replaced, and the regeneration marker constant.
-const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 3;
+/// pinned install URL and the regeneration marker constant.
+const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 2;
 
 /// Everything the deny list applies to: the crate's Rust sources, its
 /// templates, its tests and fixtures, its build scripts, benches, examples,

@@ -26,7 +26,7 @@ use crate::{
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
     yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain,
     SelectionFieldSources, Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION,
-    OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
+    OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -1503,6 +1503,8 @@ pub(crate) struct WorkflowIr {
     pub(crate) velnor_trusted_runner_skip_reason: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
     pub(crate) repository: String,
+    /// The D19 generator pin (`ProjectConfig::workflow_revision`).
+    pub(crate) workflow_revision: String,
     pub(crate) default_dispatch_runner: String,
     pub(crate) runners: RunnerMode,
     pub(crate) automatic: RunnerMode,
@@ -2182,6 +2184,7 @@ impl WorkflowIr {
                 VelnorPullRequest::TrustedOnly
             },
             repository: config.repository.clone(),
+            workflow_revision: config.workflow_revision.clone(),
             default_dispatch_runner: config.default_dispatch_runner.clone(),
             runners: config.runners,
             automatic: config.automatic,
@@ -3281,7 +3284,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let policy_runtime = FeatureCoverage::over(&facts, |facts| facts.policy_runtime);
         if !github_lane && policy_runtime.any {
             output.push_str(&gated(
-                crate::workflow_pinned_policy_runtime_velnor(),
+                crate::workflow_pinned_policy_runtime_velnor(&self.workflow_revision),
                 policy_runtime,
                 lane_input::POLICY_RUNTIME,
             ));
@@ -3920,11 +3923,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn render_workflow_runtime_setup(&self, output: &mut String, lane: RunnerMode) {
-        output.push_str(&workflow_runtime_setup(lane, &self.repository));
+        output.push_str(&workflow_runtime_setup(
+            lane,
+            &self.repository,
+            &self.workflow_revision,
+        ));
     }
 
-    pub(crate) fn render_workflow_runtime_download(output: &mut String, lane: RunnerMode) {
-        output.push_str(&workflow_runtime_download(lane));
+    pub(crate) fn render_workflow_runtime_download(&self, output: &mut String, lane: RunnerMode) {
+        output.push_str(&workflow_runtime_download(lane, &self.workflow_revision));
     }
 
     fn render_unit_runtime(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
@@ -3940,7 +3947,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         {
             self.render_workflow_runtime_setup(output, lane);
         } else {
-            Self::render_workflow_runtime_download(output, lane);
+            self.render_workflow_runtime_download(output, lane);
         }
     }
 
@@ -3970,7 +3977,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
-            crate::workflow_runtime_setup_with_pinned_policy(&self.repository)
+            crate::workflow_runtime_setup_with_pinned_policy(
+                &self.repository,
+                &self.workflow_revision,
+            )
         };
         let base_sha = self.base_sha_expression();
         // Both-mode planning consumes the admitted lanes: a velnor-only
@@ -4014,26 +4024,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             base_sha = base_sha,
         );
         if runners != RunnerMode::Velnor {
-            output.push_str(&workflow_runtime_artifact_upload());
+            output.push_str(&workflow_runtime_artifact_upload(&self.workflow_revision));
         }
     }
 
     pub(crate) fn render_policy(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
-        if runners == RunnerMode::Velnor {
-            let gate = self.trusted_runner_gate(runners, trusted);
-            output.push_str(&crate::inline_policy_job_for_lane(
-                "Policy",
-                VELNOR_POLICY_WORKFLOW_REV,
-                &self.runner_for(runners),
-                "local",
-                Some(&gate),
-            ));
-        } else {
-            output.push_str(&crate::inline_policy_job(
-                "Policy",
-                VELNOR_POLICY_WORKFLOW_REV,
-            ));
-        }
+        let velnor = runners == RunnerMode::Velnor;
+        let gate = velnor.then(|| self.trusted_runner_gate(runners, trusted));
+        output.push_str(&crate::policy_job(&crate::PolicyJobSpec {
+            name: "Policy",
+            revision: &self.workflow_revision,
+            runner: &self.runner_for(runners),
+            cache_backend: if velnor { "local" } else { "github" },
+            trusted_gate: gate.as_deref(),
+            default_branch: &self.default_branch,
+        }));
     }
 
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {

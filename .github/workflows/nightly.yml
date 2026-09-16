@@ -139,25 +139,32 @@ jobs:
   policy:
     name: Policy
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
+    # Trust invariant: this job runs the base branch's validator against the
+    # audited tree under pull_request_target. It holds `contents: read` only,
+    # references no secrets, and its checkout persists no credentials, so
+    # building and running the tree's declared generator here is no more
+    # privileged than the pull_request lanes that already build the tree.
     permissions:
       contents: read
     steps:
-      - name: Checkout caller workflow data
+      - name: Checkout repository history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: policy-checkout
-          sparse-checkout: |
-            .github/workflows
-            .github/actions
-            .github-gen
-          sparse-checkout-cone-mode: true
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
-          # Static policy validation only; fork head checkout is intentional.
-          allow-unsafe-pr-checkout: true
+      - name: Check out audited head
+        working-directory: policy-checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+          fi
+          git checkout --quiet --detach "$HEAD_SHA"
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -188,11 +195,31 @@ jobs:
             velnor-workflow \
             --bin velnor-workflow
           echo "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"
+      - name: Resolve required status checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: main
+        run: |
+          set -euo pipefail
+          contexts="$(gh api "repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true" \
+            | jq -r '.[] | select(.target == "branch" and .enforcement == "active") | .id' \
+            | while read -r id; do gh api "repos/$GITHUB_REPOSITORY/rulesets/$id"; done \
+            | jq -r --arg branch "refs/heads/$DEFAULT_BRANCH" 'select(.conditions.ref_name.include | any(. == "~DEFAULT_BRANCH" or . == "~ALL" or . == $branch)) | .rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+            | sort -u | paste -sd, -)"
+          echo "RULESET_CONTEXTS=$contexts" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
           VELNOR_WORKFLOW_POLICY_REVISION: 17b441c1211cf305d19486c33587882aca1c60c3
-        run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
+        run: |
+          set -euo pipefail
+          velnor-workflow policy \
+            --workflow-root "$WORKFLOW_ROOT" \
+            --head-sha "$HEAD_SHA" \
+            --base-sha "$BASE_SHA" \
+            --ruleset-contexts "$RULESET_CONTEXTS"
       - name: Set up actionlint
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:

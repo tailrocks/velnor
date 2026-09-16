@@ -88,8 +88,8 @@ pub(crate) fn maintenance_content(config: &ProjectConfig) -> String {
 }
 
 /// The `ci-release-package-signer.yml` content.
-pub(crate) fn release_signer_content() -> String {
-    crate::render_static_template(VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE)
+pub(crate) fn release_signer_content(revision: &str) -> String {
+    crate::render_static_template(VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE, revision)
 }
 
 /// A `static-workflow` row names an imported workflow body, which is not a
@@ -205,7 +205,7 @@ impl Primitive for ReleaseSigner {
         render_file(
             ctx,
             "ci-release-package-signer.yml",
-            release_signer_content(),
+            release_signer_content(&ctx.config.workflow_revision),
         )
     }
 }
@@ -1403,7 +1403,11 @@ fn render_preview_identity_job(config: &ProjectConfig, release: &ReleaseSpec) ->
     let checkout = ActionPin::Checkout.reference();
     // The identity job below always runs on the hosted github runner, so its
     // runtime install is keyed to that placement — never to the repo lane.
-    let setup = workflow_runtime_setup(RunnerMode::Github, &config.repository);
+    let setup = workflow_runtime_setup(
+        RunnerMode::Github,
+        &config.repository,
+        &config.workflow_revision,
+    );
     let manifest = match rust_package_unit(config, &release.package) {
         Some(unit) if unit.root == "." || unit.root.is_empty() => "Cargo.toml".to_owned(),
         Some(unit) => format!("{}/Cargo.toml", unit.root.trim_end_matches('/')),
@@ -1544,7 +1548,11 @@ fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
     if config.runners == RunnerMode::Velnor {
         String::new()
     } else {
-        workflow_runtime_setup(RunnerMode::Github, &config.repository)
+        workflow_runtime_setup(
+            RunnerMode::Github,
+            &config.repository,
+            &config.workflow_revision,
+        )
     }
 }
 
@@ -1799,7 +1807,9 @@ fn render_release_unit_job(
     // packaged fleet runtime and builds the pinned binary into the host's
     // persistent executable store instead.
     if lane == crate::RunnerMode::Velnor && super::ir::unit_runs_workflow_plain_check(unit) {
-        output.push_str(&crate::workflow_pinned_policy_runtime_velnor());
+        output.push_str(&crate::workflow_pinned_policy_runtime_velnor(
+            &workflow.workflow_revision,
+        ));
     }
     workflow.render_tool_provisioning(output, lane, unit, false);
     let cargo_cache_restored = CacheBackend::Detected
@@ -2682,9 +2692,10 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         let mut setup = workflow_runtime_setup_with_install_rev(
             RunnerMode::Github,
             &config.repository,
-            &workflow_setup_install_rev(&config.repository),
+            &config.workflow_revision,
+            &workflow_setup_install_rev(&config.repository, &config.workflow_revision),
         );
-        if crate::workflow_setup_action_uses(&config.repository)
+        if crate::workflow_setup_action_uses(&config.repository, &config.workflow_revision)
             == crate::VELNOR_WORKFLOW_LOCAL_SETUP_ACTION
         {
             // The owner runs its own checkout of the setup action; the cache
@@ -2741,6 +2752,10 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::*;
+
+    /// A fixed generator pin so the pinned render digests below never move
+    /// with the commit that builds the test binary.
+    const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
         match result {
@@ -2852,7 +2867,7 @@ mod tests {
             );
         } else {
             assert!(
-                uses_line.contains(&format!("@{}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
+                uses_line.contains(&format!("@{}", config.workflow_revision)),
                 "uses: must pin SOURCE_REV: {uses_line}"
             );
         }
@@ -2860,7 +2875,8 @@ mod tests {
             !uses_line.contains("github.sha"),
             "GitHub Actions forbids expressions in uses: versions: {uses_line}"
         );
-        let expected_rev = crate::workflow_setup_install_rev(&config.repository);
+        let expected_rev =
+            crate::workflow_setup_install_rev(&config.repository, &config.workflow_revision);
         assert!(
             workflow.contains(&format!("rev: {expected_rev}")),
             "maintenance install rev follows setup-action ownership: {workflow}"
@@ -2902,7 +2918,7 @@ mod tests {
             assert!(
                 workflow.contains("github.event_name == 'push'")
                     && workflow.contains("github.event.repository.default_branch")
-                    && workflow.contains(crate::VELNOR_WORKFLOW_SOURCE_REV),
+                    && workflow.contains(config.workflow_revision.as_str()),
                 "owned maintenance must use the context-gated runtime revision: {workflow}"
             );
         }
@@ -3103,6 +3119,7 @@ mod tests {
     fn config(workflow_files: &[&str], release: Option<ReleaseSpec>) -> ProjectConfig {
         crate::ProjectConfig {
             repository: String::new(),
+            workflow_revision: FIXTURE_REVISION.to_owned(),
             profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "test".to_owned(),
@@ -3205,15 +3222,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "f0f6430727c1881c6a5a2613c64624f097aa50fdc60a1d9c6b1dc8c749530aee",
+                "e525fe66482e23af4de8305c08d15e73c53b89035d9cf43d27109503005bf755",
             ),
             (
                 "preview.yml",
-                "be9e9c4f46f4671b9901b300655cb2063e8f56d6aae1878e385385f349ec2a77",
+                "6a38b79eddf0ccef2e5d29b0a9da84a66db82a941714e805797fd908fb924b85",
             ),
             (
                 "maintenance.yml",
-                "2943d300dc5d29481d7e668209b0911a3b960f861b8c60990e9377591fdd2792",
+                "35965d42079b669e7a258bd038e5256152a515e5896f90464316e5811cdf89ae",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3281,11 +3298,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "a61b9dc24cb641094fa83f4eea245abe25b8e037d3040e761b93305dd81f4a84",
+                "5e63188780384d0fc8fcf93211c4e833a73858790aee3914faf448cde6ff6fca",
             ),
             (
                 "preview.yml",
-                "659d8b2e6030e59dc6272b16755c1991a6a21902199bfb393155629a96ca4568",
+                "ef2a4ec0451803292fabb985f404dec000653a9b27543b1249d1a1f555c4edb4",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -3505,7 +3522,10 @@ mod tests {
         assert!(
             workflow.contains(&format!(
                 "rev: {}",
-                crate::workflow_setup_install_rev(crate::workflow_setup_action_repository())
+                crate::workflow_setup_install_rev(
+                    crate::workflow_setup_action_repository(),
+                    &cfg.workflow_revision
+                )
             )),
             "the setup-action owner uses a context-gated HEAD fallback: {workflow}"
         );

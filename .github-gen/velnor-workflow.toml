@@ -2,6 +2,11 @@ schema = 1
 
 [generator]
 repository = "tailrocks/velnor"
+# D19 pin: the velnor-workflow commit that rendered this tree. The policy
+# validator regenerates the tree with the generator built at this commit and
+# requires a byte-identical result; bump it in a single pin commit after the
+# last generator change (see the plan ledger).
+revision = "17b441c1211cf305d19486c33587882aca1c60c3"
 
 [scan]
 exclude = ["migrations/**"]
@@ -46,6 +51,8 @@ version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust
 
 [policy]
 ruleset_required_status_checks = ["ci-required"]
+# Contexts the ruleset requires that GitHub Apps report, not workflows.
+ruleset_external_status_checks = ["DCO"]
 
 # Generator-only dual-lane cache budgets (never written to .github/ci/project.toml).
 [cache.github]

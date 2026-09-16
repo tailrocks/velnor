@@ -196,6 +196,7 @@ impl From<RepositoryShape> for ProjectConfig {
     fn from(shape: RepositoryShape) -> Self {
         Self {
             repository: String::new(),
+            workflow_revision: crate::SOURCE_REVISION.to_owned(),
             profile: "generic".to_owned(),
             analysis: AnalysisSummary {
                 method: "static-filesystem-and-manifest-inspection".to_owned(),

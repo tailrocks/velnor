@@ -64,7 +64,7 @@ pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, Gene
     }
 }
 
-fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, GeneratorError> {
+pub(crate) fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, GeneratorError> {
     let content = std::str::from_utf8(bytes).map_err(|_| {
         GeneratorError::usage(format!(
             "generation config must be UTF-8: {}",
@@ -147,6 +147,14 @@ struct CacheRootSection {
 struct GeneratorSection {
     /// `owner/repository` slug this config belongs to.
     repository: Option<String>,
+    /// D19: the generator-repository commit whose `velnor-workflow` renders
+    /// and audits this tree. Every generated pin — the policy runtime install
+    /// `--rev`, the `setup-velnor-workflow` `rev:`, the runtime artifact
+    /// names — is this one value, so the tree declares the generator that
+    /// produced it and the policy validator regenerates the tree with exactly
+    /// that generator. Absent keeps the running binary's own source commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -373,6 +381,11 @@ struct PolicySection {
     /// top-level job `name:` values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ruleset_required_status_checks: Vec<String>,
+    /// Repository-ruleset status-check contexts reported by GitHub Apps rather
+    /// than by a workflow (for example `DCO`). The policy validator requires
+    /// the live ruleset to equal the union of both lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ruleset_external_status_checks: Vec<String>,
     /// Admission rule for actions that are not pinned to a full commit SHA.
     action_pin_admission: Option<String>,
     /// Emit `config-variables: null` in the generated actionlint config.
@@ -626,6 +639,11 @@ impl RepoGenerationConfig {
         self.generator.repository.as_deref()
     }
 
+    /// The D19 generator pin the config declares, if any.
+    pub(crate) fn revision(&self) -> Option<&str> {
+        self.generator.revision.as_deref()
+    }
+
     /// The GitHub-hosted runner label, when the config declares one.
     pub(crate) fn github_runner(&self) -> Option<&str> {
         self.workflow.github_runner.as_deref()
@@ -766,6 +784,12 @@ impl RepoGenerationConfig {
     /// must expose as job display names.
     pub(crate) fn ruleset_required_status_checks(&self) -> &[String] {
         &self.policy.ruleset_required_status_checks
+    }
+
+    /// Status-check contexts the repository ruleset gates on that GitHub Apps
+    /// report rather than workflows.
+    pub(crate) fn ruleset_external_status_checks(&self) -> &[String] {
+        &self.policy.ruleset_external_status_checks
     }
 
     /// Workflow basenames excluded from static policy validation.

@@ -727,6 +727,7 @@ mod tests {
         };
         let config = crate::ProjectConfig {
             repository: "example/project".to_owned(),
+            workflow_revision: crate::SOURCE_REVISION.to_owned(),
             profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "static metadata".to_owned(),

@@ -985,6 +985,7 @@ mod tests {
     fn config() -> crate::ProjectConfig {
         crate::ProjectConfig {
             repository: "test".to_owned(),
+            workflow_revision: crate::SOURCE_REVISION.to_owned(),
             profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "test".to_owned(),
