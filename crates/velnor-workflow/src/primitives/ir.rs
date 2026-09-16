@@ -459,11 +459,11 @@ pub(crate) fn render_phase_report_step(
 ) {
     output.push_str("      - name: Report phase timings and cache outcomes\n");
     output.push_str("        if: always()\n");
-    render_cache_outcome_report_env(output, lane, facts);
     let _ = writeln!(
         output,
         "        uses: {VELNOR_CI_REPORT_ACTION}\n        with:\n          job_label: {job_display_name}"
     );
+    render_cache_outcome_report_inputs(output, lane, facts);
 }
 
 /// One cache layer whose restore step outputs the post-checks report reads.
@@ -495,6 +495,17 @@ impl ReportedCacheLayer {
             Self::Mbx => "MBX",
             Self::CargoBundle => "CARGO",
             Self::DockerSeed => "DOCKER_SEED",
+        }
+    }
+
+    /// Snake-case input prefix for the report composite action.
+    fn report_input_prefix(self) -> &'static str {
+        match self {
+            Self::Rustup => "rustup",
+            Self::Mold => "mold",
+            Self::Mbx => "mbx",
+            Self::CargoBundle => "cargo",
+            Self::DockerSeed => "docker_seed",
         }
     }
 }
@@ -603,7 +614,7 @@ fn velnor_host_warm_layers(unit: &Unit, ir: &WorkflowIr) -> Vec<&'static str> {
     host_warm
 }
 
-fn render_cache_outcome_report_env(
+fn render_cache_outcome_report_inputs(
     output: &mut String,
     lane: RunnerMode,
     facts: &CacheReportFacts,
@@ -612,38 +623,37 @@ fn render_cache_outcome_report_env(
         RunnerMode::Github | RunnerMode::Both => "github",
         RunnerMode::Velnor => "velnor",
     };
-    output.push_str("        env:\n");
-    let _ = writeln!(output, "          VELNOR_CI_LANE: {lane_name}");
+    let _ = writeln!(output, "          ci_lane: {lane_name}");
     if lane == RunnerMode::Velnor {
         if let Some(layers) = &facts.host_warm_layers {
-            let _ = writeln!(output, "          VELNOR_HOST_WARM_LAYERS: {layers}");
+            let _ = writeln!(output, "          host_warm_layers: {layers}");
         }
         return;
     }
     for layer in &facts.layers {
-        let prefix = layer.env_prefix();
+        let input_prefix = layer.report_input_prefix();
         let step_id = layer.step_id();
         if *layer == ReportedCacheLayer::Mbx {
             let _ = writeln!(
                 output,
-                "          VELNOR_CACHE_{prefix}_HIT: {}",
+                "          cache_mbx_hit: {}",
                 step_output_expr(step_id, "cache-hit")
             );
             let _ = writeln!(
                 output,
-                "          VELNOR_CACHE_{prefix}_PRIMARY: {}",
+                "          cache_mbx_primary: {}",
                 step_output_expr(step_id, "cache-primary-key")
             );
             continue;
         }
         let _ = writeln!(
             output,
-            "          VELNOR_CACHE_{prefix}_PRIMARY: {}",
+            "          cache_{input_prefix}_primary: {}",
             step_output_expr(step_id, "cache-primary-key")
         );
         let _ = writeln!(
             output,
-            "          VELNOR_CACHE_{prefix}_MATCHED: {}",
+            "          cache_{input_prefix}_matched: {}",
             step_output_expr(step_id, "cache-matched-key")
         );
     }

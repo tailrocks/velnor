@@ -8,6 +8,44 @@ inputs:
   job_label:
     description: Stable Actions job label included in the telemetry record
     required: true
+  ci_lane:
+    description: Lane label (`github` or `velnor`) for cache-outcome classification
+    required: false
+    default: ""
+  host_warm_layers:
+    description: Comma-separated Velnor host-warm cache layers
+    required: false
+    default: ""
+  cache_rustup_primary:
+    required: false
+    default: ""
+  cache_rustup_matched:
+    required: false
+    default: ""
+  cache_mold_primary:
+    required: false
+    default: ""
+  cache_mold_matched:
+    required: false
+    default: ""
+  cache_cargo_primary:
+    required: false
+    default: ""
+  cache_cargo_matched:
+    required: false
+    default: ""
+  cache_mbx_hit:
+    required: false
+    default: ""
+  cache_mbx_primary:
+    required: false
+    default: ""
+  cache_docker_seed_primary:
+    required: false
+    default: ""
+  cache_docker_seed_matched:
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -20,21 +58,20 @@ runs:
         # runner-owned VELNOR_* timing env instead; keep this name distinct so
         # an empty hosted expression cannot overwrite it.
         VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}
-        # Composite steps do not inherit caller step env; forward explicitly.
-        VELNOR_CI_LANE: ${{ env.VELNOR_CI_LANE }}
-        VELNOR_HOST_WARM_LAYERS: ${{ env.VELNOR_HOST_WARM_LAYERS }}
+        VELNOR_CI_LANE: ${{ inputs.ci_lane }}
+        VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}
         VELNOR_RUN_STARTED_AT: ${{ env.VELNOR_RUN_STARTED_AT }}
         VELNOR_JOB_QUEUED_AT: ${{ env.VELNOR_JOB_QUEUED_AT }}
-        VELNOR_CACHE_RUSTUP_PRIMARY: ${{ env.VELNOR_CACHE_RUSTUP_PRIMARY }}
-        VELNOR_CACHE_RUSTUP_MATCHED: ${{ env.VELNOR_CACHE_RUSTUP_MATCHED }}
-        VELNOR_CACHE_MOLD_PRIMARY: ${{ env.VELNOR_CACHE_MOLD_PRIMARY }}
-        VELNOR_CACHE_MOLD_MATCHED: ${{ env.VELNOR_CACHE_MOLD_MATCHED }}
-        VELNOR_CACHE_CARGO_PRIMARY: ${{ env.VELNOR_CACHE_CARGO_PRIMARY }}
-        VELNOR_CACHE_CARGO_MATCHED: ${{ env.VELNOR_CACHE_CARGO_MATCHED }}
-        VELNOR_CACHE_MBX_HIT: ${{ env.VELNOR_CACHE_MBX_HIT }}
-        VELNOR_CACHE_MBX_PRIMARY: ${{ env.VELNOR_CACHE_MBX_PRIMARY }}
-        VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ env.VELNOR_CACHE_DOCKER_SEED_PRIMARY }}
-        VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ env.VELNOR_CACHE_DOCKER_SEED_MATCHED }}
+        VELNOR_CACHE_RUSTUP_PRIMARY: ${{ inputs.cache_rustup_primary }}
+        VELNOR_CACHE_RUSTUP_MATCHED: ${{ inputs.cache_rustup_matched }}
+        VELNOR_CACHE_MOLD_PRIMARY: ${{ inputs.cache_mold_primary }}
+        VELNOR_CACHE_MOLD_MATCHED: ${{ inputs.cache_mold_matched }}
+        VELNOR_CACHE_CARGO_PRIMARY: ${{ inputs.cache_cargo_primary }}
+        VELNOR_CACHE_CARGO_MATCHED: ${{ inputs.cache_cargo_matched }}
+        VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}
+        VELNOR_CACHE_MBX_PRIMARY: ${{ inputs.cache_mbx_primary }}
+        VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ inputs.cache_docker_seed_primary }}
+        VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ inputs.cache_docker_seed_matched }}
       run: |
         set -uo pipefail
         max_telemetry_seconds=$((7 * 24 * 60 * 60))

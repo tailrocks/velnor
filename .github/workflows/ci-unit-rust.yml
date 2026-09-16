@@ -502,19 +502,18 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: always()
-        env:
-          VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: ${{ inputs.unit }}
+          ci_lane: github
+          cache_rustup_primary: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          cache_rustup_matched: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          cache_mold_primary: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          cache_mold_matched: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          cache_mbx_hit: ${{ steps.mbx-cache.outputs.cache-hit }}
+          cache_mbx_primary: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
+          cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
 
   verify-velnor:
     name: Velnor
@@ -713,10 +712,9 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: always()
-        env:
-          VELNOR_CI_LANE: velnor
-          VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: ${{ inputs.unit }}
+          ci_lane: velnor
+          host_warm_layers: rustup,mold,mbx,cargo
 

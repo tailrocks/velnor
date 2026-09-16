@@ -338,13 +338,12 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: always()
-        env:
-          VELNOR_CI_LANE: github
-          VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: ${{ inputs.unit }}
+          ci_lane: github
+          cache_docker_seed_primary: ${{ steps.cache.outputs.cache-primary-key }}
+          cache_docker_seed_matched: ${{ steps.cache.outputs.cache-matched-key }}
 
   verify-velnor-trusted:
     name: Velnor
@@ -511,10 +510,9 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: always()
-        env:
-          VELNOR_CI_LANE: velnor
-          VELNOR_HOST_WARM_LAYERS: docker_seed
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: ${{ inputs.unit }}
+          ci_lane: velnor
+          host_warm_layers: docker_seed
 
