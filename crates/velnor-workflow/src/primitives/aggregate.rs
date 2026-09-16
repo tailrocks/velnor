@@ -1,10 +1,11 @@
 //! `unit-aggregation`: the aggregate workflow that composes the CI graph.
 //!
 //! One declaration per aggregate file: the pull request surface, the main
-//! surface, and the nightly schedule. The aggregate owns composition only — the
-//! plan job a primitive contributed, the advisory policy job, one
+//! surface, and the nightly dispatcher. PR and main aggregates own composition —
+//! the plan job a primitive contributed, the advisory policy job, one
 //! reusable-workflow caller per contributed unit node, and the required check
-//! that validates every one of them.
+//! that validates every one of them. Nightly dispatches `ci-main.yml` on the
+//! default branch so trusted mbx saves fire via `workflow_dispatch`.
 
 use super::WorkflowKind;
 use super::{Args, GraphNode, Primitive, RenderCtx, Rendered, UNIT_AGGREGATION};
@@ -48,10 +49,13 @@ impl Primitive for UnitAggregation {
                 super::AFFECTED_PLAN
             )));
         }
-        let content = ctx
-            .lanes
-            .ir()
-            .render_nested(kind, ctx.nodes, Some(ctx.contracts));
+        let content = if kind == WorkflowKind::Nightly {
+            ctx.lanes.ir().render_nightly_dispatcher()
+        } else {
+            ctx.lanes
+                .ir()
+                .render_nested(kind, ctx.nodes, Some(ctx.contracts))
+        };
         Ok(Rendered {
             files: std::iter::once((
                 std::path::PathBuf::from(".github/workflows").join(file),

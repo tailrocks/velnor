@@ -20,7 +20,7 @@ generator	44
 .github/workflows/ci-unit-opentofu.yml	2989c5619b7a0077
 .github/workflows/ci-unit-rust.yml	f99d70051f462a66
 .github/workflows/maintenance.yml	8d64f8d623648b70
-.github/workflows/nightly.yml	57af445b475eb5e6
+.github/workflows/nightly.yml	2057397bf0480d73
 .github/workflows/preview.yml	3818e37b7f12f85a
 .github/workflows/release.yml	b26c505d4186b8f3
 config/fleet/velnor-host.env	d14b419216449423
