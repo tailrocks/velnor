@@ -1786,6 +1786,12 @@ fn validate_velnor_pull_request_contract(config: &ProjectConfig) -> Result<(), G
 }
 
 fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<String, GeneratorError> {
+    const CANDIDATES: &[&str] = &[
+        "renovate.json",
+        "renovate.json5",
+        ".github/renovate.json",
+        ".github/renovate.json5",
+    ];
     if let Some(path) = explicit {
         let full = root.join(path);
         if !full.is_file() {
@@ -1795,12 +1801,6 @@ fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<Strin
         }
         return Ok(path.to_owned());
     }
-    const CANDIDATES: &[&str] = &[
-        "renovate.json",
-        "renovate.json5",
-        ".github/renovate.json",
-        ".github/renovate.json5",
-    ];
     for candidate in CANDIDATES {
         if root.join(candidate).is_file() {
             return Ok((*candidate).to_owned());

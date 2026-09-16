@@ -483,17 +483,6 @@ impl ReportedCacheLayer {
         }
     }
 
-    /// The `VELNOR_CACHE_<LAYER>_*` env prefix the report action reads.
-    fn env_prefix(self) -> &'static str {
-        match self {
-            Self::Rustup => "RUSTUP",
-            Self::Mold => "MOLD",
-            Self::Mbx => "MBX",
-            Self::CargoBundle => "CARGO",
-            Self::DockerSeed => "DOCKER_SEED",
-        }
-    }
-
     /// Snake-case input prefix for the report composite action.
     fn report_input_prefix(self) -> &'static str {
         match self {

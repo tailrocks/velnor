@@ -138,10 +138,10 @@ fn render_file(
 
 fn renovate_runner(config: &ProjectConfig) -> String {
     let mut labels = config.velnor_labels.clone();
-    if let Some(trusted) = config.velnor_trusted_label.as_deref() {
-        if !labels.iter().any(|label| label == trusted) {
-            labels.push(trusted.to_owned());
-        }
+    if let Some(trusted) = config.velnor_trusted_label.as_deref()
+        && !labels.iter().any(|label| label == trusted)
+    {
+        labels.push(trusted.to_owned());
     }
     velnor_runner(&labels, velnor_runner_group(config))
 }
@@ -191,7 +191,7 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
     if spec.cache {
         let _ = write!(
             cache_steps,
-            r#"      - name: Restore Renovate repository cache
+            r"      - name: Restore Renovate repository cache
         id: renovate-cache
         uses: {cache_restore}
         with:
@@ -203,7 +203,7 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
       - name: Fix Renovate cache ownership
         if: steps.renovate-cache.outputs.cache-matched-key != ''
         run: sudo chown -R 12021:0 /tmp/renovate/
-"#
+"
         );
     }
 
@@ -211,13 +211,13 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
     if spec.cache {
         let _ = write!(
             cache_save_step,
-            r#"      - name: Save Renovate repository cache
+            r"      - name: Save Renovate repository cache
         if: always() && ({cache_save_gate}) && steps.renovate-cache.outputs.cache-hit != 'true'
         uses: {cache_save}
         with:
           path: {cache_path}
           key: velnor-renovate-${{{{ github.repository }}}}-{hash_files}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
-"#
+"
         );
     }
 
