@@ -6518,7 +6518,7 @@ mod tests {
         assert!(action.contains(&expected_source));
         assert!(!action
             .contains("SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}"));
-        assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
+        assert!(action.contains("cargo install --locked --force --git \"$SOURCE_REPOSITORY\""));
         assert!(action.contains("head_sha == env.INSTALL_REV"));
         assert!(action.contains("actions/runs/$artifact_run_id"));
         assert!(action.contains("run_conclusion"));

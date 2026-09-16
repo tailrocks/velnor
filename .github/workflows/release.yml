@@ -57,9 +57,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -101,9 +101,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Restore "Bun package (velnor)" cache
@@ -138,9 +138,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Expose GitHub Actions runtime
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Set up Docker Buildx
@@ -170,9 +170,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Documentation cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -205,9 +205,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
@@ -245,9 +245,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -357,9 +357,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -477,9 +477,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -597,9 +597,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -717,9 +717,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -837,9 +837,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -957,9 +957,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1077,9 +1077,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1197,9 +1197,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1317,9 +1317,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1437,9 +1437,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1557,9 +1557,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1677,9 +1677,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -2508,7 +2508,7 @@ jobs:
       - name: Provision pinned Velnor workflow policy runtime
         shell: bash
         env:
-          PINNED_REVISION: 75707ac45c9213388d287518a5894ad6196e1a12
+          PINNED_REVISION: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
         run: |
           set -euo pipefail
           binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
@@ -2774,9 +2774,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -3172,9 +3172,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3529,9 +3529,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 75707ac45c9213388d287518a5894ad6196e1a12
+          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=75707ac45c9213388d287518a5894ad6196e1a12" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -173,12 +173,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-75707ac45c9213388d287518a5894ad6196e1a12-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-ba2305d94777b4d7c91277f8d17d53efb6b7ba1a-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 75707ac45c9213388d287518a5894ad6196e1a12
+          EXPECTED_REVISION: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -192,7 +192,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 75707ac45c9213388d287518a5894ad6196e1a12
+          EXPECTED_REVISION: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
         run: |
           set -euo pipefail
           install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
@@ -566,7 +566,7 @@ jobs:
         if: ${{ inputs.policy_runtime }}
         shell: bash
         env:
-          PINNED_REVISION: 75707ac45c9213388d287518a5894ad6196e1a12
+          PINNED_REVISION: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
         run: |
           set -euo pipefail
           binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
