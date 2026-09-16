@@ -147,7 +147,7 @@ Unlimited resource entitlement does not imply infinite memory or guaranteed host
 
 A representative full and mixed workload is benchmarked, initially testing values such as 16, 24, 32, 48, 64 and higher only while stable useful throughput improves. These are experiments, not five simultaneous pools or promised capacity. A measured native-only provisional N comes before Scale Set, then mixed modes are remeasured and N is requalified after Jackin/ChainArgos.
 
-Source, logical plan, image/toolchain identity, and cold/warm conditions stay comparable. Measured: jobs/minute, end-to-end time-to-green, queue and provisioning delay, compile/test/cache/cleanup phases, CPU, available memory/pressure/OOM, disk/inodes/IO latency, Docker/BuildKit/cache-lock contention, and failures. Benchmarks must not intentionally destabilize unrelated jobs. Only host-level N changes; containers remain unbounded. The highest stable useful throughput wins, not the largest integer or CPU utilization alone.
+Source, logical plan, image/toolchain identity, and cold/warm conditions stay comparable. Measured: jobs/minute, end-to-end time-to-green, queue and provisioning delay, compile/test/cache/cleanup phases, CPU, available memory/pressure/OOM, disk/inodes/IO latency, Docker/BuildKit/cache-lock contention, and failures. Benchmarks must not intentionally destabilize unrelated jobs. Only host-level N changes; containers remain unbounded. The highest stable useful throughput wins, not the largest integer or CPU utilization alone. Never present all-green parity across different hosted hardware as a fair performance comparison; compare same-host before/after only.
 
 ## 5. Rust Scale Set adapter and official-runner lifecycle
 

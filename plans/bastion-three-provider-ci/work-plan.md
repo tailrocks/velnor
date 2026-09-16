@@ -487,6 +487,7 @@ A later generic fix returns to its affected author/verifier pair. Tooling is pub
    while stable useful throughput improves); record jobs/min, time-to-green, queue/setup/
    compile/test/cache/cleanup, CPU, memory pressure/OOM, IO/disk/inodes, contention.
    Containers stay unbounded; only host-level N changes. Serial test groups respected.
+   Do not call all-green parity a fair performance comparison with different hosted hardware.
 4. Obtain three consecutive full triple-provider green `main` runs (zero manual reruns, full
    expected-result sets per spec §2 identity) plus one representative PR run end to end.
    Record run URLs, source/plan identities, attempts, timings.
