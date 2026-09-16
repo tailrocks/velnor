@@ -22,6 +22,10 @@ repository = "https://github.com/tailrocks/velnor"
 # foreign-arch ELF (cargo deb is invoked with --no-strip).
 [profile.release]
 strip = "symbols"
+# Release and debug `velnor-workflow` binaries are interchangeable renderers
+# for the same source closure (the D19 guard accepts either profile), so
+# release must trap on overflow exactly like debug instead of wrapping.
+overflow-checks = true
 
 [workspace.dependencies]
 anyhow = "1.0.98"

@@ -96,6 +96,10 @@ on:
         required: false
         type: boolean
         default: false
+      candidate_publish:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   velnor-prepare-cargo-sources:
@@ -182,7 +186,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
-          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and .policy_revision == $revision and (.policy_binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
           expected="$(jq -er '.binary_sha256' "$manifest")"
           actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
           [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
@@ -198,8 +202,9 @@ jobs:
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
           install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"
           install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"
-          reported="$("$home/bin/velnor-workflow-policy" --revision)"
-          [[ "$reported" == "$EXPECTED_REVISION" ]] || { echo "::error::policy runtime reports revision $reported, expected $EXPECTED_REVISION" >&2; exit 1; }
+          expected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"
+          reported="$("$home/bin/velnor-workflow-policy" --closure)"
+          [[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
           echo "$home/bin" >> "$GITHUB_PATH"
           echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
       - name: Mark runner setup end
@@ -480,6 +485,71 @@ jobs:
             fi
           fi
           exit $rc
+      - name: Prepare candidate generator product
+        if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+        id: candidate
+        env:
+          CANDIDATE_MERGE_SHA: ${{ inputs.head_sha }}
+          CANDIDATE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          PR_HEAD="$CANDIDATE_PR_HEAD_SHA"
+          BASE="$CANDIDATE_BASE_SHA"
+          if ! git cat-file -e "$PR_HEAD^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PR_HEAD"
+          fi
+          head_closure="$(velnor-workflow closure --rev="$PR_HEAD" --candidate)"
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
+          fi
+          base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' | head -n 1)"
+          test "$base_pin" != '' || { echo "::error::base $BASE declares no generator pin" >&2; exit 1; }
+          if ! git cat-file -e "$base_pin^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
+          fi
+          base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
+          if [[ "$head_closure" == "$base_closure" ]]; then
+            echo "head $PR_HEAD shares the base pin's candidate closure; no candidate to publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          merge_closure="$(velnor-workflow closure --rev="$CANDIDATE_MERGE_SHA" --candidate)"
+          worktree=""
+          if [[ "$merge_closure" == "$head_closure" ]]; then
+            test -x target/debug/velnor-workflow || { echo "::error::candidate packaging needs the unit's own target/debug/velnor-workflow; the checks must build the generator binary" >&2; exit 1; }
+            binary="target/debug/velnor-workflow"
+            build_rev="$CANDIDATE_MERGE_SHA"
+          else
+            worktree="$RUNNER_TEMP/velnor-workflow-head"
+            rm -rf "$worktree"
+            git worktree add --detach "$worktree" "$PR_HEAD"
+            trap 'git worktree remove --force "$worktree"' EXIT
+            cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
+            binary="$worktree/target/debug/velnor-workflow"
+            build_rev="$PR_HEAD"
+          fi
+          stage="$RUNNER_TEMP/velnor-workflow-candidate"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          install -m 0755 "$binary" "$stage/velnor-workflow"
+          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+          reported="$("$stage/velnor-workflow" --closure)"
+          [[ "$reported" == "$head_closure" ]] || { echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }
+          jq -n --arg profile debug --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}' > "$stage/candidate-manifest.json"
+          if [[ "$worktree" != "" ]]; then
+            git worktree remove --force "$worktree"
+          fi
+          echo "name=velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}" >> "$GITHUB_OUTPUT"
+      - name: Publish candidate generator product
+        if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.candidate.outputs.name }}
+          path: ${{ runner.temp }}/velnor-workflow-candidate
+          if-no-files-found: error
+          retention-days: 1
       - name: Save unit cache
         if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -599,19 +669,54 @@ jobs:
         if: ${{ inputs.policy_runtime }}
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           PINNED_REVISION: b9c3156cdb88e63c11b9e595a3e694b02238c09a
+          CHECKOUT_PATH: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
-          reported="$("$binary" --revision 2>/dev/null || true)"
-          if [[ "$reported" != "$PINNED_REVISION" ]]; then
-            root="$RUNNER_TEMP/velnor-workflow-policy-$PINNED_REVISION"
-            env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-              cargo install --locked --git https://github.com/tailrocks/velnor --rev "$PINNED_REVISION" --root "$root" velnor-workflow --bin velnor-workflow
-            install -Dm0755 "$root/bin/velnor-workflow" "$binary"
-            reported="$("$binary" --revision)"
+          if ! git -C "$CHECKOUT_PATH" cat-file -e "$PINNED_REVISION^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PINNED_REVISION"
           fi
-          [[ "$reported" == "$PINNED_REVISION" ]] || { echo "::error::pinned workflow policy runtime reports revision $reported, expected $PINNED_REVISION" >&2; exit 1; }
+          listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$PINNED_REVISION" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+          test "$listing" != '' || { echo "::error::revision $PINNED_REVISION has no closure inputs" >&2; exit 1; }
+          if command -v sha256sum >/dev/null 2>&1; then
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
+          else
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | shasum -a 256 | awk '{print $1}')"
+          fi
+          binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
+          tag="velnor-workflow-runtime-v1-${closure:0:16}"
+          asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          if ! gh release download "$tag" --repo tailrocks/velnor --pattern manifest.json --dir "$temporary"; then
+            echo "::error::no policy runtime product for revision $PINNED_REVISION (closure ${closure:0:16}); the mainline runtime-product publisher builds it after merge" >&2
+            exit 1
+          fi
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
+          expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
+          existing=""
+          if [[ -x "$binary" ]]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+              existing="$(sha256sum "$binary" | awk '{print $1}')"
+            else
+              existing="$(shasum -a 256 "$binary" | awk '{print $1}')"
+            fi
+          fi
+          if [[ "$existing" != "$expected" ]]; then
+            gh release download "$tag" --repo tailrocks/velnor --pattern "$asset" --dir "$temporary"
+            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
+            else
+              actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
+            fi
+            [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+            install -Dm0755 "$temporary/$asset" "$binary"
+          fi
+          reported="$("$binary" --closure)"
+          [[ "$reported" == "$closure" ]] || { echo "::error::pinned workflow policy runtime reports closure $reported, expected $closure" >&2; exit 1; }
           echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
       - name: Install declared Mise tools
         if: ${{ inputs.mise_tools != '' }}

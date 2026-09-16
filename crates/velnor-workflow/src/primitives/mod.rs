@@ -19,6 +19,7 @@ mod plan;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
+pub(crate) mod runtime_products;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
 
@@ -76,6 +77,8 @@ pub(crate) const RENOVATE: &str = "renovate";
 pub(crate) const RENOVATE_VALIDATE: &str = "renovate-validate";
 /// A reviewed workflow body declared verbatim by the repository.
 pub(crate) const STATIC_WORKFLOW: &str = "static-workflow";
+/// The owner-only Stage-0 runtime-product producer.
+pub(crate) const RUNTIME_PRODUCTS: &str = "runtime-products";
 
 /// The Dockerfile stage a mutable mount seed is injected through. The image
 /// declares it as an empty `FROM scratch` stage so a build without the
@@ -616,6 +619,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(release::StaticWorkflow),
         Box::new(renovate::Renovate),
         Box::new(renovate::RenovateValidate),
+        Box::new(runtime_products::RuntimeProducts),
     ]
 }
 
@@ -793,7 +797,8 @@ pub(crate) fn generate(
     for row in &rows {
         if row.unit_contract
             || (!release::is_release_side(&row.primitive)
-                && !renovate::is_renovate_side(&row.primitive))
+                && !renovate::is_renovate_side(&row.primitive)
+                && !runtime_products::is_runtime_products_side(&row.primitive))
         {
             continue;
         }
@@ -972,7 +977,9 @@ fn rows_for(
     // Declared release-side families: the file rows they name, rendered by the
     // family's primitive.
     for row in declared.iter().filter(|row| {
-        release::is_release_side(&row.primitive) || renovate::is_renovate_side(&row.primitive)
+        release::is_release_side(&row.primitive)
+            || renovate::is_renovate_side(&row.primitive)
+            || runtime_products::is_runtime_products_side(&row.primitive)
     }) {
         rows.push(ResolvedRow::declared(row));
     }
@@ -1264,7 +1271,9 @@ fn validate(
     // The declared release-side and Renovate families render whole-repository
     // workflow files: each names the canonical file it owns, and no units.
     for row in declared.iter().filter(|row| {
-        release::is_release_side(&row.primitive) || renovate::is_renovate_side(&row.primitive)
+        release::is_release_side(&row.primitive)
+            || renovate::is_renovate_side(&row.primitive)
+            || runtime_products::is_runtime_products_side(&row.primitive)
     }) {
         if !row.units.is_empty() {
             return Err(GeneratorError::usage(format!(
@@ -1279,7 +1288,8 @@ fn validate(
             ))
         })?;
         let canonical = release::canonical_release_side_file(&row.primitive)
-            .or_else(|| renovate::canonical_renovate_side_file(&row.primitive));
+            .or_else(|| renovate::canonical_renovate_side_file(&row.primitive))
+            .or_else(|| runtime_products::canonical_runtime_products_side_file(&row.primitive));
         if let Some(canonical) = canonical
             && file != canonical
         {

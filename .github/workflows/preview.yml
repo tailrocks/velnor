@@ -200,6 +200,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Velnor workflow runtime
+        id: runtime
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
@@ -478,6 +479,7 @@ jobs:
           ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Velnor workflow runtime
+        id: runtime
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
@@ -619,6 +621,7 @@ jobs:
           ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
       - name: Set up Velnor workflow runtime
+        id: runtime
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
