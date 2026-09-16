@@ -29,6 +29,7 @@ mod command_files;
 mod config;
 pub use config::config_dir;
 mod container;
+pub mod daemon_instance;
 pub mod docker;
 mod docker_argv;
 mod docker_lease;

@@ -422,7 +422,17 @@ async fn status(globals: &GlobalArgs) -> Result<(), CommandError> {
     );
     println!("docker_endpoint     {}", docker_endpoint_display());
     println!("execution           {}", execution_platform());
-    let hosts = discover_hosts(globals.instance.as_deref())?;
+    let packaged = crate::packaged::instances()?;
+    let requested = crate::packaged::requested(globals);
+    println!("packaged_instances  {}", packaged.len());
+    for instance in packaged.iter().filter(|instance| {
+        requested
+            .as_deref()
+            .is_none_or(|requested| instance.instance == requested || instance.name == requested)
+    }) {
+        print_packaged_instance(instance).await;
+    }
+    let hosts = discover_hosts(requested.as_deref(), &packaged)?;
     println!("active_hosts        {}", hosts.len());
     for host in hosts {
         println!("host                {}", host.name);
@@ -451,6 +461,58 @@ async fn status(globals: &GlobalArgs) -> Result<(), CommandError> {
     println!("follow              velnorctl --instance <name> get slots");
     println!("docker_report       velnorctl docker report");
     Ok(())
+}
+
+/// One packaged `velnor-daemon@<instance>` as its unit environment configures
+/// it: the paths `velnorctl` addresses it through, and whether the daemon is
+/// actually there.
+async fn print_packaged_instance(instance: &velnor_runner::daemon_instance::DaemonInstance) {
+    println!("instance            {}", instance.instance);
+    println!("  unit              {}", instance.unit);
+    println!("  name              {}", instance.name);
+    if let Some(url) = &instance.url {
+        println!("  url               {url}");
+    }
+    println!("  storage_root      {}", instance.storage_root.display());
+    println!("  trust_scope       {}", instance.trust_scope);
+    println!("  work_dir          {}", instance.work_dir.display());
+    println!("  daemon_dir        {}", instance.daemon_dir.display());
+    let control = instance.control_socket();
+    println!(
+        "  control_socket    {} ({})",
+        control.display(),
+        if control.exists() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    if control.exists() {
+        match crate::packaged::Selected::Packaged(Box::new(instance.clone())).endpoint() {
+            Ok(endpoint) => {
+                let client = velnor_client::UnixControlClient::new(endpoint)
+                    .with_timeout(Duration::from_secs(2));
+                match client.info().await {
+                    Ok(info) => println!(
+                        "  control_api       {} schema={} mutations={}",
+                        info.api_version, info.schema_version, info.mutations
+                    ),
+                    Err(error) => println!("  control_api       unavailable ({error})"),
+                }
+            }
+            Err(error) => println!("  control_api       unavailable ({})", error.message),
+        }
+    }
+    match velnor_runner::node::health::fetch(&instance.daemon_dir) {
+        Ok(health) => println!(
+            "  health            {}",
+            serde_json::to_string(&health).unwrap_or_else(|_| "unrenderable".to_owned())
+        ),
+        Err(_) => println!(
+            "  health            unavailable ({} has no health document)",
+            instance.daemon_dir.display()
+        ),
+    }
 }
 
 async fn drain(globals: &GlobalArgs) -> Result<(), CommandError> {
@@ -587,9 +649,28 @@ impl Drop for HostProcessGuard {
     }
 }
 
-fn discover_hosts(requested: Option<&str>) -> Result<Vec<HostProcess>, CommandError> {
+/// Running host processes under the socket root.
+///
+/// A `requested` name that is a packaged instance (by systemd instance or
+/// `VELNOR_NAME`) is looked up where that instance's unit puts its socket —
+/// its storage root's runtime directory and its `VELNOR_NAME` — not under
+/// this process's socket root.
+fn discover_hosts(
+    requested: Option<&str>,
+    packaged: &[velnor_runner::daemon_instance::DaemonInstance],
+) -> Result<Vec<HostProcess>, CommandError> {
     let root = velnor_client::socket_root();
     if let Some(name) = requested {
+        let (root, name) = match packaged
+            .iter()
+            .find(|instance| instance.instance == name || instance.name == name)
+        {
+            Some(instance) => (
+                velnor_client::socket_root_for_storage_root(Some(&instance.storage_root)),
+                instance.name.as_str(),
+            ),
+            None => (root, name),
+        };
         validate_host_name(name)?;
         let instance_dir = root.join(name);
         if !instance_dir.is_dir() {
@@ -640,7 +721,7 @@ fn discover_hosts(requested: Option<&str>) -> Result<Vec<HostProcess>, CommandEr
 }
 
 fn resolve_single_host(requested: Option<&str>) -> Result<HostProcess, CommandError> {
-    let hosts = discover_hosts(requested)?;
+    let hosts = discover_hosts(requested, &crate::packaged::instances()?)?;
     match hosts.as_slice() {
         [host] => Ok(host.clone()),
         [] => Err(CommandError::new(

@@ -471,9 +471,22 @@ pub struct CacheGcArgs {
     pub max_size_bytes: Option<u64>,
 }
 
+impl CacheArgs {
+    /// Runtime arguments for the packaged instance the global `--instance`
+    /// selects (`None`: every packaged instance, or the process environment
+    /// on a host without any).
+    pub fn into_runtime(self, instance: Option<String>) -> rt::CacheArgs {
+        rt::CacheArgs {
+            instance,
+            ..self.into()
+        }
+    }
+}
+
 impl From<CacheArgs> for rt::CacheArgs {
     fn from(args: CacheArgs) -> Self {
         Self {
+            instance: None,
             work_dir: args.work_dir,
             config_dir: args.config_dir,
             budget_targets_bytes: args.budget_targets_bytes,
@@ -750,13 +763,16 @@ impl From<RemoveArgs> for rt::RemoveArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct StatusArgs {
-    /// Store configuration under this directory.
+    /// Daemon config directory to read. Defaults to the selected daemon's own
+    /// directory (global --instance on a packaged host).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
-    /// Number of daemon slot configs to inspect. For --slots > 1, reads <config-dir>/slots/slot-N.
-    #[arg(long, default_value_t = 1)]
-    pub slots: usize,
+    /// Number of daemon slot configs to inspect. For --slots > 1, reads
+    /// <config-dir>/slots/slot-N. Defaults to the selected packaged
+    /// instance's VELNOR_SLOTS, else 1.
+    #[arg(long)]
+    pub slots: Option<usize>,
 
     /// Validate that local config is ready for current target repository x64 Linux jobs.
     #[arg(long)]
@@ -766,18 +782,30 @@ pub struct StatusArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Journal directory for `--json` (journal.db + health.sock).
+    /// Journal directory for `--json` (journal.db + health.sock). Defaults to
+    /// the selected daemon's directory.
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
 }
 
-impl From<StatusArgs> for rt::StatusArgs {
-    fn from(args: StatusArgs) -> Self {
-        Self {
-            config_dir: args.config_dir,
-            slots: args.slots,
-            check_target_mvp: args.check_target_mvp,
-        }
+impl StatusArgs {
+    /// Runtime arguments for the selected daemon: explicit `--config-dir` and
+    /// `--slots` win; otherwise the daemon-scoped directory and slot count the
+    /// selection resolved (a packaged instance's unit environment, or the
+    /// development daemon's config base).
+    pub fn into_runtime(
+        self,
+        selected: &crate::packaged::Selected,
+    ) -> Result<rt::StatusArgs, crate::CommandError> {
+        let config_dir = match self.config_dir {
+            Some(dir) => dir,
+            None => selected.daemon_dir()?,
+        };
+        Ok(rt::StatusArgs {
+            config_dir: Some(config_dir),
+            slots: self.slots.or_else(|| selected.slots()).unwrap_or(1),
+            check_target_mvp: self.check_target_mvp,
+        })
     }
 }
 

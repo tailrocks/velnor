@@ -29,6 +29,7 @@ pub mod http;
 #[cfg(target_os = "macos")]
 pub mod local_diagnostics;
 pub mod man;
+pub mod packaged;
 pub mod preflight;
 pub mod runtime;
 
@@ -573,7 +574,10 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Recycle(args) => execute_lifecycle(&globals, "recycle", args).await,
         Command::Scale(args) => execute_scale(&globals, args).await,
         Command::Cache(args) => {
-            run_runtime(velnor_runner::args::Command::Cache((*args).into())).await
+            run_runtime(velnor_runner::args::Command::Cache(
+                (*args).into_runtime(globals.instance.clone()),
+            ))
+            .await
         }
         Command::Capabilities(args) => {
             run_runtime(velnor_runner::args::Command::Capabilities((*args).into())).await
@@ -615,17 +619,24 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
         }
         Command::Status(args) => {
+            // Same selection as `get`: the daemon's own directory, from its
+            // unit environment on a packaged host.
+            let selected = packaged::select(&globals)?;
             if args.json || globals.output_format().is_machine() {
-                return status_health_json(&args);
+                return status_health_json(&args, &selected);
             }
             #[cfg(target_os = "macos")]
             {
-                let runtime_args = velnor_runner::args::Command::Status((*args).clone().into());
+                let runtime_args =
+                    velnor_runner::args::Command::Status((*args).clone().into_runtime(&selected)?);
                 let runner_result = run_status(runtime_args).await;
                 local_diagnostics::status(&globals, &args, runner_result)
             }
             #[cfg(not(target_os = "macos"))]
-            run_status(velnor_runner::args::Command::Status((*args).into())).await
+            run_status(velnor_runner::args::Command::Status(
+                (*args).into_runtime(&selected)?,
+            ))
+            .await
         }
         Command::Daemon(args) => runtime::run_daemon((*args).clone())
             .await
@@ -741,34 +752,47 @@ fn endpoint_client_for(
     use velnor_control::config::ContextStore;
 
     let contexts = context_store()?.list()?;
-    let (endpoint, context_selected) = if let Some(context_name) = &globals.context {
-        let context = contexts
-            .iter()
-            .find(|context| context.name == *context_name)
-            .ok_or_else(|| CommandError::unavailable("named context was not found"))?;
-        (context.endpoint.as_str().to_owned(), true)
-    } else if let Some(context) = contexts.iter().find(|context| context.current) {
-        (context.endpoint.as_str().to_owned(), true)
-    } else {
-        let instance = globals
-            .instance
-            .clone()
-            .or_else(|| std::env::var("VELNOR_INSTANCE").ok());
-        (
-            format!(
-                "unix://{}/{}",
-                velnor_client::socket_root().display(),
-                instance.as_deref().unwrap_or("default")
-            ),
-            false,
+    let context = if let Some(context_name) = &globals.context {
+        Some(
+            contexts
+                .iter()
+                .find(|context| context.name == *context_name)
+                .ok_or_else(|| CommandError::unavailable("named context was not found"))?,
         )
+    } else {
+        contexts.iter().find(|context| context.current)
     };
-    let endpoint = velnor_client::UnixEndpoint::parse(&endpoint).map_err(|error| {
-        CommandError::new(ExitClass::Usage, "endpoint.invalid", error.to_string())
-    })?;
-    if context_selected {
-        validate_context_instance(&endpoint, globals.instance.as_deref())?;
-    }
+    let Some(context) = context else {
+        // No context: the daemon is selected the way systemd configured it —
+        // a packaged instance's socket lives under that instance's storage
+        // root, not under whatever this shell's environment names.
+        let selected = packaged::select(globals)?;
+        let endpoint = selected.endpoint()?;
+        if let Some(instance) = selected.packaged() {
+            let control = endpoint.socket_path(velnor_client::SocketKind::Control);
+            if !control.exists() {
+                // The address is right; the daemon behind it is not serving.
+                // Say which unit and which path, so the operator does not go
+                // hunting for the socket under this shell's socket root.
+                return Err(CommandError::unavailable(format!(
+                    "packaged instance {} ({}) has no control socket at {}; its daemon \
+                     serves only {} (the unit runs `velnor-runner daemon`, whose control \
+                     API is `velnorctl daemon`). Inspect it with `velnorctl --instance {} status`",
+                    instance.instance,
+                    instance.unit,
+                    control.display(),
+                    instance.health_socket().display(),
+                    instance.instance,
+                )));
+            }
+        }
+        return Ok(velnor_client::UnixControlClient::new(endpoint));
+    };
+    let endpoint =
+        velnor_client::UnixEndpoint::parse(context.endpoint.as_str()).map_err(|error| {
+            CommandError::new(ExitClass::Usage, "endpoint.invalid", error.to_string())
+        })?;
+    validate_context_instance(&endpoint, globals.instance.as_deref())?;
     Ok(velnor_client::UnixControlClient::new(endpoint))
 }
 
@@ -1474,14 +1498,24 @@ fn print_json<T: serde::Serialize>(value: T) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
+/// The node health vector of the selected daemon.
+///
+/// `journal.db` and `health.sock` live in the daemon-scoped directory
+/// (`<config base>/daemons/<name>`), which the selection resolves from the
+/// daemon's unit environment on a packaged host. This used to default to
+/// `/run/velnor`, a directory no packaged daemon journals in, so `status
+/// --json` on a multi-instance host read a stale file that belonged to
+/// nobody.
+fn status_health_json(
+    args: &runtime::StatusArgs,
+    selected: &packaged::Selected,
+) -> Result<(), CommandError> {
     use velnor_control::journal::Journal;
     use velnor_model::HealthDocument;
-    let dir = args
-        .state_dir
-        .clone()
-        .or_else(|| args.config_dir.clone())
-        .unwrap_or_else(|| std::path::PathBuf::from("/run/velnor"));
+    let dir = match args.state_dir.clone().or_else(|| args.config_dir.clone()) {
+        Some(dir) => dir,
+        None => selected.daemon_dir()?,
+    };
     let config_dir = args.config_dir.clone().unwrap_or_else(|| dir.clone());
     let execution = velnor_runner::execution::load_execution_file(&config_dir, None)
         .or_else(|_| velnor_runner::execution::load_execution_file(&dir, None))
@@ -1805,7 +1839,7 @@ mod tests {
             globals: globals_with_output(OutputArg::Json),
             command: Command::Status(Box::new(runtime::StatusArgs {
                 config_dir: Some(dir.clone()),
-                slots: 1,
+                slots: Some(1),
                 check_target_mvp: false,
                 json: false,
                 state_dir: None,

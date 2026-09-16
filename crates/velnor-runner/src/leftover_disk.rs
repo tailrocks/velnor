@@ -227,7 +227,9 @@ pub fn discover_daemon_work_roots() -> Vec<PathBuf> {
     }
 }
 
-fn discover_daemon_work_roots_for_layout(layout: &crate::storage::StorageLayout) -> Vec<PathBuf> {
+pub(crate) fn discover_daemon_work_roots_for_layout(
+    layout: &crate::storage::StorageLayout,
+) -> Vec<PathBuf> {
     let lib_parent = layout
         .lib_root
         .parent()

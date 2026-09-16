@@ -212,6 +212,18 @@ pub(crate) fn normalize_scope(raw: &str) -> &str {
     }
 }
 
+/// The boundary a daemon resolves from a `VELNOR_TRUST_SCOPE` value it was
+/// (or was not) given, without touching this process's cell.
+///
+/// This is [`TrustScopeArg`]'s answer for an environment that is not this
+/// process's: unset falls to the flag default [`FAIL_CLOSED`], set values are
+/// normalized exactly as [`resolve`] normalizes them. The packaged instance
+/// resolver uses it to report the trust boundary of another daemon.
+#[must_use]
+pub fn configured(value: Option<&str>) -> String {
+    TrustScope::normalize(value.unwrap_or(FAIL_CLOSED)).into_string()
+}
+
 /// The boundary this process resolved, or [`FAIL_CLOSED`] if it resolved none.
 ///
 /// This is what every trust-scoped store path consults. It can only ever return

@@ -4850,18 +4850,31 @@ pub(crate) fn daemon_config_dir(args: &DaemonArgs) -> Result<PathBuf> {
     }
 
     let base = config::config_dir(None)?;
-    let Some(identity) = args
+    let identity = args
         .name
         .as_deref()
         .or(args.work_dir.as_deref().and_then(Path::to_str))
-        .or(args.url.as_deref())
-    else {
-        return Ok(base);
-    };
+        .or(args.url.as_deref());
+    Ok(daemon_config_dir_under(&base, identity))
+}
 
-    Ok(base
-        .join("daemons")
-        .join(sanitize_daemon_config_component(identity)))
+/// The daemon-scoped config directory below a resolved config base:
+/// `<base>/daemons/<sanitized identity>`, or the base itself when the daemon
+/// has no identity. This is the one spelling of that path; the packaged
+/// instance resolver (`daemon_instance`) calls it with the identity the unit
+/// environment gives the daemon, so `velnorctl` lands in the same directory.
+pub fn daemon_config_dir_under(base: &Path, identity: Option<&str>) -> PathBuf {
+    match identity {
+        Some(identity) => base
+            .join("daemons")
+            .join(sanitize_daemon_config_component(identity)),
+        None => base.to_path_buf(),
+    }
+}
+
+/// The work directory a daemon uses when `--work-dir` is not passed.
+pub(crate) fn default_daemon_work_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("_work")
 }
 
 fn sanitize_daemon_config_component(value: &str) -> String {
@@ -12658,7 +12671,7 @@ fn append_native_action_step_from_plan(
 fn slot_work_dir(config_dir: &std::path::Path, work_dir: Option<&std::path::Path>) -> PathBuf {
     work_dir
         .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| config_dir.join("_work"))
+        .unwrap_or_else(|| default_daemon_work_dir(config_dir))
 }
 
 fn job_work_dir(

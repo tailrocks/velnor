@@ -56,11 +56,20 @@ impl UnixEndpoint {
         })
     }
 
-    /// Build an endpoint from a validated instance name.
+    /// Build an endpoint from a validated instance name under this process's
+    /// own socket root.
     pub fn from_instance(instance: &str) -> Result<Self, EndpointError> {
+        Self::in_socket_root(&socket_root::socket_root(), instance)
+    }
+
+    /// Build an endpoint for an instance under an explicit socket root — the
+    /// root of the daemon being addressed, which need not be this process's
+    /// (a packaged daemon under `/run/velnor` inspected from a shell whose
+    /// environment names no storage root).
+    pub fn in_socket_root(root: &Path, instance: &str) -> Result<Self, EndpointError> {
         validate_instance(instance)?;
         Ok(Self {
-            root: socket_root::socket_root().join(instance),
+            root: root.join(instance),
             instance: instance.to_owned(),
         })
     }

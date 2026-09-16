@@ -128,6 +128,10 @@ pub enum StorageCommand {
 
 #[derive(Debug)]
 pub struct CacheArgs {
+    /// Packaged daemon instance whose stores to inspect (systemd instance
+    /// name or `VELNOR_NAME`). `None` covers every packaged instance on the
+    /// host, or this process's own environment on a host without any.
+    pub instance: Option<String>,
     pub work_dir: Option<PathBuf>,
     pub config_dir: Option<PathBuf>,
     pub budget_targets_bytes: u64,
@@ -138,13 +142,13 @@ pub struct CacheArgs {
     pub command: CacheCommand,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CacheCommand {
     Du,
     Gc(CacheGcArgs),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CacheGcArgs {
     pub dry_run: bool,
     pub yes: bool,
