@@ -2386,9 +2386,95 @@ fn inspect_jobs(
             .and_then(|strategy| mapping_value(strategy, "matrix"))
             .and_then(Value::as_mapping);
         failures.job = Some(job_id.clone());
+        audit_job_level_env(job, path, failures);
         inspect_mapping(job, path, matrix, trusted_gate, velnor_policy, failures);
         failures.job = None;
     }
+}
+
+/// GitHub expression contexts forbidden in job-level `env:`.
+///
+/// Per the context-availability table
+/// (<https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability>),
+/// `jobs.<job_id>.env` allows only `github, needs, strategy, matrix, vars,
+/// secrets, inputs`, and "The listed contexts are only available for the given
+/// workflow key, and may not be used anywhere else." `runner` is additionally
+/// proven by a live rejection: a workflow with job-level `CARGO_HOME: ${{
+/// runner.temp }}/...` concluded `failure` with 0 jobs and `Unrecognized
+/// named-value: 'runner'`. `steps` is additionally proven by its section ("You
+/// can access this context from any step in a job",
+/// <https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#steps-context>).
+/// `matrix` and `strategy` are proven allowed (listed in the table and "from
+/// any job or step" in their sections), so they are not flagged. `job`, `env`,
+/// and `jobs` are also absent from the table but omitted from enforcement as
+/// outside this rule's named scope.
+const JOB_ENV_FORBIDDEN_CONTEXTS: &[&str] = &["runner", "steps"];
+
+/// Reject forbidden contexts in a job's own `env:` mapping. Step-level `env:`
+/// allows every context (including `runner` and `steps`), so only the job
+/// mapping's direct `env` child is inspected; steps are left to
+/// [`inspect_mapping`].
+fn audit_job_level_env(job: &Mapping, path: &Path, failures: &mut PolicyFindings) {
+    let Some(env) = mapping_value(job, "env").and_then(Value::as_mapping) else {
+        return;
+    };
+    for (key, value) in env {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        for expression in github_expressions(text) {
+            if let Some(context) = expression_root_context(&expression)
+                && JOB_ENV_FORBIDDEN_CONTEXTS.contains(&context.as_str())
+            {
+                failures.record(
+                    Rule::Structure,
+                    path,
+                    &format!(
+                        "job-level env `{}` uses forbidden `{context}` context: `${{{{ {expression} }}}}`",
+                        key.as_str(),
+                        expression = expression.trim(),
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Every `${{ ... }}` inner expression in `text`, in order.
+fn github_expressions(text: &str) -> Vec<String> {
+    let mut expressions = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("${{") {
+        let after_start = &rest[start + 3..];
+        let Some(end) = after_start.find("}}") else {
+            break;
+        };
+        expressions.push(after_start[..end].to_owned());
+        rest = &after_start[end + 2..];
+    }
+    expressions
+}
+
+/// The root context of a `${{ ... }}` inner expression: the leading identifier
+/// (`runner` in `runner.temp`, `steps` in `steps.prove.outputs.asset`,
+/// `github` in `github.event.inputs.runner`). Function names (`toJson`), string
+/// literals, and non-identifiers yield their leading token or `None`; callers
+/// match against the forbidden list, so only a forbidden root flags.
+fn expression_root_context(expression: &str) -> Option<String> {
+    let mut chars = expression.trim().chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    let mut root = String::from(first);
+    for character in chars {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            root.push(character);
+        } else {
+            break;
+        }
+    }
+    Some(root)
 }
 
 fn inspect_yaml_value(
