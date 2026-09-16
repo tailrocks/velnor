@@ -19,9 +19,21 @@ else
   build=(cargo check -p velnor-runner --release --locked --features test-support)
 fi
 
+echo "release boundary probe: the following compile is EXPECTED TO FAIL with:"
+echo "  $expected"
+echo "success looks like: this script exits 0 printing 'release boundary guard fired: ...'. Treat the error text below as the passing signal, not a swallowed failure."
+if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+  echo "##[group]Expected-failure probe output (must fail with the guard)"
+fi
 if "${build[@]}" 2>&1 | tee "$log"; then
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "##[endgroup]"
+  fi
   echo "boundary violation: test-support compiled in a release profile" >&2
   exit 1
+fi
+if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+  echo "##[endgroup]"
 fi
 
 if ! grep -qF "$expected" "$log"; then
