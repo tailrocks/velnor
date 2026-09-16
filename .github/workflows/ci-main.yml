@@ -188,10 +188,12 @@ jobs:
           deadline=$((SECONDS + 900))
           run_id=""
           while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository_id == .repository.id)]')"
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
             waiting=false
+            seen=false
             while read -r candidate_run; do
               test "$candidate_run" != '' || continue
+              seen=true
               status="$(jq -r .status <<<"$candidate_run")"
               id="$(jq -r .id <<<"$candidate_run")"
               # $name in the filter is a jq variable, not a shell expansion.
@@ -202,6 +204,9 @@ jobs:
               fi
               [[ "$status" == "completed" ]] || waiting=true
             done <<<"$(jq -c '.[]' <<<"$runs")"
+            # No runs yet means the API has not indexed the sibling run, not
+            # that it will never come: keep polling until the deadline.
+            [[ "$seen" == "true" ]] || waiting=true
             [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }
             sleep 15
           done

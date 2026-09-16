@@ -3640,10 +3640,12 @@ fn policy_candidate_step(revision: &str) -> String {
           deadline=$((SECONDS + 900))
           run_id=""
           while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository_id == .repository.id)]')"
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
             waiting=false
+            seen=false
             while read -r candidate_run; do
               test "$candidate_run" != '' || continue
+              seen=true
               status="$(jq -r .status <<<"$candidate_run")"
               id="$(jq -r .id <<<"$candidate_run")"
               # $name in the filter is a jq variable, not a shell expansion.
@@ -3654,6 +3656,9 @@ fn policy_candidate_step(revision: &str) -> String {
               fi
               [[ "$status" == "completed" ]] || waiting=true
             done <<<"$(jq -c '.[]' <<<"$runs")"
+            # No runs yet means the API has not indexed the sibling run, not
+            # that it will never come: keep polling until the deadline.
+            [[ "$seen" == "true" ]] || waiting=true
             [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
             sleep 15
           done
@@ -13135,6 +13140,29 @@ channel = "stable"
                 "the manifest accept filter binds {clause}: {owner}"
             );
         }
+    }
+
+    /// The acquire step finds the sibling PR run through the runs-list API,
+    /// whose items carry `.head_repository` as an object — there is no
+    /// `.head_repository_id` scalar, so selecting on it matches nothing and
+    /// the candidate path fails systematically. An empty list means the API
+    /// has not indexed the sibling run yet, so the loop keeps polling until
+    /// the deadline instead of failing fast.
+    #[test]
+    fn policy_acquire_step_selects_same_repository_runs_by_object_id() {
+        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        assert!(
+            owner.contains("select(.head_repository.id == .repository.id)"),
+            "the same-repository select compares the embedded objects: {owner}"
+        );
+        assert!(
+            !owner.contains(".head_repository_id"),
+            "the list endpoint has no head_repository_id scalar: {owner}"
+        );
+        assert!(
+            owner.contains("[[ \"$seen\" == \"true\" ]] || waiting=true"),
+            "an unindexed sibling run keeps polling until the deadline: {owner}"
+        );
     }
 
     /// The acquire step's `--closure` probe executes the candidate binary in a
