@@ -3615,7 +3615,9 @@ fn audited_pin_script() -> &'static str {
 /// `GITHUB_TOKEN` emptied: the probe needs no auth, so the exec point holds
 /// no token even though the API steps above it use the job token. Fork
 /// generator changes fail closed: only same-repository runs are even
-/// considered.
+/// considered. The same-repository select compares the embedded
+/// `.head_repository.id` object: the runs-list endpoint exposes no
+/// `.head_repository_id` scalar, and selecting on it matches nothing.
 fn policy_candidate_step(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
