@@ -79,21 +79,30 @@ jobs:
         run: |
           set -euo pipefail
           for workflow in ci-main.yml nightly.yml; do
-            if [[ "$(gh run list --workflow "$workflow" --status in_progress --limit 1 --jq 'length')" != "0" ]]; then
+            if [[ "$(gh run list --workflow "$workflow" --status in_progress --limit 1 --json databaseId --jq 'length')" != "0" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "$workflow is in_progress; skipping cache retention" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
           done
           echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Checkout setup action
+        if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github/actions
+          sparse-checkout-cone-mode: true
+          fetch-depth: 1
+          persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+        uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '643f33123abe01adee09662a366cb9a5d2b3c3bf' }}
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || 'ad0b1065d8a8c3b31be5759dedbb94aec0f7f93c' }}
       - name: Set trusted workflow policy revision
         if: steps.retention-gate.outputs.skip != 'true'
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ad0b1065d8a8c3b31be5759dedbb94aec0f7f93c" >> "$GITHUB_ENV"
       - name: Sweep closed-PR merge-ref caches
         if: steps.retention-gate.outputs.skip != 'true'
         env:
