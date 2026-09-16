@@ -124,9 +124,12 @@ label on Apple silicon.
 
 ## Identity
 
-The GitHub runner name is `velnor-<host>-<instance>-<slot>`, and the same
-string appears in the job's **Set up job** log as `Runner name`, with
-`Machine name`, `Instance`, and `Slot` beneath it.
+The GitHub runner name is `velnor-<host>-<instance>-<slot>` (`<slot>` counts
+from 0), and the same string appears in the job's **Set up job** log as
+`Runner name`, with `Machine name`, `Instance`, and `Slot` beneath it. Every
+JIT registration serves one job; while a slot runs one it already holds the
+next registration, named `velnor-<host>-<instance>-<slot>-next-<pid>-<cycle>`,
+so the runner list shows that form from the second job on.
 
 - `<host>` is the slug of the machine's `uname` nodename (lowercase,
   `[a-z0-9-]`, e.g. `alexeys-macbook-pro-local`). `velnorctl` and
@@ -206,6 +209,21 @@ per daemon generation and reported by `velnor-runner preflight` and
 `supported`: overlayfs reads the store over virtiofs as a lower and writes to
 the VM-local upper. (An upper on the virtiofs bind is what the VM kernel
 mounts read-only; the layer no longer puts one there.)
+
+The layer reads whatever *this host's* `trusted` Cargo store holds — stores
+are per host, not per pool. A host that has never run a push or schedule job
+has an empty one, and a PR job cannot fill it: its `Prepare Cargo` fetch lands
+in the discarded upper. With `tailrocks/velnor`'s workflow, whose Velnor Rust
+units run Cargo offline after `Control / Prepare Cargo`, every PR Rust unit
+such a host claims fails at `cargo metadata --locked` with `can't checkout
+from '…' : you are in the offline mode (--offline)` while the same unit
+passes on a host whose trusted store is warm — and the host, sharing the
+`self-hosted, velnor-target-mvp` labels with the fleet, keeps claiming them.
+Do not serve pull requests from a host whose trusted store has not been
+populated by a trusted job on that host; drain it (`velnorctl host drain`)
+if it is. A main-branch unit on a cold host fails the same way unless
+`Prepare Cargo` itself landed on that host, so a new host's first trusted
+run is not guaranteed green either.
 
 Each admission says what its stores read. A trusted-pool PR job's **Set up
 job** log gets a `Persistent stores` group with a `Read-through:` line naming
