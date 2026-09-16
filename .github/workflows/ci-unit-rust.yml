@@ -298,7 +298,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin
-          key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
+          key: velnor-cargo-bin-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
       - name: Verify cargo bin tools
         if: ${{ inputs.cargo_bin_tools != '' && (steps.cargo-bin-toolchain.outputs.cache-hit == 'true') }}
         id: cargo-bin-verify
@@ -317,6 +317,17 @@ jobs:
               missing=1
               break
             fi
+            if ! "$tool" --version >/dev/null 2>&1; then
+              missing=1
+              break
+            fi
+            if [[ "$tool" == cargo-* ]]; then
+              subcommand="${tool#cargo-}"
+              if ! cargo "$subcommand" --version >/dev/null 2>&1; then
+                missing=1
+                break
+              fi
+            fi
           done
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
       - name: Set up cargo bin tools
@@ -330,7 +341,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin
-          key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
+          key: velnor-cargo-bin-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
       - name: Restore mold 2.42.0 cache
         id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
