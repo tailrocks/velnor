@@ -5985,6 +5985,7 @@ fn daemon_slot_run_args(
 
     Ok(RunArgs {
         slot_count: validated_slot_count,
+        slot_index: Some(slot_index),
         state_db: Some(
             args.state_db
                 .clone()
@@ -8427,6 +8428,7 @@ async fn handle_job_request(
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let slot_count = args.slot_count;
+        let slot_store_key = args.slot_index.map(crate::container::slot_store_key);
         let node_action_image = args.node_action_image.clone();
         let effective_trust_scope = effective_trust_scope.clone();
         let store_read_through = store_read_through.clone();
@@ -8458,6 +8460,7 @@ async fn handle_job_request(
                 &docker_image,
                 resource_options,
                 slot_count,
+                slot_store_key,
                 &node_action_image,
                 &admission_graph,
                 &effective_trust_scope,
@@ -10484,6 +10487,7 @@ fn execute_script_job(
     docker_image: &str,
     resource_options: Vec<String>,
     slot_count: NonZeroU32,
+    slot_store_key: Option<String>,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
@@ -10511,6 +10515,7 @@ fn execute_script_job(
         docker_image,
         resource_options,
         slot_count,
+        slot_store_key,
         node_action_image,
         admission_graph,
         effective_trust_scope,
@@ -10620,6 +10625,8 @@ fn execute_microvm_script_job(
             tools_host: run_root.join("tools"),
             docker_host_work_dir: None,
             execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+            // The microVM backend shares stores without per-slot subtrees.
+            slot_store_key: None,
         },
         docker_image,
         Vec::new(),
@@ -11013,6 +11020,7 @@ fn execute_script_job_inner(
     docker_image: &str,
     resource_options: Vec<String>,
     slot_count: NonZeroU32,
+    slot_store_key: Option<String>,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
@@ -11096,6 +11104,7 @@ fn execute_script_job_inner(
             tools_host: tools.clone(),
             docker_host_work_dir,
             execution_backend,
+            slot_store_key,
         },
         docker_image,
         resource_options,
@@ -17349,6 +17358,7 @@ mod tests {
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
             slot_count: NonZeroU32::MIN,
+            slot_index: None,
             state_db: None,
             config_dir: None,
             pat: None,
@@ -17766,6 +17776,7 @@ mod tests {
                 tools_host: "/velnor/work/job/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -26147,6 +26158,7 @@ runs:
             tools_host: temp.join("tools"),
             mount_docker_socket: true,
             slot_count: NonZeroU32::MIN,
+            slot_store_key: None,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),

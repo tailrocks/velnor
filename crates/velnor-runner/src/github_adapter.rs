@@ -39,6 +39,9 @@ pub struct GitHubJobContainerPaths {
     pub tools_host: PathBuf,
     pub docker_host_work_dir: Option<PathBuf>,
     pub execution_backend: velnor_model::ExecutionBackendKind,
+    /// The owning daemon slot's store key; see
+    /// [`JobContainerSpec::slot_store_key`].
+    pub slot_store_key: Option<String>,
 }
 
 /// Build the job container spec for one admitted job.
@@ -115,6 +118,7 @@ pub fn github_job_container_spec(
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
         slot_count,
+        slot_store_key: paths.slot_store_key,
         env: backend_advertising_env(job_container_env(job), paths.execution_backend),
         resource_options,
         options: job_container_options(job, trust_scope),
@@ -1128,6 +1132,7 @@ mod tests {
             tools_host: root.join("tools"),
             mount_docker_socket: true,
             slot_count: NonZeroU32::MIN,
+            slot_store_key: None,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),
@@ -1221,6 +1226,7 @@ mod tests {
                 tools_host: "/velnor/work/job/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -1309,6 +1315,7 @@ mod tests {
                 tools_host: "/velnor/work/job/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -1450,6 +1457,7 @@ mod tests {
                     tools_host: "/tmp/tools".into(),
                     docker_host_work_dir: None,
                     execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                    slot_store_key: None,
                 },
                 "ubuntu:24.04",
                 Vec::new(),
@@ -1520,6 +1528,7 @@ mod tests {
                     tools_host: work.join("slot-1/job-1/tools"),
                     docker_host_work_dir: None,
                     execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                    slot_store_key: None,
                 },
                 "ubuntu:24.04",
                 Vec::new(),
@@ -1724,6 +1733,7 @@ mod tests {
                 tools_host: "/tmp/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -1754,6 +1764,7 @@ mod tests {
                 tools_host: "/tmp/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -1793,6 +1804,7 @@ mod tests {
                 tools_host: "/tmp/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -1816,6 +1828,7 @@ mod tests {
             tools_host: "/tmp/tools".into(),
             docker_host_work_dir: None,
             execution_backend: velnor_model::ExecutionBackendKind::Docker,
+            slot_store_key: None,
         };
         // Default: mbx store, no sccache presence anywhere in the spec.
         let default = github_job_container_spec(
@@ -1877,6 +1890,7 @@ mod tests {
                 tools_host: "/tmp/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),

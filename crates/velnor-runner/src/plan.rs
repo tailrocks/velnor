@@ -113,6 +113,7 @@ mod tests {
             tools_host: root.join("tools"),
             mount_docker_socket: false,
             slot_count: std::num::NonZeroU32::MIN,
+            slot_store_key: None,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),

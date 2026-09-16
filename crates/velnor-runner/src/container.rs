@@ -194,6 +194,17 @@ pub struct JobContainerSpec {
     /// Validated daemon slot count carried into this job. Resource budgeting
     /// must not infer topology from this job's filesystem layout.
     pub slot_count: NonZeroU32,
+    /// The owning daemon slot's stable store key (`slot-N`), carried from
+    /// the slot's own configuration like `slot_count`. It scopes the
+    /// per-slot persistent stores (mise installs, the mbx cache and target
+    /// tree). `None` means no slot owns this job (standalone `run`), and
+    /// those stores stay job-ephemeral: persistence is never granted to a
+    /// job without a slot identity, because two unidentified jobs would
+    /// share one mutable store. Never derived from the work-dir layout:
+    /// that inference held only for `--work-dir <root>` with several
+    /// slots, and silently lost every store on the default `_work` layout
+    /// and on single-slot hosts.
+    pub slot_store_key: Option<String>,
     pub env: Vec<(String, String)>,
     /// Daemon-enforced Docker resource limits. CPU and memory limits are
     /// normalized with workflow createOptions into runner-owned values before
@@ -1527,7 +1538,7 @@ impl JobContainerSpec {
     }
 
     pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
-        match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
+        match (self.repository_store_key(), self.slot_store_key.as_deref()) {
             (Some(repository), Some(slot)) => mise_executable_store_host(
                 &self.temp_host,
                 self.store_trust_scope.as_str(),
@@ -1557,8 +1568,8 @@ impl JobContainerSpec {
     /// leases, and checkouts (`MBX_CACHE_DIR` → `cache_dir` →
     /// `cache_dir/incremental`). The mount itself is unchanged, so the store
     /// root stays shared and each slot's cache stays warm across its own jobs.
-    /// Without a slot identity (a non-production temp layout) the subdir
-    /// isolates per job name instead of falling back to the shared root.
+    /// Without a slot identity (standalone `run`) the subdir isolates per
+    /// job name instead of falling back to the shared root.
     pub(crate) fn mbx_cache_container_dir(&self) -> String {
         crate::mbx_store::slot_cache_dir(Path::new(MBX_CONTAINER_STORE), &self.mbx_slot_key())
             .to_string_lossy()
@@ -1660,10 +1671,10 @@ impl JobContainerSpec {
     }
 
     fn mbx_slot_key(&self) -> String {
-        slot_store_key(&self.temp_host).unwrap_or_else(|| {
+        self.slot_store_key.clone().unwrap_or_else(|| {
             eprintln!(
-                "forensics.lifecycle: mbx cache isolated per job: no runner slot identity under {}",
-                self.temp_host.display()
+                "forensics.lifecycle: mbx cache isolated per job: job {} has no runner slot identity",
+                self.name
             );
             sanitize_store_key(&self.name)
         })
@@ -2221,12 +2232,12 @@ pub(crate) fn daemon_store_root(temp_host: &Path) -> PathBuf {
     daemon_shared_root(per_slot_root)
 }
 
-/// Resolve the stable runner slot from a production job temp path
-/// (`…/slot-N/<job>/temp`). Executable stores must not fall back to a shared
-/// scope when this identity is absent: that would recreate concurrent mutation.
-fn slot_store_key(temp_host: &Path) -> Option<String> {
-    let slot = temp_host.parent()?.parent()?.file_name()?.to_str()?;
-    slot.starts_with("slot-").then(|| sanitize_store_key(slot))
+/// Store key of daemon slot `slot_index` (1-based): the `slot-N` name the
+/// daemon gives the slot everywhere else (its config dir, its logs), so a
+/// store warmed under one layout stays warm under the next.
+#[must_use]
+pub(crate) fn slot_store_key(slot_index: usize) -> String {
+    sanitize_store_key(&format!("slot-{slot_index}"))
 }
 
 /// Sanitize a job/store key into a filesystem-safe directory name.
@@ -2362,6 +2373,7 @@ mod tests {
             tools_host: job.join("tools"),
             mount_docker_socket: true,
             slot_count: NonZeroU32::MIN,
+            slot_store_key: None,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
             resource_options: vec!["--memory".into(), "8g".into()],
             options: vec!["--cpus".into(), "2".into()],
@@ -3176,10 +3188,13 @@ mod tests {
     fn mise_installs_are_warm_per_slot_but_isolated_between_slots() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut same_slot = spec();
         same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        same_slot.slot_store_key = Some(slot_store_key(3));
         let mut other_slot = spec();
         other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+        other_slot.slot_store_key = Some(slot_store_key(4));
 
         let expected = PathBuf::from(
             "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3",
@@ -3191,6 +3206,7 @@ mod tests {
         let root = container_test_temp("mise-slot");
         let mut warm = spec();
         warm.temp_host = root.join("work/slot-3/job-a/temp");
+        warm.slot_store_key = Some(slot_store_key(3));
         let expected_mount = format!(
             "{}:/opt/mise/installs",
             warm.mise_executable_store_host().display()
@@ -3208,14 +3224,65 @@ mod tests {
         );
     }
 
+    /// The per-slot stores follow the slot's carried identity, not the shape
+    /// of its work dir. Regression: with the identity parsed from
+    /// `…/slot-N/<job>/temp`, the daemon's default `<slot>/_work/<job>/temp`
+    /// layout (`velnorctl host start`) and the single-slot fleet layout
+    /// (`<work>/<job>/temp`) both lost every persistent mise install and
+    /// every warm mbx cache, on every job, with only a forensics line to
+    /// show for it.
+    #[test]
+    fn per_slot_stores_follow_the_carried_slot_identity_not_the_work_dir_shape() {
+        let mut default_layout = spec();
+        default_layout.temp_host =
+            "/home/ci/.local/state/velnor/lib/velnor/runner/hosts/mac-1/slots/slot-2/_work/job-a/temp"
+                .into();
+        default_layout.slot_store_key = Some(slot_store_key(2));
+        let mut single_slot = spec();
+        single_slot.temp_host = "/var/lib/velnor/work/job-b/temp".into();
+        single_slot.slot_store_key = Some(slot_store_key(1));
+
+        assert!(default_layout
+            .mise_executable_store_host()
+            .ends_with("slots/slot-2"));
+        assert_eq!(
+            default_layout.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-2"
+        );
+        assert!(single_slot
+            .mise_executable_store_host()
+            .ends_with("slots/slot-1"));
+        assert_eq!(
+            single_slot.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-1"
+        );
+
+        // A job no slot owns gets job-ephemeral stores, whatever its path
+        // looks like: persistence is never granted on a lookalike layout.
+        let mut unowned = spec();
+        unowned.temp_host = "/var/lib/velnor/work/slot-3/job-c/temp".into();
+        unowned.slot_store_key = None;
+        assert_eq!(
+            unowned.mise_executable_store_host(),
+            unowned.temp_host.join("_velnor/ephemeral/mise-installs")
+        );
+        assert_eq!(
+            unowned.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/velnor-job-1"
+        );
+    }
+
     #[test]
     fn mbx_cache_is_warm_per_slot_but_isolated_between_slots() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut same_slot = spec();
         same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        same_slot.slot_store_key = Some(slot_store_key(3));
         let mut other_slot = spec();
         other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+        other_slot.slot_store_key = Some(slot_store_key(4));
 
         // Same slot, successive jobs: one warm subdir. Different slots:
         // disjoint subdirs, so mbx's registrar/lease flocks never cross.
@@ -3262,8 +3329,10 @@ mod tests {
     fn concurrent_slots_do_not_share_mbx_target_roots() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut other = spec();
         other.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+        other.slot_store_key = Some(slot_store_key(4));
 
         assert_eq!(
             first.mbx_target_container_dir(),
@@ -3318,12 +3387,14 @@ mod tests {
             .join("slot-3")
             .join("job-a")
             .join("temp");
+        first_run.slot_store_key = Some(slot_store_key(3));
         let mut other_run = spec();
         other_run.temp_host = container_test_temp("concurrent-slots-b")
             .join("slots")
             .join("slot-4")
             .join("job-c")
             .join("temp");
+        other_run.slot_store_key = Some(slot_store_key(4));
         let first_args = rendered(&first_run.start_args().unwrap());
         let other_args = rendered(&other_run.start_args().unwrap());
         assert!(first_args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-3".into()));
@@ -3334,8 +3405,10 @@ mod tests {
     fn sequential_same_slot_jobs_reuse_mbx_target_root() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut second = spec();
         second.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        second.slot_store_key = Some(slot_store_key(3));
 
         assert_eq!(
             first.mbx_target_container_dir(),
@@ -4127,15 +4200,18 @@ mod tests {
         );
     }
 
-    /// Spec whose temp root carries the production slot layout, so the
-    /// persistent mise stores resolve their slot scope like a real job.
+    /// Spec owned by daemon slot 1, so the persistent per-slot stores resolve
+    /// their slot scope like a real job. The temp root deliberately uses the
+    /// default `_work` layout, which carries no slot name of its own.
     fn slotted_spec(name: &str) -> JobContainerSpec {
         let mut spec = spec();
         spec.temp_host = container_test_temp(name)
             .join("slots")
             .join("slot-1")
+            .join("_work")
             .join("job-1")
             .join("temp");
+        spec.slot_store_key = Some(slot_store_key(1));
         spec
     }
 
