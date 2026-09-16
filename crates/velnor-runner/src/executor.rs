@@ -1540,11 +1540,33 @@ impl<T> StepPublishSpill<T> {
 /// Exception: on the cancel path the executor never returns `ScriptJobResult`,
 /// so the streamed mirror (fed through this channel) is the persisted log's
 /// only source — drops there surface in the cancel-path truncation marker.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BoundedStepSender<T> {
     sender: Sender<T>,
     drops: Arc<AtomicU64>,
     spill: Option<Arc<StepPublishSpill<T>>>,
+    sink: Option<Arc<dyn StepRecordSink<T>>>,
+}
+
+impl<T> std::fmt::Debug for BoundedStepSender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundedStepSender")
+            .field("drops", &self.drops)
+            .field("spill", &self.spill.is_some())
+            .field("sink", &self.sink.is_some())
+            .finish()
+    }
+}
+
+/// Local sink invoked synchronously, on the sending thread, for every record
+/// BEFORE it enters the publish channel. This is the durable copy: the
+/// channel feeds a best-effort network publisher that a stalled backend can
+/// starve or the drain deadline can abort, so anything that must exist on
+/// disk regardless of GitHub reachability is written here, not there.
+/// actions/runner has the same split — `PagingLogger` writes `_diag/pages`
+/// on the execution side and `JobServerQueue` uploads from those files.
+pub trait StepRecordSink<T>: Send + Sync {
+    fn record(&self, value: &T);
 }
 
 impl<T> BoundedStepSender<T> {
@@ -1553,6 +1575,7 @@ impl<T> BoundedStepSender<T> {
             sender,
             drops: Arc::new(AtomicU64::new(0)),
             spill: None,
+            sink: None,
         }
     }
 
@@ -1561,7 +1584,14 @@ impl<T> BoundedStepSender<T> {
             sender,
             drops: Arc::new(AtomicU64::new(0)),
             spill: Some(spill),
+            sink: None,
         }
+    }
+
+    /// Attach the durable local sink; see [`StepRecordSink`].
+    pub fn with_sink(mut self, sink: Arc<dyn StepRecordSink<T>>) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     /// Cloneable handle to the drop counter; the runner keeps this (not a
@@ -1580,6 +1610,9 @@ impl<T> BoundedStepSender<T> {
     /// travel in `ScriptJobResult` — except on the cancel path, where the
     /// count feeds the truncation marker instead.
     pub fn send_best_effort(&self, value: T) {
+        if let Some(sink) = &self.sink {
+            sink.record(&value);
+        }
         match self.sender.try_send(value) {
             Ok(()) => {}
             Err(TrySendError::Full(value)) => {

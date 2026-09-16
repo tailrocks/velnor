@@ -412,6 +412,9 @@ struct RunServiceJobContext {
     billing_owner_id: Option<String>,
     journal_dir: PathBuf,
     journal_state: RunServiceJobJournalState,
+    /// `StepLogPages::root` of the slot handling the job: a job rejected
+    /// before execution still leaves its synthetic step's page there.
+    step_log_pages_root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1110,6 +1113,7 @@ pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
         billing_owner_id: record.billing_owner_id,
         journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
         journal_dir,
+        step_log_pages_root: StepLogPages::root(slot_dir),
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
@@ -1174,6 +1178,7 @@ async fn complete_recorded_in_flight_job_with_failure(
         billing_owner_id: record.billing_owner_id,
         journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
         journal_dir,
+        step_log_pages_root: StepLogPages::root(slot_dir),
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
@@ -7590,6 +7595,7 @@ async fn handle_v2_message(
         billing_owner_id: reference.billing_owner_id.clone(),
         journal_dir: journal_dir.clone(),
         journal_state: RunServiceJobJournalState::Acquired,
+        step_log_pages_root: StepLogPages::root(config_dir),
     };
     let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
         Ok(job) => job,
@@ -7630,6 +7636,7 @@ async fn handle_v2_message(
         billing_owner_id: reference.billing_owner_id,
         journal_dir,
         journal_state: RunServiceJobJournalState::Acquired,
+        step_log_pages_root: StepLogPages::root(config_dir),
     };
     if let Some(trigger) = prewarm_trigger.take() {
         let _ = trigger.send(());
@@ -8378,8 +8385,17 @@ async fn handle_job_request(
         let step_log_spill = StepPublishSpill::new();
         let (step_log_tx, step_log_receiver) =
             tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        // The durable copy of every step log is written by the sender side
+        // (before the record enters the channel); the publisher uploads it
+        // from disk. See `StepLogPages`.
+        let step_log_pages = Arc::new(StepLogPages::open(&StepLogPages::root(config_dir), &job));
+        forensics.lifecycle(&format!(
+            "step-log-pages dir={}",
+            step_log_pages.dir().display()
+        ));
         let step_log_sender =
-            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill));
+            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill))
+                .with_sink(Arc::clone(&step_log_pages) as Arc<_>);
         let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
@@ -8400,6 +8416,7 @@ async fn handle_job_request(
             step_log_spill,
             console_log_path,
             Arc::clone(&streamed_step_logs),
+            Arc::clone(&step_log_pages),
         );
         let config_dir = config_dir.to_path_buf();
         let teardown_config_dir = config_dir.clone();
@@ -8667,6 +8684,11 @@ async fn handle_job_request(
                 mirror_evicted,
             );
         }
+        // Every final record has a page before completion: the sender-side
+        // sink covers the streamed path; this covers records that reached
+        // the result without it (a completion-only backend, the cancel-path
+        // merge above).
+        step_log_pages.persist_missing(&step_logs);
         let teardown = job_result.teardown;
         let execution_timings = job_result.timings;
         let finalize_started = Instant::now();
@@ -9628,6 +9650,7 @@ fn start_step_log_publisher(
     spill: Arc<StepPublishSpill<StepLog>>,
     console_log_path: Option<PathBuf>,
     streamed_step_logs: Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
+    step_log_pages: Arc<StepLogPages>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -9862,11 +9885,28 @@ fn start_step_log_publisher(
 
                     // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
                     // Upload for every non-skipped step — even empty — so it is expandable.
+                    // The blob is the local page read back from disk (the
+                    // sender side wrote it when the step completed); the
+                    // in-memory lines are the fallback only when that page
+                    // could not be written, so a full disk does not also
+                    // lose the GitHub copy.
                     // LOG FORMAT CONTRACT (docs/reference/interface.md): blob lines
                     // MUST carry the 7-digit timestamp prefix — the UI strips it
-                    // into the "Show timestamps" toggle column.
+                    // into the "Show timestamps" toggle column; the page holds
+                    // them already.
                     if !log.skipped {
-                        let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
+                        let timestamped = match step_log_pages.read_page(&log) {
+                            Ok(page) => page,
+                            Err(error) => {
+                                tracing::warn!(
+                                    job_id = %job_id,
+                                    step_id = %log.step_id,
+                                    error = %error,
+                                    "step-log page unreadable; uploading from memory"
+                                );
+                                blob_log_lines(&unix_now_iso8601(), &lines)
+                            }
+                        };
                         if let Err(e) = publish_with_timeout(client.upload_step_log(
                             &plan_id,
                             &job_id,
@@ -13368,6 +13408,213 @@ fn combine_job_and_cleanup<T>(
     }
 }
 
+/// Newest job page directories kept per slot under `logs/pages/`; older ones
+/// are pruned when a new job's directory is created.
+const STEP_LOG_PAGE_JOBS_RETAINED: usize = 32;
+
+/// Name of the per-job page index: one tab-separated line per persisted step
+/// (`order`, `exit_code`, `page file`, `display name`), so a human can find a
+/// step's page without decoding step ids.
+const STEP_LOG_PAGE_INDEX: &str = "index.tsv";
+
+/// Local step-log pages — the primary sink for every completed step's log.
+///
+/// `<config-dir>/logs/pages/<job-id>/<order>-<step-id>.log` holds exactly
+/// the bytes the Results Service step-log blob carries (masked, lock-wait
+/// annotated, 7-digit-timestamp prefixed), and `index.tsv` names each page.
+/// The executor side writes a page the moment a step's final record is
+/// emitted (through [`StepRecordSink`] on the step-log sender), and the
+/// network publisher uploads that file from disk. GitHub reachability
+/// therefore never decides whether a step's output survives: on a host whose
+/// egress blocks blob storage the page is the only copy, and it is complete.
+/// Mirrors actions/runner, where `PagingLogger` writes `_diag/pages/` on the
+/// execution side and `JobServerQueue` uploads the files.
+///
+/// Masking is a property of the write: a page is masked with the job secrets
+/// plus every `::add-mask::` value any earlier record of this job carried,
+/// never with the emitting step's own masks only (see
+/// [`MaskPatterns::with_every_step`] for why per-step masking leaks).
+struct StepLogPages {
+    dir: PathBuf,
+    job: AgentJobRequestMessage,
+    job_masks: MaskPatterns,
+    /// Running union of every mask registered so far in this job.
+    registered_masks: Mutex<Vec<String>>,
+}
+
+impl std::fmt::Debug for StepLogPages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepLogPages")
+            .field("dir", &self.dir)
+            .field("job_id", &self.job.job_id)
+            .finish()
+    }
+}
+
+impl StepLogPages {
+    /// Root of every job's pages under one slot config dir.
+    fn root(config_dir: &Path) -> PathBuf {
+        config_dir.join("logs").join("pages")
+    }
+
+    /// Open (create) this job's page directory under `root` and prune the
+    /// oldest sibling job directories past [`STEP_LOG_PAGE_JOBS_RETAINED`].
+    fn open(root: &Path, job: &AgentJobRequestMessage) -> Self {
+        let dir = root.join(sanitize_path_segment(&job.job_id));
+        if let Err(error) = fs::create_dir_all(&dir) {
+            eprintln!(
+                "forensics.lifecycle: step-log page directory {} unavailable: {error}",
+                dir.display()
+            );
+        }
+        prune_step_log_page_jobs(root, &dir, STEP_LOG_PAGE_JOBS_RETAINED);
+        Self {
+            dir,
+            job_masks: MaskPatterns::new(job_secret_mask_values(job)),
+            job: job.clone(),
+            registered_masks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn page_path(&self, log: &StepLog) -> PathBuf {
+        self.dir.join(format!(
+            "{:03}-{}.log",
+            log.order.max(0),
+            sanitize_path_segment(&log.step_id)
+        ))
+    }
+
+    /// Remember the masks a record carries so every later page is masked
+    /// with them too.
+    fn register_masks(&self, masks: &[String]) {
+        if masks.iter().all(String::is_empty) {
+            return;
+        }
+        if let Ok(mut registered) = self.registered_masks.lock() {
+            for mask in masks {
+                if !mask.is_empty() && !registered.contains(mask) {
+                    registered.push(mask.clone());
+                }
+            }
+        }
+    }
+
+    /// The exact lines the page holds and the blob upload carries.
+    fn page_lines(&self, log: &StepLog) -> Vec<String> {
+        let registered = self
+            .registered_masks
+            .lock()
+            .map(|masks| masks.clone())
+            .unwrap_or_default();
+        let mut extra = registered;
+        extra.extend(log.masks.iter().cloned());
+        let masker = self.job_masks.with_extra(&extra);
+        let lines = annotate_lock_wait_lines(&mask_log_lines_with(&log.lines, &masker), &self.job);
+        blob_log_lines(&unix_now_iso8601(), &lines)
+    }
+
+    /// Write (or rewrite — the latest final record for a step is
+    /// authoritative) the step's page and index line. Returns the page path.
+    fn persist(&self, log: &StepLog) -> std::io::Result<PathBuf> {
+        let path = self.page_path(log);
+        let mut content = String::new();
+        for line in self.page_lines(log) {
+            content.push_str(&line);
+            content.push('\n');
+        }
+        fs::create_dir_all(&self.dir)?;
+        fs::write(&path, content)?;
+        let mut index = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(STEP_LOG_PAGE_INDEX))?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        writeln!(
+            index,
+            "{}\t{}\t{}\t{}",
+            log.order,
+            log.exit_code,
+            file_name,
+            log.display_name.replace(['\t', '\n'], " ")
+        )?;
+        Ok(path)
+    }
+
+    /// Persist every final record that has no page yet — the backstop for
+    /// records that reached `ScriptJobResult` without passing the step-log
+    /// sender (a backend that returns its logs only at completion).
+    fn persist_missing(&self, logs: &[StepLog]) {
+        for log in logs {
+            if log.completed_at.is_empty() || log.skipped || self.page_path(log).is_file() {
+                continue;
+            }
+            self.register_masks(&log.masks);
+            if let Err(error) = self.persist(log) {
+                eprintln!(
+                    "forensics.lifecycle: step-log page write failed step={} path={}: {error}",
+                    log.step_id,
+                    self.page_path(log).display()
+                );
+            }
+        }
+    }
+
+    /// Read a step's page back for upload. `Err` when no page exists (the
+    /// write failed) — the caller decides whether to upload from memory.
+    fn read_page(&self, log: &StepLog) -> std::io::Result<Vec<String>> {
+        let content = fs::read_to_string(self.page_path(log))?;
+        Ok(content.lines().map(str::to_owned).collect())
+    }
+}
+
+impl crate::executor::StepRecordSink<StepLog> for StepLogPages {
+    fn record(&self, log: &StepLog) {
+        self.register_masks(&log.masks);
+        if log.completed_at.is_empty() || log.skipped {
+            return;
+        }
+        if let Err(error) = self.persist(log) {
+            eprintln!(
+                "forensics.lifecycle: step-log page write failed step={} path={}: {error}",
+                log.step_id,
+                self.page_path(log).display()
+            );
+        }
+    }
+}
+
+/// Keep the newest `retain` job directories under `root` (the one being
+/// opened, `keep`, always survives); remove the rest oldest-first.
+fn prune_step_log_page_jobs(root: &Path, keep: &Path, retain: usize) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut jobs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| entry.path() != keep)
+        .filter_map(|entry| {
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    let others_retained = retain.saturating_sub(1);
+    if jobs.len() <= others_retained {
+        return;
+    }
+    jobs.sort();
+    for (_, stale) in jobs.iter().take(jobs.len() - others_retained) {
+        let _ = fs::remove_dir_all(stale);
+    }
+}
+
 /// Host path of the live console file the job container tails as PID 1. Lives
 /// under the job's temp dir (mounted at `/__t`), so the container streams it via
 /// `tail -F /__t/_velnor/console.log` and `docker logs` mirrors the UI output.
@@ -13929,19 +14176,28 @@ async fn upload_results_job_log_with_client(
 }
 
 /// Upload one step's log blob through an explicit Results Service client, for
-/// the pre-execution failure path that bypasses the live step publisher. Lines
-/// are masked and stamped with the 7-digit timestamp prefix exactly like the
-/// publisher path (docs/reference/interface.md).
+/// the pre-execution failure path that bypasses the live step publisher. The
+/// blob is the step's local page read from disk (masked, 7-digit-timestamp
+/// prefixed — docs/reference/interface.md); the in-memory lines are the
+/// fallback only when the page could not be written.
 async fn upload_results_step_log_with_client(
     client: &crate::protocol::TwirpResultsClient,
+    pages: &StepLogPages,
     job: &AgentJobRequestMessage,
     log: &StepLog,
 ) -> Result<()> {
-    // The pre-execution failure path has exactly one log, so its own mask set
-    // is already the whole job's.
-    let masker = MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks);
-    let lines = mask_log_lines_with(&log.lines, &masker);
-    let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
+    let timestamped = match pages.read_page(log) {
+        Ok(page) => page,
+        Err(error) => {
+            tracing::warn!(
+                job_id = %job.job_id,
+                step_id = %log.step_id,
+                error = %error,
+                "step-log page unreadable; uploading from memory"
+            );
+            pages.page_lines(log)
+        }
+    };
     client
         .upload_step_log(&job.plan.plan_id, &job.job_id, &log.step_id, &timestamped)
         .await
@@ -14938,6 +15194,10 @@ async fn complete_acquired_job_outcome(
         .unwrap_or("pre_execution");
     if let Some(job) = job {
         let log = failed_acquired_job_step_log(category, &masked_reason);
+        // The local page first: the rejection reason must survive on disk
+        // even when every upload below fails.
+        let pages = StepLogPages::open(&run_service_job.step_log_pages_root, job);
+        pages.persist_missing(std::slice::from_ref(&log));
         if let Err(error) = publish_timeline_step_log(job, &log).await {
             eprintln!("Best-effort Velnor rejection step log upload failed: {error:#}");
         }
@@ -14946,7 +15206,9 @@ async fn complete_acquired_job_outcome(
         // hiding the rejection reason (homebrew-tablerock run 33344851591).
         // Best-effort — completion must not be blocked by a log upload.
         if let Some(client) = results_client_for_job(job) {
-            if let Err(error) = upload_results_step_log_with_client(&client, job, &log).await {
+            if let Err(error) =
+                upload_results_step_log_with_client(&client, &pages, job, &log).await
+            {
                 tracing::warn!(
                     job_id = %job.job_id,
                     blob_kind = "step-log",
@@ -16537,6 +16799,7 @@ mod tests {
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
 
         persist_in_flight_job(&dir, &context, &job).unwrap();
@@ -16559,6 +16822,7 @@ mod tests {
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         let mut first = minimal_job_with_variables(serde_json::json!({}));
         first.job_id = "job-first".into();
@@ -16594,6 +16858,7 @@ mod tests {
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
 
         persist_in_flight_job(&dir, &context, &job).unwrap();
@@ -18999,6 +19264,7 @@ jobs:
             client: RunServiceClient::new("token").unwrap(),
             run_service_url: "https://example.test/run-service".to_owned(),
             billing_owner_id: None,
+            step_log_pages_root: StepLogPages::root(&journal_dir),
             journal_dir,
             journal_state: RunServiceJobJournalState::Accepted,
         };
@@ -22010,6 +22276,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         complete_acquired_job_failure(
             &context,
@@ -22089,6 +22356,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: recorded_job_journal_state(&dir, &identity.job_id),
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         assert_eq!(
             context.journal_state,
@@ -22146,6 +22414,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
 
@@ -22322,6 +22591,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
         let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
@@ -22373,6 +22643,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
         let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
@@ -22455,6 +22726,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
 
@@ -25833,6 +26105,7 @@ runs:
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         let mut first = minimal_job_with_variables(serde_json::json!({}));
         first.job_id = "job-first".into();
@@ -26746,6 +27019,129 @@ runs:
         }
     }
 
+    fn pages_job(job_id: &str, secret: &str) -> AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": job_id,
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "system.github.token": { "value": secret, "isSecret": true }
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn step_log_pages_are_written_by_the_sender_side_and_read_back_for_upload() {
+        let root = unique_temp_dir("step-log-pages");
+        let job = pages_job("job-1", "ghs_jobsecret");
+        let pages = Arc::new(StepLogPages::open(&root, &job));
+        assert_eq!(pages.dir(), root.join("job-1"));
+
+        // The sink is attached to the real sender: a send persists the page
+        // BEFORE the record reaches the channel, so the durable copy never
+        // waits on the publisher.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx).with_sink(Arc::clone(&pages) as Arc<_>);
+
+        // A live chunk registers its masks but writes no page.
+        let mut live = partial_step_log("step-a", &["adding mask"], "");
+        live.masks = vec!["hunter2".to_string()];
+        sender.send_best_effort(live);
+        assert!(fs::read_dir(pages.dir()).unwrap().next().is_none());
+
+        // A skipped step writes no page either.
+        let mut skipped = partial_step_log("step-skipped", &[], "2026-08-31T00:00:01.0000000Z");
+        skipped.skipped = true;
+        sender.send_best_effort(skipped);
+        assert!(fs::read_dir(pages.dir()).unwrap().next().is_none());
+
+        // The final record of a later step is masked with the job secret AND
+        // the mask an earlier record registered, then written as blob lines.
+        let mut done = partial_step_log(
+            "step-b",
+            &[
+                "token ghs_jobsecret pw hunter2",
+                "Blocking waiting for file lock on build directory",
+            ],
+            "2026-08-31T00:00:02.0000000Z",
+        );
+        done.order = 7;
+        done.exit_code = 3;
+        done.display_name = "Run unit\tchecks".to_string();
+        sender.send_best_effort(done.clone());
+        let page = pages.dir().join("007-step-b.log");
+        let content = fs::read_to_string(&page).unwrap();
+        assert!(!content.contains("ghs_jobsecret"), "{content}");
+        assert!(!content.contains("hunter2"), "{content}");
+        assert!(content.contains("token *** pw ***"), "{content}");
+        assert!(
+            content.contains("[velnor] waiting for Cargo build lock"),
+            "{content}"
+        );
+        for line in content.lines() {
+            // `YYYY-MM-DDTHH:MM:SS.fffffffZ ` is 28 chars plus the separator.
+            assert!(
+                line.len() > 28 && line.as_bytes()[27] == b'Z' && line.as_bytes()[28] == b' ',
+                "blob line must carry the 7-digit timestamp prefix: {line:?}"
+            );
+        }
+        // The upload reads exactly the page.
+        assert_eq!(
+            pages.read_page(&done).unwrap(),
+            content.lines().map(str::to_owned).collect::<Vec<_>>()
+        );
+        let index = fs::read_to_string(pages.dir().join(STEP_LOG_PAGE_INDEX)).unwrap();
+        assert_eq!(index, "7\t3\t007-step-b.log\tRun unit checks\n");
+        // Every record still reached the channel, in order.
+        let mut received = Vec::new();
+        while let Ok(log) = rx.try_recv() {
+            received.push(log.step_id);
+        }
+        assert_eq!(received, vec!["step-a", "step-skipped", "step-b"]);
+
+        // The backstop persists only records without a page.
+        let unseen = partial_step_log("step-c", &["late"], "2026-08-31T00:00:03.0000000Z");
+        pages.persist_missing(&[done.clone(), unseen]);
+        assert_eq!(fs::read_to_string(&page).unwrap(), content);
+        assert!(pages.dir().join("001-step-c.log").is_file());
+        assert!(pages
+            .read_page(&partial_step_log("nope", &[], "x"))
+            .is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn step_log_pages_retain_only_the_newest_jobs() {
+        let root = unique_temp_dir("step-log-pages-retention");
+        for index in 0..STEP_LOG_PAGE_JOBS_RETAINED + 3 {
+            let job = pages_job(&format!("job-{index:03}"), "s");
+            let pages = StepLogPages::open(&root, &job);
+            fs::write(pages.dir().join("marker"), b"x").unwrap();
+            let count = fs::read_dir(&root).unwrap().count();
+            assert!(
+                count <= STEP_LOG_PAGE_JOBS_RETAINED,
+                "{count} job dirs after job {index}"
+            );
+            // Distinct mtimes so the prune order is the creation order.
+            let stamp = UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index as u64);
+            fs::File::open(pages.dir())
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        }
+        assert!(!root.join("job-000").exists());
+        assert!(!root.join("job-002").exists());
+        assert!(root.join("job-003").exists());
+        assert!(root
+            .join(format!("job-{:03}", STEP_LOG_PAGE_JOBS_RETAINED + 2))
+            .exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn streamed_step_log_mirror_evicts_oldest_at_entry_cap() {
         let mut mirror = StreamedStepLogMirror::default();
@@ -26849,12 +27245,15 @@ runs:
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let held = mirror.lock().await;
+        let pages_root = unique_temp_dir("step-log-publisher-contended");
+        let pages = Arc::new(StepLogPages::open(&pages_root, &job));
         let mut publisher = start_step_log_publisher(
             job,
             receiver,
             StepPublishSpill::new(),
             None,
             Arc::clone(&mirror),
+            pages,
         );
         sender
             .send(partial_step_log("contended", &["line"], ""))
