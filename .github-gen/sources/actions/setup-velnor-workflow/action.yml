@@ -158,7 +158,7 @@ runs:
         # must not shape foreign code either.
         cd "$RUNNER_TEMP"
         env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-          cargo install --locked --git "$SOURCE_REPOSITORY" \
+          cargo install --locked --force --git "$SOURCE_REPOSITORY" \
             --rev "$INSTALL_REV" velnor-workflow --bin velnor-workflow
         runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
         mkdir -p "$runtime"
