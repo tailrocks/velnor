@@ -28,18 +28,21 @@ velnor-runner storage status   # when available on the host
 
 ## Scheduled cache GC
 
-Install timer units shipped with `velnor-runner` (alongside
-`velnor-fleet-policy-audit.timer`):
+`velnor-runner` ships `velnor-cache-gc.timer` (alongside
+`velnor-fleet-policy-audit.timer`) and its `postinst` enables it on install and
+on every upgrade; `systemctl mask velnor-cache-gc.timer` is the opt-out the
+package honours. An enabled timer never blocks an upgrade: the gc service is a
+`Type=oneshot` wrapped in the shared package-transaction lock, and the
+maintainer-script drain gates exempt exactly that class.
 
 ```bash
-systemctl enable --now velnor-cache-gc.timer
 systemctl list-timers velnor-cache-gc.timer velnor-fleet-policy-audit.timer
 ```
 
-The service runs:
+The service runs one pass per packaged instance:
 
 ```bash
-velnorctl cache --work-dir /var/lib/velnor/work gc --yes
+velnorctl cache gc --yes
 ```
 
 Budgets come from `/etc/velnor/velnor.env` (`VELNOR_BUDGET_*`). Target:

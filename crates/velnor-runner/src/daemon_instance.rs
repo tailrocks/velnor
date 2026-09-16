@@ -938,10 +938,36 @@ mod tests {
         ] {
             assert!(cargo_toml.contains(asset), "deb assets do not ship {asset}");
         }
-        // Enablement is the operator's (postinst refuses to configure while any
-        // velnor timer is active, so it cannot enable one itself); the install
-        // message must name the timer so it is not forgotten.
+        // The package enables the timer itself (a real command, not an echoed
+        // hint), honouring an operator mask. That is only sound because the
+        // maintainer-script gates exempt lock-serialised maintenance oneshots
+        // and their timers: the old gate refused to configure while any
+        // `velnor*.timer` was active, so enabling this one would have blocked
+        // every later upgrade — in preinst as much as in postinst.
         let postinst = fs::read_to_string(manifest_dir.join("debian/postinst")).unwrap();
-        assert!(postinst.contains("systemctl enable --now velnor-cache-gc.timer"));
+        let enable = postinst
+            .lines()
+            .find(|line| line.contains("systemctl enable --now velnor-cache-gc.timer"))
+            .expect("postinst enables velnor-cache-gc.timer");
+        assert!(
+            !enable.trim_start().starts_with("echo"),
+            "enablement must be a command, not an operator hint: {enable}"
+        );
+        assert!(postinst.contains("masked|masked-runtime)"));
+        for script in ["debian/postinst", "debian/preinst"] {
+            let text = fs::read_to_string(manifest_dir.join(script)).unwrap();
+            assert!(
+                text.contains("scheduled_oneshot_under_transaction_lock \"$unit\" && continue"),
+                "{script} must exempt lock-serialised oneshots and their timers from the drain gate"
+            );
+            assert!(text.contains(
+                "*\"argv[]=/usr/bin/flock --shared --no-fork $PACKAGE_TRANSACTION_LOCK \"*) return 0 ;;"
+            ));
+            assert!(text.contains(
+                "[ \"$(systemctl show --property=Type --value \"$1\" 2>/dev/null || true)\" = oneshot ] || return 1"
+            ));
+        }
+        // The exemption is exactly what the shipped gc unit satisfies.
+        assert!(unit.contains("Type=oneshot"));
     }
 }
