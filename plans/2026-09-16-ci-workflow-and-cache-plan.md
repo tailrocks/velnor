@@ -961,10 +961,10 @@ Root cause of the persisting `ci-pr` startup failure (`Invalid workflow file: .g
 | Docs markdownlint | V | `8cc755fd` escaped table pipes in rev 11 ledger (MD056/MD038); `Documentation · Documentation / GitHub` success on 35039991442 |
 | §16 post-merge gates | P | 3× `ci-main` on `main`, policy on `main`, GHA cache ≤ 8 GiB, 7× maintenance, Phase 6 fleet ops still open |
 
-#### Rev 13 delta @ `5554e5d` (2026-09-16)
+#### Rev 13 delta @ `d2437de4` (2026-09-16)
 
 | Claim | Verdict | Evidence |
 | --- | --- | --- |
-| Plan-only commit DCO regression | V | `b3157a10` lacked `Signed-off-by:`; DCO `fail` on PR [#872](https://github.com/tailrocks/velnor/pull/872); fixed via `git commit --amend --signoff` → `5554e5d` |
+| Branch DCO regression | V | several commits (rev 9–10 docs/code) lacked `Signed-off-by:`; DCO `fail` on PR [#872](https://github.com/tailrocks/velnor/pull/872); fixed via `git rebase origin/main --signoff` (69 commits replayed) |
 | Rerun @ `b3157a10` fleet admission flake | P | run [35041695268](https://github.com/tailrocks/velnor/actions/runs/35041695268): `Rust · velnor-workflow / Velnor` + `Rust · velnor-render / Velnor` `operational store rejected the sanitized admission row` (`runner.rs:7266`); `ci-required` failure; same class as rev 10 run 35036454380 — not generator regression |
 | Stable green rollup still valid | V | run [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442) @ `8cc755fd` remains the ruleset-gate proof; flake is intermittent fleet ops |
