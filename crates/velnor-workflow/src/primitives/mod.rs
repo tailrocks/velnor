@@ -17,6 +17,7 @@ mod lanes;
 mod pipeline;
 mod plan;
 mod regen;
+pub(crate) mod renovate;
 pub(crate) mod release;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
@@ -69,6 +70,10 @@ pub(crate) const PREVIEW: &str = "preview";
 pub(crate) const MAINTENANCE: &str = "maintenance";
 /// The release artifact provenance signer.
 pub(crate) const RELEASE_SIGNER: &str = "release-signer";
+/// The self-hosted Renovate writer workflow.
+pub(crate) const RENOVATE: &str = "renovate";
+/// The Renovate configuration validation workflow.
+pub(crate) const RENOVATE_VALIDATE: &str = "renovate-validate";
 /// A reviewed workflow body declared verbatim by the repository.
 pub(crate) const STATIC_WORKFLOW: &str = "static-workflow";
 
@@ -609,6 +614,8 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(release::Maintenance),
         Box::new(release::ReleaseSigner),
         Box::new(release::StaticWorkflow),
+        Box::new(renovate::Renovate),
+        Box::new(renovate::RenovateValidate),
     ]
 }
 
@@ -784,7 +791,10 @@ pub(crate) fn generate(
     // caller extends the owned file list so it is emitted and recorded.
     let mut added_files: Vec<String> = Vec::new();
     for row in &rows {
-        if row.unit_contract || !release::is_release_side(&row.primitive) {
+        if row.unit_contract
+            || (!release::is_release_side(&row.primitive)
+                && !renovate::is_renovate_side(&row.primitive))
+        {
             continue;
         }
         let Some(file) = &row.file else {
@@ -963,7 +973,9 @@ fn rows_for(
     // family's primitive.
     for row in declared
         .iter()
-        .filter(|row| release::is_release_side(&row.primitive))
+        .filter(|row| {
+            release::is_release_side(&row.primitive) || renovate::is_renovate_side(&row.primitive)
+        })
     {
         rows.push(ResolvedRow::declared(row));
     }
@@ -980,6 +992,32 @@ fn rows_for(
             }
             // A repository without a release contract omits the publisher.
             if *family == RELEASE && config.release.is_none() {
+                continue;
+            }
+            rows.push(ResolvedRow {
+                primitive: (*family).to_owned(),
+                units: Vec::new(),
+                file: Some((*file).to_owned()),
+                unit_contract: false,
+                args: BTreeMap::new(),
+            });
+        }
+        for (file, family) in renovate::RENOVATE_SIDE_FILES {
+            if !config.workflow_files.iter().any(|owned| owned == file) {
+                continue;
+            }
+            if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
+                continue;
+            }
+            if config.renovate.is_none() {
+                continue;
+            }
+            if *family == RENOVATE_VALIDATE
+                && !config
+                    .renovate
+                    .as_ref()
+                    .is_some_and(|spec| spec.validate)
+            {
                 continue;
             }
             rows.push(ResolvedRow {
@@ -1229,12 +1267,11 @@ fn validate(
             )));
         }
     }
-    // The declared release-side families render whole-repository workflow
-    // files: each names the canonical file it owns, and no units.
-    for row in declared
-        .iter()
-        .filter(|row| release::is_release_side(&row.primitive))
-    {
+    // The declared release-side and Renovate families render whole-repository
+    // workflow files: each names the canonical file it owns, and no units.
+    for row in declared.iter().filter(|row| {
+        release::is_release_side(&row.primitive) || renovate::is_renovate_side(&row.primitive)
+    }) {
         if !row.units.is_empty() {
             return Err(GeneratorError::usage(format!(
                 "`[[declare]]` primitive `{}` renders one whole-repository workflow and takes no `units`",
@@ -1247,7 +1284,9 @@ fn validate(
                 row.primitive
             ))
         })?;
-        if let Some(canonical) = release::canonical_release_side_file(&row.primitive)
+        let canonical = release::canonical_release_side_file(&row.primitive)
+            .or_else(|| renovate::canonical_renovate_side_file(&row.primitive));
+        if let Some(canonical) = canonical
             && file != canonical
         {
             return Err(GeneratorError::usage(format!(
@@ -1304,6 +1343,8 @@ mod tests {
             MAINTENANCE,
             RELEASE_SIGNER,
             STATIC_WORKFLOW,
+            RENOVATE,
+            RENOVATE_VALIDATE,
         ] {
             assert!(lookup(contract).is_ok(), "`{contract}` is not registered");
             ids.push(contract);

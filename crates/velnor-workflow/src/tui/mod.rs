@@ -1010,6 +1010,9 @@ mod tests {
             release_enabled: true,
             release_reason: String::new(),
             release: None,
+            renovate_enabled: false,
+            renovate_reason: String::new(),
+            renovate: None,
             units: vec![
                 unit("core", &[]),
                 unit("middle", &["core"]),
