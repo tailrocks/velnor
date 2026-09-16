@@ -3615,7 +3615,9 @@ fn audited_pin_script() -> &'static str {
 /// `GITHUB_TOKEN` emptied: the probe needs no auth, so the exec point holds
 /// no token even though the API steps above it use the job token. Fork
 /// generator changes fail closed: only same-repository runs are even
-/// considered.
+/// considered. The same-repository select compares the embedded
+/// `.head_repository.id` object: the runs-list endpoint exposes no
+/// `.head_repository_id` scalar, and selecting on it matches nothing.
 fn policy_candidate_step(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
@@ -3650,7 +3652,7 @@ fn policy_candidate_step(revision: &str) -> String {
               id="$(jq -r .id <<<"$candidate_run")"
               # $name in the filter is a jq variable, not a shell expansion.
               # shellcheck disable=SC2016
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq --arg name "$name" -e '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
                 run_id="$id"
                 break 2
               fi
@@ -13147,7 +13149,10 @@ channel = "stable"
     /// `.head_repository_id` scalar, so selecting on it matches nothing and
     /// the candidate path fails systematically. An empty list means the API
     /// has not indexed the sibling run yet, so the loop keeps polling until
-    /// the deadline instead of failing fast.
+    /// the deadline instead of failing fast. The artifact check pipes
+    /// through real `jq`: `gh api` has no `-e` flag, so `gh api --jq -e`
+    /// exits 1 with "unknown shorthand flag" and the artifact is never
+    /// detected.
     #[test]
     fn policy_acquire_step_selects_same_repository_runs_by_object_id() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
@@ -13162,6 +13167,16 @@ channel = "stable"
         assert!(
             owner.contains("[[ \"$seen\" == \"true\" ]] || waiting=true"),
             "an unindexed sibling run keeps polling until the deadline: {owner}"
+        );
+        assert!(
+            owner.contains(
+                "| jq -e --arg name \"$name\" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0'"
+            ),
+            "the artifact check evaluates through real jq: {owner}"
+        );
+        assert!(
+            !owner.contains("--jq --arg name"),
+            "no gh api call smuggles jq flags gh does not accept: {owner}"
         );
     }
 

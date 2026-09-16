@@ -59,7 +59,7 @@ jobs:
       - name: Set up Velnor workflow runtime
         uses: ./policy-setup-action/.github/actions/setup-velnor-workflow
         with:
-          rev: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
+          rev: 14c1c69acc102db7b744cad160b93f364516f1cc
           checkout-path: ${{ github.workspace }}/policy-checkout
       - name: Acquire candidate generator product
         working-directory: policy-checkout
@@ -67,7 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          BASE_PIN: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
+          BASE_PIN: 14c1c69acc102db7b744cad160b93f364516f1cc
         run: |
           set -euo pipefail
           pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
@@ -96,7 +96,7 @@ jobs:
               id="$(jq -r .id <<<"$candidate_run")"
               # $name in the filter is a jq variable, not a shell expansion.
               # shellcheck disable=SC2016
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq --arg name "$name" -e '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
                 run_id="$id"
                 break 2
               fi
@@ -145,7 +145,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
+          VELNOR_WORKFLOW_POLICY_REVISION: 14c1c69acc102db7b744cad160b93f364516f1cc
         run: |
           set -euo pipefail
           velnor-workflow policy \
