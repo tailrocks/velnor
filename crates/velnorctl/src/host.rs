@@ -960,21 +960,21 @@ pub(crate) fn ensure_dev_canonical_storage() -> Result<(), CommandError> {
     {
         return Ok(());
     }
-    let home = env::var("HOME").map_err(|error| {
-        CommandError::new(
+    if env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return Err(CommandError::new(
             ExitClass::Usage,
             "host.home_missing",
-            format!("HOME is unset; export VELNOR_STORAGE_ROOT or set HOME: {error}"),
-        )
-    })?;
-    // macOS Unix sockets are limited to 104 bytes: `~/Library/Application
-    // Support/velnor/run/velnor/<name>/control.sock` overflows SUN_LEN, so
-    // the on-demand default stays a short dot-directory instead.
-    let prefix = if cfg!(target_os = "macos") {
-        PathBuf::from(&home).join(".velnor-store")
-    } else {
-        PathBuf::from(&home).join(".local/state/velnor")
-    };
+            "HOME is unset; export VELNOR_STORAGE_ROOT or set HOME",
+        ));
+    }
+    // The prefix is velnor-client's user-mode default, the one every
+    // `velnorctl` surface and `UnixEndpoint` resolve without this variable.
+    // Exporting it makes the slot and job children — and the runner's own
+    // storage layout, which reads the variable directly — agree with them.
+    let prefix = velnor_client::default_user_storage_root();
     // SAFETY: `host start` is single-threaded until the daemon child is spawned.
     unsafe { env::set_var("VELNOR_STORAGE_ROOT", &prefix) };
     Ok(())
