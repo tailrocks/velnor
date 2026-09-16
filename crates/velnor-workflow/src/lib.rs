@@ -75,6 +75,10 @@ pub(crate) const VELNOR_WORKFLOW_SETUP_ACTION: &str =
 /// runtime.
 pub(crate) const VELNOR_WORKFLOW_LOCAL_SETUP_ACTION: &str =
     "./.github/actions/setup-velnor-workflow";
+pub(crate) const VELNOR_CI_REPORT_ACTION: &str =
+    "tailrocks/velnor/.github/actions/report-velnor-ci-outcomes";
+pub(crate) const VELNOR_CI_LOCAL_REPORT_ACTION: &str =
+    "./.github/actions/report-velnor-ci-outcomes";
 const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/velnor";
 /// The source commit this binary was built from, stamped by `build.rs`
 /// (`unknown` when the build tree had no git). `velnor-workflow --revision`
@@ -3951,6 +3955,16 @@ pub(crate) fn workflow_setup_action_uses(repository: &str, revision: &str) -> St
         VELNOR_WORKFLOW_LOCAL_SETUP_ACTION.to_owned()
     } else {
         format!("{VELNOR_WORKFLOW_SETUP_ACTION}@{revision}")
+    }
+}
+
+/// The `uses:` reference for `report-velnor-ci-outcomes`: local path for the
+/// owner repository, published pin for every consumer.
+pub(crate) fn ci_report_action_uses(repository: &str, revision: &str) -> String {
+    if !repository.is_empty() && repository == workflow_setup_action_repository() {
+        VELNOR_CI_LOCAL_REPORT_ACTION.to_owned()
+    } else {
+        format!("{VELNOR_CI_REPORT_ACTION}@{revision}")
     }
 }
 

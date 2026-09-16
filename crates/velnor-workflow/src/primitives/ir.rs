@@ -442,17 +442,13 @@ pub(crate) fn render_ci_cleanup_end_marker(output: &mut String) {
     render_phase_epoch_marker(output, "CLEANUP_ENDED", "Mark cleanup end");
 }
 
-/// Local composite action every generated surface invokes for post-check
-/// telemetry. The script lives in one emitted action file instead of being
-/// duplicated into every lane job.
-pub(crate) const VELNOR_CI_REPORT_ACTION: &str = "./.github/actions/report-velnor-ci-outcomes";
-
 /// Emit the post-checks report step shared by both render paths.
 ///
 /// `job_display_name` is the Actions API job name for this job (the workflow
 /// `jobs.<id>.name` value), which queue-time lookup matches on exactly.
 pub(crate) fn render_phase_report_step(
     output: &mut String,
+    report_action_uses: &str,
     job_display_name: &str,
     lane: RunnerMode,
     facts: &CacheReportFacts,
@@ -461,7 +457,7 @@ pub(crate) fn render_phase_report_step(
     output.push_str("        if: always()\n");
     let _ = writeln!(
         output,
-        "        uses: {VELNOR_CI_REPORT_ACTION}\n        with:\n          job_label: {job_display_name}"
+        "        uses: {report_action_uses}\n        with:\n          job_label: {job_display_name}"
     );
     render_cache_outcome_report_inputs(output, lane, facts);
 }
@@ -2226,6 +2222,10 @@ impl WorkflowIr {
         }
     }
 
+    fn ci_report_action_uses(&self) -> String {
+        crate::ci_report_action_uses(&self.repository, &self.workflow_revision)
+    }
+
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
@@ -3528,6 +3528,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .collect::<Vec<_>>();
         render_phase_report_step(
             output,
+            &self.ci_report_action_uses(),
             &lane_input::expression("unit"),
             lane,
             &CacheReportFacts::union(&report),
@@ -3858,6 +3859,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         render_ci_cleanup_end_marker(output);
         render_phase_report_step(
             output,
+            &self.ci_report_action_uses(),
             &yaml_scalar(&report_label),
             lane,
             &CacheReportFacts::for_unit(lane, unit, self),
@@ -4444,6 +4446,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_ci_cleanup_end_marker(output);
             render_phase_report_step(
                 output,
+                &self.ci_report_action_uses(),
                 &job_name,
                 lane,
                 &CacheReportFacts::for_unit(lane, unit, self),

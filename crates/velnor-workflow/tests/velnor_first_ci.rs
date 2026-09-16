@@ -718,6 +718,13 @@ fn declared_mise_tools_propagate_to_non_rust_kind_reusables() {
         pr.contains("mise_tools: \"python pipx:reuse\""),
         "the aggregate caller must pass declared mise tools for non-Rust units: {pr}"
     );
+    let unit = generated.workflow("ci-unit-docs.yml");
+    assert!(
+        unit.contains(
+            "uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@"
+        ),
+        "consumer kind reusables must reference the published report action: {unit}"
+    );
 }
 
 #[test]
