@@ -64,12 +64,12 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: f5c8466d8b4bd79a2c583043fe5d34e643b219e3
+          rev: 5e311cace1fdfc1b58bf2f620c93cd815a9f005c
       - name: Resolve pinned Velnor workflow policy runtime
         if: ${{ runner.environment == 'github-hosted' }}
         shell: bash
         env:
-          PINNED_REVISION: f5c8466d8b4bd79a2c583043fe5d34e643b219e3
+          PINNED_REVISION: 5e311cace1fdfc1b58bf2f620c93cd815a9f005c
         run: |
           set -euo pipefail
           binary="$HOME/.cache/velnor/workflow-runtime/$PINNED_REVISION/bin/velnor-workflow"
@@ -80,9 +80,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || 'f5c8466d8b4bd79a2c583043fe5d34e643b219e3' }}
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '5e311cace1fdfc1b58bf2f620c93cd815a9f005c' }}
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f5c8466d8b4bd79a2c583043fe5d34e643b219e3" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=5e311cace1fdfc1b58bf2f620c93cd815a9f005c" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -99,7 +99,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: f5c8466d8b4bd79a2c583043fe5d34e643b219e3
+          EXPECTED_REVISION: 5e311cace1fdfc1b58bf2f620c93cd815a9f005c
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -117,7 +117,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-f5c8466d8b4bd79a2c583043fe5d34e643b219e3-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-5e311cace1fdfc1b58bf2f620c93cd815a9f005c-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -167,7 +167,7 @@ jobs:
         with:
           backend: github
           version: 1.11.1
-          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-f5c8466d8b4bd79a2c583043fe5d34e643b219e3
+          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-5e311cace1fdfc1b58bf2f620c93cd815a9f005c
           restore-keys: |
             velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -187,7 +187,7 @@ jobs:
             cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev f5c8466d8b4bd79a2c583043fe5d34e643b219e3 \
+            --rev 5e311cace1fdfc1b58bf2f620c93cd815a9f005c \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -209,7 +209,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: f5c8466d8b4bd79a2c583043fe5d34e643b219e3
+          VELNOR_WORKFLOW_POLICY_REVISION: 5e311cace1fdfc1b58bf2f620c93cd815a9f005c
         run: |
           set -euo pipefail
           velnor-workflow policy \
