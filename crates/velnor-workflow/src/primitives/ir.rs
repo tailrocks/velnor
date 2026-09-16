@@ -21,13 +21,13 @@ use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
     kind_unit_workflow_file, lane_supports_unit, nested_unit_workflow_file,
-    prepare_cargo_caller_job_id, rendered_cache_values, sidebar_group_name, stack_group_job_id,
-    unit_group, unit_group_job_id, unit_job_display_name, unit_job_id, unit_needs, velnor_runner,
-    velnor_runner_group, velnor_rust_dependency_needs, workflow_runtime_artifact_upload,
-    workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
-    yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain,
-    SelectionFieldSources, Unit, UnitKind, VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION,
-    OPEN_TOFU_VERSION,
+    prepare_cargo_caller_job_id, render_mr_boxington_store_budget_step, rendered_cache_values,
+    sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id, unit_job_display_name,
+    unit_job_id, unit_needs, velnor_runner, velnor_runner_group, velnor_rust_dependency_needs,
+    workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
+    workflow_selection_file_materialize, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
+    ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources, Unit, UnitKind,
+    VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
 
 /// GitHub rejects reusable workflow files above this size.
@@ -4730,7 +4730,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         self.render_kind_level_tool_steps(output, lane, &tools, cache_save);
     }
 
+    /// GitHub lane: the store budget export precedes the action so the
+    /// hosted store is bounded for the import, every Cargo command, and the
+    /// post-step export alike (see `MR_BOXINGTON_HOSTED_STORE_BUDGET`).
     fn render_mbx_github_step(&self, output: &mut String, cache_key: &str, restore_keys: &str) {
+        render_mr_boxington_store_budget_step(output);
         let _ = writeln!(
             output,
             "      - name: Set up Mr. Boxington\n        id: mbx-cache\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
