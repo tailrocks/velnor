@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `8f41f2dd` (Phases 0–6 code landed; §16 live gates open until merge + fleet ops).  
-Date: 2026-09-16 (rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `8cc755fd` (PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup green @ run 35039991442; §16 post-merge + fleet ops gates open).  
+Date: 2026-09-16 (rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -513,7 +513,7 @@ Pre-req: Phase 0 green.
 
 - [x] `cargo check -p velnor-runner` and `cargo test -p velnor-workflow` compile and pass on `main`
 - [ ] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green
-- [ ] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup`
+- [x] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup` — **VERIFIED @ `8cc755fd`:** PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup `ci-required` + `Control / Required` SUCCESS (run [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442)); DCO still `ACTION_REQUIRED`
 - [ ] Nightly completes in < 2 h (no 24 h queue)
 - [ ] `actions/cache/usage` ≤ 8 GiB after one maintenance run
 
@@ -772,7 +772,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | P0-7 live account ≤ 8 GiB | U | live 10.54 GiB; sweep/classify code landed, not yet proven post-maintenance |
 | P0-8 nightly dispatches `ci-main@main` for mbx saves | V | `nightly.yml:48` `Control / Dispatch ci-main` |
 | Phase 0 gate: 3× green `ci-main` on `main` | U | blocked until merge; `origin/main` still red pre-merge |
-| Phase 0 gate: ruleset context on PR rollup | U | DCO + merge pending; context unproven on open PR |
+| Phase 0 gate: ruleset context on PR rollup | V | PR [#872](https://github.com/tailrocks/velnor/pull/872) `statusCheckRollup`: `ci-required` SUCCESS @ run 35039991442 (`8cc755fd`); DCO `ACTION_REQUIRED` |
 | Phase 0 gate: `actions/cache/usage` ≤ 8 GiB | U | live 10.54 GiB |
 
 #### Phase 1 — generator core
@@ -949,3 +949,14 @@ Root cause of the persisting `ci-pr` startup failure (`Invalid workflow file: .g
 | `velnor-workflow` clippy gate | V | the unit's `clippy --profile test --all-targets --all-features -- -D warnings` failed with 24 findings (13 on the shared branch before this series); all fixed behaviour-preservingly (`d7a35c50`, `17b441c1`; `--plain --force` leaves the tree clean); `velnor-runner` clippy gate exit 0 |
 | Dead monolithic render path | U | `#[allow(dead_code)]` over `impl WorkflowIr` (from `c2bc9c57`) hides `render`, `render_nested_unit`, `render_lane_job`, `render_verify_*` — the pre-reusable aggregate shape no generated file uses; ~70 lib tests still assert on it. Separate migration: delete the path and port the tests to `generated_files` |
 | Further headroom | U | splitting each kind reusable per lane would halve the per-caller cost (~1.4 MiB for `ci-pr.yml`); not needed under the ceiling |
+
+#### Rev 12 delta @ `8cc755fd` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Full PR CI rollup green | V | run [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442): `conclusion: success`; 37 success / 64 skipped / 0 failure / 101 jobs |
+| `ci-required` + `Control / Required` | V | same run; PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup both SUCCESS |
+| `Rust · velnor-workflow / GitHub` | V | clippy + offline `--plain --check` green (rev 11 guard + policy runtime artifact) |
+| `Rust · velnor-workflow / Velnor` | V | same run (policy runtime provision on Velnor lane) |
+| Docs markdownlint | V | `8cc755fd` escaped table pipes in rev 11 ledger (MD056/MD038); `Documentation · Documentation / GitHub` success on 35039991442 |
+| §16 post-merge gates | P | 3× `ci-main` on `main`, policy on `main`, GHA cache ≤ 8 GiB, 7× maintenance, Phase 6 fleet ops still open |
