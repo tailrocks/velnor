@@ -2169,20 +2169,14 @@ impl WorkflowIr {
             }
             tools.insert(ToolRequirement::Mold);
         }
-        // The detection fact only says mise is configured; the renderer needs
-        // it wherever a unit runs through mise or declares tools the scan
-        // cannot see (docs, homebrew, Swift, and Rust alike).
-        let mise_detected = config
+        // The detection fact only says mise is configured; the mise surface
+        // matters here only where Rust units exist to run through it.
+        let mise_present = config
             .analysis
             .detected
             .iter()
-            .any(|item| item == "mise-present");
-        let mise_surface_needed = config.units.iter().any(|unit| {
-            unit.kind == UnitKind::Rust
-                || !unit.mise_tools.is_empty()
-                || commands_invoke_mise(unit)
-        });
-        let mise_present = mise_detected && mise_surface_needed;
+            .any(|item| item == "mise-present")
+            && config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
         if mise_present {
             tools.insert(ToolRequirement::Mise);
         }
