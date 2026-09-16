@@ -31,7 +31,7 @@ on:
 
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -59,13 +59,29 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up pinned Velnor workflow policy runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: ./.github/actions/setup-velnor-workflow
+        with:
+          rev: 6ea138c16caed7969aa6f6382fa6a63c96de3eac
+      - name: Resolve pinned Velnor workflow policy runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        shell: bash
+        env:
+          PINNED_REVISION: 6ea138c16caed7969aa6f6382fa6a63c96de3eac
+        run: |
+          set -euo pipefail
+          binary="$HOME/.cache/velnor/workflow-runtime/$PINNED_REVISION/bin/velnor-workflow"
+          reported="$("$binary" --revision)"
+          [[ "$reported" == "$PINNED_REVISION" ]] || { echo "::error::pinned workflow runtime reports revision $reported, expected $PINNED_REVISION" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@643f33123abe01adee09662a366cb9a5d2b3c3bf
+        uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '643f33123abe01adee09662a366cb9a5d2b3c3bf' }}
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '6ea138c16caed7969aa6f6382fa6a63c96de3eac' }}
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=643f33123abe01adee09662a366cb9a5d2b3c3bf" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6ea138c16caed7969aa6f6382fa6a63c96de3eac" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -82,7 +98,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 643f33123abe01adee09662a366cb9a5d2b3c3bf
+          EXPECTED_REVISION: 6ea138c16caed7969aa6f6382fa6a63c96de3eac
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -91,11 +107,16 @@ jobs:
           src="$(command -v velnor-workflow)"
           install -m 0755 "$src" "$stage/velnor-workflow"
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
-          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' > "$stage/manifest.json"
+          policy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"
+          install -m 0755 "$policy_src" "$stage/velnor-workflow-policy"
+          policy_revision="$("$stage/velnor-workflow-policy" --revision)"
+          [[ "$policy_revision" == "$EXPECTED_REVISION" ]] || { echo "::error::policy runtime reports revision $policy_revision, expected $EXPECTED_REVISION" >&2; exit 1; }
+          policy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-643f33123abe01adee09662a366cb9a5d2b3c3bf-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-6ea138c16caed7969aa6f6382fa6a63c96de3eac-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -152,6 +173,17 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      cache_paths: ".velnor-docker-cache"
+      seed_compat: "9c97194a807b"
+      seed_dependency_files: |
+        Cargo.lock
+        Dockerfile
+        docker/build-mise.lock
+        docker/build-mise.toml
+        rust-toolchain.toml
+      seed_freshness_files: |
+        Cargo.lock
+        deny.toml
   velnor-docker:
     name: "Docker · Docker"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -165,6 +197,7 @@ jobs:
       full_units: ${{ needs.plan.outputs.full_units }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      host_warm_layers: docker_seed
   github-docs:
     name: "Documentation · Documentation"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') }}
@@ -363,6 +396,7 @@ jobs:
         rust-toolchain
         rust-toolchain.toml
       mbx_freshness_files: |
+        config/fleet/**
         crates/velnor-bench/**/*.rs
         crates/velnor-bench/benches/**
         crates/velnor-bench/examples/**
@@ -416,10 +450,12 @@ jobs:
         crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
         docker/job-mise.lock
         docker/job-ubuntu.Dockerfile
+        microvm/**
         microvm/kernel.config
         microvm/manifest.json
         microvm/pins.json
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -433,8 +469,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-bench:
     name: "Rust · velnor-bench"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-model, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-bench
@@ -479,6 +515,7 @@ jobs:
         crates/velnor-model/src/**
         crates/velnor-model/tests/**
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -492,8 +529,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-client:
     name: "Rust · velnor-client"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-client
@@ -538,6 +575,7 @@ jobs:
         crates/velnor-model/src/**
         crates/velnor-model/tests/**
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -551,8 +589,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-control:
     name: "Rust · velnor-control"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-control
@@ -592,6 +630,7 @@ jobs:
         crates/velnor-model/src/**
         crates/velnor-model/tests/**
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -651,6 +690,7 @@ jobs:
         crates/velnor-render/src/**
         crates/velnor-render/tests/**
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -664,8 +704,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-render:
     name: "Rust · velnor-render"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-render
@@ -699,6 +739,7 @@ jobs:
         rust-toolchain
         rust-toolchain.toml
       mbx_freshness_files: |
+        config/fleet/**
         crates/velnor-control/**/*.rs
         crates/velnor-control/benches/**
         crates/velnor-control/examples/**
@@ -747,10 +788,12 @@ jobs:
         crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
         docker/job-mise.lock
         docker/job-ubuntu.Dockerfile
+        microvm/**
         microvm/kernel.config
         microvm/manifest.json
         microvm/pins.json
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -764,8 +807,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-runner:
     name: "Rust · velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-control, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-runner
@@ -799,6 +842,7 @@ jobs:
         rust-toolchain
         rust-toolchain.toml
       mbx_freshness_files: |
+        config/fleet/**
         crates/velnor-client/**/*.rs
         crates/velnor-client/benches/**
         crates/velnor-client/examples/**
@@ -816,6 +860,7 @@ jobs:
         crates/velnor-tools/src/**
         crates/velnor-tools/tests/**
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -829,8 +874,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-tools:
     name: "Rust · velnor-tools"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-model]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-tools
@@ -857,13 +902,15 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: d37c915686bf
+      mbx_compat: "434caa7ff878"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
         rust-toolchain
         rust-toolchain.toml
       mbx_freshness_files: |
+        Dockerfile
+        config/fleet/**
         crates/velnor-control/**/*.rs
         crates/velnor-control/benches/**
         crates/velnor-control/examples/**
@@ -911,18 +958,24 @@ jobs:
         crates/velnor-tools/debian/velnor-fleet-policy-audit.service
         crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
         crates/velnor-workflow/**/*.rs
+        crates/velnor-workflow/README.md
         crates/velnor-workflow/benches/**
         crates/velnor-workflow/build.rs
         crates/velnor-workflow/examples/**
         crates/velnor-workflow/src/**
+        crates/velnor-workflow/src/runtime.rs
+        crates/velnor-workflow/templates/**
         crates/velnor-workflow/templates/release-package-signer.yml
         crates/velnor-workflow/tests/**
+        docker/build-mise.*
         docker/job-mise.lock
         docker/job-ubuntu.Dockerfile
+        microvm/**
         microvm/kernel.config
         microvm/manifest.json
         microvm/pins.json
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -936,8 +989,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnor-workflow:
     name: "Rust · velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnor-workflow
@@ -950,6 +1003,7 @@ jobs:
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
+      policy_runtime: true
   github-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
@@ -1025,6 +1079,7 @@ jobs:
         rust-toolchain
         rust-toolchain.toml
       mbx_freshness_files: |
+        config/fleet/**
         crates/velnor-client/**/*.rs
         crates/velnor-client/benches/**
         crates/velnor-client/examples/**
@@ -1089,10 +1144,12 @@ jobs:
         crates/velnorctl/tests/**
         docker/job-mise.lock
         docker/job-ubuntu.Dockerfile
+        microvm/**
         microvm/kernel.config
         microvm/manifest.json
         microvm/pins.json
         mise.lock
+        schemas/**
         schemas/velnor.telemetry.v1.json
       cache_paths: |
         ~/.cargo/registry
@@ -1106,8 +1163,8 @@ jobs:
       cargo_net_offline: true
   velnor-rust-velnorctl:
     name: "Rust · velnorctl"
-    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [plan, prepare-cargo]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && (needs.velnor-rust-velnor-client.result == 'success' || needs.velnor-rust-velnor-client.result == 'skipped') && (needs.velnor-rust-velnor-control.result == 'success' || needs.velnor-rust-velnor-control.result == 'skipped') && (needs.velnor-rust-velnor-model.result == 'success' || needs.velnor-rust-velnor-model.result == 'skipped') && (needs.velnor-rust-velnor-render.result == 'success' || needs.velnor-rust-velnor-render.result == 'skipped') && (needs.velnor-rust-velnor-runner.result == 'success' || needs.velnor-rust-velnor-runner.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     uses: ./.github/workflows/ci-unit-rust.yml
     with:
       unit: rust-velnorctl
@@ -1120,10 +1177,59 @@ jobs:
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
+  github-rust-production-topology:
+    name: "Rust · Rust production topology"
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-production-topology
+      lane: github
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_runner: true
+      mbx_compat: ed95a0c30f51
+      mbx_dependency_files: |
+        Cargo.lock
+        Cargo.toml
+      mbx_freshness_files: |
+        ./**/*.rs
+        crates/velnor-runner/**
+        docker/**
+        microvm/**
+        mise.lock
+        scripts/check-release-feature-boundary.sh
+        scripts/test-check-release-feature-boundary.sh
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        Cargo.toml
+        Cargo.lock
+      cargo_root: "."
+      cargo_net_offline: true
+  velnor-rust-production-topology:
+    name: "Rust · Rust production topology"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-production-topology
+      lane: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [plan, velnor-lane-admission, github-bun-velnor, velnor-bun-velnor, github-docker, velnor-docker, github-docs, velnor-docs, github-opentofu, velnor-opentofu, prepare-cargo, github-rust-policy, velnor-rust-policy, github-rust-unit-collector, velnor-rust-unit-collector, github-rust-velnor-bench, velnor-rust-velnor-bench, github-rust-velnor-client, velnor-rust-velnor-client, github-rust-velnor-control, velnor-rust-velnor-control, github-rust-velnor-model, velnor-rust-velnor-model, github-rust-velnor-render, velnor-rust-velnor-render, github-rust-velnor-runner, velnor-rust-velnor-runner, github-rust-velnor-tools, velnor-rust-velnor-tools, github-rust-velnor-workflow, velnor-rust-velnor-workflow, github-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-rust-velnorctl, velnor-rust-velnorctl]
+    needs: [plan, velnor-lane-admission, github-bun-velnor, velnor-bun-velnor, github-docker, velnor-docker, github-docs, velnor-docs, github-opentofu, velnor-opentofu, prepare-cargo, github-rust-policy, velnor-rust-policy, github-rust-unit-collector, velnor-rust-unit-collector, github-rust-velnor-bench, velnor-rust-velnor-bench, github-rust-velnor-client, velnor-rust-velnor-client, github-rust-velnor-control, velnor-rust-velnor-control, github-rust-velnor-model, velnor-rust-velnor-model, github-rust-velnor-render, velnor-rust-velnor-render, github-rust-velnor-runner, velnor-rust-velnor-runner, github-rust-velnor-tools, velnor-rust-velnor-tools, github-rust-velnor-workflow, velnor-rust-velnor-workflow, github-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-rust-velnorctl, velnor-rust-velnorctl, github-rust-production-topology, velnor-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1688,6 +1794,39 @@ jobs:
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI job velnor-rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ "$selected" == *",rust-production-topology,"* ]]; then
+            result="$(result_for_job github-rust-production-topology)"
+            case "$result" in
+              success) ;;
+              *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;
+            esac
+          else
+            result="$(result_for_job github-rust-production-topology)"
+            case "$result" in
+              success|skipped) ;;
+              *) echo "unselected CI job github-rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ "$selected" == *",rust-production-topology,"* ]]; then
+            result="$(result_for_job velnor-rust-production-topology)"
+            if [[ "$FORK_PR" == true ]]; then
+              case "$result" in
+                success|skipped) ;;
+                *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-rust-production-topology)"
+            case "$result" in
+              success|skipped) ;;
+              *) echo "unselected CI job velnor-rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
   required:
