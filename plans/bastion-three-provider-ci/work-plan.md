@@ -2,7 +2,7 @@
 
 Status: **authoritative execution order** — branch `docs/bastion-final-plan` (PR `tailrocks/velnor#912`).
 Date: 2026-09-17.
-Authority: `plans/bastion-three-provider-ci/spec.md` (§1–§9) governs every step. Revalidation inputs live in `plans/bastion-three-provider-ci/evidence.md`. Acceptance is tracked in `plans/bastion-three-provider-ci/checklist.md` (1:1 with the step IDs below). The paste-ready prompt is `goal-bastion-three-provider-ci.md` at the repo root.
+Authority: `plans/bastion-three-provider-ci/spec.md` (§1–§9) governs every step. Revalidation inputs live in `plans/bastion-three-provider-ci/evidence.md`. Acceptance is tracked in `plans/bastion-three-provider-ci/checklist.md` (1:1 with the step IDs below). The paste-ready prompt is `plans/bastion-three-provider-ci/goal.md` in this directory.
 
 Independent source modules are implemented in parallel, but no deployment/consumer gate is crossed before its prerequisites. Every step requires evidence reviewed by a verifier other than its author.
 

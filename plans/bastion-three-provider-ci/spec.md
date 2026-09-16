@@ -13,7 +13,7 @@ Documents in this campaign:
 - `plans/bastion-three-provider-ci/work-plan.md` — ordered implementation steps A0–G2.
 - `plans/bastion-three-provider-ci/checklist.md` — acceptance checklist, 1:1 with work-plan step IDs.
 - `plans/bastion-three-provider-ci/evidence.md` — retained audit facts as revalidation inputs and known issues.
-- `goal-bastion-three-provider-ci.md` (repo root) — paste-ready `/goal` execution prompt.
+- `goal.md` (this directory) — paste-ready `/goal` execution prompt.
 
 This specification governs implementation. Historical audit facts live in the evidence document; they are regression and discovery inputs, never deployment pins and never proof that a failure still exists.
 
