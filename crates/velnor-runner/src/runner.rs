@@ -3189,7 +3189,13 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     crate::ops::init_at(instance_slug_for_store(), args.state_db.as_deref())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
-    let _storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
+    let storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
+    if args.url.is_some() && !args.dry_run_registration {
+        // Before preflight and before any slot can admit a job: delete every
+        // mbx store layout the current code no longer produces, then bring
+        // the compiler stores under the host budget.
+        startup_store_maintenance(args, &config_base, &storage_layout, slots);
+    }
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
@@ -6426,6 +6432,124 @@ fn reserve_job_peak_capacity(
     }
 }
 
+/// The daemon-shared work root the stores hang off, for a slot's `RunArgs`.
+fn daemon_work_root(config_dir: &Path, work_dir: Option<&Path>) -> PathBuf {
+    crate::container::daemon_shared_root(
+        work_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| config_dir.join("_work")),
+    )
+}
+
+/// Enforce the host compiler store budget at job admission (see
+/// [`crate::capacity::StoreBudgetPolicy`]). Best-effort: a failed probe or
+/// pass warns and the job proceeds; the capacity reservation remains the
+/// fail-closed guard on real free space.
+fn enforce_compiler_store_budget_at_admission(
+    storage_layout: &crate::storage::StorageLayout,
+    config_dir: &Path,
+    args: &RunArgs,
+) {
+    let work_root = daemon_work_root(config_dir, args.work_dir.as_deref());
+    let policy = match crate::capacity::StoreBudgetPolicy::probe(
+        &work_root,
+        args.emergency_reserve_bytes,
+        args.job_peak_bytes,
+        args.slot_count.get(),
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("Warning: compiler store budget probe failed at admission: {error:#}");
+            return;
+        }
+    };
+    enforce_compiler_store_budget_logged(&work_root, storage_layout, policy, "admission");
+}
+
+/// One budget pass with its operator-visible log lines. `moment` names the
+/// trigger (`startup`, `admission`).
+fn enforce_compiler_store_budget_logged(
+    work_root: &Path,
+    storage_layout: &crate::storage::StorageLayout,
+    policy: crate::capacity::StoreBudgetPolicy,
+    moment: &str,
+) {
+    let budget = policy.compiler_store_budget_bytes();
+    match crate::cache::enforce_compiler_store_budget(work_root, storage_layout, budget) {
+        Ok(report) => {
+            for deleted in &report.deleted {
+                eprintln!(
+                    "forensics.lifecycle: compiler store budget ({moment}) evicted {}",
+                    deleted.display()
+                );
+            }
+            for failure in &report.failures {
+                eprintln!("Warning: compiler store budget ({moment}) eviction failed: {failure}");
+            }
+            if report.freed_bytes > 0 {
+                eprintln!(
+                    "forensics.lifecycle: compiler store budget ({moment}) freed {} bytes; budget {}",
+                    report.freed_bytes,
+                    policy.describe_compiler_store_budget()
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("Warning: compiler store budget pass ({moment}) failed: {error:#}");
+        }
+    }
+}
+
+/// Daemon-start store maintenance: the one-shot mbx layout migration, then
+/// the first compiler budget pass. Both log what they removed, with sizes.
+fn startup_store_maintenance(
+    args: &DaemonArgs,
+    config_base: &Path,
+    storage_layout: &crate::storage::StorageLayout,
+    slots: usize,
+) {
+    let work_root = daemon_work_root(config_base, args.work_dir.as_deref());
+    let canonical = crate::storage::StorageLayout::resolve();
+    let migration = crate::mbx_store::migrate_at_daemon_start(&work_root, canonical.as_ref());
+    for (path, bytes) in &migration.removed {
+        eprintln!(
+            "forensics.lifecycle: mbx store migration removed {} ({bytes} bytes): layout no longer produced",
+            path.display()
+        );
+    }
+    for (path, error) in &migration.failures {
+        eprintln!(
+            "Warning: mbx store migration could not remove {}: {error}",
+            path.display()
+        );
+    }
+    if !migration.removed.is_empty() {
+        eprintln!(
+            "forensics.lifecycle: mbx store migration removed {} path(s), {} bytes total",
+            migration.removed.len(),
+            migration.total_bytes()
+        );
+    }
+    let slots = u32::try_from(slots).unwrap_or(u32::MAX);
+    match crate::capacity::StoreBudgetPolicy::probe(
+        &work_root,
+        args.emergency_reserve_bytes,
+        args.job_peak_bytes,
+        slots,
+    ) {
+        Ok(policy) => {
+            println!(
+                "Compiler store budget: {}",
+                policy.describe_compiler_store_budget()
+            );
+            enforce_compiler_store_budget_logged(&work_root, storage_layout, policy, "startup");
+        }
+        Err(error) => {
+            eprintln!("Warning: compiler store budget probe failed at startup: {error:#}");
+        }
+    }
+}
+
 /// Proactively refresh OAuth credentials for an idle slot. Best-effort: a
 /// failed refresh keeps the old (still valid) credentials and is retried on
 /// the next interval; if the token does expire anyway, broker polls turn into
@@ -7523,7 +7647,7 @@ async fn handle_job_request(
                 ));
                 let stale_after = Duration::from_secs(24 * 3600);
                 let lease_holder = crate::container::sanitize_store_key(&job.job_id);
-                [
+                let mut leases = vec![
                     ("actions-cache", actions_cache_scope),
                     ("artifacts", artifact_run_scope),
                     ("cargo", "registry".into()),
@@ -7532,21 +7656,36 @@ async fn handle_job_request(
                     ("mise", "cache".into()),
                     ("mise", mise_install_scope),
                     ("mise", mise_binary_scope),
-                ]
-                .into_iter()
-                .map(|(class, scope)| {
-                    // ScopeLease is intentionally exclusive. Give every active job its own
-                    // child lease while the GC's ancestor-overlap check protects the shared
-                    // candidate scope for all concurrent holders.
-                    let holder_scope = format!("{scope}/{lease_holder}");
-                    crate::capacity::ScopeLease::acquire(
-                        capacity_run_root,
-                        class,
-                        &holder_scope,
-                        stale_after,
-                    )
-                })
-                .collect()
+                ];
+                // The compiler stores are namespaced by repository id
+                // (`github_rust_store_host`) and are routinely GC-managed
+                // under the host compiler budget, so the job must lease
+                // its repository's store or the budget pass could evict the
+                // tree it is compiling into. Without a valid id the store is
+                // job-ephemeral and needs no lease.
+                if let Some(repository_id) =
+                    crate::github_adapter::job_variable(&job, "github.repository_id")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|id| *id != 0)
+                {
+                    leases.push(("mbx", repository_id.to_string()));
+                    leases.push(("sccache", repository_id.to_string()));
+                }
+                leases
+                    .into_iter()
+                    .map(|(class, scope)| {
+                        // ScopeLease is intentionally exclusive. Give every active job its own
+                        // child lease while the GC's ancestor-overlap check protects the shared
+                        // candidate scope for all concurrent holders.
+                        let holder_scope = format!("{scope}/{lease_holder}");
+                        crate::capacity::ScopeLease::acquire(
+                            capacity_run_root,
+                            class,
+                            &holder_scope,
+                            stale_after,
+                        )
+                    })
+                    .collect()
             })
             .transpose()
     };
@@ -7887,6 +8026,11 @@ async fn handle_job_request(
                 return Err(error).context("acquire storage leases for active job");
             }
         };
+        // Admission-time enforcement of the host compiler store budget. Runs
+        // after this job's leases are published, so the store it is about to
+        // compile into is protected and only idle repositories' slot trees
+        // are candidates. Hygiene, not safety: a failed pass warns.
+        enforce_compiler_store_budget_at_admission(storage_layout, config_dir, args);
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }

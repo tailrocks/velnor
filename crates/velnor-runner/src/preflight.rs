@@ -75,6 +75,7 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
             "microVM preflight passed (Firecracker {}).",
             crate::execution::FIRECRACKER_VERSION
         );
+        report_compiler_store_budget(&preflight_work_dir(args.work_dir)?);
         return Ok(());
     }
     let work_dir = preflight_work_dir(args.work_dir)?;
@@ -157,7 +158,24 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
         "Read-through store overlay (D18): {}",
         store_overlay.summary()
     );
+    report_compiler_store_budget(&work_dir);
     Ok(())
+}
+
+/// The one number that bounds the compiler stores on this host, and its
+/// derivation — the same [`crate::capacity::StoreBudgetPolicy`] the daemon
+/// enforces at startup and at every admission, read from the daemon's
+/// environment (`VELNOR_EMERGENCY_RESERVE_BYTES`, `VELNOR_JOB_PEAK_BYTES`,
+/// `VELNOR_SLOTS`, defaults as the daemon's flags). Reporting only: a probe
+/// failure is printed, never a preflight failure.
+fn report_compiler_store_budget(work_dir: &Path) {
+    match crate::capacity::StoreBudgetPolicy::probe_from_env(work_dir) {
+        Ok(policy) => println!(
+            "Compiler store budget: {}",
+            policy.describe_compiler_store_budget()
+        ),
+        Err(error) => println!("Compiler store budget: unmeasured ({error:#})"),
+    }
 }
 
 fn run_required(

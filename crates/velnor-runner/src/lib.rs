@@ -60,6 +60,7 @@ mod job_claim;
 mod job_message;
 mod leftover_disk;
 pub mod manifest;
+pub(crate) mod mbx_store;
 mod mise;
 /// The locked-mise install contract the generator must emit against:
 /// `install_args` tokens are tool keys the committed lock pins. Re-exported so

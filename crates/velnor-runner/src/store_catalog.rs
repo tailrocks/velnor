@@ -66,6 +66,12 @@ impl StoreClass {
             Self::Docker => return None,
         })
     }
+
+    /// The compiler-acceleration stores (mbx and explicit sccache) share
+    /// one host-level budget, [`crate::capacity::StoreBudgetPolicy`].
+    pub(crate) fn is_compiler(self) -> bool {
+        matches!(self, Self::Mbx | Self::Sccache)
+    }
 }
 
 impl fmt::Display for StoreClass {
@@ -210,6 +216,10 @@ impl StoreCatalog {
             .join(crate::container::sanitize_store_key(run_key))
     }
 
+    /// Root of the mbx compiler store for one trust scope: the pool scope
+    /// or the untrusted floor on the GC path, the job's admitted scope on
+    /// the execution path. Below it, one store per repository id, laid out
+    /// per slot by [`crate::mbx_store`].
     pub(crate) fn mbx(&self, trust_scope: &str) -> PathBuf {
         crate::storage::cache_class_path_for_trust_with_layout(
             &self.work_root,
@@ -218,6 +228,13 @@ impl StoreCatalog {
             LEGACY_MBX_DIR,
             self.layout.as_ref(),
         )
+    }
+
+    /// The legacy (pre-`VELNOR_STORAGE_ROOT`) mbx root under the work root,
+    /// trust scopes below it. The startup migration deletes it whole once
+    /// canonical storage is in effect; nothing else may construct it.
+    pub(crate) fn legacy_mbx_root(&self) -> PathBuf {
+        self.work_root.join(LEGACY_MBX_DIR)
     }
 
     /// Root of the sccache compiler store for one trust scope: the pool

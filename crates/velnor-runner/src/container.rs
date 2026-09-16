@@ -258,6 +258,8 @@ const DEFAULT_CONTAINER_EXEC_PATH: &str =
     "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const MBX_CONTAINER_EXEC_PATH: &str =
     "/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// Container mount point of the job's mbx store.
+const MBX_CONTAINER_STORE: &str = "/var/cache/mbx";
 
 impl JobContainerSpec {
     /// The `-v` operands of the daemon-shared Cargo subtrees: an overlay
@@ -501,7 +503,7 @@ impl JobContainerSpec {
 
     fn append_rust_acceleration(&self, command: &mut DockerCommand) -> io::Result<()> {
         if let Some(host) = &self.mbx_store_host {
-            command.pair("-v", self.mount_arg(host, "/var/cache/mbx"));
+            command.pair("-v", self.mount_arg(host, MBX_CONTAINER_STORE));
             let cache_dir = self.mbx_cache_container_dir();
             let target_root = self.mbx_target_container_dir();
             command.envs([
@@ -1511,7 +1513,9 @@ impl JobContainerSpec {
     /// Without a slot identity (a non-production temp layout) the subdir
     /// isolates per job name instead of falling back to the shared root.
     pub(crate) fn mbx_cache_container_dir(&self) -> String {
-        format!("/var/cache/mbx/slots/{}", self.mbx_slot_key())
+        crate::mbx_store::slot_cache_dir(Path::new(MBX_CONTAINER_STORE), &self.mbx_slot_key())
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Host-side path of this job's mbx cache subdir, created before start.
@@ -1519,7 +1523,7 @@ impl JobContainerSpec {
     pub(crate) fn mbx_cache_store_host(&self) -> Option<PathBuf> {
         self.mbx_store_host
             .as_ref()
-            .map(|store| store.join("slots").join(self.mbx_slot_key()))
+            .map(|store| crate::mbx_store::slot_cache_dir(store, &self.mbx_slot_key()))
     }
 
     /// Container-side managed-target root: a per-slot subdir of the shared
@@ -1528,16 +1532,15 @@ impl JobContainerSpec {
     /// same slot keep one warm tree. Missing slot identity isolates per job
     /// name, never the global `/var/cache/mbx/targets` root.
     pub(crate) fn mbx_target_container_dir(&self) -> String {
-        format!("/var/cache/mbx/targets/slots/{}", self.mbx_slot_key())
+        crate::mbx_store::slot_target_dir(Path::new(MBX_CONTAINER_STORE), &self.mbx_slot_key())
+            .to_string_lossy()
+            .into_owned()
     }
 
     pub(crate) fn mbx_target_store_host(&self) -> Option<PathBuf> {
-        self.mbx_store_host.as_ref().map(|store| {
-            store
-                .join("targets")
-                .join("slots")
-                .join(self.mbx_slot_key())
-        })
+        self.mbx_store_host
+            .as_ref()
+            .map(|store| crate::mbx_store::slot_target_dir(store, &self.mbx_slot_key()))
     }
 
     /// Host directory of the sentinel that ends the container's PID 1
