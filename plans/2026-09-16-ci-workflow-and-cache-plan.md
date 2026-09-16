@@ -513,7 +513,7 @@ Pre-req: Phase 0 green.
 
 - [x] `cargo check -p velnor-runner` and `cargo test -p velnor-workflow` compile and pass on `main`
 - [ ] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green
-- [x] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup` — **VERIFIED @ `8cc755fd`:** PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup `ci-required` + `Control / Required` SUCCESS (run [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442)); DCO still `ACTION_REQUIRED`
+- [x] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup` — **VERIFIED @ `8cc755fd`:** PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup `ci-required` + `Control / Required` SUCCESS (run [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442)); DCO restored @ `5554e5d`/`066221a7` (rev 13)
 - [ ] Nightly completes in < 2 h (no 24 h queue)
 - [ ] `actions/cache/usage` ≤ 8 GiB after one maintenance run
 
