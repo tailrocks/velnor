@@ -344,8 +344,21 @@ fn shell_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
-    use crate::ProjectConfig;
+    use crate::{config, ProjectConfig};
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"),
+        }
+    }
 
     fn renovate_config() -> ProjectConfig {
         let mut config = ProjectConfig {
@@ -374,7 +387,7 @@ mod tests {
             renovate_reason: String::new(),
             renovate: None,
             units: Vec::new(),
-            workflow_templates: Default::default(),
+            workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
             ci_required: true,
@@ -391,9 +404,9 @@ mod tests {
             velnor_serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
-            mise_lock_keys: Default::default(),
-            github_cache: Default::default(),
-            velnor_host_cache: Default::default(),
+            mise_lock_keys: BTreeSet::new(),
+            github_cache: config::CacheGithubSection::default(),
+            velnor_host_cache: config::CacheVelnorSection::default(),
         };
         config.renovate = Some(RenovateSpec {
             enabled: true,
@@ -410,7 +423,10 @@ mod tests {
     #[test]
     fn renovate_writer_references_token_and_action_pin() {
         let config = renovate_config();
-        let spec = config.renovate.as_ref().unwrap();
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
         let workflow = render_renovate(&config, spec);
         assert!(workflow.contains("secrets.GH_RENOVATE_TOKEN"));
         assert!(workflow.contains(ActionPin::Renovate.reference()));
@@ -427,7 +443,10 @@ mod tests {
     #[test]
     fn renovate_writer_uses_trusted_runner_labels() {
         let config = renovate_config();
-        let spec = config.renovate.as_ref().unwrap();
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
         let workflow = render_renovate(&config, spec);
         assert!(workflow.contains("example-trusted"));
         assert!(workflow.contains("self-hosted"));
@@ -436,7 +455,10 @@ mod tests {
     #[test]
     fn renovate_validate_uses_docker_validator_without_secrets() {
         let config = renovate_config();
-        let spec = config.renovate.as_ref().unwrap();
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
         let workflow = render_renovate_validate(&config, spec);
         assert!(workflow.contains("renovate-config-validator --strict --no-global renovate.json"));
         assert!(workflow.contains("ghcr.io/renovatebot/renovate:44.93.6"));
