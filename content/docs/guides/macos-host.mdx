@@ -32,6 +32,21 @@ runners only and refuses organization URLs, so a laptop can never join the
 - **Binaries.** `velnorctl` and `velnor-runner` built from the same checkout
   (`cargo build --locked -p velnorctl -p velnor-runner`). Slot and job
   children exec `velnor-runner` from beside `velnorctl`.
+- **Outbound network for those binaries.** The host talks to GitHub from
+  the `velnorctl` and `velnor-runner` processes themselves (api.github.com,
+  `*.actions.githubusercontent.com`, and the `*.blob.core.windows.net` log
+  and cache storage). A macOS outbound filter (Little Snitch and similar)
+  holds TCP connects from a binary it has no rule for; the connect times out
+  and the host prints `GitHub routing probe failed closed: … operation timed
+  out` and registers nothing. Allow both binaries before starting — they are
+  ad-hoc signed and rebuilt often, so the rule must follow the path. The
+  system `curl` is usually already allowed, and
+  `VELNOR_GITHUB_HTTP_TRANSPORT=curl` moves the REST calls (registration,
+  routing probe) onto it; the broker session, run-service, and results
+  uploads stay in-process, so a still-filtered `velnor-runner` registers and
+  runs jobs but logs `WARN best-effort Results Service … upload failed …
+  operation timed out`, and the job's log is missing on GitHub. `host start`
+  prints the transport it will use as `github_transport`.
 
 Check the daemon before anything else:
 
@@ -76,9 +91,10 @@ target/debug/velnorctl host start --repo tailrocks/velnor --name recovery-1 --sl
 | `--config-dir` | Per-host runner config directory. Defaults to `hosts/<name>` under the runner config root. |
 
 `host start` prints its decisions before it registers anything: storage root,
-GitHub scope, runner name, slots, Docker endpoint, execution platform,
-control socket, and the pool (`none`). It then runs the Docker preflight and
-starts the daemon in the foreground.
+GitHub scope and REST transport, instance, slots, the GitHub runner names
+the slots will register (see [Identity](#identity)), Docker endpoint,
+execution platform, control socket, and the pool (`none`). It then runs the
+Docker preflight and starts the daemon in the foreground.
 
 ### `--pr` and what the host can claim
 

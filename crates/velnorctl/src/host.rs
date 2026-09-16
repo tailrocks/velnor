@@ -66,8 +66,21 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         println!("  service_binary   {runner}");
     }
     println!("  github_scope     {url} (repository)");
-    println!("  runner_name      {name}");
+    if let Ok(transport) = env::var(velnor_runner::protocol::GITHUB_HTTP_TRANSPORT_ENV) {
+        println!("  github_transport {transport} (REST only; broker, run-service, and uploads stay in-process)");
+    }
+    println!("  instance         {name}");
     println!("  slots            {slots}");
+    {
+        let host = velnor_runner::runner::github_runner_host_slug();
+        let first = velnor_runner::runner::compose_github_runner_name(&host, &name, 0);
+        let last = velnor_runner::runner::compose_github_runner_name(&host, &name, slots - 1);
+        if slots == 1 {
+            println!("  runner_names     {first}");
+        } else {
+            println!("  runner_names     {first} .. {last}");
+        }
+    }
     println!("  docker_endpoint  {docker}");
     println!("  execution        {execution}");
     println!(
