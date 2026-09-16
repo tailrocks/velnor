@@ -2053,11 +2053,18 @@ impl RegistrationClient {
     }
 }
 
-/// Transport selector for GitHub JSON requests.
+/// Transport selector for GitHub REST requests (api.github.com).
 ///
 /// The selector is explicit so a missing or unsupported configuration cannot
-/// silently choose a legacy transport. `native` is the normal Linux path;
-/// `curl` uses the host executable for macOS hosts where native TLS stalls.
+/// silently choose a legacy transport. `native` is the normal path; `curl`
+/// runs the host's `curl` for macOS hosts whose outbound network filter
+/// (Little Snitch and similar) holds TCP connects from a binary it has no
+/// rule for — the connect times out with no TLS or DNS involved, while the
+/// system `curl` the filter already trusts goes through. TLS is not the
+/// cause. Only REST goes through this selector: the broker, run-service,
+/// results-service, and log/blob uploads stay in-process, so a filtered
+/// host registers under `curl` yet still loses those (best-effort) uploads
+/// until the filter allows `velnor-runner` itself.
 pub const GITHUB_HTTP_TRANSPORT_ENV: &str = "VELNOR_GITHUB_HTTP_TRANSPORT";
 
 fn parse_github_http_transport(configured: &str) -> Result<&'static str> {

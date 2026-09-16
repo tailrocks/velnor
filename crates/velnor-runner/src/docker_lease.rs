@@ -672,23 +672,6 @@ pub fn list_daemon_owned_job_format_args() -> Vec<String> {
     ]
 }
 
-/// List every volume carrying a daemon ownership label, with its job id and
-/// owning daemon, so startup reclaim can remove the volumes of jobs that left
-/// no container behind. The job-id listing above starts from containers; a
-/// daemon that died between removing a job's container and removing its
-/// volumes (store-overlay scratch, BuildKit state) leaves volumes no
-/// container-driven scan can attribute to an orphan job.
-pub fn list_daemon_owned_volume_format_args() -> Vec<String> {
-    vec![
-        "volume".into(),
-        "ls".into(),
-        "--filter".into(),
-        format!("label={DAEMON_ID_LABEL}"),
-        "--format".into(),
-        "{{.Name}}\t{{.Label \"velnor.job-id\"}}\t{{.Label \"velnor.daemon-id\"}}".into(),
-    ]
-}
-
 pub fn list_testcontainers_format_args() -> Vec<String> {
     vec![
         "ps".into(),
@@ -2136,32 +2119,7 @@ pub fn reclaim_daemon_orphan_jobs(
         reclaim_stale_job_owned(&job_id, &mut docker)?;
     }
     let live = docker_client::live_daemon_job_ids(&formatted, daemon_id);
-    reclaim_daemon_orphan_volumes(daemon_id, &mut docker)?;
     reclaim_orphan_job_buildkit_with_live(&live, Some(daemon_id), &mut docker)
-}
-
-/// Remove every volume this daemon labelled for a job that has no live
-/// container: the store-overlay scratch volumes (and any other job-labelled
-/// volume) a crash or drain left behind after the job's container was gone.
-/// BuildKit objects are excluded here and owned by the BuildKit reclaim,
-/// which knows about shared persistent builders.
-///
-/// Job liveness is re-listed immediately before removal, as the BuildKit
-/// path does: a slot runner that survived the daemon restart can be
-/// creating its volumes right now, and its job becomes live the moment its
-/// container exists.
-fn reclaim_daemon_orphan_volumes(
-    daemon_id: &str,
-    docker: &mut impl FnMut(&[String]) -> Result<String>,
-) -> Result<()> {
-    let volumes = docker(&list_daemon_owned_volume_format_args())?;
-    let jobs = docker(&list_daemon_owned_job_format_args())?;
-    let live = docker_client::live_daemon_job_ids(&jobs, daemon_id);
-    let names = docker_client::daemon_orphan_volume_names(&volumes, daemon_id, &live);
-    if names.is_empty() {
-        return Ok(());
-    }
-    docker(&force_remove_volume_args(&names)).map(|_| ())
 }
 
 pub fn reclaim_unlabeled_testcontainers(
@@ -5763,9 +5721,6 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
             String::new(),
             String::new(),
             String::new(),
-            // daemon-owned volume sweep: volume listing, job re-listing
-            String::new(),
-            String::new(),
             String::new(),
             String::new(),
             String::new(),
@@ -5795,80 +5750,6 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
                 .iter()
                 .all(|call| !call.iter().any(|arg| arg == "other")),
             "foreign daemon job leaked into reclaim calls: {calls:?}"
-        );
-    }
-
-    #[test]
-    fn reclaim_daemon_orphan_jobs_removes_volumes_of_jobs_that_left_no_container() {
-        // A daemon that died between `docker rm` of the job container and
-        // the job-owned volume reclaim leaves store-overlay scratch volumes
-        // no container scan can attribute. Startup lists daemon-labelled
-        // volumes directly and removes the ones whose job has no live
-        // container; live jobs, foreign daemons, unlabeled rows and BuildKit
-        // objects are left alone.
-        let daemon = "/var/lib/velnor-fleet/work";
-        let mut calls = Vec::new();
-        let mut outputs: std::collections::VecDeque<String> = std::collections::VecDeque::from([
-            // list daemon-owned jobs: only `live` has a running container.
-            "velnor-job-live\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning\n"
-                .to_string(),
-            // list daemon-owned volumes
-            "velnor-job-gone-overlay-cargo-registry-cache-upper\tvelnor-job-gone\t/var/lib/velnor-fleet/work/slot-2\n\
-             velnor-job-gone-overlay-cargo-registry-cache-work\tvelnor-job-gone\t/var/lib/velnor-fleet/work/slot-2\n\
-             velnor-job-gone-overlay-cargo-registry-cache\tvelnor-job-gone\t/var/lib/velnor-fleet/work/slot-2\n\
-             velnor-job-live-overlay-cargo-registry-cache-upper\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\n\
-             velnor-job-foreign-overlay-cargo-registry-cache-upper\tvelnor-job-foreign\t/var/lib/velnor-other/work\n\
-             unlabeled-volume\t\t/var/lib/velnor-fleet/work/slot-2\n\
-             buildx_buildkit_velnor-builder-gone0_state\tvelnor-job-gone\t/var/lib/velnor-fleet/work/slot-2\n"
-                .to_string(),
-            // re-list jobs right before removal
-            "velnor-job-live\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning\n"
-                .to_string(),
-            // volume rm --force
-            String::new(),
-        ]);
-        reclaim_daemon_orphan_jobs(daemon, |args| {
-            calls.push(args.to_vec());
-            // Everything after the volume sweep is the BuildKit path, which
-            // this test does not script: answer it with empty listings.
-            Ok(outputs.pop_front().unwrap_or_default())
-        })
-        .unwrap();
-        assert_eq!(calls[0], list_daemon_owned_job_format_args());
-        assert_eq!(calls[1], list_daemon_owned_volume_format_args());
-        assert_eq!(calls[2], list_daemon_owned_job_format_args());
-        assert_eq!(
-            calls[3],
-            force_remove_volume_args(&[
-                "velnor-job-gone-overlay-cargo-registry-cache".to_string(),
-                "velnor-job-gone-overlay-cargo-registry-cache-upper".to_string(),
-                "velnor-job-gone-overlay-cargo-registry-cache-work".to_string(),
-            ])
-        );
-    }
-
-    #[test]
-    fn reclaim_daemon_orphan_jobs_skips_the_volume_removal_when_nothing_is_orphaned() {
-        let daemon = "/var/lib/velnor-fleet/work";
-        let mut calls = Vec::new();
-        let mut outputs: std::collections::VecDeque<String> = std::collections::VecDeque::from([
-            "velnor-job-live\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning\n"
-                .to_string(),
-            "velnor-job-live-overlay-cargo-git-db-upper\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\n"
-                .to_string(),
-            "velnor-job-live\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning\n"
-                .to_string(),
-        ]);
-        reclaim_daemon_orphan_jobs(daemon, |args| {
-            calls.push(args.to_vec());
-            Ok(outputs.pop_front().unwrap_or_default())
-        })
-        .unwrap();
-        assert!(
-            !calls
-                .iter()
-                .any(|call| call.starts_with(&["volume".to_string(), "rm".to_string()])),
-            "{calls:?}"
         );
     }
 

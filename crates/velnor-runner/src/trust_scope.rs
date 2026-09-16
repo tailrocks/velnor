@@ -43,7 +43,8 @@ pub const FAIL_CLOSED: &str = "untrusted";
 pub const TRUSTED: &str = "trusted";
 
 /// Store namespace for same-repo pull-request jobs on a trusted pool. Writes
-/// land here; reads may overlay the trusted scope (D18).
+/// land here and persist; the Cargo store is copy-seeded from the trusted
+/// scope before each PR job (D18, `storage::seed_cargo_store`).
 pub const PR_STORE_SCOPE: &str = "pr";
 
 const HELP: &str = "Trust boundary for this daemon/pool. \"trusted\" keeps full capabilities; \

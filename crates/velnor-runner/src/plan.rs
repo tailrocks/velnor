@@ -113,6 +113,7 @@ mod tests {
             tools_host: root.join("tools"),
             mount_docker_socket: false,
             slot_count: std::num::NonZeroU32::MIN,
+            slot_store_key: None,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),
@@ -126,7 +127,6 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             store_trust_scope: "release".to_owned(),
-            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         }

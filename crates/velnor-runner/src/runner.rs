@@ -44,8 +44,8 @@ use crate::{
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     execution::condition_is_statically_false,
     executor::{
-        BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
-        ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
+        BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobEnvironmentGuards,
+        JobExecutionSummary, ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
         STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
@@ -412,6 +412,9 @@ struct RunServiceJobContext {
     billing_owner_id: Option<String>,
     journal_dir: PathBuf,
     journal_state: RunServiceJobJournalState,
+    /// `StepLogPages::root` of the slot handling the job: a job rejected
+    /// before execution still leaves its synthetic step's page there.
+    step_log_pages_root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1110,6 +1113,7 @@ pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
         billing_owner_id: record.billing_owner_id,
         journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
         journal_dir,
+        step_log_pages_root: StepLogPages::root(slot_dir),
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
@@ -1174,6 +1178,7 @@ async fn complete_recorded_in_flight_job_with_failure(
         billing_owner_id: record.billing_owner_id,
         journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
         journal_dir,
+        step_log_pages_root: StepLogPages::root(slot_dir),
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
@@ -2644,6 +2649,29 @@ pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Woken by the drain latch so an idle slot's broker long-poll can be
+/// cancelled the moment SIGTERM arrives, like actions/runner cancels
+/// `GetNextMessageAsync` through its shutdown token.
+static DRAIN_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Resolves once this process is draining: immediately when the latch is
+/// already set, otherwise on the SIGTERM/SIGINT edge. Enabling the waiter
+/// before reading the latch closes the lost-wakeup window.
+pub(crate) async fn until_draining() {
+    let notified = DRAIN_NOTIFY.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if draining() {
+        return;
+    }
+    notified.await;
+}
+
+fn latch_draining() {
+    DRAINING.store(true, std::sync::atomic::Ordering::Relaxed);
+    DRAIN_NOTIFY.notify_waiters();
+}
+
 /// Cached journal-drain reads: one zero-timeout `SELECT` per journal path at
 /// most this often. Poll boundaries tick every ~2s, so a 2s TTL bounds each
 /// boundary to one SQLite open without letting a drain order go stale.
@@ -2926,7 +2954,7 @@ fn start_drain_listener(config_base: PathBuf) {
                 }
             } => {}
         }
-        DRAINING.store(true, std::sync::atomic::Ordering::Relaxed);
+        latch_draining();
         let note =
             "drain requested (SIGTERM/SIGINT): finishing running jobs, idle slots deregister";
         println!("{note}");
@@ -5985,6 +6013,7 @@ fn daemon_slot_run_args(
 
     Ok(RunArgs {
         slot_count: validated_slot_count,
+        slot_index: Some(slot_index),
         state_db: Some(
             args.state_db
                 .clone()
@@ -6469,21 +6498,34 @@ async fn run_v2(
         'poll: loop {
             let poll_drain_journal =
                 crate::node::complete::journal_dir_near(&config_dir).join("journal.db");
-            let message = poll_broker_message(
-                &mut broker,
-                &mut run_service,
-                &current_broker_url,
-                &mut broker_token,
-                &stored,
-                session_id,
-                RunnerStatus::Online,
-                stored.settings.disable_update,
-                &mut poll_state,
-                &mut health,
-                &forensics,
-                &poll_drain_journal,
-            )
-            .await?;
+            // The long-poll (up to 70s) is cancelled on the drain edge, as
+            // actions/runner cancels `GetNextMessageAsync` on shutdown. An
+            // idle slot left to finish its poll outlived the controller's
+            // drain budget and was SIGKILLed with its registration intact:
+            // the drain the guide promises ("idle slots deregister") never
+            // ran. Dropping the request mid-flight is what the broker
+            // expects from a departing runner; the session is deleted below.
+            let message = tokio::select! {
+                biased;
+                () = until_draining() => {
+                    forensics.lifecycle("broker long-poll cancelled: daemon drain requested");
+                    None
+                }
+                message = poll_broker_message(
+                    &mut broker,
+                    &mut run_service,
+                    &current_broker_url,
+                    &mut broker_token,
+                    &stored,
+                    session_id,
+                    RunnerStatus::Online,
+                    stored.settings.disable_update,
+                    &mut poll_state,
+                    &mut health,
+                    &forensics,
+                    &poll_drain_journal,
+                ) => message?,
+            };
 
             let Some(message) = message else {
                 println!("No broker message received.");
@@ -7553,6 +7595,7 @@ async fn handle_v2_message(
         billing_owner_id: reference.billing_owner_id.clone(),
         journal_dir: journal_dir.clone(),
         journal_state: RunServiceJobJournalState::Acquired,
+        step_log_pages_root: StepLogPages::root(config_dir),
     };
     let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
         Ok(job) => job,
@@ -7593,6 +7636,7 @@ async fn handle_v2_message(
         billing_owner_id: reference.billing_owner_id,
         journal_dir,
         journal_state: RunServiceJobJournalState::Acquired,
+        step_log_pages_root: StepLogPages::root(config_dir),
     };
     if let Some(trigger) = prewarm_trigger.take() {
         let _ = trigger.send(());
@@ -7717,72 +7761,16 @@ async fn handle_job_request(
             anyhow::bail!("{REASON}: {error}");
         }
     };
-    // The backend's ability to mount D18 read-through store layers is part of
-    // the admission input: a job whose class and pool call for a layer the
-    // backend cannot mount is admitted on its write scope alone, with the
-    // denial recorded and shown in its "Set up job" log. The Docker answer is
-    // the probed daemon capability (one probe per daemon generation).
-    let read_through_support = match execution_backend {
-        velnor_model::ExecutionBackendKind::Docker => {
-            let work_dir = args
-                .work_dir
-                .clone()
-                .unwrap_or_else(|| config_dir.join("_work"));
-            let docker_host_work_dir = args.docker_host_work_dir.clone();
-            let docker_image = args.docker_image.clone();
-            let probed = tokio::task::spawn_blocking(move || {
-                crate::execution::store_overlay_support(
-                    &mut ProcessCommandRunner,
-                    Some(&docker_image),
-                    &work_dir,
-                    docker_host_work_dir.as_deref(),
-                )
-            })
-            .await
-            .context("store overlay capability probe task")?;
-            match probed {
-                Ok(support) => crate::trust_class::ReadThroughSupport::from_store_overlay(&support),
-                Err(error) => {
-                    const REASON: &str = "Docker store overlay capability probe could not reach a verdict; job failed closed before execution";
-                    let completion = complete_acquired_job_failure(
-                        &run_service_job,
-                        &AcquiredJobIdentity::from_job(&job),
-                        Some(&job),
-                        Some("store_overlay_probe".to_string()),
-                        &format!("{REASON}: {error}"),
-                    )
-                    .await;
-                    completion.context(
-                        "failed to complete the job rejected for the store overlay probe",
-                    )?;
-                    clear_in_flight_job(config_dir)
-                        .context("failed to clear completed in-flight job")?;
-                    anyhow::bail!("{REASON}: {error}");
-                }
-            }
-        }
-        velnor_model::ExecutionBackendKind::MicroVm => {
-            crate::trust_class::ReadThroughSupport::Unsupported {
-                reason: "the microVM backend shares stores without a read-through layer".to_owned(),
-            }
-        }
-    };
-    let admitted_trust =
-        crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope, &read_through_support);
+    let admitted_trust = crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope);
     let effective_trust_scope = admitted_trust.effective_scope().to_owned();
-    let store_read_through = admitted_trust.store_read_through();
+    let cargo_seed_scope = admitted_trust.cargo_seed_scope().map(ToOwned::to_owned);
     forensics.lifecycle(&format!(
-        "job admitted job_id={} trust={} admitted_scope={} pool_scope={} read_through={}",
+        "job admitted job_id={} trust={} admitted_scope={} pool_scope={} cargo_seed_from={}",
         job.job_id,
         admitted_trust.class().as_str(),
         effective_trust_scope,
         args.trust_scope,
-        match &store_read_through {
-            crate::trust_class::StoreReadThrough::Layered { lower_scope } =>
-                format!("{lower_scope} (overlay)"),
-            crate::trust_class::StoreReadThrough::Denied { reason } => format!("denied ({reason})"),
-            crate::trust_class::StoreReadThrough::None => "none".to_owned(),
-        },
+        cargo_seed_scope.as_deref().unwrap_or("none"),
     ));
 
     // Plan 066 required write: the sanitized admission row must persist
@@ -8397,8 +8385,17 @@ async fn handle_job_request(
         let step_log_spill = StepPublishSpill::new();
         let (step_log_tx, step_log_receiver) =
             tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        // The durable copy of every step log is written by the sender side
+        // (before the record enters the channel); the publisher uploads it
+        // from disk. See `StepLogPages`.
+        let step_log_pages = Arc::new(StepLogPages::open(&StepLogPages::root(config_dir), &job));
+        forensics.lifecycle(&format!(
+            "step-log-pages dir={}",
+            step_log_pages.dir().display()
+        ));
         let step_log_sender =
-            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill));
+            BoundedStepSender::with_spill(step_log_tx, Arc::clone(&step_log_spill))
+                .with_sink(Arc::clone(&step_log_pages) as Arc<_>);
         let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
@@ -8419,6 +8416,7 @@ async fn handle_job_request(
             step_log_spill,
             console_log_path,
             Arc::clone(&streamed_step_logs),
+            Arc::clone(&step_log_pages),
         );
         let config_dir = config_dir.to_path_buf();
         let teardown_config_dir = config_dir.clone();
@@ -8427,9 +8425,28 @@ async fn handle_job_request(
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let slot_count = args.slot_count;
+        let slot_store_key = args.slot_index.map(crate::container::slot_store_key);
         let node_action_image = args.node_action_image.clone();
         let effective_trust_scope = effective_trust_scope.clone();
-        let store_read_through = store_read_through.clone();
+        let cargo_seed_scope = cargo_seed_scope.clone();
+        // The bound on what the pr-scope Cargo seed may add: the same
+        // policy the compiler-store budget is enforced from, probed against
+        // the same work root. A failed probe seeds unbounded and says so;
+        // the capacity reservation stays the fail-closed guard on free space.
+        let store_budget = cargo_seed_scope.as_ref().and_then(|_| {
+            crate::capacity::StoreBudgetPolicy::probe(
+                &daemon_work_root(&config_dir, args.work_dir.as_deref()),
+                args.emergency_reserve_bytes,
+                args.job_peak_bytes,
+                args.slot_count.get(),
+            )
+            .inspect_err(|error| {
+                eprintln!(
+                    "Warning: store budget probe failed before the Cargo store seed; seeding unbounded: {error:#}"
+                );
+            })
+            .ok()
+        });
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
         let daemon_id = args
@@ -8458,10 +8475,12 @@ async fn handle_job_request(
                 &docker_image,
                 resource_options,
                 slot_count,
+                slot_store_key,
                 &node_action_image,
                 &admission_graph,
                 &effective_trust_scope,
-                &store_read_through,
+                cargo_seed_scope.as_deref(),
+                store_budget,
                 &run_service_url,
                 billing_owner_id,
                 &job_to_execute,
@@ -8665,6 +8684,11 @@ async fn handle_job_request(
                 mirror_evicted,
             );
         }
+        // Every final record has a page before completion: the sender-side
+        // sink covers the streamed path; this covers records that reached
+        // the result without it (a completion-only backend, the cancel-path
+        // merge above).
+        step_log_pages.persist_missing(&step_logs);
         let teardown = job_result.teardown;
         let execution_timings = job_result.timings;
         let finalize_started = Instant::now();
@@ -9626,6 +9650,7 @@ fn start_step_log_publisher(
     spill: Arc<StepPublishSpill<StepLog>>,
     console_log_path: Option<PathBuf>,
     streamed_step_logs: Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
+    step_log_pages: Arc<StepLogPages>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -9860,11 +9885,28 @@ fn start_step_log_publisher(
 
                     // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
                     // Upload for every non-skipped step — even empty — so it is expandable.
+                    // The blob is the local page read back from disk (the
+                    // sender side wrote it when the step completed); the
+                    // in-memory lines are the fallback only when that page
+                    // could not be written, so a full disk does not also
+                    // lose the GitHub copy.
                     // LOG FORMAT CONTRACT (docs/reference/interface.md): blob lines
                     // MUST carry the 7-digit timestamp prefix — the UI strips it
-                    // into the "Show timestamps" toggle column.
+                    // into the "Show timestamps" toggle column; the page holds
+                    // them already.
                     if !log.skipped {
-                        let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
+                        let timestamped = match step_log_pages.read_page(&log) {
+                            Ok(page) => page,
+                            Err(error) => {
+                                tracing::warn!(
+                                    job_id = %job_id,
+                                    step_id = %log.step_id,
+                                    error = %error,
+                                    "step-log page unreadable; uploading from memory"
+                                );
+                                blob_log_lines(&unix_now_iso8601(), &lines)
+                            }
+                        };
                         if let Err(e) = publish_with_timeout(client.upload_step_log(
                             &plan_id,
                             &job_id,
@@ -10484,10 +10526,12 @@ fn execute_script_job(
     docker_image: &str,
     resource_options: Vec<String>,
     slot_count: NonZeroU32,
+    slot_store_key: Option<String>,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
-    store_read_through: &crate::trust_class::StoreReadThrough,
+    cargo_seed_scope: Option<&str>,
+    store_budget: Option<crate::capacity::StoreBudgetPolicy>,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -10511,10 +10555,12 @@ fn execute_script_job(
         docker_image,
         resource_options,
         slot_count,
+        slot_store_key,
         node_action_image,
         admission_graph,
         effective_trust_scope,
-        store_read_through,
+        cargo_seed_scope,
+        store_budget,
         run_service_url,
         billing_owner_id,
         job,
@@ -10620,6 +10666,8 @@ fn execute_microvm_script_job(
             tools_host: run_root.join("tools"),
             docker_host_work_dir: None,
             execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+            // The microVM backend shares stores without per-slot subtrees.
+            slot_store_key: None,
         },
         docker_image,
         Vec::new(),
@@ -10627,7 +10675,6 @@ fn execute_microvm_script_job(
         node_action_image,
         "microvm".into(),
         effective_trust_scope,
-        None,
     )?;
     if container.mount_docker_socket {
         return Err(microvm_capability_error(
@@ -11013,10 +11060,12 @@ fn execute_script_job_inner(
     docker_image: &str,
     resource_options: Vec<String>,
     slot_count: NonZeroU32,
+    slot_store_key: Option<String>,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
-    store_read_through: &crate::trust_class::StoreReadThrough,
+    cargo_seed_scope: Option<&str>,
+    store_budget: Option<crate::capacity::StoreBudgetPolicy>,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -11086,6 +11135,35 @@ fn execute_script_job_inner(
     if repaired > 0 {
         eprintln!("forensics.lifecycle: removed {repaired} orphaned Cargo git checkout(s)");
     }
+    // D18: a pr-scope job's persistent Cargo store is seeded from the
+    // trusted store by copy before its container exists, so the job — and
+    // every later job sharing the store on this host — starts warm. The
+    // container then bind-mounts the pr store read-write like every other
+    // pr-scope store; nothing of the trusted store is ever mounted.
+    let cargo_seed = cargo_seed_scope
+        .map(|from_scope| {
+            let from = crate::container::cargo_store_host(&temp, from_scope);
+            let headroom = store_budget.map(|policy| {
+                policy
+                    .cargo_seed_headroom_bytes(crate::storage::dir_size(&cargo_store).unwrap_or(0))
+            });
+            let report = crate::storage::seed_cargo_store(&from, &cargo_store, headroom)
+                .with_context(|| {
+                    format!(
+                        "seed {} Cargo store from {}",
+                        effective_trust_scope,
+                        from.display()
+                    )
+                })?;
+            println!("{}", report.summary_line(effective_trust_scope, from_scope));
+            if let Some(line) =
+                headroom.and_then(|headroom| report.skipped_line(effective_trust_scope, headroom))
+            {
+                eprintln!("Warning: {line}");
+            }
+            Ok::<_, anyhow::Error>(report)
+        })
+        .transpose()?;
     let mut container = github_job_container_spec(
         job,
         GitHubJobContainerPaths {
@@ -11096,6 +11174,7 @@ fn execute_script_job_inner(
             tools_host: tools.clone(),
             docker_host_work_dir,
             execution_backend,
+            slot_store_key,
         },
         docker_image,
         resource_options,
@@ -11103,7 +11182,6 @@ fn execute_script_job_inner(
         node_action_image,
         daemon_id,
         effective_trust_scope,
-        store_read_through.lower_scope(),
     )?;
     let identity = identity_from_agent_name(runner_name);
     crate::github_adapter::push_runner_identity_env(&mut container.env, &identity);
@@ -11121,23 +11199,11 @@ fn execute_script_job_inner(
     let setup_ts = unix_now_iso8601();
     let mut setup_lines =
         setup_job_lines(job, docker_image, Some(&identity), Some(execution_backend));
-    let (store_lines, store_warning) = store_read_through.setup_job_lines(effective_trust_scope);
-    setup_lines.push("##[group]Persistent stores".to_string());
-    setup_lines.extend(store_lines);
-    setup_lines.push("##[endgroup]".to_string());
-    let store_annotations: Vec<crate::script_step::StepAnnotation> = store_warning
-        .into_iter()
-        .map(|message| crate::script_step::StepAnnotation {
-            level: crate::script_step::StepAnnotationLevel::Warning,
-            message,
-            title: Some("Read-through store unavailable".to_string()),
-            path: None,
-            start_line: None,
-            end_line: None,
-            start_column: None,
-            end_column: None,
-        })
-        .collect();
+    setup_lines.push(persistent_stores_line(
+        effective_trust_scope,
+        cargo_seed_scope,
+        cargo_seed.as_ref(),
+    ));
     let setup_log = StepLog {
         step_id: setup_step_id,
         display_name: "Set up job".to_string(),
@@ -11146,8 +11212,8 @@ fn execute_script_job_inner(
         completed_at: setup_ts,
         lines: setup_lines,
         masks: Vec::new(),
-        warning_count: i32::try_from(store_annotations.len()).unwrap_or(i32::MAX),
-        annotations: store_annotations,
+        warning_count: 0,
+        annotations: Vec::new(),
         telemetry: Vec::new(),
         exit_code: 0,
         skipped: false,
@@ -11385,7 +11451,7 @@ fn execute_script_job_inner(
     // Keep clones for synthetic steps after executor (senders are moved into executor below).
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
-    let (environment_started, container_boot_duration, environment_lease) =
+    let (environment_started, container_boot_duration, environment_guards) =
         precreated_environment.claim();
     let container_boot_ms = duration_ms(container_boot_duration);
     // Claim teardown ownership before the first fallible execution step. The
@@ -11428,18 +11494,21 @@ fn execute_script_job_inner(
         }
         log
     });
+    // Adopt the pre-create thread's guards so the in-container docker socket
+    // stays proxied for the whole step loop. The job network is the teardown
+    // owner's from `record_teardown_owner` above — it removes the network on
+    // every exit path, after the container — so this executor holds no
+    // network guard: one would fire at its drop, at the end of the steps,
+    // against the still-attached container.
     let mut executor = DockerJobEngine::inert(command_runner)
         .with_job_environment_started(environment_started)
+        .with_job_environment_guards(environment_guards)
+        .with_job_network_owned_by_teardown()
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
         .with_trust_scope(effective_trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
-    // Adopt the pre-create thread's lease guard so the in-container docker
-    // socket stays proxied until THIS executor's job cleanup drops it.
-    if let Some(lease) = environment_lease {
-        executor = executor.with_docker_lease(lease);
-    }
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -12083,19 +12152,15 @@ const PRIOR_TEARDOWN_JOIN_DEADLINE: Duration = Duration::from_secs(300);
 
 struct PrecreatedJobEnvironment {
     container: crate::container::JobContainerSpec,
-    task: Option<
-        std::thread::JoinHandle<(
-            Result<Option<crate::docker_lease::DockerLeaseGuard>>,
-            Duration,
-        )>,
-    >,
-    /// Lease guard bound by the pre-create thread. It must outlive the job
-    /// container: the container holds the proxy socket bind-mounted, so
-    /// dropping the guard deletes the socket inode and every in-container
-    /// docker client dies with "Cannot connect to the Docker daemon"
-    /// (0.1.185 regression — the guard used to die with the pre-create
-    /// thread's thread-local executor).
-    lease: Option<crate::docker_lease::DockerLeaseGuard>,
+    task: Option<std::thread::JoinHandle<(Result<JobEnvironmentGuards>, Duration)>>,
+    /// Every guard the pre-create thread's executor armed. They must outlive
+    /// the job container: the lease guard owns the proxy socket the container
+    /// has bind-mounted (dropping it kills every in-container docker client —
+    /// the 0.1.185 regression), and the network guard removes the job network
+    /// on drop. Both used to die with the pre-create thread's thread-local
+    /// executor; the network guard fired `docker network rm` against the
+    /// running container's endpoint on every pre-created job.
+    guards: JobEnvironmentGuards,
     claimed: bool,
     boot_duration: Duration,
 }
@@ -12105,18 +12170,16 @@ impl PrecreatedJobEnvironment {
         Self::spawn_with(container, |container| {
             let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
             let result = executor.start_job_environment(container);
-            // Hand the guard out of the thread-local executor BEFORE it is
-            // dropped; the running container keeps using the proxied socket.
-            let lease = executor.take_docker_lease();
-            result.map(|()| lease)
+            // Hand every guard out of the thread-local executor BEFORE it is
+            // dropped; the running container keeps using what they protect.
+            let guards = executor.take_job_environment_guards();
+            result.map(|()| guards)
         })
     }
 
     fn spawn_with(
         container: crate::container::JobContainerSpec,
-        starter: impl FnOnce(
-                &crate::container::JobContainerSpec,
-            ) -> Result<Option<crate::docker_lease::DockerLeaseGuard>>
+        starter: impl FnOnce(&crate::container::JobContainerSpec) -> Result<JobEnvironmentGuards>
             + Send
             + 'static,
     ) -> Self {
@@ -12129,7 +12192,7 @@ impl PrecreatedJobEnvironment {
         Self {
             container,
             task: Some(task),
-            lease: None,
+            guards: JobEnvironmentGuards::default(),
             claimed: false,
             boot_duration: Duration::ZERO,
         }
@@ -12140,9 +12203,9 @@ impl PrecreatedJobEnvironment {
             return self.claimed;
         };
         match task.join() {
-            Ok((Ok(lease), duration)) => {
+            Ok((Ok(guards), duration)) => {
                 self.boot_duration = duration;
-                self.lease = lease;
+                self.guards = guards;
                 true
             }
             Ok((Err(error), duration)) => {
@@ -12159,15 +12222,13 @@ impl PrecreatedJobEnvironment {
         }
     }
 
-    fn claim(
-        mut self,
-    ) -> (
-        bool,
-        Duration,
-        Option<crate::docker_lease::DockerLeaseGuard>,
-    ) {
+    fn claim(mut self) -> (bool, Duration, JobEnvironmentGuards) {
         self.claimed = self.join();
-        (self.claimed, self.boot_duration, self.lease.take())
+        (
+            self.claimed,
+            self.boot_duration,
+            std::mem::take(&mut self.guards),
+        )
     }
 }
 
@@ -12176,13 +12237,12 @@ impl Drop for PrecreatedJobEnvironment {
         if self.claimed || !self.join() {
             return;
         }
-        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
-        // Hand the pre-create thread's guard to the cleanup executor: its
-        // cleanup drops the guard only AFTER the abandoned environment's
-        // container is removed, so the proxy never dies under a live mount.
-        if let Some(lease) = self.lease.take() {
-            executor = executor.with_docker_lease(lease);
-        }
+        // Hand the pre-create thread's guards to the cleanup executor: its
+        // cleanup drops the lease guard only AFTER the abandoned environment's
+        // container is removed, so the proxy never dies under a live mount,
+        // and defuses the network guard once it has removed the network.
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner)
+            .with_job_environment_guards(std::mem::take(&mut self.guards));
         if let Err(error) = executor.cleanup(&self.container) {
             eprintln!("Warning: abandoned pre-created environment cleanup failed: {error:#}");
         }
@@ -13348,6 +13408,213 @@ fn combine_job_and_cleanup<T>(
     }
 }
 
+/// Newest job page directories kept per slot under `logs/pages/`; older ones
+/// are pruned when a new job's directory is created.
+const STEP_LOG_PAGE_JOBS_RETAINED: usize = 32;
+
+/// Name of the per-job page index: one tab-separated line per persisted step
+/// (`order`, `exit_code`, `page file`, `display name`), so a human can find a
+/// step's page without decoding step ids.
+const STEP_LOG_PAGE_INDEX: &str = "index.tsv";
+
+/// Local step-log pages — the primary sink for every completed step's log.
+///
+/// `<config-dir>/logs/pages/<job-id>/<order>-<step-id>.log` holds exactly
+/// the bytes the Results Service step-log blob carries (masked, lock-wait
+/// annotated, 7-digit-timestamp prefixed), and `index.tsv` names each page.
+/// The executor side writes a page the moment a step's final record is
+/// emitted (through [`StepRecordSink`] on the step-log sender), and the
+/// network publisher uploads that file from disk. GitHub reachability
+/// therefore never decides whether a step's output survives: on a host whose
+/// egress blocks blob storage the page is the only copy, and it is complete.
+/// Mirrors actions/runner, where `PagingLogger` writes `_diag/pages/` on the
+/// execution side and `JobServerQueue` uploads the files.
+///
+/// Masking is a property of the write: a page is masked with the job secrets
+/// plus every `::add-mask::` value any earlier record of this job carried,
+/// never with the emitting step's own masks only (see
+/// [`MaskPatterns::with_every_step`] for why per-step masking leaks).
+struct StepLogPages {
+    dir: PathBuf,
+    job: AgentJobRequestMessage,
+    job_masks: MaskPatterns,
+    /// Running union of every mask registered so far in this job.
+    registered_masks: Mutex<Vec<String>>,
+}
+
+impl std::fmt::Debug for StepLogPages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepLogPages")
+            .field("dir", &self.dir)
+            .field("job_id", &self.job.job_id)
+            .finish()
+    }
+}
+
+impl StepLogPages {
+    /// Root of every job's pages under one slot config dir.
+    fn root(config_dir: &Path) -> PathBuf {
+        config_dir.join("logs").join("pages")
+    }
+
+    /// Open (create) this job's page directory under `root` and prune the
+    /// oldest sibling job directories past [`STEP_LOG_PAGE_JOBS_RETAINED`].
+    fn open(root: &Path, job: &AgentJobRequestMessage) -> Self {
+        let dir = root.join(sanitize_path_segment(&job.job_id));
+        if let Err(error) = fs::create_dir_all(&dir) {
+            eprintln!(
+                "forensics.lifecycle: step-log page directory {} unavailable: {error}",
+                dir.display()
+            );
+        }
+        prune_step_log_page_jobs(root, &dir, STEP_LOG_PAGE_JOBS_RETAINED);
+        Self {
+            dir,
+            job_masks: MaskPatterns::new(job_secret_mask_values(job)),
+            job: job.clone(),
+            registered_masks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn page_path(&self, log: &StepLog) -> PathBuf {
+        self.dir.join(format!(
+            "{:03}-{}.log",
+            log.order.max(0),
+            sanitize_path_segment(&log.step_id)
+        ))
+    }
+
+    /// Remember the masks a record carries so every later page is masked
+    /// with them too.
+    fn register_masks(&self, masks: &[String]) {
+        if masks.iter().all(String::is_empty) {
+            return;
+        }
+        if let Ok(mut registered) = self.registered_masks.lock() {
+            for mask in masks {
+                if !mask.is_empty() && !registered.contains(mask) {
+                    registered.push(mask.clone());
+                }
+            }
+        }
+    }
+
+    /// The exact lines the page holds and the blob upload carries.
+    fn page_lines(&self, log: &StepLog) -> Vec<String> {
+        let registered = self
+            .registered_masks
+            .lock()
+            .map(|masks| masks.clone())
+            .unwrap_or_default();
+        let mut extra = registered;
+        extra.extend(log.masks.iter().cloned());
+        let masker = self.job_masks.with_extra(&extra);
+        let lines = annotate_lock_wait_lines(&mask_log_lines_with(&log.lines, &masker), &self.job);
+        blob_log_lines(&unix_now_iso8601(), &lines)
+    }
+
+    /// Write (or rewrite — the latest final record for a step is
+    /// authoritative) the step's page and index line. Returns the page path.
+    fn persist(&self, log: &StepLog) -> std::io::Result<PathBuf> {
+        let path = self.page_path(log);
+        let mut content = String::new();
+        for line in self.page_lines(log) {
+            content.push_str(&line);
+            content.push('\n');
+        }
+        fs::create_dir_all(&self.dir)?;
+        fs::write(&path, content)?;
+        let mut index = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(STEP_LOG_PAGE_INDEX))?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        writeln!(
+            index,
+            "{}\t{}\t{}\t{}",
+            log.order,
+            log.exit_code,
+            file_name,
+            log.display_name.replace(['\t', '\n'], " ")
+        )?;
+        Ok(path)
+    }
+
+    /// Persist every final record that has no page yet — the backstop for
+    /// records that reached `ScriptJobResult` without passing the step-log
+    /// sender (a backend that returns its logs only at completion).
+    fn persist_missing(&self, logs: &[StepLog]) {
+        for log in logs {
+            if log.completed_at.is_empty() || log.skipped || self.page_path(log).is_file() {
+                continue;
+            }
+            self.register_masks(&log.masks);
+            if let Err(error) = self.persist(log) {
+                eprintln!(
+                    "forensics.lifecycle: step-log page write failed step={} path={}: {error}",
+                    log.step_id,
+                    self.page_path(log).display()
+                );
+            }
+        }
+    }
+
+    /// Read a step's page back for upload. `Err` when no page exists (the
+    /// write failed) — the caller decides whether to upload from memory.
+    fn read_page(&self, log: &StepLog) -> std::io::Result<Vec<String>> {
+        let content = fs::read_to_string(self.page_path(log))?;
+        Ok(content.lines().map(str::to_owned).collect())
+    }
+}
+
+impl crate::executor::StepRecordSink<StepLog> for StepLogPages {
+    fn record(&self, log: &StepLog) {
+        self.register_masks(&log.masks);
+        if log.completed_at.is_empty() || log.skipped {
+            return;
+        }
+        if let Err(error) = self.persist(log) {
+            eprintln!(
+                "forensics.lifecycle: step-log page write failed step={} path={}: {error}",
+                log.step_id,
+                self.page_path(log).display()
+            );
+        }
+    }
+}
+
+/// Keep the newest `retain` job directories under `root` (the one being
+/// opened, `keep`, always survives); remove the rest oldest-first.
+fn prune_step_log_page_jobs(root: &Path, keep: &Path, retain: usize) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut jobs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| entry.path() != keep)
+        .filter_map(|entry| {
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    let others_retained = retain.saturating_sub(1);
+    if jobs.len() <= others_retained {
+        return;
+    }
+    jobs.sort();
+    for (_, stale) in jobs.iter().take(jobs.len() - others_retained) {
+        let _ = fs::remove_dir_all(stale);
+    }
+}
+
 /// Host path of the live console file the job container tails as PID 1. Lives
 /// under the job's temp dir (mounted at `/__t`), so the container streams it via
 /// `tail -F /__t/_velnor/console.log` and `docker logs` mirrors the UI output.
@@ -13587,6 +13854,22 @@ fn setup_job_lines(
 
     lines.push(format!("Complete job name: {}", job.job_display_name));
     lines
+}
+
+/// The "Set up job" line naming the job's persistent Cargo store: the scope
+/// it writes and, for a pr-scope job, what the daemon seeded it with (D18).
+fn persistent_stores_line(
+    write_scope: &str,
+    seed_scope: Option<&str>,
+    seed: Option<&crate::storage::CargoStoreSeedReport>,
+) -> String {
+    match (seed_scope, seed) {
+        (Some(from), Some(report)) => format!(
+            "Persistent stores: cargo {write_scope} scope (seeded from {from}: {} files)",
+            report.files
+        ),
+        _ => format!("Persistent stores: cargo {write_scope} scope"),
+    }
 }
 
 /// The job image bakes the CI toolchain (rust, cargo-nextest, just, protoc,
@@ -13893,19 +14176,28 @@ async fn upload_results_job_log_with_client(
 }
 
 /// Upload one step's log blob through an explicit Results Service client, for
-/// the pre-execution failure path that bypasses the live step publisher. Lines
-/// are masked and stamped with the 7-digit timestamp prefix exactly like the
-/// publisher path (docs/reference/interface.md).
+/// the pre-execution failure path that bypasses the live step publisher. The
+/// blob is the step's local page read from disk (masked, 7-digit-timestamp
+/// prefixed — docs/reference/interface.md); the in-memory lines are the
+/// fallback only when the page could not be written.
 async fn upload_results_step_log_with_client(
     client: &crate::protocol::TwirpResultsClient,
+    pages: &StepLogPages,
     job: &AgentJobRequestMessage,
     log: &StepLog,
 ) -> Result<()> {
-    // The pre-execution failure path has exactly one log, so its own mask set
-    // is already the whole job's.
-    let masker = MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks);
-    let lines = mask_log_lines_with(&log.lines, &masker);
-    let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
+    let timestamped = match pages.read_page(log) {
+        Ok(page) => page,
+        Err(error) => {
+            tracing::warn!(
+                job_id = %job.job_id,
+                step_id = %log.step_id,
+                error = %error,
+                "step-log page unreadable; uploading from memory"
+            );
+            pages.page_lines(log)
+        }
+    };
     client
         .upload_step_log(&job.plan.plan_id, &job.job_id, &log.step_id, &timestamped)
         .await
@@ -14902,6 +15194,10 @@ async fn complete_acquired_job_outcome(
         .unwrap_or("pre_execution");
     if let Some(job) = job {
         let log = failed_acquired_job_step_log(category, &masked_reason);
+        // The local page first: the rejection reason must survive on disk
+        // even when every upload below fails.
+        let pages = StepLogPages::open(&run_service_job.step_log_pages_root, job);
+        pages.persist_missing(std::slice::from_ref(&log));
         if let Err(error) = publish_timeline_step_log(job, &log).await {
             eprintln!("Best-effort Velnor rejection step log upload failed: {error:#}");
         }
@@ -14910,7 +15206,9 @@ async fn complete_acquired_job_outcome(
         // hiding the rejection reason (homebrew-tablerock run 33344851591).
         // Best-effort — completion must not be blocked by a log upload.
         if let Some(client) = results_client_for_job(job) {
-            if let Err(error) = upload_results_step_log_with_client(&client, job, &log).await {
+            if let Err(error) =
+                upload_results_step_log_with_client(&client, &pages, job, &log).await
+            {
                 tracing::warn!(
                     job_id = %job.job_id,
                     blob_kind = "step-log",
@@ -16501,6 +16799,7 @@ mod tests {
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
 
         persist_in_flight_job(&dir, &context, &job).unwrap();
@@ -16523,6 +16822,7 @@ mod tests {
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         let mut first = minimal_job_with_variables(serde_json::json!({}));
         first.job_id = "job-first".into();
@@ -16558,6 +16858,7 @@ mod tests {
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
 
         persist_in_flight_job(&dir, &context, &job).unwrap();
@@ -16976,6 +17277,33 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The broker long-poll is raced against this future, so it must resolve
+    /// at once when the latch is already set (drain edge before the poll
+    /// started) and on the edge when it is armed first (drain mid-poll) —
+    /// never hang the slot for the remainder of a 70s poll.
+    #[tokio::test]
+    async fn until_draining_resolves_on_the_latch_and_on_the_edge() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        let previous_draining = DRAINING.swap(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1), until_draining())
+            .await
+            .expect("an already-latched drain resolves immediately");
+
+        DRAINING.store(false, Ordering::SeqCst);
+        let armed = tokio::spawn(until_draining());
+        tokio::task::yield_now().await;
+        assert!(
+            !armed.is_finished(),
+            "no drain: the waiter must stay pending"
+        );
+        latch_draining();
+        tokio::time::timeout(Duration::from_secs(1), armed)
+            .await
+            .expect("the drain edge wakes an armed waiter")
+            .unwrap();
+        DRAINING.store(previous_draining, Ordering::SeqCst);
+    }
+
     #[test]
     fn supervised_start_does_not_clear_drain_while_this_process_is_draining() {
         let _serial = crate::trust_scope::test_support::serialized();
@@ -17359,6 +17687,7 @@ mod tests {
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
             slot_count: NonZeroU32::MIN,
+            slot_index: None,
             state_db: None,
             config_dir: None,
             pat: None,
@@ -17716,11 +18045,7 @@ mod tests {
         // event, narrow the pool ceiling by it, and enforce the admitted scope
         // on all three axes — secrets, socket, stores.
         let job = admission_job("pull_request", Some("mallory/base"), true);
-        let admitted = crate::trust_class::AdmittedTrust::admit(
-            &job,
-            "trusted",
-            &crate::trust_class::ReadThroughSupport::Supported,
-        );
+        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
         assert_eq!(admitted.class(), TrustClass::ForkPR);
         assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
 
@@ -17756,11 +18081,7 @@ mod tests {
             }
         }));
 
-        let admitted = crate::trust_class::AdmittedTrust::admit(
-            &job,
-            "trusted",
-            &crate::trust_class::ReadThroughSupport::Supported,
-        );
+        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
         assert_eq!(admitted.class(), TrustClass::ForkPR);
         let admitted_scope = admitted.effective_scope().to_owned();
         validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
@@ -17776,6 +18097,7 @@ mod tests {
                 tools_host: "/velnor/work/job/tools".into(),
                 docker_host_work_dir: None,
                 execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                slot_store_key: None,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -17783,7 +18105,6 @@ mod tests {
             "",
             "daemon".into(),
             &admitted_scope,
-            None,
         )
         .unwrap();
 
@@ -17813,11 +18134,7 @@ mod tests {
         // signals keeps the trusted pool's capabilities — secrets flow and the
         // admitted scope is the pool value itself.
         let job = admission_job("push", None, true);
-        let admitted = crate::trust_class::AdmittedTrust::admit(
-            &job,
-            "trusted",
-            &crate::trust_class::ReadThroughSupport::Supported,
-        );
+        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
         assert_eq!(admitted.class(), TrustClass::Trusted);
         assert_eq!(admitted.effective_scope(), "trusted");
         validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
@@ -17846,11 +18163,7 @@ mod tests {
         ] {
             let job = admission_job(event, head, false);
             assert_eq!(TrustClass::derive(&job), class);
-            let trust = crate::trust_class::AdmittedTrust::admit(
-                &job,
-                "trusted",
-                &crate::trust_class::ReadThroughSupport::Supported,
-            );
+            let trust = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
             assert_eq!(trust.class(), class);
             assert_eq!(trust.effective_scope(), scope);
 
@@ -18951,6 +19264,7 @@ jobs:
             client: RunServiceClient::new("token").unwrap(),
             run_service_url: "https://example.test/run-service".to_owned(),
             billing_owner_id: None,
+            step_log_pages_root: StepLogPages::root(&journal_dir),
             journal_dir,
             journal_state: RunServiceJobJournalState::Accepted,
         };
@@ -21962,6 +22276,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         complete_acquired_job_failure(
             &context,
@@ -22041,6 +22356,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: recorded_job_journal_state(&dir, &identity.job_id),
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         assert_eq!(
             context.journal_state,
@@ -22098,6 +22414,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
 
@@ -22274,6 +22591,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
         let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
@@ -22325,6 +22643,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
         let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
@@ -22407,6 +22726,7 @@ jobs:
             billing_owner_id: None,
             journal_dir: config_dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&config_dir),
         };
         persist_in_flight_job(&config_dir, &context, &job).unwrap();
 
@@ -25785,6 +26105,7 @@ runs:
             billing_owner_id: None,
             journal_dir: dir.clone(),
             journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: StepLogPages::root(&dir),
         };
         let mut first = minimal_job_with_variables(serde_json::json!({}));
         first.job_id = "job-first".into();
@@ -26157,6 +26478,7 @@ runs:
             tools_host: temp.join("tools"),
             mount_docker_socket: true,
             slot_count: NonZeroU32::MIN,
+            slot_store_key: None,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),
@@ -26170,7 +26492,6 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             store_trust_scope: "trusted".to_owned(),
-            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         }
@@ -26206,17 +26527,21 @@ runs:
         let environment = PrecreatedJobEnvironment::spawn_with(
             lease_test_container_spec(&root),
             move |_container| {
-                Ok(Some(crate::docker_lease::DockerLeaseGuard::bind_to(
-                    listen_for_starter,
-                    PathBuf::from("/nonexistent-host-docker.sock"),
-                    "job".into(),
-                    "daemon".into(),
-                )?))
+                Ok(JobEnvironmentGuards {
+                    docker_lease: Some(crate::docker_lease::DockerLeaseGuard::bind_to(
+                        listen_for_starter,
+                        PathBuf::from("/nonexistent-host-docker.sock"),
+                        "job".into(),
+                        "daemon".into(),
+                    )?),
+                    job_network: None,
+                })
             },
         );
 
-        let (started, _duration, lease) = environment.claim();
+        let (started, _duration, guards) = environment.claim();
         assert!(started);
+        let lease = guards.docker_lease;
         assert!(
             lease.is_some(),
             "claim must hand the live lease guard to the job executor"
@@ -26258,12 +26583,15 @@ runs:
         spec.network = format!("{}-net", spec.name);
         {
             let _environment = PrecreatedJobEnvironment::spawn_with(spec, move |_container| {
-                Ok(Some(crate::docker_lease::DockerLeaseGuard::bind_to(
-                    listen_for_starter,
-                    PathBuf::from("/nonexistent-host-docker.sock"),
-                    "job".into(),
-                    "daemon".into(),
-                )?))
+                Ok(JobEnvironmentGuards {
+                    docker_lease: Some(crate::docker_lease::DockerLeaseGuard::bind_to(
+                        listen_for_starter,
+                        PathBuf::from("/nonexistent-host-docker.sock"),
+                        "job".into(),
+                        "daemon".into(),
+                    )?),
+                    job_network: None,
+                })
             });
             // Dropped without claim: Drop runs cleanup with a real docker CLI
             // (absent in tests — the cleanup failure is logged and ignored),
@@ -26691,6 +27019,129 @@ runs:
         }
     }
 
+    fn pages_job(job_id: &str, secret: &str) -> AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": job_id,
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "system.github.token": { "value": secret, "isSecret": true }
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn step_log_pages_are_written_by_the_sender_side_and_read_back_for_upload() {
+        let root = unique_temp_dir("step-log-pages");
+        let job = pages_job("job-1", "ghs_jobsecret");
+        let pages = Arc::new(StepLogPages::open(&root, &job));
+        assert_eq!(pages.dir(), root.join("job-1"));
+
+        // The sink is attached to the real sender: a send persists the page
+        // BEFORE the record reaches the channel, so the durable copy never
+        // waits on the publisher.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx).with_sink(Arc::clone(&pages) as Arc<_>);
+
+        // A live chunk registers its masks but writes no page.
+        let mut live = partial_step_log("step-a", &["adding mask"], "");
+        live.masks = vec!["hunter2".to_string()];
+        sender.send_best_effort(live);
+        assert!(fs::read_dir(pages.dir()).unwrap().next().is_none());
+
+        // A skipped step writes no page either.
+        let mut skipped = partial_step_log("step-skipped", &[], "2026-08-31T00:00:01.0000000Z");
+        skipped.skipped = true;
+        sender.send_best_effort(skipped);
+        assert!(fs::read_dir(pages.dir()).unwrap().next().is_none());
+
+        // The final record of a later step is masked with the job secret AND
+        // the mask an earlier record registered, then written as blob lines.
+        let mut done = partial_step_log(
+            "step-b",
+            &[
+                "token ghs_jobsecret pw hunter2",
+                "Blocking waiting for file lock on build directory",
+            ],
+            "2026-08-31T00:00:02.0000000Z",
+        );
+        done.order = 7;
+        done.exit_code = 3;
+        done.display_name = "Run unit\tchecks".to_string();
+        sender.send_best_effort(done.clone());
+        let page = pages.dir().join("007-step-b.log");
+        let content = fs::read_to_string(&page).unwrap();
+        assert!(!content.contains("ghs_jobsecret"), "{content}");
+        assert!(!content.contains("hunter2"), "{content}");
+        assert!(content.contains("token *** pw ***"), "{content}");
+        assert!(
+            content.contains("[velnor] waiting for Cargo build lock"),
+            "{content}"
+        );
+        for line in content.lines() {
+            // `YYYY-MM-DDTHH:MM:SS.fffffffZ ` is 28 chars plus the separator.
+            assert!(
+                line.len() > 28 && line.as_bytes()[27] == b'Z' && line.as_bytes()[28] == b' ',
+                "blob line must carry the 7-digit timestamp prefix: {line:?}"
+            );
+        }
+        // The upload reads exactly the page.
+        assert_eq!(
+            pages.read_page(&done).unwrap(),
+            content.lines().map(str::to_owned).collect::<Vec<_>>()
+        );
+        let index = fs::read_to_string(pages.dir().join(STEP_LOG_PAGE_INDEX)).unwrap();
+        assert_eq!(index, "7\t3\t007-step-b.log\tRun unit checks\n");
+        // Every record still reached the channel, in order.
+        let mut received = Vec::new();
+        while let Ok(log) = rx.try_recv() {
+            received.push(log.step_id);
+        }
+        assert_eq!(received, vec!["step-a", "step-skipped", "step-b"]);
+
+        // The backstop persists only records without a page.
+        let unseen = partial_step_log("step-c", &["late"], "2026-08-31T00:00:03.0000000Z");
+        pages.persist_missing(&[done.clone(), unseen]);
+        assert_eq!(fs::read_to_string(&page).unwrap(), content);
+        assert!(pages.dir().join("001-step-c.log").is_file());
+        assert!(pages
+            .read_page(&partial_step_log("nope", &[], "x"))
+            .is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn step_log_pages_retain_only_the_newest_jobs() {
+        let root = unique_temp_dir("step-log-pages-retention");
+        for index in 0..STEP_LOG_PAGE_JOBS_RETAINED + 3 {
+            let job = pages_job(&format!("job-{index:03}"), "s");
+            let pages = StepLogPages::open(&root, &job);
+            fs::write(pages.dir().join("marker"), b"x").unwrap();
+            let count = fs::read_dir(&root).unwrap().count();
+            assert!(
+                count <= STEP_LOG_PAGE_JOBS_RETAINED,
+                "{count} job dirs after job {index}"
+            );
+            // Distinct mtimes so the prune order is the creation order.
+            let stamp = UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index as u64);
+            fs::File::open(pages.dir())
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        }
+        assert!(!root.join("job-000").exists());
+        assert!(!root.join("job-002").exists());
+        assert!(root.join("job-003").exists());
+        assert!(root
+            .join(format!("job-{:03}", STEP_LOG_PAGE_JOBS_RETAINED + 2))
+            .exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn streamed_step_log_mirror_evicts_oldest_at_entry_cap() {
         let mut mirror = StreamedStepLogMirror::default();
@@ -26794,12 +27245,15 @@ runs:
         let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let (sender, receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let held = mirror.lock().await;
+        let pages_root = unique_temp_dir("step-log-publisher-contended");
+        let pages = Arc::new(StepLogPages::open(&pages_root, &job));
         let mut publisher = start_step_log_publisher(
             job,
             receiver,
             StepPublishSpill::new(),
             None,
             Arc::clone(&mirror),
+            pages,
         );
         sender
             .send(partial_step_log("contended", &["line"], ""))

@@ -56,21 +56,28 @@ reference it from `buildkitd-config-inline` on trusted `velnor-host-docker`
 jobs. Keeps builder disk under ~40 GiB used with 10 GiB reserved and 5 GiB
 min free.
 
-## Trust-scope overlay (D18)
+## Trust-scope `pr` seed (D18)
 
 Same-repo **pull_request** jobs on a **trusted** pool (`VELNOR_TRUST_SCOPE=trusted`):
 
-- **Write scope:** `pr` — mbx, targets, executables, and PR-local caches.
-- **Read-through:** `trusted` — Cargo registry cache/index/git db overlay from
-  trusted stores when overlay mount succeeds; otherwise PR scope only (warned in logs).
+- **Write scope:** `pr` — mbx, targets, executables, Cargo registry/git db,
+  and PR-local caches; persistent, bind-mounted read-write, shared by every
+  slot on the host.
+- **Seed:** before the job container starts the daemon copies every file of
+  the `trusted` Cargo store (`registry/cache`, `registry/index`, `git/db`)
+  that `pr` lacks into `pr` — a copy, never a hard link or overlay, so a PR
+  rewriting a seeded file in place cannot touch `trusted`. Bounded by the
+  compiler store budget; newest entries first, skipped entries logged.
 
 Fork and unknown jobs remain on the `untrusted` floor. Trusted events (main
 push, schedule, dispatch on default branch) write the `trusted` scope only.
 
-**Partial hooks:** admission derives scope in `trust_class::AdmittedTrust`;
-`container::JobContainerSpec::prepare_store_overlays` mounts overlays;
-`storage::teardown_store_overlays` unmounts at job cleanup.
+**Hooks:** admission derives scope and seed source in
+`trust_class::AdmittedTrust`; `storage::seed_cargo_store` copies before
+`github_job_container_spec` builds the mounts (`runner.rs`,
+`execute_script_job_inner`).
 
-**Verify:** consecutive same-repo PR Velnor jobs show mbx hits on unchanged
-source; trusted main push saves remain in `trusted/` only (`velnorctl cache du`
-lists `pr/` vs `trusted/` separately).
+**Verify:** the daemon log shows `seeded pr cargo store from trusted: N files,
+M bytes, T ms` per PR admission; consecutive same-repo PR Velnor jobs show
+mbx hits on unchanged source; trusted main push saves remain in `trusted/`
+only (`velnorctl cache du` lists `pr/` vs `trusted/` separately).

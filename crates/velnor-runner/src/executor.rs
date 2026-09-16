@@ -1540,11 +1540,33 @@ impl<T> StepPublishSpill<T> {
 /// Exception: on the cancel path the executor never returns `ScriptJobResult`,
 /// so the streamed mirror (fed through this channel) is the persisted log's
 /// only source — drops there surface in the cancel-path truncation marker.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BoundedStepSender<T> {
     sender: Sender<T>,
     drops: Arc<AtomicU64>,
     spill: Option<Arc<StepPublishSpill<T>>>,
+    sink: Option<Arc<dyn StepRecordSink<T>>>,
+}
+
+impl<T> std::fmt::Debug for BoundedStepSender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundedStepSender")
+            .field("drops", &self.drops)
+            .field("spill", &self.spill.is_some())
+            .field("sink", &self.sink.is_some())
+            .finish()
+    }
+}
+
+/// Local sink invoked synchronously, on the sending thread, for every record
+/// BEFORE it enters the publish channel. This is the durable copy: the
+/// channel feeds a best-effort network publisher that a stalled backend can
+/// starve or the drain deadline can abort, so anything that must exist on
+/// disk regardless of GitHub reachability is written here, not there.
+/// actions/runner has the same split — `PagingLogger` writes `_diag/pages`
+/// on the execution side and `JobServerQueue` uploads from those files.
+pub trait StepRecordSink<T>: Send + Sync {
+    fn record(&self, value: &T);
 }
 
 impl<T> BoundedStepSender<T> {
@@ -1553,6 +1575,7 @@ impl<T> BoundedStepSender<T> {
             sender,
             drops: Arc::new(AtomicU64::new(0)),
             spill: None,
+            sink: None,
         }
     }
 
@@ -1561,7 +1584,14 @@ impl<T> BoundedStepSender<T> {
             sender,
             drops: Arc::new(AtomicU64::new(0)),
             spill: Some(spill),
+            sink: None,
         }
+    }
+
+    /// Attach the durable local sink; see [`StepRecordSink`].
+    pub fn with_sink(mut self, sink: Arc<dyn StepRecordSink<T>>) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     /// Cloneable handle to the drop counter; the runner keeps this (not a
@@ -1580,6 +1610,9 @@ impl<T> BoundedStepSender<T> {
     /// travel in `ScriptJobResult` — except on the cancel path, where the
     /// count feeds the truncation marker instead.
     pub fn send_best_effort(&self, value: T) {
+        if let Some(sink) = &self.sink {
+            sink.record(&value);
+        }
         match self.sender.try_send(value) {
             Ok(()) => {}
             Err(TrySendError::Full(value)) => {
@@ -2030,6 +2063,22 @@ impl LifecycleTelemetry {
     }
 }
 
+/// Every guard a started job environment owns, moved as one value.
+///
+/// `start_job_environment` arms guards inside the executor that ran it. When
+/// that executor is the pre-create thread's, the guards would fire with the
+/// thread while the job container is still using what they protect: the
+/// lease guard drops the proxied socket the container has bind-mounted
+/// (0.1.185 regression), the network guard runs `docker network rm` on the
+/// live job network. Handing them over one field at a time is how the
+/// network guard got left behind after the lease guard was fixed, so the
+/// hand-off is a single value with no per-guard path.
+#[derive(Default)]
+pub(crate) struct JobEnvironmentGuards {
+    pub(crate) docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
+    pub(crate) job_network: Option<crate::docker_lease::JobNetworkGuard>,
+}
+
 /// Host-Docker step engine owned by the docker backend.
 ///
 /// Jobs enter through [`crate::execution::run_validated_job`]. This type is not
@@ -2062,6 +2111,14 @@ pub(crate) struct DockerJobEngine<R> {
     /// removed it. Drop then removes the network, so no executor exit path can
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
+    /// False when another owner runs the job's terminal cleanup — the slot's
+    /// teardown handle, recorded before this executor exists and run on
+    /// every exit path until it succeeds. This executor then never holds a
+    /// network guard: one it armed or adopted would fire at its drop, which
+    /// comes at the end of the steps while the container it protects is
+    /// still attached (the teardown removes both later), so the guard failed
+    /// with "has active endpoints" on every job and guarded nothing.
+    arm_job_network_guard: bool,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
     /// The running job's cancellation. Required, not optional: a job that could
     /// not be cancelled is the defect this field exists to remove, so there is
@@ -2104,6 +2161,7 @@ where
             job_environment_started: false,
             docker_lease: None,
             job_network_guard: None,
+            arm_job_network_guard: true,
             lifecycle_telemetry: None,
             cancellation,
             deprecated_command_scope: DeprecatedCommandScope::default(),
@@ -2165,6 +2223,15 @@ where
         self
     }
 
+    /// The job network's terminal cleanup belongs to a teardown owner that
+    /// outlives this executor (see `arm_job_network_guard`): drop any guard
+    /// already adopted and arm none on a lazy environment start.
+    pub(crate) fn with_job_network_owned_by_teardown(mut self) -> Self {
+        self.arm_job_network_guard = false;
+        self.defuse_job_network_guard();
+        self
+    }
+
     pub(crate) fn with_tool_prep_telemetry(
         mut self,
         sink: Arc<crate::ops::OpsSink>,
@@ -2174,18 +2241,28 @@ where
         self
     }
 
-    /// Adopt the Docker lease guard bound by an earlier (pre-created)
-    /// environment start. The guard must live as long as the job container:
-    /// the container holds the proxy socket bind-mounted, and dropping the
-    /// guard deletes the socket inode, killing in-container docker clients
-    /// (0.1.185 precreate regression, tailrocks/velnor#311 follow-up).
-    pub fn with_docker_lease(mut self, lease: crate::docker_lease::DockerLeaseGuard) -> Self {
-        self.docker_lease = Some(lease);
+    /// Adopt every guard an earlier (pre-created) environment start bound.
+    /// The guards must live as long as the job container: the container
+    /// holds the lease proxy socket bind-mounted, so dropping that guard
+    /// deletes the socket inode and kills in-container docker clients
+    /// (0.1.185 precreate regression, tailrocks/velnor#311 follow-up); the
+    /// network guard fires `docker network rm` on drop, which against the
+    /// live container's endpoint fails with "has active endpoints" and
+    /// against a network without one removes it under the job.
+    pub(crate) fn with_job_environment_guards(mut self, guards: JobEnvironmentGuards) -> Self {
+        self.docker_lease = guards.docker_lease;
+        self.job_network_guard = guards.job_network;
         self
     }
 
-    pub(crate) fn take_docker_lease(&mut self) -> Option<crate::docker_lease::DockerLeaseGuard> {
-        self.docker_lease.take()
+    /// Hand every environment-owned guard out of this executor, leaving it
+    /// with none to fire when it drops. The pre-create thread's executor
+    /// calls this before it dies so the guards travel to the job executor.
+    pub(crate) fn take_job_environment_guards(&mut self) -> JobEnvironmentGuards {
+        JobEnvironmentGuards {
+            docker_lease: self.docker_lease.take(),
+            job_network: self.job_network_guard.take(),
+        }
     }
 
     pub fn into_runner(self) -> R {
@@ -5652,8 +5729,6 @@ where
         // before reclaim. `docker rm` of Created BuildKit waits forever on
         // that lock if the lease still holds `POST /containers/{id}/start`.
         self.abort_docker_lease();
-        // The overlay volumes and their scratch volumes are job-labelled and
-        // go with the job-owned reclaim: nothing of the layer outlives it.
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
 
@@ -5967,7 +6042,6 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
-        self.create_store_overlays(container)?;
         if container.mount_docker_socket
             && crate::container::JobContainerSpec::guest_can_connect_host_bound_unix_lease()
         {
@@ -5999,10 +6073,12 @@ where
         // executor on any error path now removes it instead of leaking it.
         // Defuse only after cleanup reclaimed it; Docker refuses to remove a
         // network with active endpoints, so a late guard fire cannot break a
-        // live job.
-        self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
-            container.network.clone(),
-        ));
+        // live job. Not armed when a teardown owner holds that cleanup.
+        if self.arm_job_network_guard {
+            self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
+                container.network.clone(),
+            ));
+        }
         for service in &container.services {
             // Service environment holds workflow credentials; start_args keeps
             // it in a mode-0600 env file instead of the world-readable argv.
@@ -6035,59 +6111,6 @@ where
         }
         if container.verify_bind_mounts {
             self.verify_bind_mounts(container)?;
-        }
-        Ok(())
-    }
-
-    /// Create the D18 read-through overlay volumes the container spec asks
-    /// for: first the job-labelled scratch volumes that back each layer's
-    /// `upperdir`/`workdir` on the daemon's own storage, then — with their
-    /// data directories as the daemon reports them — the overlay volumes.
-    /// overlayfs needs every layer directory to exist before the daemon
-    /// mounts the volume at container start; the lower is the host store,
-    /// the scratch directories exist from the moment their volumes do.
-    ///
-    /// The scratch volumes are what makes the layer job-scoped: they carry
-    /// `velnor.job-id`, so the same reclaim that removes the overlay volume
-    /// removes the PR job's writes with it. Admission already established
-    /// that this daemon can mount such a layer, so every failure here is the
-    /// job's error.
-    fn create_store_overlays(&mut self, container: &JobContainerSpec) -> Result<()> {
-        if container.store_overlays.is_empty() {
-            return Ok(());
-        }
-        for overlay in &container.store_overlays {
-            fs::create_dir_all(&overlay.lower).with_context(|| {
-                format!(
-                    "create read-through store lower {}",
-                    overlay.lower.display()
-                )
-            })?;
-        }
-        for volume in container.store_overlay_scratch_volumes() {
-            let args = container.create_store_overlay_scratch_args(&volume);
-            self.with_docker_lifecycle("create-store-overlay", |executor| {
-                executor.run_docker(&args)
-            })
-            .with_context(|| format!("create read-through store scratch volume {volume}"))?;
-        }
-        let inspected = self
-            .run_docker(&container.inspect_store_overlay_scratch_args())
-            .context("inspect read-through store scratch volumes")?;
-        let scratch = container.store_overlay_scratch_mountpoints(&inspected.stdout)?;
-        for overlay in &container.store_overlays {
-            let args = container.create_store_overlay_args(overlay, &scratch)?;
-            self.with_docker_lifecycle("create-store-overlay", |executor| {
-                executor.run_docker(&args)
-            })
-            .with_context(|| {
-                format!(
-                    "create read-through store overlay volume {} ({} over {})",
-                    overlay.volume,
-                    overlay.upper_volume,
-                    overlay.lower.display()
-                )
-            })?;
         }
         Ok(())
     }
@@ -16461,6 +16484,7 @@ esac
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
             slot_count: std::num::NonZeroU32::MIN,
+            slot_store_key: None,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),
@@ -16474,7 +16498,6 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             store_trust_scope: "trusted".to_owned(),
-            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         }
@@ -16627,147 +16650,6 @@ esac
             .iter()
             .any(|args| args
                 == &crate::docker_lease::force_remove_volume_args(&["guest-vol".into()])));
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn read_through_layers_are_built_on_job_labelled_scratch_volumes_and_reclaimed_with_the_job() {
-        // A daemon double that answers `volume inspect` with a data
-        // directory in its own storage and reports every job-labelled volume
-        // it created when the job's reclaim lists them.
-        struct ScratchDaemon {
-            calls: Vec<Vec<String>>,
-            volumes: Vec<String>,
-        }
-        impl CommandRunner for ScratchDaemon {
-            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
-                let args: &[String] = &crate::execution::expand_env_file_args(args);
-                self.calls.push(args.to_vec());
-                let mut stdout = String::new();
-                if args.starts_with(&["volume".into(), "create".into()]) {
-                    assert!(
-                        args.windows(2)
-                            .any(|pair| pair == ["--label", "velnor.job-id=job"]),
-                        "every volume is job-labelled: {args:?}"
-                    );
-                    self.volumes.push(args.last().unwrap().clone());
-                } else if args.starts_with(&["volume".into(), "inspect".into()]) {
-                    let names = &args[args.iter().position(|arg| arg == "--").unwrap() + 1..];
-                    for name in names {
-                        assert!(self.volumes.contains(name), "inspect before create: {name}");
-                        stdout.push_str(&format!("/var/lib/docker/volumes/{name}/_data\n"));
-                    }
-                } else if args == crate::docker_lease::list_owned_volumes_args("job") {
-                    stdout = self.volumes.join("\n");
-                } else if args.starts_with(&["volume".into(), "rm".into()]) {
-                    let names = &args[3..];
-                    self.volumes.retain(|volume| !names.contains(volume));
-                }
-                Ok(CommandResult {
-                    code: 0,
-                    stdout,
-                    stderr: String::new(),
-                })
-            }
-        }
-
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        spec.store_trust_scope = crate::trust_scope::PR_STORE_SCOPE.to_owned();
-        spec.store_overlays = crate::storage::StoreOverlay::cargo_layers(
-            &spec.name,
-            &spec.temp_host,
-            crate::trust_scope::TRUSTED,
-        );
-        let mut executor = DockerJobEngine::inert(ScratchDaemon {
-            calls: Vec::new(),
-            volumes: Vec::new(),
-        });
-        executor.start_job_environment_once(&spec).unwrap();
-        {
-            let daemon = executor.runner();
-            // Six scratch volumes, one inspect of all of them, three overlay
-            // volumes whose upper/work operands are the inspected data
-            // directories — all before the job container starts.
-            let volume_calls = daemon
-                .calls
-                .iter()
-                .filter(|args| args.first().is_some_and(|arg| arg == "volume"))
-                .cloned()
-                .collect::<Vec<_>>();
-            assert_eq!(volume_calls.len(), 6 + 1 + 3, "{volume_calls:?}");
-            assert!(volume_calls[..6]
-                .iter()
-                .all(|args| args[1] == "create" && !args.iter().any(|arg| arg == "--opt")));
-            assert_eq!(volume_calls[6], spec.inspect_store_overlay_scratch_args());
-            for (args, overlay) in volume_calls[7..].iter().zip(&spec.store_overlays) {
-                let options = args
-                    .iter()
-                    .find_map(|arg| arg.strip_prefix("o="))
-                    .expect("overlay options");
-                assert!(options.contains(&format!(
-                    "upperdir=/var/lib/docker/volumes/{}/_data",
-                    overlay.upper_volume
-                )));
-                assert!(options.contains(&format!(
-                    "workdir=/var/lib/docker/volumes/{}/_data",
-                    overlay.work_volume
-                )));
-                let host_root = temp.display().to_string();
-                for part in options.split(',') {
-                    assert_eq!(
-                        part.contains(&host_root),
-                        part.starts_with("lowerdir="),
-                        "only the lower is a host path: {options}"
-                    );
-                }
-                assert_eq!(args.last(), Some(&overlay.volume));
-            }
-            let run_index = daemon
-                .calls
-                .iter()
-                .position(|args| args.first().is_some_and(|arg| arg == "run"))
-                .expect("job container start");
-            assert!(daemon
-                .calls
-                .iter()
-                .rposition(|args| args.first().is_some_and(|arg| arg == "volume"))
-                .is_some_and(|last_volume| last_volume < run_index));
-            assert_eq!(daemon.volumes.len(), 9);
-            // Nothing of the layer is on the host: no upper or work directory
-            // was created beside the stores.
-            fn overlay_dirs(root: &Path, found: &mut Vec<PathBuf>) {
-                for entry in fs::read_dir(root).into_iter().flatten().flatten() {
-                    let path = entry.path();
-                    if path
-                        .file_name()
-                        .is_some_and(|name| name.to_string_lossy().contains("overlay"))
-                    {
-                        found.push(path.clone());
-                    }
-                    if path.is_dir() {
-                        overlay_dirs(&path, found);
-                    }
-                }
-            }
-            let mut found = Vec::new();
-            overlay_dirs(&temp, &mut found);
-            assert_eq!(found, Vec::<PathBuf>::new());
-        }
-
-        // Job-owned reclaim removes every one of them — the overlay volumes
-        // and the scratch that held the PR job's writes — with no separate
-        // host-side step.
-        executor.cleanup(&spec).unwrap();
-        let daemon = executor.runner();
-        assert_eq!(daemon.volumes, Vec::<String>::new());
-        let removed = daemon
-            .calls
-            .iter()
-            .find(|args| args.starts_with(&["volume".into(), "rm".into(), "--force".into()]))
-            .expect("volume rm --force");
-        assert_eq!(removed.len() - 3, 9, "{removed:?}");
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -16964,7 +16846,10 @@ esac
             job_rm_saw_lease: false,
             buildkit_saw_dead_lease: false,
         })
-        .with_docker_lease(lease);
+        .with_job_environment_guards(JobEnvironmentGuards {
+            docker_lease: Some(lease),
+            job_network: None,
+        });
         executor.cleanup(&spec).unwrap();
         let runner = executor.into_runner();
         assert!(
@@ -17044,7 +16929,10 @@ esac
             job_rm_saw_lease: false,
             calls: Vec::new(),
         })
-        .with_docker_lease(lease);
+        .with_job_environment_guards(JobEnvironmentGuards {
+            docker_lease: Some(lease),
+            job_network: None,
+        });
         executor.cleanup_without_buildkit(&spec).unwrap();
         let runner = executor.into_runner();
         assert!(runner.job_rm_saw_lease);
@@ -17122,6 +17010,79 @@ esac
             buildx_driver_options(&memory_only, &static_options).unwrap(),
             ["cpu-period=100000", "cpu-quota=250000", "memory=1024"]
         );
+    }
+
+    /// Under a teardown owner the executor must hold no network guard: not
+    /// the one handed over from the pre-create thread, and none from a lazy
+    /// start. Either would fire at executor drop, before the teardown removes
+    /// the still-attached container, as every pre-0.1.x job log showed
+    /// (`job network drop-guard removal failed … has active endpoints`).
+    #[test]
+    fn teardown_owned_network_leaves_the_executor_without_a_guard() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut precreate = DockerJobEngine::inert(RecordingRunner::default());
+        precreate.start_job_environment(&spec).unwrap();
+        let guards = precreate.take_job_environment_guards();
+        assert!(guards.job_network.is_some());
+
+        let adopted = DockerJobEngine::inert(RecordingRunner::default())
+            .with_job_environment_started(true)
+            .with_job_environment_guards(guards)
+            .with_job_network_owned_by_teardown();
+        assert!(
+            adopted.job_network_guard.is_none(),
+            "an adopted guard is defused when the teardown owns the network"
+        );
+
+        let mut lazy =
+            DockerJobEngine::inert(RecordingRunner::default()).with_job_network_owned_by_teardown();
+        lazy.start_job_environment(&spec).unwrap();
+        assert!(
+            lazy.job_network_guard.is_none(),
+            "a lazy start under a teardown owner arms no guard"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn started_environment_hands_every_guard_to_the_claiming_executor() {
+        // The pre-create thread starts the environment in its own executor
+        // and dies. Every guard that start armed must leave with the
+        // hand-off: a network guard left behind fired `docker network rm`
+        // against the running container's endpoint on every pre-created job
+        // (the lease guard had the same defect in 0.1.185).
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut precreate = DockerJobEngine::inert(RecordingRunner::default());
+        precreate.start_job_environment(&spec).unwrap();
+        assert!(
+            precreate.job_network_guard.is_some(),
+            "start must arm the network guard"
+        );
+
+        let guards = precreate.take_job_environment_guards();
+        assert!(
+            guards.job_network.is_some(),
+            "the network guard must travel with the environment hand-off"
+        );
+        assert!(
+            precreate.job_network_guard.is_none() && precreate.docker_lease.is_none(),
+            "the pre-create executor must own nothing after the hand-off"
+        );
+
+        let mut job = DockerJobEngine::inert(RecordingRunner::default())
+            .with_job_environment_started(true)
+            .with_job_environment_guards(guards);
+        assert!(job.job_network_guard.is_some());
+        job.cleanup(&spec).unwrap();
+        assert!(
+            job.job_network_guard.is_none(),
+            "terminal cleanup must defuse the adopted network guard"
+        );
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

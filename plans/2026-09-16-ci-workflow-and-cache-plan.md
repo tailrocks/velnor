@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
 Status: **in progress** — `main` @ [`c23d7e8a`](https://github.com/tailrocks/velnor/commit/c23d7e8a) (rev 17: post-push verifier 4/4 PASS — nightly 112 lines, no `pull_request` in mbx save `if`, `--check` green; pin `75707ac4`; PR [#872](https://github.com/tailrocks/velnor/pull/872) merged @ [`364347e9`](https://github.com/tailrocks/velnor/commit/364347e9) 2026-09-16; post-merge `ci-main` [35051490717](https://github.com/tailrocks/velnor/actions/runs/35051490717) `ci-required` fail (mbx flake, 2289 tests passed); [35059608031](https://github.com/tailrocks/velnor/actions/runs/35059608031) Planning fail `binary velnor-workflow already exists` → `cargo install --force` fix pending; live cache **10,714,874,867 B / 63 entries**; §16 Phase 0/4 gates still open).
-Date: 2026-09-16 (rev 17: post-push verifier 4/4 PASS @ `c23d7e8a`; P0-8 pre-merge FAIL superseded; ci-main 35059608031 Planning `--force` fix; YAML drift gate literals expected expansion; rev 16: PR #872 merged @ `364347e9`; P0-8 nightly dispatcher on `main` @ `7171fe01`; rev 15: third green `ci-required` rollup @ `1e552afe`; rev 14: pin-decoupled policy validator + config-only trust-gated emission + `velnor-host-docker` online; rev 13: DCO sign-off restored; rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Date: 2026-09-16 (rev 18: D18 read-through overlay replaced by a copy seed of the `pr` Cargo store, PR writes persist and are host-shared; rev 17: post-push verifier 4/4 PASS @ `c23d7e8a`; P0-8 pre-merge FAIL superseded; ci-main 35059608031 Planning `--force` fix; YAML drift gate literals expected expansion; rev 16: PR #872 merged @ `364347e9`; P0-8 nightly dispatcher on `main` @ `7171fe01`; rev 15: third green `ci-required` rollup @ `1e552afe`; rev 14: pin-decoupled policy validator + config-only trust-gated emission + `velnor-host-docker` online; rev 13: DCO sign-off restored; rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -234,7 +234,7 @@ Canonical root `<VELNOR_STORAGE_ROOT>/cache/velnor/v1/<trust_scope>/<class>` —
 | D15 | (rev 2) **Producers never cancel themselves**: `ci-main.yml` and `nightly.yml` use `cancel-in-progress: false`; nightly is a scheduled **dispatcher** of `ci-main.yml@main` so mbx saves (P0-8) |
 | D16 | (rev 2) **Required-check name is a contract**: the aggregate job whose `name` the ruleset references is fixed at `ci-required` (restore the pre-#867 name) or the ruleset is updated atomically; the generator emits a check that fails when the ruleset context is absent from `ci-pr.yml` |
 | D17 | (rev 2) Fork PRs: **run GitHub lane only, skip Velnor lane, do not fail admission** — the admission job becomes an informational "Velnor lane omitted for fork" notice; `ci-required` validates GitHub-lane results only for forks. (Alternative — keep red — is acceptable only if documented in `content/docs`.) |
-| D18 | (rev 2) Velnor trusted stores accept writes only from **trusted events** (main push/schedule/dispatch@main); same-repo PR jobs run against a `pr` trust scope whose stores are seeded read-only from the trusted scope (overlay or copy-on-write), never the reverse |
+| D18 | (rev 2; rev 16 form) Velnor trusted stores accept writes only from **trusted events** (main push/schedule/dispatch@main); same-repo PR jobs run against a persistent `pr` trust scope whose Cargo store is **copy-seeded** from the trusted scope before the job container starts (never hardlink, never overlay); PR writes persist in `pr` and are shared across slots; never the reverse |
 | D19 | (rev 2) Self-referential pins (`VELNOR_WORKFLOW_SOURCE_REV`, `VELNOR_POLICY_WORKFLOW_REV`) are bumped by the generator's `--check`, which fails when the pinned rev cannot parse/accept the current output |
 
 ---
@@ -460,7 +460,7 @@ Pre-req: Phase 0 green.
 
 ### Trust-scope hardening (D18)
 
-- [x] Same-repo PR jobs mount a `pr` scope overlay: read-through to trusted stores, writes stay in `pr`; trusted events write the trusted scope
+- [x] Same-repo PR jobs bind the persistent `pr` scope read-write, **copy-seeded** from the trusted Cargo store before the container starts (`storage::seed_cargo_store`); writes persist in `pr` and warm every later unit on the host; trusted events write the trusted scope. (rev 16: replaces the read-through overlay, whose job-scoped upper discarded `Prepare Cargo`'s fetch and failed every offline PR unit on a cold host)
 - [x] mbx local store for PR scope separate from trusted scope
 
 ### Monitoring
@@ -599,7 +599,7 @@ Pre-req: Phase 0 green.
 | **3** | Key churn reduction (cargo per-lockfile key, policy freshness, docker seed use, tool bins) | §11 |
 | **4** | GitHub 8 GiB budget proof + classification + closed-PR sweep | §16 Phase 4 |
 | **5** | Dual-lane observability + operator docs | §13, §16 |
-| **6** | Velnor fleet ops (storage root, gc timer, BuildKit GC, trust-scope overlay) + config schema | §14, §16 Phase 6 |
+| **6** | Velnor fleet ops (storage root, gc timer, BuildKit GC, trust-scope `pr` copy seed) + config schema | §14, §16 Phase 6 |
 
 **Start Phase 0.** Phase 1 GitHub and Velnor cache work proceed in parallel — same keys, different transport verification.
 
@@ -835,7 +835,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 | --- | --- | --- |
 | `[cache.*]` schema; `velnor-host.env` emission | V | `config/mod.rs:110-143`; test `emitted_project_toml_ignores_cache_generation_config` |
 | Fleet timer + runbook + BuildKit GC artifact | V | `debian/velnor-cache-gc.{timer,service}`; `config/fleet/RUNBOOK.md`; `buildkitd.gc.toml` |
-| D18 PR read-through overlay | V | `trust_class.rs:172-253`; `storage.rs:186-199`; `velnor-host.env:10` |
+| D18 PR copy seed (was read-through overlay) | V | `trust_class.rs` `AdmittedTrust::cargo_seed_scope`; `storage.rs` `seed_cargo_store`; `runner.rs` `execute_script_job_inner` seed call before `github_job_container_spec`; `velnor-host.env:10` |
 | `VELNOR_STORAGE_ROOT` applied on fleet hosts | U | snippet only; no host apply evidence |
 | Online `velnor-host-docker` runner | U | `velnor_trusted_runner_available = false`; 0 online @ rev 2 live audit |
 | mbx hits / `cache du` ≤ 50 GiB / disk alert | U | live gates |
@@ -1051,3 +1051,13 @@ PR [#872](https://github.com/tailrocks/velnor/pull/872) merged into `main` as me
 | cargo-bin toolchain cache (`Rust · Rust dependency policy / GitHub`, run 35059222512: `no such command: deny`) | V | Same class (shared `~/.cargo/bin`, save rendered ahead of the install, key without the unit). Fixed on `main` by rev 17 `3bee709a` (restore → verify → install → save, stale-hit repair); this rev keeps that and removes the other contributor — the runtime binaries no longer enter `~/.cargo/bin` at all (Failure 3 fix), so the cached directory holds tools only. The crate clippy gate was red on `main`'s `hosted_cargo_bin_toolchain_tests` (`expect()` on `Option`); `5bb97775` makes it lint-clean |
 | Tests / gates @ `e5976775` | V | `cargo test -p velnor-workflow` 408 lib + 51 integration; `velnor-workflow-contract` 6; `cargo clippy -p velnor-workflow --profile test --all-targets --all-features -- -D warnings` clean; `cargo fmt --all --check` clean; `actionlint` 1.7.12 exit 0; `--plain --check` `Generated files are current` after the pin bump with HEAD ≠ pin. New tests (rev 18): `github_backend_mr_boxington_jobs_export_the_hosted_store_budget`, `hosted_store_budget_validator_requires_the_export_before_the_action`, `policy_running_jobs_check_out_full_history`, `full_history_validator_refuses_a_shallow_policy_job`, `every_release_kind_renders_validator_jobs_with_full_history_and_bounded_stores`, `pin_reachable_names_a_shallow_checkout_as_the_cause`, plus the three Failure 3 tests above; `cargo test -p velnor-runner manifest::tests::release_workflow_action_refs_are_compiled_into_the_manifest` ok against the regenerated tree |
 | Validator on the tree (branch head) | V | `VELNOR_WORKFLOW_POLICY_REVISION=e5976775… velnor-workflow policy --workflow-root . --head-sha $(git rev-parse HEAD) --base-sha a3383f99… --ruleset-contexts DCO,ci-required,Policy` → **11 rules, 0 failed**; also with the base pin `3bee709a` (what `main`'s `ci-policy.yml` runs) → `pin-monotonic` `descends from the base validator`, pinned generator built from the local clone, 11/11 PASS |
+
+#### Rev 19 delta — D18 read-through overlay replaced by a copy seed (2026-09-16), PR [#873](https://github.com/tailrocks/velnor/pull/873)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Defect | V | Live on fresh macOS host (PR #872 jobs): `Control / Prepare Cargo` fetched into the overlay **upper** — job-scoped scratch discarded at job end — so every following `Rust · <crate> / Velnor` unit failed `cargo metadata --locked` with `you are in the offline mode (--offline)` \| `can't checkout from 'https://github.com/tailrocks/termrock.git'`. Sentry only passed because its trusted lower already held every dependency; any PR adding a dependency would fail the Velnor lane the same way |
+| Root cause | V | overlayfs is the wrong primitive for D18: (1) PR writes must persist in `pr` and be shared across slots (that is what lets one `Prepare Cargo` warm the units), and overlayfs forbids one upper under concurrent mounts; (2) an upper on a virtiofs bind is read-only on macOS Docker VMs, which is why scratch volumes existed at all |
+| Replacement | V | `storage::seed_cargo_store(from, to, budget)`: copy missing trusted cargo files into the `pr` store before container start; PR jobs bind the `pr` store read-write |
+| Tests | V | `storage::tests::seed_copies_only_missing_files_and_never_overwrites` and related seed tests; `cargo nextest run -p velnor-runner --features test-support` 2286 passed |
+| Docs | V | `content/docs/guides/macos-host.mdx` §"Stores and the `pr` seed"; `config/fleet/RUNBOOK.md` §"Trust-scope `pr` seed (D18)" |

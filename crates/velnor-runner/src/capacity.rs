@@ -171,6 +171,19 @@ impl StoreBudgetPolicy {
         self.persistent_allowance_bytes() / COMPILER_STORE_SHARE_DIVISOR
     }
 
+    /// Bytes the `pr`-scope Cargo store seed may add to a store that already
+    /// holds `pr_cargo_store_bytes` (D18, [`crate::storage::seed_cargo_store`]).
+    ///
+    /// The seeded `pr` Cargo store counts against the same number as the
+    /// compiler stores: the seed may bring it up to
+    /// [`Self::compiler_store_budget_bytes`] and no further, saturating at
+    /// zero. One bound for every store class the daemon itself grows, derived
+    /// from the admission policy that already promises each slot its peak.
+    pub fn cargo_seed_headroom_bytes(&self, pr_cargo_store_bytes: u64) -> u64 {
+        self.compiler_store_budget_bytes()
+            .saturating_sub(pr_cargo_store_bytes)
+    }
+
     /// One line an operator can read: the number and how it was derived.
     pub fn describe_compiler_store_budget(&self) -> String {
         format!(
@@ -898,6 +911,22 @@ mod tests {
         let exhausted = StoreBudgetPolicy { slots: 10, ..base };
         assert_eq!(exhausted.persistent_allowance_bytes(), 0);
         assert_eq!(exhausted.compiler_store_budget_bytes(), 0);
+    }
+
+    /// The `pr` Cargo store seed fills up to the compiler-store number and
+    /// counts what the store already holds against it.
+    #[test]
+    fn cargo_seed_headroom_is_the_compiler_budget_less_the_store() {
+        let policy = StoreBudgetPolicy {
+            total_bytes: 200 * GIB,
+            emergency_reserve_bytes: 10 * GIB,
+            job_peak_bytes: 30 * GIB,
+            slots: 1,
+        };
+        assert_eq!(policy.cargo_seed_headroom_bytes(0), 80 * GIB);
+        assert_eq!(policy.cargo_seed_headroom_bytes(30 * GIB), 50 * GIB);
+        assert_eq!(policy.cargo_seed_headroom_bytes(80 * GIB), 0);
+        assert_eq!(policy.cargo_seed_headroom_bytes(u64::MAX), 0);
     }
 
     /// `probe` binds the daemon's flags to the real filesystem; the number it

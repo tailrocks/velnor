@@ -206,6 +206,11 @@ pub struct RunArgs {
     /// budgeting must use this carried value, never infer topology from paths
     /// or ambient environment.
     pub slot_count: NonZeroU32,
+    /// The daemon slot this process serves (1-based), carried like
+    /// `slot_count`: it names the slot's persistent per-slot stores. `None`
+    /// for standalone `run`, whose jobs then get job-ephemeral per-slot
+    /// stores. Never inferred from the work-dir layout.
+    pub slot_index: Option<usize>,
     /// Host operational store. Slot config dirs are not this parent; omit
     /// only for standalone `run` that still honors `VELNOR_STATE_DB`.
     pub state_db: Option<PathBuf>,

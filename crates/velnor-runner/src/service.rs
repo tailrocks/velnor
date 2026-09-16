@@ -541,6 +541,8 @@ impl From<RunArgs> for crate::args::RunArgs {
     fn from(a: RunArgs) -> Self {
         Self {
             slot_count: a.slot_count,
+            // The service CLI is standalone `run`; only the daemon owns slots.
+            slot_index: None,
             state_db: a.state_db,
             config_dir: a.config_dir,
             pat: a.pat,

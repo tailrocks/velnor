@@ -66,8 +66,21 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         println!("  service_binary   {runner}");
     }
     println!("  github_scope     {url} (repository)");
-    println!("  runner_name      {name}");
+    if let Ok(transport) = env::var(velnor_runner::protocol::GITHUB_HTTP_TRANSPORT_ENV) {
+        println!("  github_transport {transport} (REST only; broker, run-service, and uploads stay in-process)");
+    }
+    println!("  instance         {name}");
     println!("  slots            {slots}");
+    {
+        let host = velnor_runner::runner::github_runner_host_slug();
+        let first = velnor_runner::runner::compose_github_runner_name(&host, &name, 0);
+        let last = velnor_runner::runner::compose_github_runner_name(&host, &name, slots - 1);
+        if slots == 1 {
+            println!("  runner_names     {first}");
+        } else {
+            println!("  runner_names     {first} .. {last}");
+        }
+    }
     println!("  docker_endpoint  {docker}");
     println!("  execution        {execution}");
     println!(
@@ -960,21 +973,21 @@ pub(crate) fn ensure_dev_canonical_storage() -> Result<(), CommandError> {
     {
         return Ok(());
     }
-    let home = env::var("HOME").map_err(|error| {
-        CommandError::new(
+    if env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return Err(CommandError::new(
             ExitClass::Usage,
             "host.home_missing",
-            format!("HOME is unset; export VELNOR_STORAGE_ROOT or set HOME: {error}"),
-        )
-    })?;
-    // macOS Unix sockets are limited to 104 bytes: `~/Library/Application
-    // Support/velnor/run/velnor/<name>/control.sock` overflows SUN_LEN, so
-    // the on-demand default stays a short dot-directory instead.
-    let prefix = if cfg!(target_os = "macos") {
-        PathBuf::from(&home).join(".velnor-store")
-    } else {
-        PathBuf::from(&home).join(".local/state/velnor")
-    };
+            "HOME is unset; export VELNOR_STORAGE_ROOT or set HOME",
+        ));
+    }
+    // The prefix is velnor-client's user-mode default, the one every
+    // `velnorctl` surface and `UnixEndpoint` resolve without this variable.
+    // Exporting it makes the slot and job children — and the runner's own
+    // storage layout, which reads the variable directly — agree with them.
+    let prefix = velnor_client::default_user_storage_root();
     // SAFETY: `host start` is single-threaded until the daemon child is spawned.
     unsafe { env::set_var("VELNOR_STORAGE_ROOT", &prefix) };
     Ok(())

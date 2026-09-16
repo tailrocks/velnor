@@ -52,7 +52,17 @@ const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
 /// controller cycle retries registration.
 const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
 const FENCED_SLOT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
-const CONTROLLER_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a draining slot child may take to leave GitHub before SIGKILL.
+///
+/// An idle slot's graceful exit is bounded network work: the broker
+/// long-poll is cancelled on the drain edge, then it deletes its broker
+/// session (`BrokerClient::delete_session`, 30s request bound), its own JIT
+/// registration and the prewarmed successor's (one REST call each,
+/// `GITHUB_MAX_TIME_SECS` = 5s). Killing it sooner leaves those
+/// registrations on GitHub — the 5s budget did exactly that on every
+/// on-demand drain. Fleet slots are systemd units with their own
+/// `TimeoutStopSec`; this bound applies to controller-owned children.
+const CONTROLLER_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(30 + 5 + 5 + 5);
 /// A slot must publish fresh, generation-bound progress within this startup
 /// bound before it can prove session liveness or readiness.
 const SLOT_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);

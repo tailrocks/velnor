@@ -18,7 +18,8 @@ pub use http::{
     WatchItem,
 };
 pub use socket_root::{
-    ensure_socket_root, is_package_socket_mode, socket_root, socket_root_for_storage_root,
+    default_user_storage_root, ensure_socket_root, is_package_socket_mode, socket_root,
+    socket_root_for_storage_root, storage_root_prefix,
 };
 pub use unix::{EndpointError, SocketKind, UnixEndpoint, API_VERSION};
 

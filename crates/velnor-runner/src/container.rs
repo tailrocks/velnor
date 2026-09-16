@@ -194,6 +194,17 @@ pub struct JobContainerSpec {
     /// Validated daemon slot count carried into this job. Resource budgeting
     /// must not infer topology from this job's filesystem layout.
     pub slot_count: NonZeroU32,
+    /// The owning daemon slot's stable store key (`slot-N`), carried from
+    /// the slot's own configuration like `slot_count`. It scopes the
+    /// per-slot persistent stores (mise installs, the mbx cache and target
+    /// tree). `None` means no slot owns this job (standalone `run`), and
+    /// those stores stay job-ephemeral: persistence is never granted to a
+    /// job without a slot identity, because two unidentified jobs would
+    /// share one mutable store. Never derived from the work-dir layout:
+    /// that inference held only for `--work-dir <root>` with several
+    /// slots, and silently lost every store on the default `_work` layout
+    /// and on single-slot hosts.
+    pub slot_store_key: Option<String>,
     pub env: Vec<(String, String)>,
     /// Daemon-enforced Docker resource limits. CPU and memory limits are
     /// normalized with workflow createOptions into runner-owned values before
@@ -220,12 +231,6 @@ pub struct JobContainerSpec {
     /// the lease side and the mount side instead of collapsing to `untrusted`
     /// on one of them.
     pub store_trust_scope: String,
-    /// Read-through store layers for PR jobs on trusted pools (D18): the
-    /// trusted scope's Cargo store read beneath [`Self::store_trust_scope`].
-    /// Empty for single-namespace stores. Each layer replaces the plain bind
-    /// of its `target` in [`Self::start_args`] with a daemon-mounted overlay
-    /// volume; the executor creates the volumes before the container starts.
-    pub store_overlays: Vec<crate::storage::StoreOverlay>,
     /// Docker-only Mr Boxington store. `None` for MicroVM jobs.
     pub mbx_store_host: Option<PathBuf>,
     /// Docker-only explicit sccache action store.
@@ -262,89 +267,18 @@ const MBX_CONTAINER_EXEC_PATH: &str =
 const MBX_CONTAINER_STORE: &str = "/var/cache/mbx";
 
 impl JobContainerSpec {
-    /// The `-v` operands of the daemon-shared Cargo subtrees: an overlay
-    /// volume where a read-through layer targets the subtree, the trust-scoped
-    /// bind otherwise.
+    /// The `-v` operands of the daemon-shared Cargo subtrees: the persistent
+    /// store of [`Self::store_trust_scope`], bind-mounted read-write like
+    /// every other trust-scoped store. A `pr`-scope job's store was seeded
+    /// from `trusted` by copy before the container started
+    /// ([`crate::storage::seed_cargo_store`]); its writes persist in `pr`
+    /// and are shared by every slot on the host.
     fn cargo_store_mount_operands(&self) -> Vec<String> {
         let store = cargo_store_host(&self.temp_host, self.store_trust_scope.as_str());
-        CARGO_STORE_LAYERS
+        CARGO_STORE_SUBTREES
             .iter()
-            .map(|(subpath, target)| {
-                self.store_overlays
-                    .iter()
-                    .find(|overlay| overlay.target == *target)
-                    .map_or_else(
-                        || self.mount_arg(&store.join(subpath), target),
-                        crate::storage::StoreOverlay::mount_operand,
-                    )
-            })
+            .map(|(subpath, target)| self.mount_arg(&store.join(subpath), target))
             .collect()
-    }
-
-    /// The ownership labels every job-owned Docker volume carries: the
-    /// daemon-id for startup reclaim, the job-id for per-job reclaim.
-    fn job_volume_labels(&self) -> [(&str, &str); 2] {
-        [
-            (
-                crate::docker_lease::DAEMON_ID_LABEL,
-                self.daemon_id.as_str(),
-            ),
-            (crate::docker_lease::JOB_ID_LABEL, self.name.as_str()),
-        ]
-    }
-
-    /// Every scratch volume the job's read-through layers need, in creation
-    /// order: the upper and work volumes of each layer.
-    #[must_use]
-    pub fn store_overlay_scratch_volumes(&self) -> Vec<String> {
-        self.store_overlays
-            .iter()
-            .flat_map(|overlay| overlay.scratch_volumes().map(str::to_owned))
-            .collect()
-    }
-
-    /// `docker volume create` argv for one read-through scratch volume of
-    /// this job, labelled like every other job-owned Docker resource.
-    #[must_use]
-    pub fn create_store_overlay_scratch_args(&self, volume: &str) -> Vec<String> {
-        crate::storage::StoreOverlay::create_scratch_volume_args(volume, &self.job_volume_labels())
-    }
-
-    /// `docker volume inspect` argv that reports the daemon-side data
-    /// directory of every scratch volume, for
-    /// [`Self::store_overlay_scratch_mountpoints`].
-    #[must_use]
-    pub fn inspect_store_overlay_scratch_args(&self) -> Vec<String> {
-        crate::storage::StoreOverlay::inspect_mountpoints_args(
-            &self.store_overlay_scratch_volumes(),
-        )
-    }
-
-    /// Parse the output of [`Self::inspect_store_overlay_scratch_args`].
-    ///
-    /// # Errors
-    /// The daemon did not answer one absolute mountpoint per scratch volume.
-    pub fn store_overlay_scratch_mountpoints(
-        &self,
-        inspected: &str,
-    ) -> io::Result<crate::storage::ScratchMountpoints> {
-        crate::storage::ScratchMountpoints::parse(&self.store_overlay_scratch_volumes(), inspected)
-    }
-
-    /// `docker volume create` argv for one read-through overlay volume of
-    /// this job, labelled like every other job-owned Docker resource.
-    ///
-    /// # Errors
-    /// The lower cannot be mapped into the daemon's view of the work root, or
-    /// a scratch mountpoint is missing from `scratch`.
-    pub fn create_store_overlay_args(
-        &self,
-        overlay: &crate::storage::StoreOverlay,
-        scratch: &crate::storage::ScratchMountpoints,
-    ) -> io::Result<Vec<String>> {
-        overlay.create_volume_args(&self.job_volume_labels(), scratch, |path, label| {
-            self.docker_host_path_checked(path, label)
-        })
     }
 
     /// The tightest valid `--cpus` limit declared by the operator
@@ -1393,9 +1327,6 @@ impl JobContainerSpec {
         for (label, path) in paths {
             self.docker_host_path_checked(&path, label)?;
         }
-        for overlay in &self.store_overlays {
-            self.docker_host_path_checked(&overlay.lower, "store overlay lower")?;
-        }
         if let Some(path) = &self.mbx_store_host {
             self.docker_host_path_checked(path, "MBX store")?;
         }
@@ -1527,7 +1458,7 @@ impl JobContainerSpec {
     }
 
     pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
-        match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
+        match (self.repository_store_key(), self.slot_store_key.as_deref()) {
             (Some(repository), Some(slot)) => mise_executable_store_host(
                 &self.temp_host,
                 self.store_trust_scope.as_str(),
@@ -1557,8 +1488,8 @@ impl JobContainerSpec {
     /// leases, and checkouts (`MBX_CACHE_DIR` → `cache_dir` →
     /// `cache_dir/incremental`). The mount itself is unchanged, so the store
     /// root stays shared and each slot's cache stays warm across its own jobs.
-    /// Without a slot identity (a non-production temp layout) the subdir
-    /// isolates per job name instead of falling back to the shared root.
+    /// Without a slot identity (standalone `run`) the subdir isolates per
+    /// job name instead of falling back to the shared root.
     pub(crate) fn mbx_cache_container_dir(&self) -> String {
         crate::mbx_store::slot_cache_dir(Path::new(MBX_CONTAINER_STORE), &self.mbx_slot_key())
             .to_string_lossy()
@@ -1660,10 +1591,10 @@ impl JobContainerSpec {
     }
 
     fn mbx_slot_key(&self) -> String {
-        slot_store_key(&self.temp_host).unwrap_or_else(|| {
+        self.slot_store_key.clone().unwrap_or_else(|| {
             eprintln!(
-                "forensics.lifecycle: mbx cache isolated per job: no runner slot identity under {}",
-                self.temp_host.display()
+                "forensics.lifecycle: mbx cache isolated per job: job {} has no runner slot identity",
+                self.name
             );
             sanitize_store_key(&self.name)
         })
@@ -2006,6 +1937,17 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
+/// The daemon-shared Cargo store subtrees and their container mount points.
+/// Registry sources and git checkouts stay in the job home (see
+/// [`JobContainerSpec::start_args`]); these three are the immutable-by-key
+/// downloads and indexes worth sharing, and the ones the `pr`-scope seed
+/// copies from `trusted` (D18, [`crate::storage::seed_cargo_store`]).
+pub(crate) const CARGO_STORE_SUBTREES: [(&str, &str); 3] = [
+    ("registry/cache", "/github/home/.cargo/registry/cache"),
+    ("registry/index", "/github/home/.cargo/registry/index"),
+    ("git/db", "/github/home/.cargo/git/db"),
+];
+
 /// Host-persistent Cargo download/index store, daemon-shared like the
 /// compiler stores.
 /// Extracted registry sources and git checkouts remain job-local because they
@@ -2014,17 +1956,6 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
 /// scope on the execution path). It selects the canonical namespace; the
 /// legacy root carries no trust segment.
-/// The daemon-shared Cargo store subtrees and their container mount points.
-/// Registry sources and git checkouts stay in the job home (see
-/// [`JobContainerSpec::start_args`]); these three are the immutable-by-key
-/// downloads and indexes worth sharing, and the ones a read-through layer
-/// (D18) overlays for PR jobs on trusted pools.
-pub(crate) const CARGO_STORE_LAYERS: [(&str, &str); 3] = [
-    ("registry/cache", "/github/home/.cargo/registry/cache"),
-    ("registry/index", "/github/home/.cargo/registry/index"),
-    ("git/db", "/github/home/.cargo/git/db"),
-];
-
 pub(crate) fn cargo_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
     crate::storage::cache_class_path(
         &daemon_store_root(temp_host),
@@ -2221,12 +2152,12 @@ pub(crate) fn daemon_store_root(temp_host: &Path) -> PathBuf {
     daemon_shared_root(per_slot_root)
 }
 
-/// Resolve the stable runner slot from a production job temp path
-/// (`…/slot-N/<job>/temp`). Executable stores must not fall back to a shared
-/// scope when this identity is absent: that would recreate concurrent mutation.
-fn slot_store_key(temp_host: &Path) -> Option<String> {
-    let slot = temp_host.parent()?.parent()?.file_name()?.to_str()?;
-    slot.starts_with("slot-").then(|| sanitize_store_key(slot))
+/// Store key of daemon slot `slot_index` (1-based): the `slot-N` name the
+/// daemon gives the slot everywhere else (its config dir, its logs), so a
+/// store warmed under one layout stays warm under the next.
+#[must_use]
+pub(crate) fn slot_store_key(slot_index: usize) -> String {
+    sanitize_store_key(&format!("slot-{slot_index}"))
 }
 
 /// Sanitize a job/store key into a filesystem-safe directory name.
@@ -2362,6 +2293,7 @@ mod tests {
             tools_host: job.join("tools"),
             mount_docker_socket: true,
             slot_count: NonZeroU32::MIN,
+            slot_store_key: None,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
             resource_options: vec!["--memory".into(), "8g".into()],
             options: vec!["--cpus".into(), "2".into()],
@@ -2375,123 +2307,55 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             store_trust_scope: "trusted".to_owned(),
-            store_overlays: Vec::new(),
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
         }
     }
 
     #[test]
-    fn read_through_layers_replace_the_cargo_binds_with_overlay_volumes() {
-        // A PR job on a trusted pool (D18): the three daemon-shared Cargo
-        // subtrees mount as daemon-created overlay volumes — a job-scoped
-        // scratch upper over `trusted` read-only — while every other store
-        // keeps its trust-scoped bind. The host never mounts anything itself
-        // and the PR store is not a layer: PR writes are discarded with the
-        // job.
+    fn pr_scope_jobs_bind_the_persistent_pr_cargo_store_read_write() {
+        // A PR job on a trusted pool (D18) mounts the `pr` scope's Cargo
+        // subtrees exactly like a trusted job mounts `trusted`'s: plain
+        // read-write binds of the persistent host store, shared by every
+        // slot. No overlay volume, no scratch, and never the trusted store.
         let mut job = spec();
         job.store_trust_scope = crate::trust_scope::PR_STORE_SCOPE.to_owned();
-        job.store_overlays = crate::storage::StoreOverlay::cargo_layers(
-            &job.name,
-            &job.temp_host,
-            crate::trust_scope::TRUSTED,
-        );
-        assert_eq!(job.store_overlays.len(), CARGO_STORE_LAYERS.len());
         let args = rendered(&job.start_args().unwrap());
+        // The test work root has no `VELNOR_STORAGE_ROOT`, so the paths are
+        // the legacy layout's; the scope selects the store root exactly as
+        // it does for every other trust-scoped store in this spec.
         let pr_store = cargo_store_host(&job.temp_host, crate::trust_scope::PR_STORE_SCOPE);
         let trusted_store = cargo_store_host(&job.temp_host, crate::trust_scope::TRUSTED);
-        for ((subpath, target), overlay) in CARGO_STORE_LAYERS.iter().zip(&job.store_overlays) {
-            assert_eq!(overlay.target, *target);
-            assert_eq!(overlay.lower, trusted_store.join(subpath));
-            assert_eq!(overlay.upper_volume, format!("{}-upper", overlay.volume));
-            assert_eq!(overlay.work_volume, format!("{}-work", overlay.volume));
+        let cargo_mounts = mount_args(&job.start_args().unwrap())
+            .into_iter()
+            .filter(|mount| mount.contains("/.cargo/"))
+            .collect::<Vec<_>>();
+        for (subpath, target) in CARGO_STORE_SUBTREES {
             assert!(
-                args.contains(&format!("{}:{target}", overlay.volume)),
-                "expected overlay volume mount for {target}, got {args:?}"
+                has_mount(&args, &pr_store.join(subpath), target),
+                "expected a read-write pr bind for {target}, got {args:?}"
             );
-            assert!(
-                !has_mount(&args, &pr_store.join(subpath), target),
-                "the plain PR bind must not shadow the overlay for {target}"
-            );
-            assert!(!has_mount(&args, &trusted_store.join(subpath), target));
-            assert!(
-                !args
+            assert!(!has_read_only_mount(&args, &pr_store.join(subpath), target));
+            assert_eq!(
+                cargo_mounts
                     .iter()
-                    .any(|arg| arg.contains(&overlay.upper_volume)
-                        || arg.contains(&overlay.work_volume)),
-                "scratch volumes are overlay operands, never job mounts: {args:?}"
+                    .filter(|mount| mount.ends_with(&format!(":{target}")))
+                    .count(),
+                1,
+                "exactly one bind serves {target}: {cargo_mounts:?}"
             );
         }
-        // Every volume carries the job-id label so job-owned reclaim removes
-        // it. The scratch volumes are plain local volumes without a host
-        // bind; the overlay volume names the lower in the daemon's view of
-        // the work root and the scratch data directories as the daemon
-        // reported them.
-        job.docker_host_work_dir = Some("/daemon/work".into());
-        let scratch_volumes = job.store_overlay_scratch_volumes();
-        assert_eq!(scratch_volumes.len(), 2 * CARGO_STORE_LAYERS.len());
-        for volume in &scratch_volumes {
-            let create = job.create_store_overlay_scratch_args(volume);
-            assert_eq!(&create[..4], ["volume", "create", "--driver", "local"]);
-            assert!(create
-                .windows(2)
-                .any(|pair| pair == ["--label", "velnor.job-id=velnor-job-1"]));
-            assert!(create
-                .windows(2)
-                .any(|pair| pair == ["--label", "velnor.daemon-id=test-daemon"]));
-            assert!(!create.iter().any(|arg| arg == "--opt"), "{create:?}");
-            assert_eq!(create.last(), Some(volume));
-        }
-        let inspect = job.inspect_store_overlay_scratch_args();
-        assert_eq!(
-            &inspect[..5],
-            ["volume", "inspect", "--format", "{{.Mountpoint}}", "--"]
-        );
-        assert_eq!(&inspect[5..], scratch_volumes.as_slice());
-        let inspected = scratch_volumes
-            .iter()
-            .map(|volume| format!("/var/lib/docker/volumes/{volume}/_data\n"))
-            .collect::<String>();
-        let scratch = job.store_overlay_scratch_mountpoints(&inspected).unwrap();
-        assert!(job.store_overlay_scratch_mountpoints("").is_err());
-        let overlay = &job.store_overlays[0];
-        let create = job.create_store_overlay_args(overlay, &scratch).unwrap();
-        assert_eq!(&create[..4], ["volume", "create", "--driver", "local"]);
-        assert!(create
-            .windows(2)
-            .any(|pair| pair == ["--label", "velnor.job-id=velnor-job-1"]));
-        let options = create
-            .windows(2)
-            .find_map(|pair| {
-                (pair[0] == "--opt")
-                    .then(|| pair[1].strip_prefix("o="))
-                    .flatten()
-            })
-            .expect("overlay mount options");
-        assert!(options.starts_with("lowerdir=/daemon/work/"), "{options}");
         assert!(
-            options.contains(&format!(
-                ",upperdir=/var/lib/docker/volumes/{}/_data",
-                overlay.upper_volume
-            )),
-            "{options}"
+            !args
+                .iter()
+                .any(|arg| arg.contains("overlay") || arg.contains("upperdir")),
+            "{args:?}"
         );
-        assert!(
-            options.contains(&format!(
-                ",workdir=/var/lib/docker/volumes/{}/_data",
-                overlay.work_volume
-            )),
-            "{options}"
-        );
-        assert!(!options.contains(&job.temp_host.display().to_string()));
-        assert!(!options.contains(&pr_store.display().to_string()));
-        assert_eq!(create.last(), Some(&overlay.volume));
-        // Without a layer the same subtree is the plain trust-scoped bind.
-        job.store_overlays.clear();
-        job.docker_host_work_dir = None;
+
+        job.store_trust_scope = crate::trust_scope::TRUSTED.to_owned();
         let args = rendered(&job.start_args().unwrap());
-        for (subpath, target) in CARGO_STORE_LAYERS {
-            assert!(has_mount(&args, &pr_store.join(subpath), target));
+        for (subpath, target) in CARGO_STORE_SUBTREES {
+            assert!(has_mount(&args, &trusted_store.join(subpath), target));
         }
     }
 
@@ -3176,10 +3040,13 @@ mod tests {
     fn mise_installs_are_warm_per_slot_but_isolated_between_slots() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut same_slot = spec();
         same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        same_slot.slot_store_key = Some(slot_store_key(3));
         let mut other_slot = spec();
         other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+        other_slot.slot_store_key = Some(slot_store_key(4));
 
         let expected = PathBuf::from(
             "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3",
@@ -3191,6 +3058,7 @@ mod tests {
         let root = container_test_temp("mise-slot");
         let mut warm = spec();
         warm.temp_host = root.join("work/slot-3/job-a/temp");
+        warm.slot_store_key = Some(slot_store_key(3));
         let expected_mount = format!(
             "{}:/opt/mise/installs",
             warm.mise_executable_store_host().display()
@@ -3208,14 +3076,65 @@ mod tests {
         );
     }
 
+    /// The per-slot stores follow the slot's carried identity, not the shape
+    /// of its work dir. Regression: with the identity parsed from
+    /// `…/slot-N/<job>/temp`, the daemon's default `<slot>/_work/<job>/temp`
+    /// layout (`velnorctl host start`) and the single-slot fleet layout
+    /// (`<work>/<job>/temp`) both lost every persistent mise install and
+    /// every warm mbx cache, on every job, with only a forensics line to
+    /// show for it.
+    #[test]
+    fn per_slot_stores_follow_the_carried_slot_identity_not_the_work_dir_shape() {
+        let mut default_layout = spec();
+        default_layout.temp_host =
+            "/home/ci/.local/state/velnor/lib/velnor/runner/hosts/mac-1/slots/slot-2/_work/job-a/temp"
+                .into();
+        default_layout.slot_store_key = Some(slot_store_key(2));
+        let mut single_slot = spec();
+        single_slot.temp_host = "/var/lib/velnor/work/job-b/temp".into();
+        single_slot.slot_store_key = Some(slot_store_key(1));
+
+        assert!(default_layout
+            .mise_executable_store_host()
+            .ends_with("slots/slot-2"));
+        assert_eq!(
+            default_layout.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-2"
+        );
+        assert!(single_slot
+            .mise_executable_store_host()
+            .ends_with("slots/slot-1"));
+        assert_eq!(
+            single_slot.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/slot-1"
+        );
+
+        // A job no slot owns gets job-ephemeral stores, whatever its path
+        // looks like: persistence is never granted on a lookalike layout.
+        let mut unowned = spec();
+        unowned.temp_host = "/var/lib/velnor/work/slot-3/job-c/temp".into();
+        unowned.slot_store_key = None;
+        assert_eq!(
+            unowned.mise_executable_store_host(),
+            unowned.temp_host.join("_velnor/ephemeral/mise-installs")
+        );
+        assert_eq!(
+            unowned.mbx_cache_container_dir(),
+            "/var/cache/mbx/slots/velnor-job-1"
+        );
+    }
+
     #[test]
     fn mbx_cache_is_warm_per_slot_but_isolated_between_slots() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut same_slot = spec();
         same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        same_slot.slot_store_key = Some(slot_store_key(3));
         let mut other_slot = spec();
         other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+        other_slot.slot_store_key = Some(slot_store_key(4));
 
         // Same slot, successive jobs: one warm subdir. Different slots:
         // disjoint subdirs, so mbx's registrar/lease flocks never cross.
@@ -3262,8 +3181,10 @@ mod tests {
     fn concurrent_slots_do_not_share_mbx_target_roots() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut other = spec();
         other.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+        other.slot_store_key = Some(slot_store_key(4));
 
         assert_eq!(
             first.mbx_target_container_dir(),
@@ -3318,12 +3239,14 @@ mod tests {
             .join("slot-3")
             .join("job-a")
             .join("temp");
+        first_run.slot_store_key = Some(slot_store_key(3));
         let mut other_run = spec();
         other_run.temp_host = container_test_temp("concurrent-slots-b")
             .join("slots")
             .join("slot-4")
             .join("job-c")
             .join("temp");
+        other_run.slot_store_key = Some(slot_store_key(4));
         let first_args = rendered(&first_run.start_args().unwrap());
         let other_args = rendered(&other_run.start_args().unwrap());
         assert!(first_args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-3".into()));
@@ -3334,8 +3257,10 @@ mod tests {
     fn sequential_same_slot_jobs_reuse_mbx_target_root() {
         let mut first = spec();
         first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        first.slot_store_key = Some(slot_store_key(3));
         let mut second = spec();
         second.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        second.slot_store_key = Some(slot_store_key(3));
 
         assert_eq!(
             first.mbx_target_container_dir(),
@@ -4127,15 +4052,18 @@ mod tests {
         );
     }
 
-    /// Spec whose temp root carries the production slot layout, so the
-    /// persistent mise stores resolve their slot scope like a real job.
+    /// Spec owned by daemon slot 1, so the persistent per-slot stores resolve
+    /// their slot scope like a real job. The temp root deliberately uses the
+    /// default `_work` layout, which carries no slot name of its own.
     fn slotted_spec(name: &str) -> JobContainerSpec {
         let mut spec = spec();
         spec.temp_host = container_test_temp(name)
             .join("slots")
             .join("slot-1")
+            .join("_work")
             .join("job-1")
             .join("temp");
+        spec.slot_store_key = Some(slot_store_key(1));
         spec
     }
 
