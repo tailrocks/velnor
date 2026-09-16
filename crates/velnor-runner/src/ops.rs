@@ -22,10 +22,9 @@ use crate::trust_class::TrustClass;
 use rusqlite::Connection;
 use velnor_control::store::{
     EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
-    RetentionMaintenanceBudget, RunnerRegistrationRow, SlotIdentity, SlotTransitionRequest,
-    SlotTransitionRequestKey, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
+    RetentionMaintenanceBudget, RunnerRegistrationRow, SlotIdentity, SlotTransitionRequest, Store,
+    StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
-#[cfg(test)]
 use velnor_model::ExitClass;
 use velnor_model::{
     EventReason, Generation, JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
@@ -47,11 +46,16 @@ const PRUNE_RETRY_MAX: Duration = PRUNE_INTERVAL;
 /// The lease is longer than the bounded store pass, but remains finite so an
 /// abandoned process cannot suppress maintenance indefinitely.
 const PRUNE_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
-/// Bound process-resident secret patterns. Exceeding either limit rejects the
-/// admission before execution; truncating patterns would permit unsanitized
-/// projections to reach the operational store.
-const MAX_RETAINED_MASK_COUNT: usize = 256;
-const MAX_RETAINED_MASK_BYTES: usize = 64 * 1024;
+/// Bound the secret patterns one admitted job may register. Exceeding either
+/// limit rejects that admission before execution; truncating patterns would
+/// permit unsanitized projections to reach the operational store.
+///
+/// The bound is per job, never per process: masks live exactly as long as
+/// the job's [`JobMaskScope`], so a slot worker that admits thousands of
+/// jobs over its lifetime never accumulates their (unique, per-job) tokens
+/// into a registry that eventually rejects every admission.
+const MAX_JOB_MASK_COUNT: usize = 256;
+const MAX_JOB_MASK_BYTES: usize = 64 * 1024;
 const TELEMETRY_RING_CAPACITY: usize = 4096;
 #[cfg(test)]
 #[allow(
@@ -252,6 +256,37 @@ fn sanitize_slug(raw: &str) -> String {
     }
 }
 
+/// The durable slot projection as seen by one actor generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotCursor {
+    /// No row, or a row owned by an older generation: this generation
+    /// establishes fresh ownership and has no `from` edge to validate.
+    Fresh,
+    /// This generation owns the row; edges project from `phase`, and the
+    /// next request key follows `sequence`.
+    Owned { phase: SlotPhase, sequence: u64 },
+    /// A newer generation owns the slot; this actor must not mutate it.
+    Superseded { owner: Generation },
+}
+
+/// Lifetime of one job's secret masks inside the sink.
+///
+/// The job that admitted the masks owns them; when the scope drops — on
+/// every exit path of the job handler, including early fail-closed bails —
+/// the masks are released, so the registry holds only in-flight jobs and
+/// can never fill up across a long-lived slot process.
+#[must_use = "dropping the scope immediately releases the job's masks"]
+pub struct JobMaskScope {
+    sink: Arc<OpsSink>,
+    job_uid: String,
+}
+
+impl Drop for JobMaskScope {
+    fn drop(&mut self) {
+        self.sink.release_job_masks(&self.job_uid);
+    }
+}
+
 /// Admission token held by exactly one retention worker.
 ///
 /// Dropping the token releases admission even when a blocking task is
@@ -351,9 +386,13 @@ pub struct OpsSink {
     store: Store,
     instance_slug: String,
     retention_owner: String,
-    // Keep admitted masks for this sink lifetime: a later operational event
-    // may repeat an earlier secret, so eviction would re-enable persistence.
-    masks: Mutex<Vec<String>>,
+    /// Secret patterns keyed by the admitted job that owns them. Every
+    /// textual projection is masked with the union of all live jobs' masks;
+    /// a job's masks are released only when its [`JobMaskScope`] drops, i.e.
+    /// after every event that could still repeat one of its secrets has been
+    /// written. One slot process runs one job at a time, so the live set is
+    /// bounded by the per-job limit rather than by process lifetime.
+    masks: Mutex<BTreeMap<String, Vec<String>>>,
     degraded: AtomicBool,
     last_prune_unix: AtomicU64,
     next_prune_attempt_unix: AtomicU64,
@@ -424,7 +463,7 @@ impl OpsSink {
                 std::process::id(),
                 uuid::Uuid::new_v4().simple()
             ),
-            masks: Mutex::new(Vec::new()),
+            masks: Mutex::new(BTreeMap::new()),
             degraded: AtomicBool::new(false),
             last_prune_unix: AtomicU64::new(0),
             next_prune_attempt_unix: AtomicU64::new(0),
@@ -526,11 +565,11 @@ impl OpsSink {
             infrastructure_category: None,
         };
         let budget = RetentionMaintenanceBudget::from(&self.budget);
-        // Register masks before the physical gate and store write. Retaining
-        // masks when capacity denies admission is conservative; it prevents
-        // later projections from losing protection and avoids any
-        // post-commit mask-registration failure path.
-        if !self.remember_masks(&admission.masks) {
+        // Register this job's masks before the physical gate and store write.
+        // They stay registered when capacity denies admission: the rejection
+        // completion still projects this job's text, and the caller's
+        // `JobMaskScope` releases them once that path has finished.
+        if !self.remember_job_masks(&job_uid, &admission.masks) {
             return self.required_failure(
                 "store.masks",
                 "event mask registry is unavailable; admission rejected",
@@ -712,22 +751,41 @@ impl OpsSink {
         }
     }
 
-    pub(crate) fn latest_slot_transition_request_key(
+    /// Where the durable slot projection stands for one actor generation.
+    ///
+    /// The daemon derives every slot edge from this cursor, so it can only
+    /// ever declare edges the closed graph permits from the phase the store
+    /// actually holds.
+    pub(crate) fn slot_cursor(
         &self,
         slot_id: &SlotId,
         slot_index: u32,
         generation: Generation,
-    ) -> Result<Option<SlotTransitionRequestKey>, StoreError> {
-        self.store.latest_slot_transition_request_key(
-            &SlotIdentity {
-                instance_slug: self.instance_slug.clone(),
-                slot_id: slot_id.clone(),
-                host: self.instance_slug.clone(),
-                slot_index,
-                slot_kind: SlotKind::Stable,
+    ) -> Result<SlotCursor, StoreError> {
+        let Some(row) = self.store.slot(&self.instance_slug, slot_id)? else {
+            return Ok(SlotCursor::Fresh);
+        };
+        if row.identity.host != self.instance_slug
+            || row.identity.slot_index != slot_index
+            || row.identity.slot_kind != SlotKind::Stable
+        {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.slot.identity.mismatch")
+                    .with_remediation(
+                    "reuse the original host, index, and slot kind for this stable slot identity",
+                ),
+            );
+        }
+        Ok(match row.generation.cmp(&generation) {
+            std::cmp::Ordering::Less => SlotCursor::Fresh,
+            std::cmp::Ordering::Equal => SlotCursor::Owned {
+                phase: row.phase,
+                sequence: row.transition_sequence,
             },
-            generation,
-        )
+            std::cmp::Ordering::Greater => SlotCursor::Superseded {
+                owner: row.generation,
+            },
+        })
     }
 
     /// Best-effort idempotent job transition; replaying `(job, token)` is a
@@ -1275,10 +1333,6 @@ impl OpsSink {
             .replace(StoreError::new(class, reason));
     }
 
-    pub(crate) fn record_slot_transition_lookup_failure(&self, error: &StoreError) {
-        self.absorb("store.slot.transition.lookup", &error.to_string());
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn forensic_failures(&self) -> Vec<String> {
         // A poisoned forensics lock recovers its guard: the buffer is plain
@@ -1299,43 +1353,73 @@ impl OpsSink {
             .push(forensic_failure_line(code, detail));
     }
 
-    fn remember_masks(&self, values: &[String]) -> bool {
-        let Ok(mut masks) = self.masks.lock() else {
+    /// Hold one job's masks registered for exactly as long as the returned
+    /// scope lives. Create it before the admission write and keep it until
+    /// every completion, rejection, and terminal transition for the job has
+    /// been written; dropping it releases the job's masks.
+    pub fn job_mask_scope(self: &Arc<Self>, job_uid: &str) -> JobMaskScope {
+        JobMaskScope {
+            sink: Arc::clone(self),
+            job_uid: job_uid.to_owned(),
+        }
+    }
+
+    /// Register the masks for one admitted job, bounded per job.
+    ///
+    /// A job whose secret patterns exceed the per-job bound fails closed;
+    /// its partial additions are discarded so a later scope release has
+    /// nothing half-registered to leave behind.
+    fn remember_job_masks(&self, job_uid: &str, values: &[String]) -> bool {
+        let Ok(mut registry) = self.masks.lock() else {
             self.absorb("store.masks", "mask registry lock poisoned");
             return false;
         };
-
-        let retained_bytes = masks.iter().map(String::len).sum::<usize>();
+        let known = registry.get(job_uid).cloned().unwrap_or_default();
+        let retained_bytes = known.iter().map(String::len).sum::<usize>();
         let mut additions = Vec::new();
         let mut addition_bytes = 0usize;
         for value in values.iter().filter(|value| !value.is_empty()) {
-            if masks.iter().any(|known| known == value)
-                || additions.iter().any(|known| known == value)
+            if known.iter().any(|existing| existing == value)
+                || additions.iter().any(|existing| existing == value)
             {
                 continue;
             }
-            if masks.len().saturating_add(additions.len()) >= MAX_RETAINED_MASK_COUNT
+            if known.len().saturating_add(additions.len()) >= MAX_JOB_MASK_COUNT
                 || retained_bytes
                     .saturating_add(addition_bytes)
                     .saturating_add(value.len())
-                    > MAX_RETAINED_MASK_BYTES
+                    > MAX_JOB_MASK_BYTES
             {
                 self.absorb(
                     "store.masks",
-                    "secret mask registry limit exceeded; admission rejected",
+                    "job secret mask bound exceeded; admission rejected",
                 );
                 return false;
             }
             addition_bytes = addition_bytes.saturating_add(value.len());
             additions.push(value.clone());
         }
-        masks.extend(additions);
+        registry
+            .entry(job_uid.to_owned())
+            .or_default()
+            .extend(additions);
         true
     }
 
+    fn release_job_masks(&self, job_uid: &str) {
+        match self.masks.lock() {
+            Ok(mut registry) => {
+                registry.remove(job_uid);
+            }
+            Err(_) => self.absorb("store.masks", "mask registry lock poisoned"),
+        }
+    }
+
+    /// Union of every live job's masks: the sanitizer input for events and
+    /// transition messages, which may name any job still in flight.
     fn event_masks(&self) -> Option<Vec<String>> {
         match self.masks.lock() {
-            Ok(values) => Some(values.clone()),
+            Ok(registry) => Some(registry.values().flatten().cloned().collect()),
             Err(_) => {
                 self.absorb("store.masks", "mask registry lock poisoned");
                 None
@@ -1784,12 +1868,101 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_mask_registry_overflow_before_store_write() {
+    fn admission_rejects_per_job_mask_overflow_before_store_write() {
         let (_dir, sink) = temp_sink("admission-mask-overflow");
-        let masks = vec!["m".repeat(MAX_RETAINED_MASK_BYTES + 1)];
+        let masks = vec!["m".repeat(MAX_JOB_MASK_BYTES + 1)];
 
-        assert!(!sink.remember_masks(&masks));
+        assert!(!sink.remember_job_masks("job-overflow", &masks));
         assert!(sink.degraded());
+        assert!(sink.event_masks().unwrap().is_empty());
+
+        let mut oversized = admission(120, None);
+        oversized.masks = (0..MAX_JOB_MASK_COUNT + 1)
+            .map(|index| format!("job-secret-{index}"))
+            .collect();
+        assert!(!sink.record_admission(&oversized));
+        assert!(sink
+            .store
+            .job_summaries("test-instance")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Sentry `velnor-daemon@dogfood` slot-3 (pid 3611670): cycles 41..52
+    /// every admission was rejected with `store.masks` because forty prior
+    /// jobs' unique per-job tokens had filled a process-lifetime registry.
+    /// A slot worker admits one job per cycle for its whole life; the mask
+    /// registry must therefore be scoped to the job, not to the process.
+    #[test]
+    fn long_lived_slot_worker_admits_every_cycle_with_unique_job_secrets() {
+        let (_dir, sink) = temp_sink("admission-long-lived-slot");
+        // Sentry hit the old process-lifetime cap after ~40 jobs (256 / 6);
+        // run well past that point.
+        let masks_per_job = 6;
+        let cycles = MAX_JOB_MASK_COUNT / masks_per_job + 24;
+        for cycle in 0..cycles {
+            let run_id = 1_000 + u64::try_from(cycle).unwrap();
+            let mut adm = admission(run_id, None);
+            adm.masks = (0..masks_per_job)
+                .map(|index| format!("ghs_job{cycle}_token{index}_0123456789abcdef"))
+                .collect();
+            let scope = sink.job_mask_scope(&adm.job_uid);
+            assert!(
+                sink.record_admission(&adm),
+                "cycle {cycle} must admit; the registry only holds the live job"
+            );
+            assert_eq!(
+                sink.event_masks().unwrap().len(),
+                masks_per_job,
+                "only the in-flight job's masks are live during cycle {cycle}"
+            );
+            drop(scope);
+        }
+        assert!(!sink.degraded());
+        assert!(sink.event_masks().unwrap().is_empty());
+        assert_eq!(
+            sink.store.job_summaries("test-instance").unwrap().len(),
+            cycles
+        );
+    }
+
+    #[test]
+    fn job_mask_scope_keeps_masks_live_until_dropped_and_masks_events() {
+        let (_dir, sink) = temp_sink("admission-mask-scope");
+        let secret = "ghs_scope_secret_0123456789abcdef";
+        let adm = admission(130, Some(secret));
+        let uid = adm.job_uid().unwrap();
+        let scope = sink.job_mask_scope(&uid);
+        assert!(sink.record_admission(&adm));
+
+        // While the scope lives, transition messages naming the secret are
+        // masked before they reach the store.
+        assert!(sink.transition(
+            &uid,
+            "t-waiting-job-130",
+            EventReason::JobWaiting,
+            Some(format!("waiting with {secret} in the message")),
+            None,
+            None,
+        ));
+        let events = sink.store.events_after("test-instance", 0, 64).unwrap();
+        let waiting = events
+            .iter()
+            .filter(|event| event.row.subject == uid && event.row.event_kind.contains("waiting"))
+            .collect::<Vec<_>>();
+        assert_eq!(waiting.len(), 1);
+        assert!(waiting[0]
+            .row
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("waiting with") && !detail.contains(secret)));
+        assert!(sink
+            .event_masks()
+            .unwrap()
+            .iter()
+            .any(|mask| mask == secret));
+
+        drop(scope);
         assert!(sink.event_masks().unwrap().is_empty());
     }
 

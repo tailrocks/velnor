@@ -89,16 +89,57 @@ require_package_transaction_lock() {
   fail "refusing package configuration: exclusive lock owner is not an apt-wrapper ancestor"
 }
 
+scheduled_oneshot_under_transaction_lock() {
+  # A `Type=oneshot` unit whose ExecStart is wrapped in `flock --shared
+  # --no-fork $PACKAGE_TRANSACTION_LOCK` (cache gc, doctor, fleet-policy
+  # audit) is serialised by the very lock this script runs under: the apt
+  # wrapper's exclusive acquisition waited for any in-flight run to finish,
+  # and a run that fires mid-transaction blocks on the shared lock until the
+  # transaction ends, then execs the newly installed binary. Its timer is
+  # `active (waiting)` for as long as it is enabled — that is a schedule, not
+  # a run. Neither is a reason to refuse. Fleet units (daemon, controller,
+  # slot, job, guardian) are excluded from this class on purpose: they hold
+  # jobs and fleet state and must be drained by the operator, lock or no lock.
+  case "$1" in
+    *.timer)
+      oneshot_triggered=$(systemctl show --property=Triggers --value "$1" 2>/dev/null) || return 1
+      [ -n "$oneshot_triggered" ] || return 1
+      for oneshot_service in $oneshot_triggered; do
+        scheduled_oneshot_under_transaction_lock "$oneshot_service" || return 1
+      done
+      return 0
+      ;;
+    *.service) ;;
+    *) return 1 ;;
+  esac
+  [ "$(systemctl show --property=Type --value "$1" 2>/dev/null || true)" = oneshot ] || return 1
+  oneshot_exec_start=$(systemctl show --property=ExecStart --value "$1" 2>/dev/null) || return 1
+  case "$oneshot_exec_start" in
+    *"argv[]=/usr/bin/flock --shared --no-fork $PACKAGE_TRANSACTION_LOCK "*) return 0 ;;
+  esac
+  return 1
+}
+
 all_velnor_units_drained() {
   # Recheck under the verified outer lock immediately before any package-owned
-  # filesystem or configuration side effect. Timers are included because an
-  # active timer can start an old doctor during package unpack/configure.
+  # filesystem or configuration side effect. Every packaged fleet service
+  # executes a Velnor binary and must be inactive. Scheduled maintenance
+  # oneshots and their timers are exempt: the transaction lock, not this
+  # snapshot, is what keeps them from running an old binary mid-configure
+  # (scheduled_oneshot_under_transaction_lock). Gating on their timers made
+  # every enabled `velnor*.timer` refuse every later upgrade.
   active_services_raw=$(systemctl list-units --type=service --all --no-legend --plain 'velnor*.service' 2>/dev/null) || return 1
   active_timers_raw=$(systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer' 2>/dev/null) || return 1
   # NF skips the empty lines printf injects when an enumeration is empty:
   # a bare empty line has no fields and must not look like an active unit.
-  active_units=$(printf '%s\n%s\n' "$active_services_raw" "$active_timers_raw" \
+  candidates=$(printf '%s\n%s\n' "$active_services_raw" "$active_timers_raw" \
     | awk 'NF && $3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
+  active_units=
+  for candidate in $candidates; do
+    unit=${candidate%(*}
+    scheduled_oneshot_under_transaction_lock "$unit" && continue
+    active_units="$active_units${active_units:+ }$candidate"
+  done
   [ -z "$active_units" ]
 }
 
@@ -236,10 +277,27 @@ case "$1" in
       esac
       [ "$effective_cpu_quota_usec" = "$expected_cpu_quota_usec" ] \
         || fail "velnor-jobs.slice effective CPUQuotaPerSecUSec is '$effective_cpu_quota_usec', expected '$expected_cpu_quota_usec'"
-      # Unit enablement, masking, and activation belong to the operator. Package
-      # upgrades preserve systemd's existing state by doing nothing here; fresh
-      # installs remain disabled. In particular, never revive the obsolete
+      # Fleet unit enablement, masking, and activation belong to the operator.
+      # Package upgrades preserve systemd's existing state for them; fresh
+      # installs leave them disabled. In particular, never revive the obsolete
       # default daemon/doctor or invent doctors for inactive template instances.
+      #
+      # The scheduled store gc is the package's own hygiene, not fleet
+      # activation: `velnor-cache-gc.timer` fires `velnorctl cache gc --yes`,
+      # which enumerates every packaged instance itself and runs under the
+      # shared package-transaction lock, so an enabled timer never blocks a
+      # later upgrade (scheduled_oneshot_under_transaction_lock). Enable it on
+      # install and on every upgrade; idempotent. An operator who masked the
+      # timer has opted out, and a mask is honoured, never removed.
+      case "$(systemctl is-enabled velnor-cache-gc.timer 2>/dev/null || true)" in
+        masked|masked-runtime)
+          echo "velnor-cache-gc.timer is masked; leaving the operator's opt-out in place"
+          ;;
+        *)
+          systemctl enable --now velnor-cache-gc.timer \
+            || fail "could not enable velnor-cache-gc.timer"
+          ;;
+      esac
     fi
 
     echo "velnorctl (velnor-runner package) installed. NOTE: this package never restarts the fleet."
@@ -247,6 +305,7 @@ case "$1" in
     echo "activate a coherent release and start:"
     echo "  sudo velnor-runner release activate --record <release-record.json>"
     echo "  sudo systemctl enable --now velnor-daemon@<name>  # operator-selected instance"
+    echo "velnor-cache-gc.timer (weekly gc of every instance's stores) is enabled by the package."
     ;;
 esac
 

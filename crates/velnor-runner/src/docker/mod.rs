@@ -37,6 +37,11 @@ pub mod metrics;
 
 pub(crate) use client::Docker;
 pub use deadline::{classify, deadline_for, DockerOp, DockerTimeout};
+/// The one Docker endpoint resolver. Every host-side consumer — Engine API
+/// client, CLI command configuration, lease proxy, and the `velnorctl`
+/// diagnostics/host commands — reads the daemon through this resolver so no
+/// two surfaces can select different daemons on the same machine.
+pub use engine::{resolve_docker_endpoint, DockerEndpoint, DockerEndpointSource};
 pub use facts::{Fact, FactKey, FactLifetime};
 pub use metrics::{
     begin_job, observe, observe_api, observe_api_fallback, snapshot, ClassTotal, JobDockerScope,

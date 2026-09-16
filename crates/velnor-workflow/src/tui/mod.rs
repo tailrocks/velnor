@@ -977,7 +977,6 @@ mod tests {
                 profile: None,
             }),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         }
@@ -986,6 +985,7 @@ mod tests {
     fn config() -> crate::ProjectConfig {
         crate::ProjectConfig {
             repository: "test".to_owned(),
+            workflow_revision: crate::SOURCE_REVISION.to_owned(),
             profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "test".to_owned(),
@@ -1019,9 +1019,11 @@ mod tests {
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
             ci_required: true,
+            ruleset_required_status_checks: Vec::new(),
             package_update_channels: None,
             velnor_runner_group: None,
             velnor_trusted_label: None,
+            velnor_trusted_runner_available: None,
             pull_request_on_velnor: false,
             default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
             automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
@@ -1031,6 +1033,8 @@ mod tests {
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
+            github_cache: crate::config::CacheGithubSection::default(),
+            velnor_host_cache: crate::config::CacheVelnorSection::default(),
         }
     }
 

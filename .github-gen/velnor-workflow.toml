@@ -2,6 +2,11 @@ schema = 1
 
 [generator]
 repository = "tailrocks/velnor"
+# D19 pin: the velnor-workflow commit that rendered this tree. The policy
+# validator regenerates the tree with the generator built at this commit and
+# requires a byte-identical result; bump it in a single pin commit after the
+# last generator change (see the plan ledger).
+revision = "75707ac45c9213388d287518a5894ad6196e1a12"
 
 [scan]
 exclude = ["migrations/**"]
@@ -27,6 +32,12 @@ default_dispatch_runner = "both"
 # lease socket) receive them. Untrusted hosts must never claim it.
 # Deliberately distinct from org pool velnor-trusted: a label, not a group.
 velnor_trusted_label = "velnor-host-docker"
+# Declared, never probed: the generator renders trust-gated Velnor jobs as
+# real jobs (true) or explicit skips (false) from this key alone, so the tree
+# is reproducible. Set false again if no online runner claims the label, or
+# the gated jobs queue until one does. Verified 2026-09-16: dogfood slots 1-5
+# advertise velnor-host-docker.
+velnor_trusted_runner_available = true
 # Recovery: omit velnor_runner_group so repository-scoped macOS/Linux hosts
 # can claim Velnor-lane jobs without joining org pool velnor-trusted.
 # Restore velnor-trusted after Sentry org fleet is healthy.
@@ -40,6 +51,22 @@ velnor_rust_needs = "dependency-closure"
 # github.ref, so main/nightly runs still supersede per branch.
 velnor_concurrency_group = "velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
+
+[policy]
+ruleset_required_status_checks = ["ci-required"]
+# Contexts the ruleset requires that GitHub Apps report, not workflows.
+ruleset_external_status_checks = ["DCO"]
+
+# Generator-only dual-lane cache budgets (never written to .github/ci/project.toml).
+[cache.github]
+budget_bytes = 8589934592
+producer_window_seconds = 7200
+mbx_generation_bound = 2
+
+[cache.velnor]
+budget_bytes = 53687091200
+producer_window_seconds = 86400
+mbx_generation_bound = 6
 
 # Release contract: typed native publisher + rolling preview. Guest-seed
 # restore/save is derived from the microvm recipe, not a pasted workflow body.
@@ -184,10 +211,10 @@ docker_closure = [
 "rust-velnor-runner" = [
   ".github-gen/velnor-workflow.toml",
   "microvm/**",
-  "fleet/**",
+  "config/fleet/**",
 ]
 "rust-velnorctl" = ["microvm/**"]
-"rust-velnor-tools" = ["fleet/**"]
+"rust-velnor-tools" = ["config/fleet/**"]
 "rust-velnor-model" = ["schemas/**"]
 
 # Regeneration gate: the workflow crate owns the generated surface, so its
@@ -263,6 +290,10 @@ mutable_mount_seed = true
 [[static_files]]
 file = ".github/actions/setup-velnor-workflow/action.yml"
 source = ".github-gen/sources/actions/setup-velnor-workflow/action.yml"
+
+[[static_files]]
+file = ".github/actions/report-velnor-ci-outcomes/action.yml"
+source = ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml"
 
 [[static_files]]
 file = ".github/workflows/AGENTS.md"

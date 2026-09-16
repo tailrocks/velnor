@@ -27,8 +27,9 @@ sudo /usr/bin/flock --exclusive --nonblock --no-fork \
 
 Replace `VERSION` and `ARCH` with the downloaded asset names. Direct `dpkg -i`
 and unlocked package transactions are rejected. Installation verifies package
-identity, creates required paths, reloads systemd, and leaves services
-disabled and stopped. It does not activate a release or restart the fleet.
+identity, creates required paths, reloads systemd, enables the weekly
+`velnor-cache-gc.timer`, and leaves every fleet service disabled and stopped.
+It does not activate a release or restart the fleet.
 
 Install host prerequisites before the package and backend prerequisites before
 starting the daemon:
@@ -257,19 +258,25 @@ the remaining cgroup.
 
 ## Upgrade and release control
 
-Before an upgrade, stop the exact daemon and doctor units, then keep the
-exclusive transaction lock for the whole package operation:
+Before an upgrade, stop the exact fleet units (daemon, guardian, controller,
+slot, and job units), then keep the exclusive transaction lock for the whole
+package operation:
 
 ```sh
 sudo systemctl stop velnor-daemon.service velnor-guardian.service
-sudo systemctl stop velnor-doctor.timer
 sudo /usr/bin/flock --exclusive --nonblock --no-fork \
   /run/velnor/package-transaction.lock \
   apt-get install ./velnor-runner-VERSION-ARCH.deb
 ```
 
-Every shipped Velnor service takes the shared lock. Package hooks reject direct
-or unlocked configuration and do not restart or re-enable services.
+Every shipped Velnor service takes the shared lock. Scheduled maintenance
+timers (`velnor-doctor*.timer`, `velnor-cache-gc.timer`,
+`velnor-fleet-policy-audit.timer`) may stay enabled: their `Type=oneshot`
+services are serialised by that lock, so a run that fires mid-transaction waits
+for the transaction and then executes the new binary. Package hooks reject
+direct or unlocked configuration and do not restart or re-enable fleet
+services; the only unit the package enables itself is `velnor-cache-gc.timer`
+(mask it to opt out).
 
 Release commands are provided by `velnor-runner`:
 

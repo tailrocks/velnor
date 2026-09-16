@@ -51,13 +51,22 @@ fn cli_c005_root_help_goes_to_stdout_and_exits_success_with_silent_stderr() {
 }
 
 #[test]
-fn cli_c005_version_prints_binary_and_workspace_version_to_stdout() {
+fn cli_c005_version_prints_binary_and_release_identity_to_stdout() {
+    // The version is the stamped release identity `velnor-runner` carries
+    // (release version and source SHA, or `development`), not velnorctl's
+    // own unbumped crate version: the operator must be able to match a host
+    // to a build from the CLI alone.
     let output = run(&["--version"]);
     assert_eq!(code(&output), 0);
     assert!(text(&output.stderr).is_empty());
     let version = text(&output.stdout);
-    assert!(version.starts_with("velnorctl "), "{version}");
-    assert!(version.contains(env!("CARGO_PKG_VERSION")), "{version}");
+    assert_eq!(
+        version.trim_end(),
+        format!("velnorctl {}", velnorctl::cli_version())
+    );
+    let identity = velnor_runner::embedded_build_identity();
+    assert!(version.contains(&identity.crate_version), "{version}");
+    assert!(version.contains(&identity.source_sha), "{version}");
 }
 
 #[test]

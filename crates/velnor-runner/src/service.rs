@@ -205,7 +205,7 @@ pub struct DaemonArgs {
     #[arg(
         long,
         env = "VELNOR_EMERGENCY_RESERVE_BYTES",
-        default_value_t = 10_737_418_240u64
+        default_value_t = crate::capacity::DEFAULT_EMERGENCY_RESERVE_BYTES
     )]
     pub emergency_reserve_bytes: u64,
 
@@ -213,7 +213,7 @@ pub struct DaemonArgs {
     #[arg(
         long,
         env = "VELNOR_JOB_PEAK_BYTES",
-        default_value_t = 32_212_254_720u64
+        default_value_t = crate::capacity::DEFAULT_JOB_PEAK_BYTES
     )]
     pub job_peak_bytes: u64,
 

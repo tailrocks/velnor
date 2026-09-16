@@ -38,7 +38,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
     crate::ensure_native_github_http_transport();
     ensure_dev_canonical_storage()?;
     ensure_dev_service_binary()?;
-    let url = resolve_repo_url(&args)?;
+    let url = resolve_repo_url(globals.repo.as_deref(), args.url.as_deref())?;
     if github_pat().is_none() {
         return Err(CommandError::new(
             ExitClass::Usage,
@@ -422,7 +422,17 @@ async fn status(globals: &GlobalArgs) -> Result<(), CommandError> {
     );
     println!("docker_endpoint     {}", docker_endpoint_display());
     println!("execution           {}", execution_platform());
-    let hosts = discover_hosts(globals.instance.as_deref())?;
+    let packaged = crate::packaged::instances()?;
+    let requested = crate::packaged::requested(globals);
+    println!("packaged_instances  {}", packaged.len());
+    for instance in packaged.iter().filter(|instance| {
+        requested
+            .as_deref()
+            .is_none_or(|requested| instance.instance == requested || instance.name == requested)
+    }) {
+        print_packaged_instance(instance).await;
+    }
+    let hosts = discover_hosts(requested.as_deref(), &packaged)?;
     println!("active_hosts        {}", hosts.len());
     for host in hosts {
         println!("host                {}", host.name);
@@ -451,6 +461,58 @@ async fn status(globals: &GlobalArgs) -> Result<(), CommandError> {
     println!("follow              velnorctl --instance <name> get slots");
     println!("docker_report       velnorctl docker report");
     Ok(())
+}
+
+/// One packaged `velnor-daemon@<instance>` as its unit environment configures
+/// it: the paths `velnorctl` addresses it through, and whether the daemon is
+/// actually there.
+async fn print_packaged_instance(instance: &velnor_runner::daemon_instance::DaemonInstance) {
+    println!("instance            {}", instance.instance);
+    println!("  unit              {}", instance.unit);
+    println!("  name              {}", instance.name);
+    if let Some(url) = &instance.url {
+        println!("  url               {url}");
+    }
+    println!("  storage_root      {}", instance.storage_root.display());
+    println!("  trust_scope       {}", instance.trust_scope);
+    println!("  work_dir          {}", instance.work_dir.display());
+    println!("  daemon_dir        {}", instance.daemon_dir.display());
+    let control = instance.control_socket();
+    println!(
+        "  control_socket    {} ({})",
+        control.display(),
+        if control.exists() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    if control.exists() {
+        match crate::packaged::Selected::Packaged(Box::new(instance.clone())).endpoint() {
+            Ok(endpoint) => {
+                let client = velnor_client::UnixControlClient::new(endpoint)
+                    .with_timeout(Duration::from_secs(2));
+                match client.info().await {
+                    Ok(info) => println!(
+                        "  control_api       {} schema={} mutations={}",
+                        info.api_version, info.schema_version, info.mutations
+                    ),
+                    Err(error) => println!("  control_api       unavailable ({error})"),
+                }
+            }
+            Err(error) => println!("  control_api       unavailable ({})", error.message),
+        }
+    }
+    match velnor_runner::node::health::fetch(&instance.daemon_dir) {
+        Ok(health) => println!(
+            "  health            {}",
+            serde_json::to_string(&health).unwrap_or_else(|_| "unrenderable".to_owned())
+        ),
+        Err(_) => println!(
+            "  health            unavailable ({} has no health document)",
+            instance.daemon_dir.display()
+        ),
+    }
 }
 
 async fn drain(globals: &GlobalArgs) -> Result<(), CommandError> {
@@ -587,9 +649,28 @@ impl Drop for HostProcessGuard {
     }
 }
 
-fn discover_hosts(requested: Option<&str>) -> Result<Vec<HostProcess>, CommandError> {
+/// Running host processes under the socket root.
+///
+/// A `requested` name that is a packaged instance (by systemd instance or
+/// `VELNOR_NAME`) is looked up where that instance's unit puts its socket —
+/// its storage root's runtime directory and its `VELNOR_NAME` — not under
+/// this process's socket root.
+fn discover_hosts(
+    requested: Option<&str>,
+    packaged: &[velnor_runner::daemon_instance::DaemonInstance],
+) -> Result<Vec<HostProcess>, CommandError> {
     let root = velnor_client::socket_root();
     if let Some(name) = requested {
+        let (root, name) = match packaged
+            .iter()
+            .find(|instance| instance.instance == name || instance.name == name)
+        {
+            Some(instance) => (
+                velnor_client::socket_root_for_storage_root(Some(&instance.storage_root)),
+                instance.name.as_str(),
+            ),
+            None => (root, name),
+        };
         validate_host_name(name)?;
         let instance_dir = root.join(name);
         if !instance_dir.is_dir() {
@@ -640,7 +721,7 @@ fn discover_hosts(requested: Option<&str>) -> Result<Vec<HostProcess>, CommandEr
 }
 
 fn resolve_single_host(requested: Option<&str>) -> Result<HostProcess, CommandError> {
-    let hosts = discover_hosts(requested)?;
+    let hosts = discover_hosts(requested, &crate::packaged::instances()?)?;
     match hosts.as_slice() {
         [host] => Ok(host.clone()),
         [] => Err(CommandError::new(
@@ -798,8 +879,8 @@ fn read_host_health(name: &str) -> Option<String> {
     Some(pairs.collect::<Vec<_>>().join(" "))
 }
 
-fn resolve_repo_url(args: &HostStartArgs) -> Result<String, CommandError> {
-    let raw = match (args.url.as_deref(), args.repo.as_deref()) {
+fn resolve_repo_url(repo: Option<&str>, url: Option<&str>) -> Result<String, CommandError> {
+    let raw = match (url, repo) {
         (Some(url), _) => url.trim().to_owned(),
         (None, Some(repo)) => format!("https://github.com/{}", repo.trim().trim_matches('/')),
         (None, None) => format!("https://github.com/{DEFAULT_REPO}"),
@@ -961,8 +1042,12 @@ pub(crate) fn host_config_dir_from_root(root: &Path, name: &str) -> PathBuf {
     root.join("hosts").join(name)
 }
 
+/// The on-demand host's operator name when `--name` is omitted. Owned by the
+/// runner: it is the same string the daemon collapses back to the `local`
+/// instance when it composes the GitHub runner name, so the registered
+/// identity is `velnor-<host>-local-<slot>` and never repeats the host.
 pub(crate) fn default_host_name() -> String {
-    format!("velnor-local-{}", hostname_slug())
+    velnor_runner::runner::default_local_operator_name()
 }
 
 fn ensure_docker_execution_file(config_dir: &Path, slots: usize) -> Result<(), CommandError> {
@@ -1282,43 +1367,29 @@ fn github_pat() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn hostname_slug() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| {
-            value
-                .chars()
-                .flat_map(|ch| ch.to_lowercase())
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .take(24)
-                .collect::<String>()
-                .trim_matches('-')
-                .to_owned()
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "host".into())
+/// The daemon this host will use, from the runner's one endpoint resolver, so
+/// what `host start` prints is exactly what the daemon and its Engine client
+/// connect to.
+fn docker_endpoint_display() -> String {
+    match velnor_runner::docker::resolve_docker_endpoint() {
+        Ok(endpoint) => docker_endpoint_line(&endpoint, endpoint.socket.exists()),
+        Err(error) => format!(
+            "unresolved ({error:#}); start Docker/OrbStack or fix the Docker context. \
+             host start will not switch backends"
+        ),
+    }
 }
 
-fn docker_endpoint_display() -> String {
-    for key in ["VELNOR_DOCKER_HOST", "DOCKER_HOST"] {
-        if let Ok(value) = env::var(key)
-            && !value.is_empty()
-        {
-            return format!("{value} (from {key})");
-        }
+fn docker_endpoint_line(endpoint: &velnor_runner::docker::DockerEndpoint, exists: bool) -> String {
+    let mut line = format!("{} (from {}", endpoint.host, endpoint.source.label());
+    if let Some(context) = &endpoint.context {
+        line.push_str(&format!(" {context}"));
     }
-    if PathBuf::from("/var/run/docker.sock").exists() {
-        return "unix:///var/run/docker.sock".into();
+    line.push(')');
+    if !exists {
+        line.push_str("; socket missing: start Docker/OrbStack before jobs are claimed");
     }
-    if let Some(home) = env::var_os("HOME") {
-        let orb = PathBuf::from(home).join(".orbstack/run/docker.sock");
-        if orb.exists() {
-            return format!("unix://{} (orbstack)", orb.display());
-        }
-    }
-    "unavailable (start Docker/OrbStack; host start will not switch backends)".into()
+    line
 }
 
 fn execution_platform() -> String {
@@ -1355,33 +1426,52 @@ mod tests {
 
     #[test]
     fn default_and_repo_urls_are_repository_scoped() {
-        let default = resolve_repo_url(&HostStartArgs {
-            repo: None,
-            url: None,
-            name: None,
-            slots: 1,
-            pr: None,
-            work_dir: None,
-            config_dir: None,
-            docker_host_work_dir: None,
-            docker_image: None,
-        })
-        .expect("default repo");
+        let default = resolve_repo_url(None, None).expect("default repo");
         assert_eq!(default, "https://github.com/tailrocks/velnor");
 
-        let named = resolve_repo_url(&HostStartArgs {
-            repo: Some("tailrocks/velnor".into()),
-            url: None,
-            name: None,
-            slots: 1,
-            pr: None,
-            work_dir: None,
-            config_dir: None,
-            docker_host_work_dir: None,
-            docker_image: None,
-        })
-        .expect("named repo");
+        let named = resolve_repo_url(Some("tailrocks/velnor"), None).expect("named repo");
         assert_eq!(named, "https://github.com/tailrocks/velnor");
+    }
+
+    #[test]
+    fn default_host_name_composes_into_the_runner_identity_without_repeating_the_host() {
+        let host = velnor_runner::runner::github_runner_host_slug();
+        let name = default_host_name();
+        assert_eq!(name, format!("velnor-local-{host}"));
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "{name}"
+        );
+        validate_host_name(&name).expect("default host name is a valid control-socket instance");
+        for slot in [0, 1] {
+            let registered = velnor_runner::runner::compose_github_runner_name(&host, &name, slot);
+            assert_eq!(
+                registered,
+                velnor_runner::runner::compose_github_runner_name(&host, "local", slot)
+            );
+            assert!(registered.len() <= 64, "{registered}");
+            assert!(
+                !registered.contains("velnor-local"),
+                "the operator default must collapse to the local instance: {registered}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_endpoint_line_reports_the_runner_resolved_endpoint() {
+        use velnor_runner::docker::{DockerEndpoint, DockerEndpointSource};
+        let endpoint = DockerEndpoint {
+            host: "unix:///Users/me/.orbstack/run/docker.sock".into(),
+            socket: PathBuf::from("/Users/me/.orbstack/run/docker.sock"),
+            source: DockerEndpointSource::Context,
+            context: Some("orbstack".into()),
+        };
+        assert_eq!(
+            docker_endpoint_line(&endpoint, true),
+            "unix:///Users/me/.orbstack/run/docker.sock (from Docker context orbstack)"
+        );
+        let missing = docker_endpoint_line(&endpoint, false);
+        assert!(missing.contains("socket missing"), "{missing}");
     }
 
     #[test]
@@ -1470,25 +1560,14 @@ mod tests {
 
     #[test]
     fn org_urls_are_refused() {
-        let error = resolve_repo_url(&HostStartArgs {
-            repo: None,
-            url: Some("https://github.com/tailrocks".into()),
-            name: None,
-            slots: 1,
-            pr: None,
-            work_dir: None,
-            config_dir: None,
-            docker_host_work_dir: None,
-            docker_image: None,
-        })
-        .expect_err("org URL");
+        let error =
+            resolve_repo_url(None, Some("https://github.com/tailrocks")).expect_err("org URL");
         assert_eq!(error.reason, "host.org_scope_refused");
     }
 
     #[test]
     fn default_config_dir_is_isolated_per_host_name() {
         let args = HostStartArgs {
-            repo: None,
             url: None,
             name: None,
             slots: 1,
@@ -1509,7 +1588,6 @@ mod tests {
     #[test]
     fn explicit_config_dir_is_unchanged() {
         let args = HostStartArgs {
-            repo: None,
             url: None,
             name: None,
             slots: 1,

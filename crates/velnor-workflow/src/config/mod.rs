@@ -64,7 +64,7 @@ pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, Gene
     }
 }
 
-fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, GeneratorError> {
+pub(crate) fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, GeneratorError> {
     let content = std::str::from_utf8(bytes).map_err(|_| {
         GeneratorError::usage(format!(
             "generation config must be UTF-8: {}",
@@ -107,6 +107,39 @@ pub(crate) struct RepoGenerationConfig {
     static_files: Vec<StaticFileSection>,
     #[serde(default)]
     declare: Vec<DeclareRow>,
+    /// Generator-only dual-lane cache budgets. Never serialized into
+    /// `.github/ci/project.toml`.
+    #[serde(default)]
+    cache: CacheRootSection,
+}
+
+/// GitHub Actions cache account retention (`[cache.github]`). Governs
+/// `velnor-workflow cache-plan` only; never merged with Velnor host GC.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CacheGithubSection {
+    pub(crate) budget_bytes: Option<u64>,
+    pub(crate) producer_window_seconds: Option<u64>,
+    pub(crate) mbx_generation_bound: Option<u32>,
+}
+
+/// Velnor host persistent-store budgets (`[cache.velnor]`). Emitted as a
+/// fleet `velnor.env` snippet; never serialized into `.github/ci/project.toml`.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CacheVelnorSection {
+    pub(crate) budget_bytes: Option<u64>,
+    pub(crate) producer_window_seconds: Option<u64>,
+    pub(crate) mbx_generation_bound: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CacheRootSection {
+    #[serde(default)]
+    github: CacheGithubSection,
+    #[serde(default)]
+    velnor: CacheVelnorSection,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -114,6 +147,14 @@ pub(crate) struct RepoGenerationConfig {
 struct GeneratorSection {
     /// `owner/repository` slug this config belongs to.
     repository: Option<String>,
+    /// D19: the generator-repository commit whose `velnor-workflow` renders
+    /// and audits this tree. Every generated pin — the policy runtime install
+    /// `--rev`, the `setup-velnor-workflow` `rev:`, the runtime artifact
+    /// names — is this one value, so the tree declares the generator that
+    /// produced it and the policy validator regenerates the tree with exactly
+    /// that generator. Absent keeps the running binary's own source commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -147,6 +188,11 @@ struct WorkflowSection {
     /// digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     velnor_trusted_label: Option<String>,
+    /// When set, pins whether trust-gated Velnor jobs render or skip at
+    /// generation time. Absent values probe `gh api …/runners` once per
+    /// generation; probe failure skips instead of queueing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_trusted_runner_available: Option<bool>,
     /// The repository profile recorded in the generated `project.toml`. A free
     /// label: it describes the surface, it never selects one.
     profile: Option<String>,
@@ -331,6 +377,15 @@ struct PolicySection {
     dco_required: Option<bool>,
     /// Require the generated policy workflow to conclude on a pull request.
     ci_required: Option<bool>,
+    /// Repository-ruleset status-check contexts that `ci-pr.yml` must expose as
+    /// top-level job `name:` values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ruleset_required_status_checks: Vec<String>,
+    /// Repository-ruleset status-check contexts reported by GitHub Apps rather
+    /// than by a workflow (for example `DCO`). The policy validator requires
+    /// the live ruleset to equal the union of both lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ruleset_external_status_checks: Vec<String>,
     /// Admission rule for actions that are not pinned to a full commit SHA.
     action_pin_admission: Option<String>,
     /// Emit `config-variables: null` in the generated actionlint config.
@@ -538,6 +593,30 @@ impl DeclareRow {
     }
 }
 
+/// Default Velnor host cache budget: 50 GiB (`[cache.velnor].budget_bytes`).
+pub(crate) const DEFAULT_VELNOR_HOST_CACHE_BYTES: u64 = 53_687_091_200;
+
+/// Render the fleet host env snippet from `[cache.velnor]` overrides.
+pub(crate) fn render_velnor_host_env(section: &CacheVelnorSection) -> String {
+    let budget_caches = section
+        .budget_bytes
+        .unwrap_or(DEFAULT_VELNOR_HOST_CACHE_BYTES);
+    let mbx_generation_bound = section.mbx_generation_bound.unwrap_or(6);
+    format!(
+        "# Generated by velnor-workflow. Merge into /etc/velnor/velnor.env on fleet hosts.\n\
+         # Generator-only [cache.velnor]; never written to .github/ci/project.toml.\n\
+         VELNOR_STORAGE_ROOT=/var\n\
+         VELNOR_BUDGET_CACHES_BYTES={budget_caches}\n\
+         VELNOR_BUDGET_CARGO_BYTES=21474836480\n\
+         VELNOR_BUDGET_MISE_BYTES=21474836480\n\
+         VELNOR_BUDGET_ARTIFACTS_BYTES=21474836480\n\
+         VELNOR_BUDGET_TARGETS_BYTES=214748364800\n\
+         MBX_GC_MAX_TOTAL_SIZE=50GiB\n\
+         # Same-repo PR jobs write the pr scope only; trusted events write trusted (D18).\n\
+         VELNOR_MBX_GENERATION_BOUND={mbx_generation_bound}\n"
+    )
+}
+
 impl RepoGenerationConfig {
     /// The declared render primitives, in the order the config declares them.
     pub(crate) fn declare(&self) -> &[DeclareRow] {
@@ -558,6 +637,11 @@ impl RepoGenerationConfig {
     /// The `owner/repository` slug the config declares, if any.
     pub(crate) fn repository(&self) -> Option<&str> {
         self.generator.repository.as_deref()
+    }
+
+    /// The D19 generator pin the config declares, if any.
+    pub(crate) fn revision(&self) -> Option<&str> {
+        self.generator.revision.as_deref()
     }
 
     /// The GitHub-hosted runner label, when the config declares one.
@@ -598,6 +682,11 @@ impl RepoGenerationConfig {
     /// The declared trust-gated runner label.
     pub(crate) fn velnor_trusted_label(&self) -> Option<&str> {
         self.workflow.velnor_trusted_label.as_deref()
+    }
+
+    /// The declared trust-gated runner availability pin.
+    pub(crate) fn velnor_trusted_runner_available(&self) -> Option<bool> {
+        self.workflow.velnor_trusted_runner_available
     }
 
     /// The declared default `workflow_dispatch` runner choice.
@@ -665,6 +754,16 @@ impl RepoGenerationConfig {
         &self.units
     }
 
+    /// GitHub Actions cache retention overrides from `[cache.github]`.
+    pub(crate) fn cache_github(&self) -> &CacheGithubSection {
+        &self.cache.github
+    }
+
+    /// Velnor host cache budget overrides from `[cache.velnor]`.
+    pub(crate) fn cache_velnor(&self) -> &CacheVelnorSection {
+        &self.cache.velnor
+    }
+
     /// The declared repository-local files the generated output owns.
     pub(crate) fn static_files(&self) -> &[StaticFileSection] {
         &self.static_files
@@ -679,6 +778,18 @@ impl RepoGenerationConfig {
     /// Whether the generated CI aggregate should be required.
     pub(crate) fn ci_required(&self) -> Option<bool> {
         self.policy.ci_required
+    }
+
+    /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
+    /// must expose as job display names.
+    pub(crate) fn ruleset_required_status_checks(&self) -> &[String] {
+        &self.policy.ruleset_required_status_checks
+    }
+
+    /// Status-check contexts the repository ruleset gates on that GitHub Apps
+    /// report rather than workflows.
+    pub(crate) fn ruleset_external_status_checks(&self) -> &[String] {
+        &self.policy.ruleset_external_status_checks
     }
 
     /// Workflow basenames excluded from static policy validation.
@@ -743,12 +854,21 @@ impl RepoGenerationConfig {
         })?;
         validate_repository_slug(repository)?;
         validate_workflow(&self.workflow)?;
-        if self.units.iter().any(UnitSection::requires_trusted)
-            && self.workflow.velnor_trusted_label.is_none()
-        {
-            return Err(GeneratorError::usage(
-                "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_label is not declared",
-            ));
+        if self.units.iter().any(UnitSection::requires_trusted) {
+            if self.workflow.velnor_trusted_label.is_none() {
+                return Err(GeneratorError::usage(
+                    "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_label is not declared",
+                ));
+            }
+            // Whether trust-gated jobs are emitted or skipped is a rendering
+            // input, so it must be declared: the generator never consults the
+            // live fleet (an earlier `gh api` probe made `--check` and the
+            // policy regeneration depend on which runners were online).
+            if self.workflow.velnor_trusted_runner_available.is_none() {
+                return Err(GeneratorError::usage(
+                    "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_runner_available is not declared; set it to true when an online runner claims velnor_trusted_label, false to render the trust-gated jobs as skips",
+                ));
+            }
         }
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
@@ -1158,6 +1278,44 @@ pub(crate) fn parse_mise_lock_keys(lock_toml: &str) -> Result<BTreeSet<String>, 
         .and_then(toml::Value::as_table)
         .map(|tools| tools.keys().cloned().collect())
         .unwrap_or_default())
+}
+
+/// The actionlint version the root `mise.lock` pins under either spelling of
+/// its key (`actionlint` or `aqua:rhysd/actionlint`), or `None` when the lock
+/// is absent or does not pin it.
+///
+/// # Errors
+/// Returns an I/O error when the lock cannot be read, and a usage error when
+/// it is not valid UTF-8 TOML.
+pub(crate) fn mise_lock_actionlint_version(root: &Path) -> Result<Option<String>, GeneratorError> {
+    let path = root.join(MISE_LOCK_PATH);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GeneratorError::io("read mise.lock", &path, &error)),
+    };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!("parse mise.lock {}: {error}", path.display()))
+    })?;
+    let table: toml::Table = text.parse().map_err(|error| {
+        GeneratorError::usage(format!("{}: parse lock TOML: {error}", path.display()))
+    })?;
+    let Some(tools) = table.get("tools").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
+    let entry = ["actionlint", "aqua:rhysd/actionlint"]
+        .iter()
+        .find_map(|key| tools.get(*key));
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let version = entry
+        .as_array()
+        .and_then(|rows| rows.first())
+        .or(Some(entry))
+        .and_then(|row| row.get("version"))
+        .and_then(toml::Value::as_str);
+    Ok(version.map(str::to_owned))
 }
 
 /// Read the committed tool keys from the root `mise.lock`.
@@ -1576,7 +1734,7 @@ mod tests {
              default_branch = \"trunk\"\n\
              \n\
              [scan]\n\
-             exclude = [\"fleet/**\", \"docs/**\"]\n\
+             exclude = [\"config/fleet/**\", \"docs/**\"]\n\
              \n\
              [policy]\n\
              dco_required = true\n\
@@ -1868,12 +2026,25 @@ mod tests {
                 .contains("velnor_trusted_label is not declared"),
             "{error}"
         );
-        let declared = config_for(
+        let undecided = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
+        );
+        let error = must_fail(
+            undecided.validate(&["example".to_owned()], &[], &BTreeSet::new()),
+            "requires_trusted without a declared runner availability must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] velnor_trusted_runner_available is not declared"),
+            "{error}"
+        );
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\nvelnor_trusted_runner_available = false\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
         );
         must(
             declared.validate(&["example".to_owned()], &[], &BTreeSet::new()),
-            "requires_trusted with a trusted label validates",
+            "requires_trusted with a trusted label and a declared availability validates",
         );
     }
 
@@ -2266,6 +2437,21 @@ mod tests {
         );
         assert!(error.contains("float"), "{error}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_sections_parse_and_stay_generator_only() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [cache.github]\nbudget_bytes = 8589934592\nproducer_window_seconds = 7200\n\
+             mbx_generation_bound = 2\n\n[cache.velnor]\nbudget_bytes = 53687091200\n\
+             mbx_generation_bound = 6\n",
+        );
+        assert_eq!(config.cache_github().budget_bytes, Some(8_589_934_592));
+        assert_eq!(config.cache_velnor().budget_bytes, Some(53_687_091_200));
+        let env = super::render_velnor_host_env(config.cache_velnor());
+        assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
+        assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
     }
 
     #[test]

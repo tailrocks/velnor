@@ -373,10 +373,12 @@ fn docker_diagnostics_parse_as_typed_values_and_keep_path_mapping_explicit() {
     {
         Cli {
             command: Command::Host(args),
-            ..
+            globals,
         } => match args.command {
             velnorctl::commands::HostCommand::Start(start) => {
-                assert_eq!(start.repo.as_deref(), Some("tailrocks/velnor"));
+                // `--repo` is the global selector; after the verb it still
+                // lands in the globals (clap propagates global flags).
+                assert_eq!(globals.repo.as_deref(), Some("tailrocks/velnor"));
                 assert_eq!(start.slots, 2);
                 assert_eq!(start.pr, Some(812));
             }

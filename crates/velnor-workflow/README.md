@@ -14,9 +14,24 @@ velnor-workflow plan --config .github/ci/project.toml
 velnor-workflow run --config .github/ci/project.toml --scope affected
 velnor-workflow test-crates --config .github/ci/project.toml
 velnor-workflow policy --workflow-root . \
-  --approved-policy-revision 6e6653a54f3ed64f6188af10c8417e7df9c1b8d1
+  --head-sha <pr-head-sha> --base-sha <base-sha> \
+  --base-revision <sha of the validator the base branch pins> \
+  --ruleset-contexts ci-required,DCO
 velnor-workflow release verify-tag
 ```
+
+`policy` is the trust validator the base branch's `ci-policy.yml` runs under
+`pull_request_target` against a pull request's tree. It never compares the
+tree with its own rendering: it reads the generator commit the tree declares
+(`[generator] revision` in `.github-gen/velnor-workflow.toml`, the D19 pin),
+proves the pin is reachable from the head and does not regress the base
+branch's validator, regenerates the tree with the generator built at that pin
+and requires a byte-identical result, and evaluates its own semantic rules
+(only the entrypoint on `pull_request_target`; every self-hosted job gated;
+every action SHA-pinned; the entrypoint on `contents: read` with no secrets;
+the ruleset's required contexts emitted). Every rule prints `PASS`/`FAIL`
+with a one-line reason. Bump the pin in a single commit after the last
+generator change; `--check` verifies the pinned generator renders the tree.
 
 Runtime commands are derived from scanned capabilities, not from config-supplied
 shell arrays. GitHub-hosted execution is the automatic and omitted-dispatch

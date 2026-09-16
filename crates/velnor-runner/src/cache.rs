@@ -109,6 +109,71 @@ impl CacheEntryLock {
     }
 }
 
+/// The storage scope one cache pass inspects: the storage layout and pool
+/// trust boundary of the daemon whose stores are being enumerated.
+///
+/// Store paths are namespaced by both, so a pass that read them from its own
+/// process environment could only ever see the stores of a daemon configured
+/// exactly like itself. `velnorctl cache du` on a packaged host did exactly
+/// that and reported the untrusted namespace of a storage root no daemon ran
+/// in. The daemon's own reclaim paths use [`StoreScope::current`]; operator
+/// passes build one per packaged instance from `daemon_instance`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreScope {
+    pub(crate) layout: Option<crate::storage::StorageLayout>,
+    pub(crate) pool_trust_scope: String,
+    /// The inspected daemon's unit environment when the pass is over a
+    /// packaged instance; `None` when the pass inspects this process's own
+    /// daemon, whose parameters are this process's environment.
+    pub(crate) daemon_environment: Option<BTreeMap<String, String>>,
+}
+
+impl StoreScope {
+    /// This process's own resolution: `VELNOR_STORAGE_ROOT` and the trust
+    /// boundary clap published at startup.
+    pub(crate) fn current() -> Self {
+        Self {
+            layout: crate::storage::StorageLayout::resolve(),
+            pool_trust_scope: crate::trust_scope::current(),
+            daemon_environment: None,
+        }
+    }
+
+    fn with_layout(layout: Option<&crate::storage::StorageLayout>) -> Self {
+        Self {
+            layout: layout.cloned(),
+            pool_trust_scope: crate::trust_scope::current(),
+            daemon_environment: None,
+        }
+    }
+
+    fn for_instance(instance: &crate::daemon_instance::DaemonInstance) -> Self {
+        Self {
+            layout: Some(instance.storage_layout()),
+            pool_trust_scope: instance.trust_scope.clone(),
+            daemon_environment: Some(instance.environment.clone()),
+        }
+    }
+
+    fn layout(&self) -> Option<&crate::storage::StorageLayout> {
+        self.layout.as_ref()
+    }
+
+    /// The compiler store budget the inspected daemon enforces: its
+    /// admission parameters (`VELNOR_SLOTS`, `VELNOR_JOB_PEAK_BYTES`,
+    /// `VELNOR_EMERGENCY_RESERVE_BYTES`) bound to the filesystem holding
+    /// `work_root`. A packaged instance's parameters come from its unit
+    /// environment, not from the operator process running the pass.
+    fn store_budget(&self, work_root: &Path) -> Result<crate::capacity::StoreBudgetPolicy> {
+        match &self.daemon_environment {
+            Some(environment) => {
+                crate::capacity::StoreBudgetPolicy::probe_from_environment(work_root, environment)
+            }
+            None => crate::capacity::StoreBudgetPolicy::probe_from_env(work_root),
+        }
+    }
+}
+
 pub(crate) fn run(args: CacheArgs) -> Result<()> {
     let budgets = BTreeMap::from([
         (CacheStore::Targets, args.budget_targets_bytes),
@@ -117,11 +182,78 @@ pub(crate) fn run(args: CacheArgs) -> Result<()> {
         (CacheStore::Cargo, args.budget_cargo_bytes),
         (CacheStore::Mise, args.budget_mise_bytes),
     ]);
-    let work_root = work_root(args.config_dir, args.work_dir)?;
-    match args.command {
-        CacheCommand::Du => run_du(&work_root, &budgets),
-        CacheCommand::Gc(gc) => run_gc(&work_root, gc, budgets),
+    let targets = if let Some(selector) = args.instance.as_deref() {
+        let instance = crate::daemon_instance::resolve(selector)?;
+        let work_root = instance_work_root(&instance, args.work_dir.clone());
+        vec![(Some(instance), work_root)]
+    } else if args.work_dir.is_none() {
+        let instances = crate::daemon_instance::enumerate()?;
+        if instances.is_empty() {
+            vec![(None, work_root(args.config_dir, None)?)]
+        } else {
+            instances
+                .into_iter()
+                .map(|instance| {
+                    let work_root = instance_work_root(&instance, None);
+                    (Some(instance), work_root)
+                })
+                .collect()
+        }
+    } else {
+        vec![(None, work_root(args.config_dir, args.work_dir)?)]
+    };
+    let multiple = targets.len() > 1;
+    for (index, (instance, work_root)) in targets.into_iter().enumerate() {
+        let scope = instance
+            .as_ref()
+            .map(StoreScope::for_instance)
+            .unwrap_or_else(StoreScope::current);
+        if let Some(instance) = &instance {
+            if index > 0 {
+                println!();
+            }
+            println!(
+                "instance\t{}\t{}\t{}\t{}",
+                instance.instance,
+                instance.unit,
+                instance.storage_root.display(),
+                instance.trust_scope
+            );
+        }
+        let result = match &args.command {
+            CacheCommand::Du => run_du(&work_root, &budgets, &scope),
+            CacheCommand::Gc(gc) => run_gc(&work_root, gc.clone(), budgets.clone(), &scope),
+        };
+        if multiple {
+            // Every instance gets its pass; one failing instance is reported
+            // in place and does not hide the others.
+            if let Err(error) = result {
+                eprintln!(
+                    "cache {} failed for instance {}: {error:#}",
+                    match &args.command {
+                        CacheCommand::Du => "du",
+                        CacheCommand::Gc(_) => "gc",
+                    },
+                    instance
+                        .map(|instance| instance.instance)
+                        .unwrap_or_default()
+                );
+            }
+        } else {
+            result?;
+        }
     }
+    Ok(())
+}
+
+/// A packaged instance's daemon-shared store root: its `VELNOR_WORK_DIR`
+/// (or an operator override), climbed to the shared root exactly as the
+/// daemon climbs it.
+fn instance_work_root(
+    instance: &crate::daemon_instance::DaemonInstance,
+    work_dir: Option<PathBuf>,
+) -> PathBuf {
+    crate::container::daemon_shared_root(work_dir.unwrap_or_else(|| instance.work_dir.clone()))
 }
 
 fn work_root(config_dir: Option<PathBuf>, work_dir: Option<PathBuf>) -> Result<PathBuf> {
@@ -146,8 +278,8 @@ fn work_root(config_dir: Option<PathBuf>, work_dir: Option<PathBuf>) -> Result<P
     Ok(config::config_dir(config_dir)?.join("_work"))
 }
 
-fn run_du(work_root: &Path, budgets: &BTreeMap<CacheStore, u64>) -> Result<()> {
-    let stores = store_roots(work_root);
+fn run_du(work_root: &Path, budgets: &BTreeMap<CacheStore, u64>, scope: &StoreScope) -> Result<()> {
+    let stores = store_roots(work_root, scope);
     println!("work_dir\t{}", work_root.display());
     println!("kind\tlogical_bytes\tphysical_bytes\tbudget_bytes\tpressure\tpath");
     for store in &stores {
@@ -199,7 +331,7 @@ fn run_du(work_root: &Path, budgets: &BTreeMap<CacheStore, u64>) -> Result<()> {
 pub fn accounting_summary(work_root: &Path) -> Result<(u64, u64)> {
     let mut logical = 0u64;
     let mut physical = 0u64;
-    for store in store_roots(work_root) {
+    for store in store_roots(work_root, &StoreScope::current()) {
         let (store_logical, store_physical, _) = size_physical_and_modified(&store.path)?;
         logical = logical.saturating_add(store_logical);
         physical = physical.saturating_add(store_physical);
@@ -211,16 +343,64 @@ fn run_gc(
     work_root: &Path,
     args: CacheGcArgs,
     class_budgets: BTreeMap<CacheStore, u64>,
+    scope: &StoreScope,
+) -> Result<()> {
+    let backend = crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None)
+        .ok()
+        .map(|file| file.backend());
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("leftover-after-Velnor host Docker reclaim skipped: {reason}");
+    }
+    let reclaim_backend = backend.unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
+    let daemon_work_roots = match scope.layout() {
+        Some(layout) => crate::leftover_disk::discover_daemon_work_roots_for_layout(layout),
+        None => crate::leftover_disk::discover_daemon_work_roots(),
+    };
+    run_gc_with(
+        work_root,
+        args,
+        class_budgets,
+        scope,
+        |coordinator, run_root| {
+            crate::leftover_disk::reclaim_production_leftovers_under_coordinator(
+                coordinator,
+                run_root,
+                &daemon_work_roots,
+                reclaim_backend,
+                false,
+            )
+        },
+    )
+}
+
+/// `cache gc` with its environment made explicit.
+///
+/// Destructive gc holds the [`GcLeaderLock`] and the exclusive
+/// [`crate::capacity::FilesystemCoordinator`] of the runtime root for its whole
+/// run — eviction and the leftover-workspace reclaim that follows it. The
+/// coordinator is a blocking `flock`; taking it a second time from the thread
+/// that holds it never returns, so `reclaim_leftover` receives the held
+/// coordinator instead of resolving and locking the runtime root itself.
+pub(crate) fn run_gc_with(
+    work_root: &Path,
+    args: CacheGcArgs,
+    class_budgets: BTreeMap<CacheStore, u64>,
+    scope: &StoreScope,
+    reclaim_leftover: impl FnOnce(
+        &crate::capacity::FilesystemCoordinator,
+        &Path,
+    ) -> Result<crate::leftover_disk::LeftoverReclaimReport>,
 ) -> Result<()> {
     if !args.dry_run && !args.yes {
         bail!("destructive cache gc requires --yes");
     }
-    let storage_layout = crate::storage::StorageLayout::resolve();
+    let storage_layout = scope.layout();
     let run_root = storage_layout
-        .as_ref()
         .map(|layout| layout.run_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_runtime"));
-    let _destructive_locks = if args.dry_run {
+    let destructive_locks = if args.dry_run {
         None
     } else {
         Some((
@@ -238,28 +418,37 @@ fn run_gc(
         Err(error) => return Err(error).context("read active cache-scope leases"),
     };
 
-    let listing = cache_listing_with_layout(work_root, false, storage_layout.as_ref())?;
+    let listing = cache_listing(work_root, false, scope)?;
     let max_age = args
         .max_age_days
         .checked_mul(DAY.as_secs())
         .map(Duration::from_secs)
         .context("max-age-days overflowed Duration")?;
+    // The compiler classes are bounded by the host capacity policy, not by a
+    // flag: the same number the daemon enforces at admission and preflight
+    // prints, derived here from the filesystem and the inspected daemon's
+    // environment (the instance's unit environment on a packaged host).
+    let store_budget = scope
+        .store_budget(work_root)
+        .context("derive the compiler store budget from host capacity")?;
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: args.keep_newest_targets,
         max_age,
         max_total_bytes: args.max_size_bytes,
         class_budgets,
+        compiler_budget_bytes: Some(store_budget.compiler_store_budget_bytes()),
         in_use_scopes,
-        protected_paths: pointer_protected_target_generations_with_layout(
-            work_root,
-            storage_layout.as_ref(),
-        ),
+        protected_paths: pointer_protected_target_generations(work_root, scope),
     };
     let candidates = select_eviction_candidates(&listing, &policy);
 
     println!("dry_run\t{}", args.dry_run);
     println!("work_dir\t{}", work_root.display());
+    println!(
+        "compiler_store_budget\t{}",
+        store_budget.describe_compiler_store_budget()
+    );
     println!("candidate_count\t{}", candidates.len());
     println!("store\tbytes\tscope\treason\tpath");
     if args.dry_run {
@@ -273,12 +462,14 @@ fn run_gc(
                 candidate.path.display()
             );
         }
-        print_leftover_workspace_candidates();
+        print_leftover_workspace_candidates(storage_layout);
         return Ok(());
     }
 
+    let Some((_leader, coordinator)) = destructive_locks.as_ref() else {
+        bail!("destructive cache gc reached deletion without holding its locks");
+    };
     let log_root = storage_layout
-        .as_ref()
         .map(|layout| layout.log_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
     for candidate in candidates {
@@ -300,16 +491,7 @@ fn run_gc(
             );
         }
     }
-    let backend = crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None)
-        .ok()
-        .map(|file| file.backend());
-    if let Some(reason) =
-        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
-    {
-        eprintln!("leftover-after-Velnor host Docker reclaim skipped: {reason}");
-    }
-    let reclaim_backend = backend.unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
-    match crate::leftover_disk::reclaim_production_leftovers_for(reclaim_backend, false) {
+    match reclaim_leftover(coordinator, &run_root) {
         Ok(report) => {
             println!(
                 "leftover_workspace_deleted\t{}",
@@ -321,8 +503,11 @@ fn run_gc(
     Ok(())
 }
 
-fn print_leftover_workspace_candidates() {
-    let roots = crate::leftover_disk::discover_daemon_work_roots();
+fn print_leftover_workspace_candidates(layout: Option<&crate::storage::StorageLayout>) {
+    let roots = match layout {
+        Some(layout) => crate::leftover_disk::discover_daemon_work_roots_for_layout(layout),
+        None => crate::leftover_disk::discover_daemon_work_roots(),
+    };
     println!("leftover_work_roots\t{}", roots.len());
     for root in &roots {
         println!("leftover_work_root\t{}", root.display());
@@ -440,25 +625,22 @@ struct StoreRoot {
     emergency_managed: bool,
 }
 
-fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
-    let layout = crate::storage::StorageLayout::resolve();
-    store_roots_with_layout(work_root, layout.as_ref())
-}
-
-fn store_roots_with_layout(
-    work_root: &Path,
-    layout: Option<&crate::storage::StorageLayout>,
-) -> Vec<StoreRoot> {
+fn store_roots(work_root: &Path, scope: &StoreScope) -> Vec<StoreRoot> {
     // Every path below comes from the catalog. GC must never spell a store root
     // itself: that is exactly how the artifact store came to be written at
     // `<work>/slot-N/_velnor_artifacts` while GC swept `<work>/_velnor_artifacts`.
-    let catalog = crate::store_catalog::StoreCatalog::for_work_root_with_layout(work_root, layout);
+    let catalog =
+        crate::store_catalog::StoreCatalog::for_work_root_with_layout(work_root, scope.layout());
+    let pool_scope = scope.pool_trust_scope.as_str();
+    let trust_partitioned_roots = |root: fn(&StoreCatalog, &str) -> PathBuf| {
+        trust_partitioned_roots(&catalog, pool_scope, root)
+    };
     let mut stores = Vec::new();
     // Jobs run under their admitted scope: trusted jobs under the pool scope,
     // fork and unknown jobs under the untrusted floor — on every pool. Each
     // trust-partitioned class is swept under both namespaces; the roots dedupe
     // by path, so the legacy layout (one root, trust below it) enumerates once.
-    for cargo in trust_partitioned_roots(&catalog, StoreCatalog::cargo) {
+    for cargo in trust_partitioned_roots(StoreCatalog::cargo) {
         let legacy = is_legacy_store(&cargo);
         stores.extend([
             StoreRoot {
@@ -490,7 +672,7 @@ fn store_roots_with_layout(
             },
         ]);
     }
-    for mise in trust_partitioned_roots(&catalog, StoreCatalog::mise) {
+    for mise in trust_partitioned_roots(StoreCatalog::mise) {
         let legacy = is_legacy_store(&mise);
         stores.extend([
             StoreRoot {
@@ -533,7 +715,7 @@ fn store_roots_with_layout(
             },
         ]);
     }
-    for targets in trust_partitioned_roots(&catalog, StoreCatalog::targets) {
+    for targets in trust_partitioned_roots(StoreCatalog::targets) {
         let legacy = is_legacy_store(&targets);
         stores.push(StoreRoot {
             kind: CacheStore::Targets,
@@ -547,7 +729,7 @@ fn store_roots_with_layout(
             emergency_managed: true,
         });
     }
-    for actions_cache in trust_partitioned_roots(&catalog, StoreCatalog::actions_cache) {
+    for actions_cache in trust_partitioned_roots(StoreCatalog::actions_cache) {
         let legacy = is_legacy_store(&actions_cache);
         stores.push(StoreRoot {
             kind: CacheStore::ActionsCache,
@@ -571,29 +753,41 @@ fn store_roots_with_layout(
     // The compiler stores are partitioned by the job's admitted scope like
     // every other trust-partitioned class: trusted jobs on a custom pool
     // write under the pool scope, fork and unknown jobs under the floor.
-    for (kind, path) in trust_partitioned_roots(&catalog, StoreCatalog::mbx)
-        .into_iter()
-        .map(|path| (CacheStore::Mbx, path))
-        .chain(
-            trust_partitioned_roots(&catalog, StoreCatalog::sccache)
-                .into_iter()
-                .map(|path| (CacheStore::Sccache, path)),
-        )
-    {
+    // Both are routinely GC-managed under the host-level compiler budget
+    // (`StoreBudgetPolicy`): they used to be emergency-only, which left the
+    // largest class on a Rust host with no bound at all between emergencies.
+    //
+    // An mbx store is laid out per slot (`mbx_store`), so its candidates are
+    // the per-slot cache and target trees, each scoped to the repository id
+    // the job leases — one cold slot is evicted, never a whole repository.
+    for mbx in trust_partitioned_roots(StoreCatalog::mbx) {
+        for (repository, path) in crate::mbx_store::gc_roots(&mbx) {
+            stores.push(StoreRoot {
+                kind: CacheStore::Mbx,
+                path,
+                scope_prefix: vec![repository],
+                scope_depth: 0,
+                candidate_depth: 1,
+                gc_managed: true,
+                emergency_managed: true,
+            });
+        }
+    }
+    for sccache in trust_partitioned_roots(StoreCatalog::sccache) {
         stores.push(StoreRoot {
-            kind,
-            path,
+            kind: CacheStore::Sccache,
+            path: sccache,
             scope_prefix: Vec::new(),
             scope_depth: 1,
             candidate_depth: 1,
-            gc_managed: false,
+            gc_managed: true,
             emergency_managed: true,
         });
     }
     // The hosted actions-cache service is durable storage like any other class.
     // It was previously invisible to `cache du` and to every collector, so each
     // tenant accumulated its own budget outside the ledger.
-    if let Some(layout) = layout {
+    if let Some(layout) = scope.layout() {
         stores.push(StoreRoot {
             kind: CacheStore::GhaCache,
             path: crate::store_catalog::gha_cache_root(layout).join("tenants"),
@@ -615,7 +809,7 @@ fn is_legacy_store(path: &Path) -> bool {
 /// The roots of one trust-partitioned store class: the pool scope first, then
 /// the untrusted floor fork and unknown jobs run under, deduped by path.
 ///
-/// The pool scope comes from the process resolution (the daemon's flag); the
+/// The pool scope is the inspected daemon's boundary ([`StoreScope`]); the
 /// floor is unconditional. Legacy roots of the plain classes ignore the
 /// scope, so both resolve to the one root and enumerate once; legacy roots of
 /// the compiler classes carry the scope below the shared root, so both
@@ -625,9 +819,10 @@ fn is_legacy_store(path: &Path) -> bool {
 /// invisible to every collector.
 fn trust_partitioned_roots(
     catalog: &StoreCatalog,
+    pool_scope: &str,
     root: impl Fn(&StoreCatalog, &str) -> PathBuf,
 ) -> Vec<PathBuf> {
-    let pool = root(catalog, &crate::trust_scope::current());
+    let pool = root(catalog, pool_scope);
     let floor = root(catalog, crate::trust_scope::FAIL_CLOSED);
     if floor == pool {
         vec![pool]
@@ -679,22 +874,15 @@ fn collect_scoped_sizes(
     Ok(total)
 }
 
-fn cache_listing_with_layout(
-    work_root: &Path,
-    emergency: bool,
-    layout: Option<&crate::storage::StorageLayout>,
-) -> Result<Vec<CacheEntry>> {
+fn cache_listing(work_root: &Path, emergency: bool, scope: &StoreScope) -> Result<Vec<CacheEntry>> {
     let mut entries = Vec::new();
-    for store in store_roots_with_layout(work_root, layout)
-        .into_iter()
-        .filter(|store| {
-            if emergency {
-                store.emergency_managed
-            } else {
-                store.gc_managed
-            }
-        })
-    {
+    for store in store_roots(work_root, scope).into_iter().filter(|store| {
+        if emergency {
+            store.emergency_managed
+        } else {
+            store.gc_managed
+        }
+    }) {
         collect_candidates(&store, &store.path, 0, &mut entries)?;
     }
     Ok(entries)
@@ -831,15 +1019,17 @@ fn reclaim_work_root_with_layout(
         run_root,
         Duration::from_secs(24 * 3600),
     )?);
-    let mut entries = cache_listing_with_layout(work_root, emergency, layout)?;
+    let scope = StoreScope::with_layout(layout);
+    let mut entries = cache_listing(work_root, emergency, &scope)?;
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: 0,
         max_age: Duration::ZERO,
         max_total_bytes: None,
         class_budgets: BTreeMap::new(),
+        compiler_budget_bytes: None,
         in_use_scopes: active_scopes,
-        protected_paths: pointer_protected_target_generations_with_layout(work_root, layout),
+        protected_paths: pointer_protected_target_generations(work_root, &scope),
     };
     entries.retain(|entry| !in_use(entry, &policy) && !protected(entry, &policy));
     if emergency {
@@ -905,6 +1095,68 @@ fn reclaim_work_root_with_layout(
             tracing::info!(builder = %builder, "emergency reclaim pruned unclaimed BuildKit builder");
         }
         report.failures.extend(pruned.failures);
+    }
+    Ok(report)
+}
+
+/// Bring the compiler stores (mbx + sccache, every scope, repository and
+/// slot under `work_root`) back under `budget_bytes`, evicting the
+/// least-recently-modified per-slot trees first.
+///
+/// This is the daemon's enforcement of [`crate::capacity::StoreBudgetPolicy`]:
+/// it runs at daemon start and at every job admission (after the job has
+/// published its own store leases, so the store it is about to use is never a
+/// victim). Leases of every live job on the host protect their repositories;
+/// the GC leader lock and the filesystem coordinator serialise it against
+/// `cache gc` and the emergency reclaimer exactly like every other pass.
+/// Another daemon already holding the leader lock is contention, not
+/// failure: the pass reports nothing and the next admission tries again.
+pub(crate) fn enforce_compiler_store_budget(
+    work_root: &Path,
+    layout: &crate::storage::StorageLayout,
+    budget_bytes: u64,
+) -> Result<ReclaimReport> {
+    let _lock = match GcLeaderLock::acquire(&layout.run_root) {
+        Ok(lock) => lock,
+        Err(error) if error.downcast_ref::<GcLeaderLockHeld>().is_some() => {
+            eprintln!("compiler store budget pass skipped: {error}");
+            return Ok(ReclaimReport::default());
+        }
+        Err(error) => return Err(error),
+    };
+    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&layout.run_root)?;
+    let in_use_scopes =
+        crate::capacity::active_scopes(&layout.run_root, Duration::from_secs(24 * 3600))?;
+    let entries: Vec<CacheEntry> =
+        cache_listing(work_root, false, &StoreScope::with_layout(Some(layout)))?
+            .into_iter()
+            .filter(|entry| entry.store.is_compiler())
+            .collect();
+    let policy = EvictionPolicy {
+        now: SystemTime::now(),
+        keep_newest_per_target_scope: 0,
+        max_age: Duration::MAX,
+        max_total_bytes: None,
+        class_budgets: BTreeMap::new(),
+        compiler_budget_bytes: Some(budget_bytes),
+        in_use_scopes,
+        protected_paths: BTreeSet::new(),
+    };
+    let mut report = ReclaimReport::default();
+    for candidate in select_eviction_candidates(&entries, &policy) {
+        match remove_candidate(&candidate) {
+            Ok(()) => {
+                report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
+                report.deleted.push(candidate.path.clone());
+                append_gc_history(&layout.log_root, &candidate, Some(&policy), "deleted")?;
+            }
+            Err(error) => {
+                report
+                    .failures
+                    .push(format!("{}: {error}", candidate.path.display()));
+                append_gc_history(&layout.log_root, &candidate, Some(&policy), "failed")?;
+            }
+        }
     }
     Ok(report)
 }
@@ -1145,6 +1397,12 @@ pub(crate) struct EvictionPolicy {
     pub(crate) max_age: Duration,
     pub(crate) max_total_bytes: Option<u64>,
     pub(crate) class_budgets: BTreeMap<CacheStore, u64>,
+    /// Host-level bound on the compiler classes together (mbx + sccache,
+    /// every scope, repository and slot), from
+    /// [`crate::capacity::StoreBudgetPolicy`]. Unlike `class_budgets`, zero
+    /// is a real budget: a host whose slots alone exhaust the disk keeps no
+    /// compiler store. `None` leaves the classes to the other rules.
+    pub(crate) compiler_budget_bytes: Option<u64>,
     pub(crate) in_use_scopes: BTreeSet<String>,
     pub(crate) protected_paths: BTreeSet<PathBuf>,
 }
@@ -1252,6 +1510,32 @@ pub(crate) fn select_eviction_candidates(
             }
             remaining = remaining.saturating_sub(entry.bytes);
             add_candidate(&mut candidates, entry, "over-class-budget");
+        }
+    }
+
+    if let Some(budget) = policy.compiler_budget_bytes {
+        let mut remaining: u64 = entries
+            .iter()
+            .filter(|entry| entry.store.is_compiler())
+            .map(|entry| entry.bytes)
+            .sum();
+        let mut oldest: Vec<&CacheEntry> = entries
+            .iter()
+            .filter(|entry| {
+                entry.store.is_compiler() && !in_use(entry, policy) && !protected(entry, policy)
+            })
+            .collect();
+        oldest.sort_by(|left, right| {
+            left.modified
+                .cmp(&right.modified)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for entry in oldest {
+            if remaining <= budget {
+                break;
+            }
+            remaining = remaining.saturating_sub(entry.bytes);
+            add_candidate(&mut candidates, entry, "over-compiler-budget");
         }
     }
 
@@ -1465,12 +1749,9 @@ fn target_generation_is_current(path: &Path) -> Result<bool> {
     Ok(current_pointer_generation_checked(parent)?.as_deref() == Some(name.as_ref()))
 }
 
-fn pointer_protected_target_generations_with_layout(
-    work_root: &Path,
-    layout: Option<&crate::storage::StorageLayout>,
-) -> BTreeSet<PathBuf> {
+fn pointer_protected_target_generations(work_root: &Path, scope: &StoreScope) -> BTreeSet<PathBuf> {
     let mut protected = BTreeSet::new();
-    for store in store_roots_with_layout(work_root, layout)
+    for store in store_roots(work_root, scope)
         .into_iter()
         .filter(|store| store.kind == CacheStore::Targets)
     {
@@ -1587,9 +1868,166 @@ mod tests {
             max_age: DAY * 30,
             max_total_bytes: None,
             class_budgets: BTreeMap::new(),
+            compiler_budget_bytes: None,
             in_use_scopes: BTreeSet::new(),
             protected_paths: BTreeSet::new(),
         }
+    }
+
+    /// The compiler budget is one bound over mbx and sccache together: the
+    /// oldest per-slot trees go first across both classes and every
+    /// repository, a leased repository's trees are never victims, and zero
+    /// is a real budget (every idle compiler store goes).
+    #[test]
+    fn cache_gc_enforces_the_compiler_budget_across_both_classes_oldest_first() {
+        // entry(path, store, scope, age_days, bytes)
+        let entries = vec![
+            entry("/mbx/7/slots/slot-1", CacheStore::Mbx, &["7"], 20, 40),
+            entry(
+                "/mbx/7/targets/slots/slot-1",
+                CacheStore::Mbx,
+                &["7"],
+                2,
+                40,
+            ),
+            entry("/mbx/9/slots/slot-2", CacheStore::Mbx, &["9"], 10, 30),
+            entry("/sccache/11", CacheStore::Sccache, &["11"], 15, 20),
+            // Another class over its own size is not the compiler budget's
+            // business.
+            entry("/cargo/registry", CacheStore::Cargo, &["registry"], 1, 500),
+        ];
+        let mut policy = policy();
+        policy.max_age = Duration::MAX;
+        policy.compiler_budget_bytes = Some(60);
+        let candidates = select_eviction_candidates(&entries, &policy);
+        let paths: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.path.to_str().unwrap())
+            .collect();
+        // 130 held; evict oldest first until <= 60: slot-1 cache (40, 20d)
+        // then sccache (20, 15d) -> 70, then repo 9 (30, 10d) -> 40.
+        assert_eq!(
+            paths,
+            vec!["/mbx/7/slots/slot-1", "/mbx/9/slots/slot-2", "/sccache/11"]
+        );
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.reason == "over-compiler-budget"));
+
+        // A lease on repository 7 protects both its trees; the budget then
+        // falls on the others.
+        policy.in_use_scopes = BTreeSet::from(["mbx/7/job-holder".to_string()]);
+        let candidates = select_eviction_candidates(&entries, &policy);
+        let paths: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.path.to_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["/mbx/9/slots/slot-2", "/sccache/11"]);
+
+        // Zero is a budget, not "unset".
+        policy.in_use_scopes.clear();
+        policy.compiler_budget_bytes = Some(0);
+        let candidates = select_eviction_candidates(&entries, &policy);
+        assert_eq!(candidates.len(), 4);
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.store.is_compiler()));
+
+        // Unset leaves the compiler classes to the other rules.
+        policy.compiler_budget_bytes = None;
+        assert!(select_eviction_candidates(&entries, &policy).is_empty());
+    }
+
+    /// The mbx roots GC enumerates are the per-slot trees the layout
+    /// produces, scoped by repository, and they are routinely GC-managed —
+    /// the whole point of the migration's layout invariant.
+    #[test]
+    fn mbx_store_roots_are_per_slot_repository_scoped_and_gc_managed() {
+        let prefix =
+            std::env::temp_dir().join(format!("velnor-mbx-roots-{}", uuid::Uuid::new_v4()));
+        let layout = crate::storage::StorageLayout::from_prefix(&prefix);
+        let work_root = prefix.join("lib/velnor/work");
+        let scope = crate::trust_scope::FAIL_CLOSED;
+        let catalog = StoreCatalog::for_work_root_with_layout(&work_root, Some(&layout));
+        let store = catalog.mbx(scope).join("1197700841");
+        for path in [
+            store.join("slots/slot-1/incremental/a"),
+            store.join("slots/slot-2/incremental/b"),
+            store.join("targets/slots/slot-1/debug/c"),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, vec![9u8; 16]).unwrap();
+        }
+        let roots: Vec<StoreRoot> =
+            store_roots(&work_root, &StoreScope::with_layout(Some(&layout)))
+                .into_iter()
+                .filter(|root| root.kind == CacheStore::Mbx)
+                .collect();
+        assert_eq!(roots.len(), 2, "{roots:?}");
+        for root in &roots {
+            assert!(root.gc_managed, "mbx must be routinely GC-managed");
+            assert!(root.emergency_managed);
+            assert_eq!(root.scope_prefix, vec!["1197700841".to_string()]);
+        }
+        let mut entries = Vec::new();
+        for root in &roots {
+            collect_candidates(root, &root.path, 0, &mut entries).unwrap();
+        }
+        let mut paths: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                store.join("slots/slot-1"),
+                store.join("slots/slot-2"),
+                store.join("targets/slots/slot-1"),
+            ]
+        );
+        assert!(entries
+            .iter()
+            .all(|entry| entry.scope == vec!["1197700841".to_string()]));
+        fs::remove_dir_all(&prefix).ok();
+    }
+
+    /// The daemon's enforcement entry point: over budget, the oldest idle
+    /// slot trees are deleted and logged; a leased repository survives.
+    #[test]
+    fn enforce_compiler_store_budget_deletes_oldest_idle_slot_trees() {
+        let prefix =
+            std::env::temp_dir().join(format!("velnor-mbx-budget-{}", uuid::Uuid::new_v4()));
+        let layout = crate::storage::StorageLayout::from_prefix(&prefix);
+        let work_root = prefix.join("lib/velnor/work");
+        let scope = crate::trust_scope::FAIL_CLOSED;
+        let catalog = StoreCatalog::for_work_root_with_layout(&work_root, Some(&layout));
+        let old = catalog.mbx(scope).join("1/slots/slot-1");
+        let leased = catalog.mbx(scope).join("2/slots/slot-1");
+        let new = catalog.mbx(scope).join("3/targets/slots/slot-1");
+        for (dir, age_days) in [(&old, 30u32), (&leased, 20), (&new, 1)] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("blob"), vec![0u8; 100]).unwrap();
+            backdate(dir, DAY * age_days);
+        }
+        fs::create_dir_all(&layout.run_root).unwrap();
+        let _lease = crate::capacity::ScopeLease::acquire(
+            &layout.run_root,
+            "mbx",
+            "2/job-holder",
+            Duration::from_secs(600),
+        )
+        .unwrap();
+
+        // 300 held (the leased store counts, it just cannot be a victim);
+        // the oldest idle tree brings it to 200, under a 250 budget.
+        let report = enforce_compiler_store_budget(&work_root, &layout, 250).unwrap();
+
+        assert_eq!(report.deleted, vec![old.clone()], "{report:?}");
+        assert!(report.failures.is_empty());
+        assert!(!old.exists());
+        assert!(leased.exists(), "a leased repository is never a victim");
+        assert!(new.exists(), "eviction stops once under budget");
+        let history = fs::read_to_string(layout.log_root.join("gc-history.jsonl")).unwrap();
+        assert!(history.contains("over-compiler-budget"), "{history}");
+        fs::remove_dir_all(&prefix).ok();
     }
 
     #[test]
@@ -1979,10 +2417,103 @@ mod tests {
             max_age_days: 30,
             max_size_bytes: None,
         };
-        assert!(run_gc(Path::new("/does-not-matter"), args, BTreeMap::new())
-            .unwrap_err()
-            .to_string()
-            .contains("requires --yes"));
+        assert!(run_gc(
+            Path::new("/does-not-matter"),
+            args,
+            BTreeMap::new(),
+            &StoreScope::current(),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("requires --yes"));
+    }
+
+    /// `velnorctl cache gc` end to end against a temp runtime root: the
+    /// destructive pass holds the coordinator, then reclaims leftover
+    /// workspaces under that same hold. Before the fix the reclaim re-locked
+    /// the coordinator on a second descriptor and the process hung on itself
+    /// (with the re-entry guard it would now surface as an error instead).
+    /// Either way the leftover workspace would survive; here it must go.
+    #[test]
+    fn destructive_gc_reclaims_leftovers_without_conflicting_with_itself() {
+        let prefix = std::env::temp_dir().join(format!("velnor-gc-e2e-{}", uuid::Uuid::new_v4()));
+        let layout = crate::storage::StorageLayout::from_prefix(&prefix);
+        let work = layout.lib_root.join("work");
+        let orphan_id = "11111111-2222-3333-4444-555555555555";
+        let orphan = work.join("slot-1").join(orphan_id);
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("marker"), b"job").unwrap();
+        test_clock::backdate(&orphan, crate::leftover_disk::WORKSPACE_MIN_IDLE * 2);
+        // A cache entry old enough to evict, so the eviction pass has work too.
+        let stale_cache = work.join("_velnor_caches/trusted/stale/key");
+        fs::create_dir_all(&stale_cache).unwrap();
+        fs::write(stale_cache.join("data"), vec![0; 16]).unwrap();
+        test_clock::backdate(&stale_cache, DAY * 40);
+
+        let args = CacheGcArgs {
+            dry_run: false,
+            yes: true,
+            force_no_lease_check: false,
+            keep_newest_targets: 3,
+            max_age_days: 30,
+            max_size_bytes: None,
+        };
+        let reclaim_ran = std::cell::Cell::new(false);
+        let run_root = layout.run_root.clone();
+        let scope = StoreScope {
+            layout: Some(layout.clone()),
+            pool_trust_scope: crate::trust_scope::TRUSTED.to_owned(),
+            daemon_environment: None,
+        };
+        run_gc_with(
+            &work,
+            args,
+            BTreeMap::new(),
+            &scope,
+            |coordinator, reclaim_root| {
+                reclaim_ran.set(true);
+                assert_eq!(reclaim_root, run_root.as_path());
+                // The production reclaim under the held coordinator, with the
+                // host Docker socket replaced by a fake.
+                crate::leftover_disk::reclaim_leftover_under_coordinator(
+                    coordinator,
+                    reclaim_root,
+                    std::slice::from_ref(&work),
+                    &BTreeSet::new(),
+                    |_| Ok(String::new()),
+                    |path| {
+                        fs::remove_dir_all(path)?;
+                        Ok(())
+                    },
+                    false,
+                )
+            },
+        )
+        .unwrap();
+
+        assert!(reclaim_ran.get(), "gc must run the leftover reclaim");
+        assert!(!orphan.exists(), "leftover workspace must be reclaimed");
+        assert!(!stale_cache.exists(), "stale cache entry must be evicted");
+        // Both locks are released once gc returns: another gc can start. The
+        // coordinator re-entry guard would refuse immediately if this thread
+        // still held it; the blocking flock then only waits out a sibling
+        // test's fork window (a child briefly inherits every open fd).
+        drop(crate::capacity::FilesystemCoordinator::lock_exclusive(&layout.run_root).unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match GcLeaderLock::acquire(&layout.run_root) {
+                Ok(leader) => break drop(leader),
+                Err(error) if std::time::Instant::now() < deadline => {
+                    assert!(
+                        error.downcast_ref::<GcLeaderLockHeld>().is_some(),
+                        "{error:#}"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("gc leader lock still held after gc returned: {error:#}"),
+            }
+        }
+        fs::remove_dir_all(prefix).unwrap();
     }
 
     #[test]
@@ -2164,7 +2695,7 @@ someone-elses-builder         docker-container
     #[test]
     fn every_emergency_managed_store_has_a_lease_class() {
         let work = PathBuf::from("/var/lib/velnor/work");
-        for store in store_roots(&work) {
+        for store in store_roots(&work, &StoreScope::current()) {
             if store.emergency_managed || store.gc_managed {
                 assert!(
                     store.kind.lease_class().is_some(),
@@ -2502,7 +3033,7 @@ someone-elses-builder         docker-container
             .collect();
         let active = crate::capacity::active_scopes(&run_root, stale_after).unwrap();
 
-        let listing = cache_listing_with_layout(&work, false, None).unwrap();
+        let listing = cache_listing(&work, false, &StoreScope::current()).unwrap();
         let mut policy = policy();
         policy.in_use_scopes = active;
         // Bind each class budget to its live bytes: every idle store must go,

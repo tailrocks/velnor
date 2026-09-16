@@ -67,7 +67,7 @@ impl WorkspaceLiveness {
                 liveness.evidence_incomplete = true;
             }
         }
-        match held_job_claim_ids(run_root) {
+        match crate::job_claim::held_job_claim_ids(run_root) {
             Ok(claimed) => liveness.claimed = claimed,
             Err(error) => {
                 eprintln!("leftover reclaim: cannot read job claims: {error:#}");
@@ -101,58 +101,6 @@ pub fn job_ids_from_lease_scopes(scopes: &BTreeSet<String>) -> BTreeSet<String> 
         .filter(|id| looks_like_job_uuid(id))
         .map(ToOwned::to_owned)
         .collect()
-}
-
-/// Job ids whose host job-claim lock is currently held by a live process.
-///
-/// The claim is taken before the job's workspace exists and released only when
-/// the job process exits, so it covers checkout and teardown. A claim file that
-/// still locks is proof; one that can be locked is stale.
-pub fn held_job_claim_ids(run_root: &Path) -> Result<BTreeSet<String>> {
-    let claims = run_root.join("job-claims");
-    let mut held = BTreeSet::new();
-    let entries = match fs::read_dir(&claims) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(held),
-        Err(error) => {
-            return Err(error).with_context(|| format!("read {}", claims.display()));
-        }
-    };
-    for entry in entries {
-        let entry = entry.with_context(|| format!("read an entry in {}", claims.display()))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&path) else {
-            // Unreadable claim: assume held rather than delete its workspace.
-            held.extend(job_uuids_in(&entry.file_name().to_string_lossy()));
-            continue;
-        };
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => {
-                let _ = rustix::fs::flock(&file, rustix::fs::FlockOperation::Unlock);
-            }
-            Err(rustix::io::Errno::WOULDBLOCK) => {
-                held.extend(job_uuids_in(&entry.file_name().to_string_lossy()));
-            }
-            Err(_) => held.extend(job_uuids_in(&entry.file_name().to_string_lossy())),
-        }
-    }
-    Ok(held)
-}
-
-/// Every job-UUID-shaped substring of a claim file name (`<plan>-<job>`).
-fn job_uuids_in(name: &str) -> BTreeSet<String> {
-    let parts: Vec<&str> = name.split('-').collect();
-    let mut found = BTreeSet::new();
-    for window in parts.windows(5) {
-        let candidate = window.join("-");
-        if looks_like_job_uuid(&candidate) {
-            found.insert(candidate);
-        }
-    }
-    found
 }
 
 fn workspace_idle_for(workspace: &Path, now: SystemTime) -> Option<Duration> {
@@ -227,7 +175,9 @@ pub fn discover_daemon_work_roots() -> Vec<PathBuf> {
     }
 }
 
-fn discover_daemon_work_roots_for_layout(layout: &crate::storage::StorageLayout) -> Vec<PathBuf> {
+pub(crate) fn discover_daemon_work_roots_for_layout(
+    layout: &crate::storage::StorageLayout,
+) -> Vec<PathBuf> {
     let lib_parent = layout
         .lib_root
         .parent()
@@ -399,6 +349,15 @@ pub struct LeftoverReclaimReport {
     pub skipped_docker: bool,
 }
 
+/// Reclaim leftover workspaces, acquiring the filesystem coordinator here.
+///
+/// This is the entry point for callers that hold no coordinator (the daemon's
+/// disk-pressure paths). A caller that already holds it must use
+/// [`reclaim_leftover_under_coordinator`]: the coordinator is a blocking
+/// `flock`, and a second open of the same lock file from the thread that
+/// holds it never returns, which is how `velnorctl cache gc` deadlocked on
+/// itself. [`crate::capacity::FilesystemCoordinator`] refuses that re-entry
+/// with an error, so the mistake is loud, but the fix is to lock once.
 pub fn reclaim_leftover_after_velnor(
     work_roots: &[PathBuf],
     live_job_ids: &BTreeSet<String>,
@@ -406,29 +365,55 @@ pub fn reclaim_leftover_after_velnor(
     remove_dir: impl FnMut(&Path) -> Result<()>,
     prune_dangling_images: bool,
 ) -> Result<LeftoverReclaimReport> {
-    let liveness = match runtime_root() {
+    match runtime_root() {
         // Hold the same coordinator the cache reclaimer takes, so no daemon can
         // publish a lease between the liveness snapshot and the deletions it
         // authorizes.
         Some(run_root) => {
-            let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?;
-            return reclaim_with_liveness(
+            let coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?;
+            reclaim_leftover_under_coordinator(
+                &coordinator,
+                &run_root,
                 work_roots,
-                &WorkspaceLiveness::collect(&run_root, live_job_ids.clone()),
+                live_job_ids,
                 docker,
                 remove_dir,
                 prune_dangling_images,
-            );
+            )
         }
-        None => WorkspaceLiveness {
-            running: live_job_ids.clone(),
-            min_idle: WORKSPACE_MIN_IDLE,
-            ..WorkspaceLiveness::default()
-        },
-    };
+        None => reclaim_with_liveness(
+            work_roots,
+            &WorkspaceLiveness {
+                running: live_job_ids.clone(),
+                min_idle: WORKSPACE_MIN_IDLE,
+                ..WorkspaceLiveness::default()
+            },
+            docker,
+            remove_dir,
+            prune_dangling_images,
+        ),
+    }
+}
+
+/// Reclaim leftover workspaces under a coordinator the caller already holds.
+///
+/// `_coordinator` is the proof of ownership: a [`FilesystemCoordinator`] can
+/// only be obtained by locking, so this function cannot be reached without
+/// the lock and never takes it again.
+///
+/// [`FilesystemCoordinator`]: crate::capacity::FilesystemCoordinator
+pub fn reclaim_leftover_under_coordinator(
+    _coordinator: &crate::capacity::FilesystemCoordinator,
+    run_root: &Path,
+    work_roots: &[PathBuf],
+    live_job_ids: &BTreeSet<String>,
+    docker: impl FnMut(&[String]) -> Result<String>,
+    remove_dir: impl FnMut(&Path) -> Result<()>,
+    prune_dangling_images: bool,
+) -> Result<LeftoverReclaimReport> {
     reclaim_with_liveness(
         work_roots,
-        &liveness,
+        &WorkspaceLiveness::collect(run_root, live_job_ids.clone()),
         docker,
         remove_dir,
         prune_dangling_images,
@@ -540,6 +525,41 @@ pub fn reclaim_production_leftovers_for(
     } else {
         reclaim_microvm_leftovers()
     }
+}
+
+/// [`reclaim_production_leftovers_for`] for a caller that already holds the
+/// filesystem coordinator of `run_root` (the destructive `cache gc` path,
+/// which takes it before its own eviction pass and must keep holding it
+/// through this reclaim instead of locking twice).
+pub fn reclaim_production_leftovers_under_coordinator(
+    coordinator: &crate::capacity::FilesystemCoordinator,
+    run_root: &Path,
+    work_roots: &[PathBuf],
+    backend: velnor_model::ExecutionBackendKind,
+    prune_dangling_images: bool,
+) -> Result<LeftoverReclaimReport> {
+    if !backend.uses_host_docker_socket() {
+        return reclaim_microvm_leftovers();
+    }
+    let live = match live_job_ids_from_host_docker() {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
+            return Ok(LeftoverReclaimReport {
+                skipped_docker: true,
+                ..LeftoverReclaimReport::default()
+            });
+        }
+    };
+    reclaim_leftover_under_coordinator(
+        coordinator,
+        run_root,
+        work_roots,
+        &live,
+        host_docker_if_safe,
+        remove_dir_all,
+        prune_dangling_images,
+    )
 }
 
 fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
@@ -969,17 +989,9 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
             .unwrap(),
         ];
         // Mid checkout: no lease yet, but the host job claim is held.
-        let claims = run_root.join("job-claims");
-        fs::create_dir_all(&claims).unwrap();
-        let claim_path = claims.join(format!("plan-uuid-{checking_out}"));
-        let claim = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&claim_path)
+        let claim = crate::job_claim::JobClaim::try_acquire(&run_root, "plan-uuid", checking_out)
+            .unwrap()
             .unwrap();
-        rustix::fs::flock(&claim, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
 
         let liveness = WorkspaceLiveness::collect(&run_root, BTreeSet::new());
         assert!(!liveness.evidence_incomplete);

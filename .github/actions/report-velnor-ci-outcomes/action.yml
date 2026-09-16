@@ -132,6 +132,73 @@ runs:
         if [[ -z "$job_name" ]]; then
           job_name="unknown"
         fi
+        classify_gha_cache() {
+          local primary="${1:-}" matched="${2:-}"
+          if [[ -z "$primary" && -z "$matched" ]]; then
+            return 0
+          fi
+          if [[ -z "$matched" ]]; then
+            echo cold
+          elif [[ "$primary" == "$matched" ]]; then
+            echo exact
+          else
+            echo prefix
+          fi
+        }
+        host_warm_layer() {
+          local layer="$1"
+          local layers="${VELNOR_HOST_WARM_LAYERS:-}"
+          [[ -n "$layers" ]] || return 1
+          [[ ",$layers," == *",$layer,"* ]]
+        }
+        classify_mbx() {
+          if host_warm_layer mbx; then
+            echo host_warm
+            return
+          fi
+          local hit="${VELNOR_CACHE_MBX_HIT:-}"
+          if [[ "$hit" == "true" ]]; then
+            echo exact
+            return
+          fi
+          if [[ -s "$log" ]]; then
+            if grep -qiE 'exact hit' "$log"; then
+              echo exact
+              return
+            fi
+            if grep -qiE 'warm start' "$log"; then
+              echo prefix
+              return
+            fi
+            if grep -qiE '(^|[^a-z])miss([^a-z]|$)' "$log"; then
+              echo cold
+              return
+            fi
+          fi
+          if [[ "$hit" == "false" ]]; then
+            echo prefix
+            return
+          fi
+          echo cold
+        }
+        cache_outcome_for() {
+          local layer="$1"
+          local primary="${2:-}" matched="${3:-}"
+          if host_warm_layer "$layer"; then
+            echo host_warm
+            return
+          fi
+          if [[ "$layer" == mbx ]]; then
+            classify_mbx
+            return
+          fi
+          classify_gha_cache "$primary" "$matched"
+        }
+        rustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}")"
+        mold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}")"
+        cargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}")"
+        mbx_outcome="$(cache_outcome_for mbx "" "")"
+        docker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}")"
         updating_index=0
         updating_git=0
         downloading_crates=0
@@ -153,6 +220,38 @@ runs:
           [[ "$value" =~ ^[0-9]+$ ]] || value=0
           printf '%s' "$value"
         }
+        cache_outcomes_json='{}'
+        if command -v jq >/dev/null 2>&1; then
+          cache_outcomes_json="$(jq -nc \
+            --arg lane "${VELNOR_CI_LANE:-}" \
+            --arg rustup "$rustup_outcome" \
+            --arg mold "$mold_outcome" \
+            --arg cargo "$cargo_outcome" \
+            --arg mbx "$mbx_outcome" \
+            --arg docker_seed "$docker_seed_outcome" \
+            '{
+              lane: ($lane | if length > 0 then . else null end),
+              rustup: ($rustup | if length > 0 then . else null end),
+              mold: ($mold | if length > 0 then . else null end),
+              cargo: ($cargo | if length > 0 then . else null end),
+              mbx: ($mbx | if length > 0 then . else null end),
+              docker_seed: ($docker_seed | if length > 0 then . else null end)
+            }' 2>/dev/null || echo '{}')"
+        fi
+        cold_layers=()
+        for layer in rustup mold cargo mbx docker_seed; do
+          outcome=""
+          case "$layer" in
+            rustup) outcome="$rustup_outcome" ;;
+            mold) outcome="$mold_outcome" ;;
+            cargo) outcome="$cargo_outcome" ;;
+            mbx) outcome="$mbx_outcome" ;;
+            docker_seed) outcome="$docker_seed_outcome" ;;
+          esac
+          if [[ "$outcome" == cold ]]; then
+            cold_layers+=("$layer")
+          fi
+        done
         report_json="$(jq -nc \
           --arg job "$job_name" \
           --arg queue "$queue" \
@@ -174,6 +273,7 @@ runs:
           --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
           --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
           --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+          --argjson cache_outcomes "$cache_outcomes_json" \
           '{
             schema_version: 1,
             job: $job,
@@ -190,6 +290,7 @@ runs:
             checks_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),
             cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),
             total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),
+            cache_outcomes: $cache_outcomes,
             origin_downloads: {
               updating_crates_io_index: $updating_index,
               updating_git: $updating_git,
@@ -216,6 +317,12 @@ runs:
           echo ""
           echo "| metric | value |"
           echo "| --- | --- |"
+          echo "| lane | ${VELNOR_CI_LANE:-unknown} |"
+          echo "| cache_outcomes.rustup | ${rustup_outcome:-n/a} |"
+          echo "| cache_outcomes.mold | ${mold_outcome:-n/a} |"
+          echo "| cache_outcomes.cargo | ${cargo_outcome:-n/a} |"
+          echo "| cache_outcomes.mbx | ${mbx_outcome:-n/a} |"
+          echo "| cache_outcomes.docker_seed | ${docker_seed_outcome:-n/a} |"
           echo "| queue_seconds | ${queue:-unknown} |"
           echo "| runner_setup_seconds | ${runner_setup:-unknown} |"
           echo "| selection_transport_seconds | ${selection_transport:-unknown} |"
@@ -230,4 +337,7 @@ runs:
           echo "| downloading_crates | $downloading_crates |"
           echo "| compiling_lines | $compiling_count |"
         } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+        if ((${#cold_layers[@]} > 0)); then
+          echo "::warning::Cold cache layer(s): ${cold_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"
+        fi
         exit 0

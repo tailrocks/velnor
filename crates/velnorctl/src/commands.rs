@@ -64,19 +64,22 @@ pub enum GetResourceCommand {
     Leases(ResourceQueryArgs),
 }
 
-/// Shared read filters.
+// The filters (`--selector`, `--field-selector`, `--since`) are global flags
+// on `crate::GlobalArgs` and are deliberately not restated here. A second
+// declaration with the same id is a clap definition error: the global value
+// is propagated into the subcommand matches under the same id and the local
+// accessor then downcasts it to the wrong type at runtime (`velnorctl get
+// jobs --since 1h` panicked with "Mismatch between definition and access of
+// `since`"). `crate::tests::no_local_argument_shadows_a_global_argument`
+// refuses any such shadowing at test time. (This is a plain comment: clap
+// renders a tuple-variant Args doc comment as the subcommand `about`.)
+/// Shared pagination for collection reads.
 #[derive(Debug, Args)]
 pub struct ResourceQueryArgs {
-    #[arg(long)]
-    pub selector: Option<String>,
-    #[arg(long)]
-    pub field_selector: Option<String>,
     #[arg(long)]
     pub page_token: Option<String>,
     #[arg(long)]
     pub limit: Option<u32>,
-    #[arg(long)]
-    pub since: Option<String>,
 }
 
 /// Describe one canonical resource identity.
@@ -232,12 +235,11 @@ pub struct RunIdArgs {
     pub run_id: u64,
 }
 
-/// Dispatch one workflow and use the exact response run id.
+/// Dispatch one workflow and use the exact response run id. The repository
+/// is the global `--repo OWNER/NAME` selector.
 #[derive(Debug, Args)]
 pub struct DispatchArgs {
     pub workflow: String,
-    #[arg(long)]
-    pub repo: String,
     #[arg(long, default_value = "main")]
     pub reference: String,
 }
@@ -403,10 +405,10 @@ pub enum WorkflowCommand {
     Check(WorkflowCheckArgs),
 }
 
+/// Static check inputs. The repository is the global `--repo OWNER/NAME`
+/// selector.
 #[derive(Debug, Args)]
 pub struct WorkflowCheckArgs {
-    #[arg(long)]
-    pub repo: String,
     #[arg(long)]
     pub reference: String,
     #[arg(long)]
@@ -497,12 +499,10 @@ pub struct HostBootstrapImageArgs {
     pub rebuild_workflow: bool,
 }
 
-/// Start one repository-scoped recovery host.
+/// Start one repository-scoped recovery host. The repository comes from the
+/// global `--repo OWNER/NAME` selector (default tailrocks/velnor) or `--url`.
 #[derive(Debug, Args)]
 pub struct HostStartArgs {
-    /// GitHub repository as owner/name. Defaults to tailrocks/velnor.
-    #[arg(long, value_name = "OWNER/NAME")]
-    pub repo: Option<String>,
     /// Full repository URL. Must be owner/name, never an org pool.
     #[arg(long, value_name = "URL")]
     pub url: Option<String>,

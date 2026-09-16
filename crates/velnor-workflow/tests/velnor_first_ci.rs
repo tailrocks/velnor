@@ -217,16 +217,16 @@ fn adopt_is_rejected() {
 }
 
 #[test]
-fn pull_request_and_merge_group_publish_required() {
+fn pull_request_publish_required() {
     let root = unique_dir("pr-gate");
     write_rust_fixture(&root, 2);
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
     assert!(pr.contains("on:\n  pull_request:"));
-    assert!(pr.contains("  merge_group:"));
+    assert!(!pr.contains("  merge_group:"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
-    assert!(pr.contains("    name: \"Control / Aggregate\""));
+    assert!(pr.contains("    name: ci-required"));
     assert!(pr.contains("  required:"));
     assert!(pr.contains("    name: \"Control / Required\""));
     assert!(!pr.contains("default: velnor"), "{pr}");
@@ -385,8 +385,8 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let main = generated.workflow("ci-main.yml");
     assert!(
-        main.contains("rev: 7fa4a0731ee8bedc5b02d90507d6dbe8b719153a"),
-        "foreign Planning installs the published pin: {main}"
+        main.contains(&format!("rev: {}", velnor_workflow::SOURCE_REVISION)),
+        "foreign Planning installs the generator's own revision when the tree declares no pin: {main}"
     );
     assert!(
         !main.contains(
@@ -404,6 +404,11 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
 }
 
+/// The validator on a consumer tree rendered in place: the pin is the
+/// generator's own revision (no `[generator] revision` declared), so the
+/// running binary is the pinned generator and the tree regenerates
+/// byte-identically without a network. Ancestry rules do not apply to a
+/// consumer; the semantic rules do.
 #[test]
 fn dual_lane_automatic_velnor_units_pass_policy() {
     let root = unique_dir("dual-lane-both-policy");
@@ -414,20 +419,23 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
     )
     .unwrap();
     enable_approved_velnor_pull_requests(&root);
-    let generated = generate(&root);
-    let unit = generated.workflow("ci-unit-rust.yml");
+    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args(["--plain", "--force", "--default-branch", "main"])
+        .arg(&root)
+        .output()
+        .expect("run velnor-workflow in place");
+    assert!(
+        outcome.status.success(),
+        "in-place generation failed:\n{}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let unit = fs::read_to_string(root.join(".github/workflows/ci-unit-rust.yml")).unwrap();
     assert!(
         unit.contains("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"),
         "dual-lane Velnor units must emit the same-repo PR gate: {unit}"
     );
-    fs::create_dir_all(generated.output.join(".github-gen")).unwrap();
-    fs::copy(
-        root.join(".github-gen/velnor-workflow.toml"),
-        generated.output.join(".github-gen/velnor-workflow.toml"),
-    )
-    .unwrap();
-    let pin = generated
-        .workflow("ci-policy.yml")
+    let policy = fs::read_to_string(root.join(".github/workflows/ci-policy.yml")).unwrap();
+    let pin = policy
         .lines()
         .find_map(|line| {
             line.trim()
@@ -435,36 +443,51 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
                 .map(str::to_owned)
         })
         .expect("generated policy job must pin VELNOR_WORKFLOW_POLICY_REVISION");
-    let run_policy = |message: &str| {
-        let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
-            .args([
-                "policy",
-                "--workflow-root",
-                generated.output.to_str().unwrap(),
-                "--approved-policy-revision",
-                &pin,
-            ])
-            .output()
-            .expect("run velnor-workflow policy");
+    assert_eq!(pin, velnor_workflow::SOURCE_REVISION);
+    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args([
+            "policy",
+            "--workflow-root",
+            root.to_str().unwrap(),
+            "--base-revision",
+            &pin,
+            "--no-pin-build",
+        ])
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("run velnor-workflow policy");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outcome.stdout),
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    assert!(
+        outcome.status.success(),
+        "policy on rendered dual-lane tree:\n{combined}"
+    );
+    for rule in [
+        "pin-declared",
+        "pin-reachable",
+        "pin-monotonic",
+        "entrypoint-pin",
+        "generated-tree",
+        "pull-request-target",
+        "entrypoint-privileges",
+        "trusted-runners",
+        "action-pins",
+        "workflow-structure",
+        "required-checks",
+    ] {
         assert!(
-            outcome.status.success(),
-            "{message}:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&outcome.stdout),
-            String::from_utf8_lossy(&outcome.stderr)
+            combined.contains(&format!("PASS {rule}")),
+            "rule {rule} must pass on a rendered consumer tree:\n{combined}"
         );
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&outcome.stdout),
-            String::from_utf8_lossy(&outcome.stderr)
-        );
-        assert!(
-            !combined.contains("self-hosted jobs require a default-branch trusted-event gate"),
-            "{message} reported trusted-event findings:\n{combined}"
-        );
-    };
-    run_policy("policy on rendered dual-lane tree");
-    fs::remove_dir_all(generated.output.join(".github/ci")).unwrap();
-    run_policy("policy on advisory sparse checkout without project.toml");
+    }
+    assert!(
+        combined.contains("not applicable: example/monorepo consumes the generator"),
+        "{combined}"
+    );
+    assert!(!combined.contains("FAIL"), "{combined}");
 }
 
 #[test]
@@ -644,13 +667,74 @@ fn velnor_lane_installs_declared_mise_tools() {
         unit.contains("Install declared Mise tools"),
         "Velnor lane must install lockfile tools: {unit}"
     );
+    // The tool list is a per-unit fact: the callee installs exactly the
+    // caller's `mise_tools` input, split as shell words.
     assert!(
-        unit.contains("mise --yes install aqua:nextest-rs/nextest/cargo-nextest"),
-        "Velnor lane must install only unit-scoped tools: {unit}"
+        unit.contains("MISE_TOOLS: ${{ inputs.mise_tools }}")
+            && unit.contains("mise --yes install \"${tools[@]}\""),
+        "Velnor lane must install the caller's unit-scoped tools: {unit}"
     );
     assert!(
         !unit.contains("mise --yes install\n"),
         "Velnor lane must not install the whole root manifest: {unit}"
+    );
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(
+        pr.contains("      lane: velnor\n")
+            && pr.contains("mise_tools: \"aqua:nextest-rs/nextest/cargo-nextest\""),
+        "the Velnor caller passes the unit's lockfile tools: {pr}"
+    );
+}
+
+#[test]
+fn regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only() {
+    let root = unique_dir("regen-gate-policy-runtime");
+    write_rust_fixture(&root, 2);
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let mut contents = fs::read_to_string(&config).unwrap();
+    contents.push_str(
+        "\n[[declare]]\nprimitive = \"regen-gate\"\nunits = [\"rust-crate00\"]\n\n[declare.args]\ncommand = \"cd -- 'crates/crate00' && cargo run --locked -- --plain --check ../..\"\n",
+    );
+    fs::write(&config, contents).unwrap();
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    let provision = "      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ inputs.policy_runtime }}\n";
+    assert_eq!(
+        unit.matches(provision).count(),
+        1,
+        "the Velnor lane job provisions the pinned policy binary behind the input gate exactly once: {unit}"
+    );
+    let (hosted, velnor) = unit
+        .split_once("\n  verify-velnor:\n")
+        .expect("both lane jobs render");
+    assert!(
+        !hosted.contains("Provision pinned Velnor workflow policy runtime"),
+        "the hosted lane carries the pinned binary in the Planning runtime artifact: {hosted}"
+    );
+    assert!(
+        velnor.contains("cargo install --locked --git ")
+            && velnor.contains(" --rev \"$PINNED_REVISION\" --root \"$root\" velnor-workflow --bin velnor-workflow")
+            && velnor.contains("echo \"VELNOR_WORKFLOW_PINNED_BINARY=$binary\" >> \"$GITHUB_ENV\""),
+        "the Velnor lane builds the named binary once into the host store and exports it for the D19 guard: {velnor}"
+    );
+    assert!(
+        unit.contains("      policy_runtime:\n        required: false\n        type: boolean\n        default: false\n"),
+        "the callee declares the flag: {unit}"
+    );
+    let pr = generated.workflow("ci-pr.yml");
+    let velnor_caller = pr
+        .split("\n  velnor-rust-crate00:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  velnor-rust-crate01:\n").next())
+        .expect("the Velnor caller of the regen-gate unit renders");
+    assert!(
+        velnor_caller.contains("      policy_runtime: true\n"),
+        "only the regen-gate unit's Velnor caller passes the flag: {velnor_caller}"
+    );
+    assert_eq!(
+        pr.matches("policy_runtime: true").count(),
+        1,
+        "no other caller (hosted lane, other units) passes the flag: {pr}"
     );
 }
 
@@ -660,20 +744,17 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     write_rust_fixture(&root, 2);
     let generated = generate(&root);
     let workflow = generated.workflow("ci-unit-rust.yml");
-    for unit in ["rust-crate00", "rust-crate01"] {
-        assert!(
-            workflow.contains(&format!(
-                "contains(format(',{{0}},', inputs.selected_units), ',{unit},')"
-            )),
-            "{unit} must select its own reusable job"
-        );
-        assert!(
-            workflow.contains(&format!("CI_UNIT_ID: {unit}")),
-            "{unit} must hard-bind CI_UNIT_ID to the job's unit"
-        );
-    }
-    assert!(!workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
-    assert!(!workflow.contains("inputs.unit"));
+    assert!(
+        !workflow.contains("inputs.unit == '"),
+        "the collapsed verify steps must not be guarded by unit identity"
+    );
+    assert!(
+        workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"),
+        "the checks step binds CI_UNIT_ID from the caller's unit input"
+    );
+    assert!(workflow.contains("unit:\n        required: true"));
+    assert!(workflow.contains("  verify-github:"));
+    assert!(workflow.contains("  verify-velnor:"));
     assert!(!workflow.contains("github-prepare-cargo-sources:"));
     assert!(workflow.contains("velnor-prepare-cargo-sources:"));
     assert!(!workflow.contains("needs: [github-prepare-cargo-sources]"));
@@ -684,12 +765,13 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     );
 
     let github_job = workflow
-        .split_once("  github-rust-crate00:\n")
-        .and_then(|(_, body)| body.split_once("\n  velnor-rust-crate00:\n"))
+        .split_once("  verify-github:\n")
+        .and_then(|(_, body)| body.split_once("\n  verify-velnor:\n"))
         .map_or("", |(body, _)| body);
     assert!(
-        github_job.contains("Restore \"Rust crate (crate00)\" cache"),
-        "GitHub jobs must retain their per-job Cargo cache: {github_job}"
+        github_job.contains("Restore unit cache")
+            && github_job.contains("hashFiles(inputs.cache_key_files)"),
+        "GitHub jobs must retain their per-job Cargo cache keyed on the caller's files: {github_job}"
     );
     assert!(
         github_job.contains("Prepare Cargo sources") && github_job.contains("cargo fetch --locked"),
@@ -702,7 +784,7 @@ fn kind_reusable_renders_each_unit_root_in_its_own_job() {
 
     let velnor_prep = workflow
         .split_once("  velnor-prepare-cargo-sources:\n")
-        .and_then(|(_, body)| body.split_once("\n  github-rust-crate00:\n"))
+        .and_then(|(_, body)| body.split_once("\n  verify-github:\n"))
         .map_or("", |(body, _)| body);
     assert!(
         velnor_prep.contains("github.event_name == 'workflow_dispatch'")
@@ -719,17 +801,19 @@ fn kind_reusable_caller_is_one_call_per_kind() {
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
-    assert_eq!(
+    assert!(
         pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
-            .count(),
-        3
+            .count()
+            >= 16,
+        "each selected (unit, lane) gets its own caller: {pr}"
     );
-    assert!(pr.contains("  group-rust-github:\n    name: \"GitHub / Rust\""));
-    assert!(pr.contains("    name: \"Velnor / Rust\""));
-    assert!(pr.contains("  group-rust-control:\n    name: \"Control / Rust\""));
-    assert!(pr.contains("lane: github"));
-    assert!(pr.contains("lane: velnor"));
-    assert!(pr.contains("lane: control"));
+    assert!(pr.contains("  prepare-cargo:\n    name: \"Control / Prepare Cargo\""));
+    assert!(pr.contains("  github-rust-crate00:\n    name: \"Rust · crate00\""));
+    assert!(pr.contains("  velnor-rust-crate00:\n    name: \"Rust · crate00\""));
+    assert!(pr.contains("      unit: rust-crate00"));
+    assert!(pr.contains("      lane: github"));
+    assert!(pr.contains("      lane: velnor"));
+    assert!(pr.contains("      lane: control"));
     assert!(!pr.contains("strategy:"));
     assert!(!pr.contains("matrix.unit"));
     assert!(!pr.contains("name: ${{ matrix.label }}"));
@@ -763,14 +847,24 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     write_rust_fixture(&root, 8);
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
-    assert_eq!(unit.matches("  github-rust-crate").count(), 8);
-    assert_eq!(unit.matches("  velnor-rust-crate").count(), 8);
-    assert_eq!(unit.matches("    name: rust-crate").count(), 16);
+    assert_eq!(unit.matches("  verify-github:").count(), 1);
+    assert_eq!(unit.matches("  verify-velnor:").count(), 1);
+    assert!(
+        !unit.contains("inputs.unit == '"),
+        "the collapsed steps are rendered once, not once per unit"
+    );
+    assert_eq!(unit.matches("- name: Run unit checks").count(), 2);
     let pr = generated.workflow("ci-pr.yml");
+    for index in 0..8 {
+        assert!(
+            pr.contains(&format!("      unit: rust-crate{index:02}\n")),
+            "each unit gets its own caller"
+        );
+    }
     assert_eq!(
         pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
             .count(),
-        3
+        17
     );
 }
 
@@ -788,7 +882,7 @@ fn kind_reusable_consumes_caller_plan_shas() {
     assert!(unit.contains("head_sha:\n        required: true"));
     assert!(unit.contains("selected_units:\n        required: true"));
     assert!(unit.contains("lane:\n        required: true"));
-    assert!(!unit.contains("      unit:\n        required: true"));
+    assert!(unit.contains("      unit:\n        required: true"));
 }
 
 #[test]
@@ -821,11 +915,17 @@ units = ["rust-crate01"]
 
     let generated = generate(&root);
     let workflow = generated.workflow("ci-unit-rust.yml");
-    assert!(workflow.contains("  github-rust-crate00:\n    name: rust-crate00"));
-    assert!(workflow.contains("timeout-minutes: 17"));
-    assert!(workflow.contains("  velnor-rust-crate01:\n    name: rust-crate01"));
-    assert!(workflow.contains("  github-rust-crate01:\n    name: rust-crate01"));
-    assert!(!workflow.contains("  velnor-rust-crate00:"));
+    assert!(
+        workflow.contains("timeout-minutes: 45"),
+        "collapsed verify uses the kind's max declared timeout"
+    );
+    assert!(!workflow.contains("inputs.unit == '"));
+    // The github-only contract keeps rust-crate00 off the Velnor lane: it
+    // gets a GitHub caller and no Velnor caller.
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(pr.contains("  github-rust-crate00:"));
+    assert!(!pr.contains("  velnor-rust-crate00:"));
+    assert!(pr.contains("  velnor-rust-crate01:"));
 }
 
 #[test]
@@ -849,10 +949,10 @@ fn unique_reusable_calls_stay_under_github_limit() {
     );
     assert!(
         calls.iter().all(|file| file.starts_with("ci-unit-rust")),
-        "rust units must stay on kind shards, not per-unit files: {calls:?}"
+        "rust units must call the single kind reusable, not per-unit files: {calls:?}"
     );
     assert!(calls.contains("ci-unit-rust.yml"));
-    assert!(pr.contains("needs.plan.outputs.rust_matrix != '[]'"));
+    assert!(pr.contains("contains(format(',{0},', needs.plan.outputs.units), ',rust-crate"));
     assert!(!pr.contains("fromJSON(needs.plan.outputs.rust_matrix)"));
     assert!(!generated
         .output
@@ -867,9 +967,8 @@ fn unit_run_consumes_the_selection_artifact_not_a_hardcoded_id() {
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(unit.contains("VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection"));
-    assert!(unit.contains("CI_UNIT_ID: rust-crate00"));
+    assert!(unit.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
     assert!(unit.contains("--unit \"$CI_UNIT_ID\""));
-    assert!(unit.contains("CI_UNIT_ID: rust-crate00"));
     assert!(!unit.contains("--unit crate00"));
 }
 
@@ -889,7 +988,7 @@ fn trust_gated_unit_appends_trusted_label_on_velnor_lane_only() {
     let mut config = fs::read_to_string(&path).unwrap();
     let _ = writeln!(
         config,
-        "velnor_trusted_label = \"example-trusted\"\n\n[[units]]\nid = \"{gated}\"\nrequires_trusted = true"
+        "velnor_trusted_label = \"example-trusted\"\nvelnor_trusted_runner_available = true\n\n[[units]]\nid = \"{gated}\"\nrequires_trusted = true"
     );
     fs::write(&path, config).unwrap();
     let generated = generate(&root);

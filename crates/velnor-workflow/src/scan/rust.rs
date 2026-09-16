@@ -561,8 +561,6 @@ fn analyze_rust_manifests(
         };
         let cache_key_files = vec![
             ".cargo/**".to_owned(),
-            "Cargo.toml".to_owned(),
-            manifest_path.clone(),
             lockfile_key,
             "rust-toolchain.toml".to_owned(),
             "rust-toolchain".to_owned(),
@@ -598,7 +596,6 @@ fn analyze_rust_manifests(
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });
@@ -644,8 +641,8 @@ fn analyze_rust_manifests(
             cache: Some(CacheSpec {
                 key_files: vec![
                     ".cargo/**".to_owned(),
-                    "Cargo.toml".to_owned(),
                     "Cargo.lock".to_owned(),
+                    "deny.toml".to_owned(),
                 ],
                 paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
                 purpose: CachePurpose::CargoSources,
@@ -656,7 +653,6 @@ fn analyze_rust_manifests(
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
-            workflow_file: None,
             requires_trusted: false,
             workspace_check: false,
         });

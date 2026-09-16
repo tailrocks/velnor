@@ -57,6 +57,7 @@ pub fn github_job_container_spec(
     node_action_image: &str,
     daemon_id: String,
     trust_scope: &str,
+    read_through_scope: Option<&str>,
 ) -> anyhow::Result<JobContainerSpec> {
     if let Some(host_work_dir) = paths.docker_host_work_dir.as_deref()
         && !host_work_dir.is_absolute()
@@ -92,8 +93,18 @@ pub fn github_job_container_spec(
              unset it — compiler reuse is content-addressed (mbx/sccache) now"
         );
     }
+    let name = job_container_name(job);
+    let store_trust_scope = crate::trust_scope::normalize_scope(trust_scope).to_owned();
+    // D18 read-through layers: admission decided whether the backend can
+    // mount them; here the layers are only spelled out for the container.
+    let store_overlays = read_through_scope
+        .map(crate::trust_scope::normalize_scope)
+        .map(|lower_scope| {
+            crate::storage::StoreOverlay::cargo_layers(&name, &paths.temp_host, lower_scope)
+        })
+        .unwrap_or_default();
     Ok(JobContainerSpec {
-        name: job_container_name(job),
+        name,
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
         network: job_network_name(job),
         workspace_host: paths.workspace_host,
@@ -116,7 +127,8 @@ pub fn github_job_container_spec(
         verify_bind_mounts: true,
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
-        store_trust_scope: crate::trust_scope::normalize_scope(trust_scope).to_owned(),
+        store_trust_scope,
+        store_overlays,
         sccache_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
             && explicit_sccache)
             .then(|| crate::sccache_compat::store_host(job, &paths.temp_host, trust_scope)),
@@ -1129,6 +1141,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             store_trust_scope: "trusted".to_owned(),
+            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         };
@@ -1215,6 +1228,7 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
+            None,
         )
         .unwrap_err();
         assert!(
@@ -1302,6 +1316,7 @@ mod tests {
             "",
             "daemon".into(),
             resolved.as_str(),
+            None,
         )
         .unwrap();
 
@@ -1442,6 +1457,7 @@ mod tests {
                 "",
                 "daemon".into(),
                 scope,
+                None,
             )
             .unwrap()
         };
@@ -1511,6 +1527,7 @@ mod tests {
                 "",
                 "daemon".into(),
                 admitted,
+                None,
             )
             .unwrap();
             assert_eq!(spec.store_trust_scope, admitted, "pool={pool}");
@@ -1714,6 +1731,7 @@ mod tests {
             "",
             "daemon".into(),
             "public-forks",
+            None,
         )
         .unwrap();
 
@@ -1743,6 +1761,7 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
+            None,
         )
         .unwrap();
 
@@ -1781,6 +1800,7 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("does not support explicit"));
@@ -1807,6 +1827,7 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
+            None,
         )
         .unwrap();
         assert!(default.mbx_store_host.is_some());
@@ -1832,6 +1853,7 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
+            None,
         )
         .unwrap();
         assert!(explicit.mbx_store_host.is_none());
@@ -1862,6 +1884,7 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
+            None,
         )
         .unwrap();
 

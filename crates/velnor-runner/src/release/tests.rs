@@ -199,7 +199,7 @@ fn debian_package_includes_fleet_policy_audit_units() {
             "lib/systemd/system/velnor-fleet-policy-audit.timer",
         ),
         (
-            "../../fleet/release-refs.toml",
+            "../../config/fleet/release-refs.toml",
             "usr/share/velnor/fleet/release-refs.toml",
         ),
     ] {
@@ -236,7 +236,7 @@ fn debian_package_includes_fleet_policy_audit_units() {
             .contains("OnCalendar=")
     );
     assert!(
-        include_str!("../../../../fleet/release-refs.toml").contains("schema_version = 1"),
+        include_str!("../../../../config/fleet/release-refs.toml").contains("schema_version = 1"),
         "packaged fleet ledger must be the repository's authoritative schema-v1 ledger"
     );
 }

@@ -17,9 +17,10 @@ use std::{
 use serde::Serialize;
 use serde_json::Value;
 use velnor_model::{ExecutionBackendKind, ExecutionFile, ExitClass};
+use velnor_runner::docker::{resolve_docker_endpoint, DockerEndpoint};
 use velnor_runner::execution::{
-    validate_docker_isolation, validate_docker_resource_projection, DockerIsolationMode,
-    DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
+    store_overlay_support, validate_docker_isolation, validate_docker_resource_projection,
+    DockerIsolationMode, DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
     DOCKER_RESOURCE_BOUNDARY_CHECK, MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
 };
 
@@ -74,7 +75,7 @@ pub fn preflight(globals: &GlobalArgs, args: &runtime::PreflightArgs) -> Result<
 
     match backend {
         ExecutionBackendKind::Docker => {
-            let target = resolve_docker_target();
+            let endpoint = resolve_docker_endpoint().ok();
             let git = run_process("git", &["--version"], COMMAND_TIMEOUT);
             checks.push(check_command(
                 "host-git",
@@ -93,14 +94,13 @@ pub fn preflight(globals: &GlobalArgs, args: &runtime::PreflightArgs) -> Result<
             );
             checks.extend(docker.checks.iter().cloned());
             checks.push(check_job_image_tools(
-                &target,
+                endpoint.as_ref(),
                 &args.docker_image,
                 docker.server_reachable,
             ));
             checks.push(check_container_docker_client(
-                &target,
+                endpoint.as_ref(),
                 &args.docker_image,
-                docker.socket_path.as_deref(),
                 docker.socket_exists,
                 args.require_buildx,
             ));
@@ -277,10 +277,13 @@ struct DockerReport {
     host_os: String,
     host_arch: String,
     docker_cli: Option<PathBuf>,
+    /// How the runner's endpoint resolver selected the daemon
+    /// (`velnor_runner::docker::DockerEndpointSource::label`).
     endpoint_source: String,
+    /// The Docker context the endpoint came from, when a context selected it.
     context: Option<String>,
+    /// The resolved `unix://` endpoint; `None` when resolution failed.
     endpoint: Option<String>,
-    endpoint_kind: String,
     provider: String,
     socket_path: Option<PathBuf>,
     socket_exists: bool,
@@ -298,6 +301,8 @@ struct DockerReport {
     velnor_compatible: bool,
     runner_ready: bool,
     capabilities: DockerCapabilities,
+    /// The runner's own words for the read-through store overlay verdict.
+    read_through_store_overlay: String,
     checks: Vec<Check>,
 }
 
@@ -318,6 +323,11 @@ struct DockerCapabilities {
     buildx: bool,
     bind_mount: Option<bool>,
     docker_resource_boundary: bool,
+    /// Whether this daemon can mount D18 read-through store layers (the
+    /// runner's probed capability). `None` when the probe could not run.
+    /// Not a readiness gate: a host without it runs PR jobs on trusted pools
+    /// cold, and every such job's log says so.
+    read_through_store_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -371,86 +381,12 @@ impl Check {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DockerTarget {
-    Host {
-        endpoint: String,
-        source: &'static str,
-    },
-    Context {
-        name: Option<String>,
-        source: &'static str,
-    },
-}
-
-impl DockerTarget {
-    fn source(&self) -> &'static str {
-        match self {
-            Self::Host { source, .. } | Self::Context { source, .. } => source,
-        }
-    }
-
-    fn cli_args(&self) -> Vec<String> {
-        match self {
-            Self::Host { endpoint, .. } => vec!["--host".to_owned(), endpoint.clone()],
-            Self::Context {
-                name: Some(name), ..
-            } => vec!["--context".to_owned(), name.clone()],
-            Self::Context { name: None, .. } => Vec::new(),
-        }
-    }
-}
-
-fn resolve_docker_target() -> DockerTarget {
-    resolve_docker_target_from(
-        env_value("VELNOR_DOCKER_HOST"),
-        env_value("VELNOR_DOCKER_CONTEXT"),
-        env_value("DOCKER_HOST"),
-        env_value("DOCKER_CONTEXT"),
-    )
-}
-
-fn resolve_docker_target_from(
-    velnor_host: Option<String>,
-    velnor_context: Option<String>,
-    docker_host: Option<String>,
-    docker_context: Option<String>,
-) -> DockerTarget {
-    if let Some(endpoint) = velnor_host {
-        return DockerTarget::Host {
-            endpoint,
-            source: "VELNOR_DOCKER_HOST",
-        };
-    }
-    if let Some(name) = velnor_context {
-        return DockerTarget::Context {
-            name: Some(name),
-            source: "VELNOR_DOCKER_CONTEXT",
-        };
-    }
-    if let Some(name) = docker_context {
-        return DockerTarget::Context {
-            name: Some(name),
-            source: "DOCKER_CONTEXT",
-        };
-    }
-    if let Some(endpoint) = docker_host {
-        return DockerTarget::Host {
-            endpoint,
-            source: "DOCKER_HOST",
-        };
-    }
-    DockerTarget::Context {
-        name: None,
-        source: "docker-default",
-    }
-}
-
-fn env_value(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+/// `docker` CLI global options that pin every diagnostic probe to the daemon
+/// the runner's resolver selected. The CLI's own context/`DOCKER_HOST`
+/// precedence is never consulted: an explicit `--host` wins over both, so the
+/// report and the daemon cannot disagree.
+fn docker_cli_endpoint_args(endpoint: &DockerEndpoint) -> Vec<String> {
+    vec!["--host".to_owned(), endpoint.host.clone()]
 }
 
 #[derive(Debug)]
@@ -487,7 +423,6 @@ fn collect_docker_report(
     docker_host_work_dir: Option<&Path>,
 ) -> DockerReport {
     let docker_cli = find_executable("docker");
-    let target = resolve_docker_target();
     let mut checks = Vec::new();
     if let Some(path) = &docker_cli {
         checks.push(Check::pass(
@@ -502,108 +437,54 @@ fn collect_docker_report(
         ));
     }
 
-    let context_result = match &target {
-        DockerTarget::Host { .. } => None,
-        DockerTarget::Context { .. } => Some(run_docker_process(
-            &target,
-            &["context", "show"],
-            COMMAND_TIMEOUT,
-        )),
-    };
-    let context = context_result.as_ref().and_then(|result| {
-        result
-            .succeeded()
-            .then(|| result.stdout.trim().to_owned())
-            .filter(|value| !value.is_empty())
-    });
-    match (&target, &context_result, &context) {
-        (DockerTarget::Host { .. }, None, _) => checks.push(Check::skipped(
-            "docker-context",
-            format!("direct endpoint selected by {}", target.source()),
-        )),
-        (_, Some(_), Some(context)) => checks.push(Check::pass(
-            "docker-context",
-            format!("selected context {context} via {}", target.source()),
-        )),
-        (_, Some(result), None) => checks.push(Check::fail(
-            "docker-context",
-            process_detail(result, "Docker context"),
-            Some(
-                "Run `docker context ls` and select a running local context; for OrbStack, run `orbctl start`."
-                    .to_owned(),
-            ),
-        )),
-        _ => checks.push(Check::fail(
-            "docker-context",
-            "Docker target selection did not yield a usable context result",
-            Some(
-                "Set only one of VELNOR_DOCKER_HOST or VELNOR_DOCKER_CONTEXT, then rerun the report."
-                    .to_owned(),
-            ),
-        )),
-    }
-
-    let context_endpoint = context.as_deref().and_then(|name| {
-        let result = run_docker_process(
-            &target,
-            &["context", "inspect", "--format", "{{json .}}", name],
-            COMMAND_TIMEOUT,
-        );
-        let endpoint = result
-            .succeeded()
-            .then(|| parse_context_endpoint(&result.stdout))
-            .flatten();
-        if endpoint.is_none() {
+    // One resolver for every host-side Docker consumer: the same precedence
+    // (`VELNOR_DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_HOST`, the selected
+    // context in `~/.docker/config.json`, portable defaults) that the daemon
+    // and its Engine client use. The report can therefore never describe a
+    // daemon the runner would not connect to.
+    let resolved = resolve_docker_endpoint();
+    let (endpoint_source, context, endpoint, socket_path) = match &resolved {
+        Ok(endpoint) => {
+            checks.push(Check::pass(
+                "docker-endpoint",
+                format!(
+                    "resolved {} from {}{}",
+                    endpoint.host,
+                    endpoint.source.label(),
+                    endpoint
+                        .context
+                        .as_deref()
+                        .map_or_else(String::new, |context| format!(" {context}"))
+                ),
+            ));
+            (
+                endpoint.source.label().to_owned(),
+                endpoint.context.clone(),
+                Some(endpoint.host.clone()),
+                Some(endpoint.socket.clone()),
+            )
+        }
+        Err(error) => {
             checks.push(Check::fail(
                 "docker-endpoint",
-                process_detail(&result, "Docker context endpoint"),
+                format!("{error:#}"),
                 Some(
-                    "Inspect the selected context with `docker context inspect`; Velnor needs a local Unix socket for the Docker backend."
+                    "Select a local Docker context (`docker context use`), or set VELNOR_DOCKER_HOST to the daemon's Unix socket; remote endpoints are refused."
                         .to_owned(),
                 ),
             ));
+            ("unresolved".to_owned(), None, None, None)
         }
-        endpoint
-    });
-    let endpoint = match &target {
-        DockerTarget::Host { endpoint, .. } => {
-            checks.push(Check::pass(
-                "docker-endpoint",
-                format!("using direct endpoint from {}", target.source()),
-            ));
-            Some(endpoint.clone())
-        }
-        DockerTarget::Context { .. } => context_endpoint,
     };
-    let endpoint_kind = endpoint
-        .as_deref()
-        .map(endpoint_kind)
-        .unwrap_or("unknown")
-        .to_owned();
-    let socket_path = endpoint
-        .as_deref()
-        .filter(|_| endpoint_kind == "unix")
-        .and_then(unix_socket_path);
+    let target = resolved.as_ref().ok();
     let (socket_exists, socket_target, socket_detail) =
         socket_path.as_deref().map(inspect_socket).unwrap_or((
             false,
             None,
             "no local Unix socket endpoint was resolved".to_owned(),
         ));
-    if endpoint_kind == "unix" && socket_exists {
+    if socket_exists {
         checks.push(Check::pass("unix-socket", socket_detail));
-    } else if endpoint_kind == "remote" {
-        checks.push(Check::fail(
-            "unix-socket",
-            format!(
-                "Docker endpoint {} is remote; Velnor job containers need a daemon-visible local socket",
-                endpoint.as_deref().unwrap_or("<unknown>")
-            ),
-            Some(
-                "Use a local Docker context/socket, or provide a daemon configuration that explicitly mounts the remote work directory; remote Docker is not silently treated as local."
-                    .to_owned(),
-            ),
-        ));
     } else {
         checks.push(Check::fail(
             "unix-socket",
@@ -613,16 +494,13 @@ fn collect_docker_report(
     }
 
     let version_result = run_docker_process(
-        &target,
+        target,
         &["version", "--format", "{{json .}}"],
         COMMAND_TIMEOUT,
     );
     let version_json = parse_json_output(&version_result);
-    let info_result = run_docker_process(
-        &target,
-        &["info", "--format", "{{json .}}"],
-        COMMAND_TIMEOUT,
-    );
+    let info_result =
+        run_docker_process(target, &["info", "--format", "{{json .}}"], COMMAND_TIMEOUT);
     let info_json = parse_json_output(&info_result);
     let server_reachable = info_result.succeeded() && info_json.is_some();
     let server_version = version_json
@@ -730,7 +608,7 @@ fn collect_docker_report(
         server_os.as_deref(),
         info_json.as_ref(),
     );
-    let buildx_result = run_docker_process(&target, &["buildx", "version"], COMMAND_TIMEOUT);
+    let buildx_result = run_docker_process(target, &["buildx", "version"], COMMAND_TIMEOUT);
     let buildx_version = buildx_result
         .succeeded()
         .then(|| buildx_result.stdout.trim().to_owned())
@@ -760,7 +638,7 @@ fn collect_docker_report(
 
     let cgroup_mode = cgroup_mode(cgroup_driver.as_deref(), cgroup_version.as_deref());
     let cgroup_check = docker_resource_boundary_check(
-        &target,
+        target,
         &cgroup_mode,
         cgroup_driver.as_deref(),
         cgroup_version.as_deref(),
@@ -774,7 +652,7 @@ fn collect_docker_report(
     let bind_mount = if check_bind_mount {
         match image {
             Some(image) if !image.trim().is_empty() && server_reachable => Some(
-                check_bind_mount_probe(&target, image, work_dir, docker_host_work_dir),
+                check_bind_mount_probe(target, image, work_dir, docker_host_work_dir),
             ),
             Some(_) => Some(Check::fail(
                 "bind-mount",
@@ -802,10 +680,29 @@ fn collect_docker_report(
         ));
     }
 
+    // The read-through store overlay capability, through the runner's probe
+    // and against the daemon this report selected. Recorded, never gated on.
+    let store_overlay = if server_reachable {
+        store_overlay_support(
+            &mut DiagnosticDockerRunner { target },
+            Some(image.unwrap_or(MACOS_DOCKER_CAPABILITY_PROBE_IMAGE)),
+            work_dir,
+            docker_host_work_dir,
+        )
+    } else {
+        Err(velnor_runner::execution::ExecutionError::DockerPreflight(
+            "not probed because the Docker API is unavailable".to_owned(),
+        ))
+    };
+    let (read_through_store_overlay, store_overlay_summary) = match &store_overlay {
+        Ok(support) => (Some(support.is_supported()), support.summary()),
+        Err(error) => (None, format!("unknown: {error}")),
+    };
+
     let endpoint_ready = server_reachable
         && info_json.is_some()
         && (!require_socket || socket_exists)
-        && endpoint_kind != "unknown";
+        && endpoint.is_some();
     let buildx_ok = buildx_result.succeeded() || !require_buildx;
     let bind_mount_ok = bind_mount
         .as_ref()
@@ -818,10 +715,9 @@ fn collect_docker_report(
         host_os: std::env::consts::OS.to_owned(),
         host_arch: std::env::consts::ARCH.to_owned(),
         docker_cli,
-        endpoint_source: target.source().to_owned(),
+        endpoint_source,
         context,
         endpoint,
-        endpoint_kind,
         provider,
         socket_path,
         socket_exists,
@@ -844,12 +740,51 @@ fn collect_docker_report(
             buildx: buildx_result.succeeded(),
             bind_mount: bind_mount.map(|check| check.status == CheckStatus::Pass),
             docker_resource_boundary,
+            read_through_store_overlay,
         },
+        read_through_store_overlay: store_overlay_summary,
         checks,
     }
 }
 
-fn check_job_image_tools(target: &DockerTarget, image: &str, server_reachable: bool) -> Check {
+/// The runner's `CommandRunner` seam over this report's pinned daemon: every
+/// probe the runner defines runs as `docker --host <endpoint> …` with the
+/// diagnostic timeout. Not a host-process runner, so nothing it learns is
+/// cached as a fact about the host — the report re-probes each time.
+struct DiagnosticDockerRunner<'a> {
+    target: Option<&'a DockerEndpoint>,
+}
+
+impl velnor_runner::CommandRunner for DiagnosticDockerRunner<'_> {
+    fn run(
+        &mut self,
+        program: &str,
+        args: &[String],
+    ) -> anyhow::Result<velnor_runner::CommandResult> {
+        if program != "docker" {
+            anyhow::bail!("diagnostic runner only runs docker, not {program}");
+        }
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let result = run_docker_process(self.target, &args, CONTAINER_TIMEOUT);
+        if let Some(error) = result.error {
+            anyhow::bail!("{error}");
+        }
+        if result.timed_out {
+            anyhow::bail!("docker {} timed out", args.join(" "));
+        }
+        Ok(velnor_runner::CommandResult {
+            code: result.status.unwrap_or(-1),
+            stdout: result.stdout,
+            stderr: result.stderr,
+        })
+    }
+}
+
+fn check_job_image_tools(
+    target: Option<&DockerEndpoint>,
+    image: &str,
+    server_reachable: bool,
+) -> Check {
     if !server_reachable {
         return Check::skipped(
             "job-image-tools",
@@ -889,18 +824,18 @@ fn check_job_image_tools(target: &DockerTarget, image: &str, server_reachable: b
 }
 
 fn check_container_docker_client(
-    target: &DockerTarget,
+    target: Option<&DockerEndpoint>,
     image: &str,
-    socket_path: Option<&Path>,
     socket_exists: bool,
     require_buildx: bool,
 ) -> Check {
-    let Some(socket_path) = socket_path else {
+    let Some(endpoint) = target else {
         return Check::skipped(
             "job-docker-client",
             "not run because no local Docker socket was resolved",
         );
     };
+    let socket_path = &endpoint.socket;
     if !socket_exists {
         return Check::skipped(
             "job-docker-client",
@@ -968,7 +903,7 @@ fn bind_mount_probe_spec(source: &Path, marker_name: &str) -> (String, String) {
 }
 
 fn check_bind_mount_probe(
-    target: &DockerTarget,
+    target: Option<&DockerEndpoint>,
     image: &str,
     work_dir: &Path,
     docker_host_work_dir: Option<&Path>,
@@ -1312,8 +1247,15 @@ fn run_process(program: &str, args: &[&str], timeout: Duration) -> ProcessResult
     }
 }
 
-fn run_docker_process(target: &DockerTarget, args: &[&str], timeout: Duration) -> ProcessResult {
-    let mut command_args = target.cli_args();
+fn run_docker_process(
+    target: Option<&DockerEndpoint>,
+    args: &[&str],
+    timeout: Duration,
+) -> ProcessResult {
+    let Some(endpoint) = target else {
+        return ProcessResult::failed("Docker endpoint is unresolved; no daemon to probe");
+    };
+    let mut command_args = docker_cli_endpoint_args(endpoint);
     command_args.extend(args.iter().map(|arg| (*arg).to_owned()));
     let command_args = command_args.iter().map(String::as_str).collect::<Vec<_>>();
     run_process("docker", &command_args, timeout)
@@ -1350,20 +1292,6 @@ fn parse_json_output(result: &ProcessResult) -> Option<Value> {
         .flatten()
 }
 
-fn parse_context_endpoint(stdout: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(stdout.trim()).ok()?;
-    let value = value
-        .as_array()
-        .and_then(|items| items.first())
-        .unwrap_or(&value);
-    value
-        .get("Endpoints")
-        .and_then(|value| value.get("docker"))
-        .and_then(|value| value.get("Host"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
 fn json_string(value: &Value, path: &[&str]) -> Option<String> {
     path.iter()
         .try_fold(value, |current, key| current.get(*key))
@@ -1378,7 +1306,7 @@ fn json_u64(value: &Value, path: &[&str]) -> Option<u64> {
 }
 
 fn docker_resource_boundary_check(
-    target: &DockerTarget,
+    target: Option<&DockerEndpoint>,
     cgroup_mode: &str,
     driver: Option<&str>,
     version: Option<&str>,
@@ -1420,7 +1348,11 @@ fn docker_resource_boundary_check(
     }
 }
 
-fn check_docker_vm_resource_controls(target: &DockerTarget, image: &str, provider: &str) -> Check {
+fn check_docker_vm_resource_controls(
+    target: Option<&DockerEndpoint>,
+    image: &str,
+    provider: &str,
+) -> Check {
     let name = probe_name("resource-boundary");
     let create_args = [
         "create",
@@ -1548,27 +1480,6 @@ fn format_resource_detail(resources: &DockerResources) -> String {
             .map_or_else(|| "unknown".to_owned(), |root| root.display().to_string()),
         resources.ready,
     )
-}
-
-fn endpoint_kind(endpoint: &str) -> &'static str {
-    if endpoint.starts_with("unix://") {
-        "unix"
-    } else if endpoint.starts_with("tcp://")
-        || endpoint.starts_with("ssh://")
-        || endpoint.starts_with("http://")
-        || endpoint.starts_with("https://")
-    {
-        "remote"
-    } else {
-        "unknown"
-    }
-}
-
-fn unix_socket_path(endpoint: &str) -> Option<PathBuf> {
-    endpoint
-        .strip_prefix("unix://")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
 }
 
 fn inspect_socket(path: &Path) -> (bool, Option<PathBuf>, String) {
@@ -1995,6 +1906,10 @@ fn print_docker_human(report: &DockerReport) {
         report.capabilities.docker_resource_boundary
     );
     println!("{}", format_resource_detail(&report.resources));
+    println!(
+        "Read-through store overlay (D18): {}",
+        report.read_through_store_overlay
+    );
     println!("Velnor-compatible: {}", report.velnor_compatible);
     println!("Runner-ready: {}", report.runner_ready);
     print_checks_from_struct(&report.checks);
@@ -2068,22 +1983,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn context_endpoint_parser_accepts_docker_context_shape() {
-        let endpoint = parse_context_endpoint(
-            r#"[{"Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]"#,
-        );
-        assert_eq!(endpoint.as_deref(), Some("unix:///var/run/docker.sock"));
-    }
-
-    #[test]
-    fn endpoint_parser_distinguishes_local_unix_from_remote() {
-        assert_eq!(endpoint_kind("unix:///var/run/docker.sock"), "unix");
-        assert_eq!(endpoint_kind("ssh://docker.example"), "remote");
-        assert_eq!(endpoint_kind("tcp://127.0.0.1:2375"), "remote");
-        assert_eq!(endpoint_kind("not-an-endpoint"), "unknown");
-    }
-
-    #[test]
     fn macos_cgroup_check_uses_docker_resource_boundary() {
         let mode = cgroup_mode(Some("cgroupfs"), Some("2"));
         let detail = cgroup_detail(&mode, Some("cgroupfs"), Some("2"));
@@ -2098,6 +1997,7 @@ mod tests {
                 buildx: true,
                 bind_mount: Some(true),
                 docker_resource_boundary: false,
+                read_through_store_overlay: Some(false),
             }
             .docker_resource_boundary
         );
@@ -2129,60 +2029,6 @@ mod tests {
         )
         .expect_err("outside work dir must not be silently remapped");
         assert!(error.contains("outside work dir"));
-    }
-
-    #[test]
-    fn docker_target_precedence_matches_runner_environment_contract() {
-        assert_eq!(
-            resolve_docker_target_from(
-                Some("unix:///velnor.sock".to_owned()),
-                Some("velnor".to_owned()),
-                Some("tcp://ambient:2375".to_owned()),
-                Some("ambient".to_owned()),
-            ),
-            DockerTarget::Host {
-                endpoint: "unix:///velnor.sock".to_owned(),
-                source: "VELNOR_DOCKER_HOST",
-            }
-        );
-        assert_eq!(
-            resolve_docker_target_from(
-                None,
-                Some("velnor".to_owned()),
-                Some("tcp://ambient:2375".to_owned()),
-                Some("ambient".to_owned()),
-            ),
-            DockerTarget::Context {
-                name: Some("velnor".to_owned()),
-                source: "VELNOR_DOCKER_CONTEXT",
-            }
-        );
-        assert_eq!(
-            resolve_docker_target_from(
-                None,
-                None,
-                Some("tcp://ambient:2375".to_owned()),
-                Some("ambient".to_owned()),
-            ),
-            DockerTarget::Context {
-                name: Some("ambient".to_owned()),
-                source: "DOCKER_CONTEXT",
-            }
-        );
-        assert_eq!(
-            resolve_docker_target_from(None, None, Some("tcp://ambient:2375".to_owned()), None,),
-            DockerTarget::Host {
-                endpoint: "tcp://ambient:2375".to_owned(),
-                source: "DOCKER_HOST",
-            }
-        );
-        assert_eq!(
-            resolve_docker_target_from(None, None, None, None),
-            DockerTarget::Context {
-                name: None,
-                source: "docker-default",
-            }
-        );
     }
 
     #[test]

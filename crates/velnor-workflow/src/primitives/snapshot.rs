@@ -275,8 +275,34 @@ pub(crate) enum CacheKeyMatcher {
     /// The key contains one generator-owned namespace fragment.
     Contains(&'static str),
     /// The anchored generic-CI namespace for Rust Cargo-source bundles:
-    /// `ci-<runner-os>-rust-...`, never the broad `ci-` prefix.
+    /// `ci-<runner-os>-rust-...` and `ci-release-<runner-os>-rust-...`, never
+    /// the broad `ci-` prefix.
     CiRustCargoSources,
+    /// Non-Rust unit dependency bundles under the same anchored `ci-` /
+    /// `ci-release-` namespace: `bun-`, `docs-`, and `opentofu-` units.
+    CiGenericUnitCaches,
+}
+
+fn ci_prefixed_unit(key: &str) -> Option<(&str, &str)> {
+    const PREFIXES: [&str; 2] = ["ci-release-", "ci-"];
+    const UNIT_MARKERS: [&str; 4] = ["-rust-", "-bun-", "-docs-", "-opentofu-"];
+    for prefix in PREFIXES {
+        let Some(rest) = key.strip_prefix(prefix) else {
+            continue;
+        };
+        for marker in UNIT_MARKERS {
+            let Some(pos) = rest.find(marker) else {
+                continue;
+            };
+            let runner = rest.get(..pos)?;
+            if runner.is_empty() {
+                continue;
+            }
+            let unit = rest.get(pos + 1..)?;
+            return Some((runner, unit));
+        }
+    }
+    None
 }
 
 impl CacheKeyMatcher {
@@ -284,14 +310,13 @@ impl CacheKeyMatcher {
         match self {
             Self::Contains(fragment) => key.contains(fragment),
             Self::CiRustCargoSources => {
-                let Some(rest) = key.strip_prefix("ci-") else {
-                    return false;
-                };
-                let Some((runner_os, unit)) = rest.split_once('-') else {
-                    return false;
-                };
-                !runner_os.is_empty() && unit.starts_with("rust-")
+                ci_prefixed_unit(key).is_some_and(|(_, unit)| unit.starts_with("rust-"))
             }
+            Self::CiGenericUnitCaches => ci_prefixed_unit(key).is_some_and(|(_, unit)| {
+                unit.starts_with("bun-")
+                    || unit.starts_with("docs-")
+                    || unit.starts_with("opentofu-")
+            }),
         }
     }
 }
@@ -349,9 +374,18 @@ impl RetentionPolicy {
                     markers: &[
                         CacheKeyMatcher::Contains("velnor-rustup-"),
                         CacheKeyMatcher::Contains("velnor-mold-"),
+                        CacheKeyMatcher::Contains("velnor-cargo-bin-"),
+                        CacheKeyMatcher::Contains("mise-v1-"),
                     ],
                     budget_bytes: 2 * GIBIBYTE,
                     generation_bound: 0,
+                },
+                ClassPolicy {
+                    id: "runtime-binary",
+                    purpose: CachePurpose::Generic,
+                    markers: &[CacheKeyMatcher::Contains("velnor-workflow-v1-")],
+                    budget_bytes: GIBIBYTE / 4,
+                    generation_bound: 1,
                 },
                 ClassPolicy {
                     id: "source-bundles",
@@ -365,25 +399,131 @@ impl RetentionPolicy {
                     generation_bound: 0,
                 },
                 ClassPolicy {
+                    id: "unit-caches",
+                    purpose: CachePurpose::Generic,
+                    markers: &[CacheKeyMatcher::CiGenericUnitCaches],
+                    budget_bytes: GIBIBYTE / 4,
+                    generation_bound: 1,
+                },
+                ClassPolicy {
                     id: "docker-seed",
                     purpose: CachePurpose::DockerSeed,
-                    markers: &[CacheKeyMatcher::Contains("velnor-docker-seed-")],
+                    markers: &[
+                        CacheKeyMatcher::Contains("velnor-docker-seed-"),
+                        CacheKeyMatcher::Contains("guest-seed-"),
+                    ],
                     budget_bytes: GIBIBYTE,
                     generation_bound: 1,
                 },
                 ClassPolicy {
                     id: "compiler-snapshots",
                     purpose: CachePurpose::Outputs,
-                    markers: &[CacheKeyMatcher::Contains("-mbx-v3-")],
-                    budget_bytes: 7 * GIBIBYTE / 2,
+                    markers: &[
+                        CacheKeyMatcher::Contains("-mbx-v3-"),
+                        CacheKeyMatcher::Contains("velnor-policy-mbx-"),
+                    ],
+                    budget_bytes: 3 * GIBIBYTE,
                     generation_bound: 2,
                 },
             ],
         }
     }
+
+    /// Build the maintenance retention policy from `[cache.github]` overrides.
+    /// Absent fields keep [`Self::default_policy`] values.
+    pub(crate) fn from_config(config: &crate::config::CacheGithubSection) -> Self {
+        let mut policy = Self::default_policy();
+        if let Some(total_bytes) = config.budget_bytes {
+            policy.total_bytes = total_bytes;
+        }
+        if let Some(producer_window_seconds) = config.producer_window_seconds {
+            policy.producer_window_seconds = producer_window_seconds;
+        }
+        if let Some(bound) = config.mbx_generation_bound
+            && let Some(class) = policy
+                .classes
+                .iter_mut()
+                .find(|class| class.id == "compiler-snapshots")
+        {
+            class.generation_bound = bound;
+        }
+        policy
+    }
 }
 
 const GIBIBYTE: u64 = 1_073_741_824;
+
+/// Held bytes and entry count for one retention class in a live account
+/// snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct ClassBudgetTotal {
+    pub(crate) id: String,
+    pub(crate) budget_bytes: u64,
+    pub(crate) held_bytes: u64,
+    pub(crate) entry_count: u32,
+}
+
+/// The account budget, held total, headroom, and per-class totals the
+/// maintenance job uses for enforcement and low-headroom warnings.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct BudgetReport {
+    pub(crate) total_budget_bytes: u64,
+    pub(crate) total_held_bytes: u64,
+    pub(crate) headroom_bytes: i64,
+    pub(crate) classes: Vec<ClassBudgetTotal>,
+}
+
+fn classify_key<'a>(key: &str, policy: &'a RetentionPolicy) -> (&'a str, u64, u32) {
+    let class = policy
+        .classes
+        .iter()
+        .find(|class| class.markers.iter().any(|matcher| matcher.matches(key)))
+        .map_or("unclassified", |class| class.id);
+    let budget_bytes = policy
+        .classes
+        .iter()
+        .find(|candidate| candidate.id == class)
+        .map_or(0, |candidate| candidate.budget_bytes);
+    (class, budget_bytes, 1)
+}
+
+/// Sum the live account by retention class so budget mode can expose per-class
+/// totals for headroom scripting.
+pub(crate) fn budget_report(entries: &[CacheEntry], policy: &RetentionPolicy) -> BudgetReport {
+    let mut classes: Vec<(String, u64, u32, u64)> = Vec::new();
+    for entry in entries {
+        let (class_id, budget_bytes, _) = classify_key(&entry.key, policy);
+        match classes.iter_mut().find(|(id, _, _, _)| id == class_id) {
+            Some((_, held, count, budget)) => {
+                *held = held.saturating_add(entry.size_in_bytes);
+                *count += 1;
+                *budget = budget_bytes;
+            }
+            None => classes.push((class_id.to_owned(), entry.size_in_bytes, 1, budget_bytes)),
+        }
+    }
+    classes.sort_by(|(left, _, _, _), (right, _, _, _)| left.cmp(right));
+    let total_held_bytes: u64 = entries.iter().map(|entry| entry.size_in_bytes).sum();
+    let headroom_bytes = i64::try_from(policy.total_bytes)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(i64::try_from(total_held_bytes).unwrap_or(i64::MAX));
+    BudgetReport {
+        total_budget_bytes: policy.total_bytes,
+        total_held_bytes,
+        headroom_bytes,
+        classes: classes
+            .into_iter()
+            .map(
+                |(id, held_bytes, entry_count, budget_bytes)| ClassBudgetTotal {
+                    id,
+                    budget_bytes,
+                    held_bytes,
+                    entry_count,
+                },
+            )
+            .collect(),
+    }
+}
 
 /// One entry of the Actions cache account, as the API reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -817,6 +957,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retention_policy_from_config_overrides_github_budget() {
+        let config = crate::config::CacheGithubSection {
+            budget_bytes: Some(4_294_967_296),
+            producer_window_seconds: Some(3_600),
+            mbx_generation_bound: Some(3),
+        };
+        let policy = RetentionPolicy::from_config(&config);
+        assert_eq!(policy.total_bytes, 4_294_967_296);
+        assert_eq!(policy.producer_window_seconds, 3_600);
+        let compiler = policy_class(&policy, "compiler-snapshots");
+        assert_eq!(compiler.generation_bound, 3);
+    }
+
     /// An RFC 3339 timestamp at `epoch`, in the exact shape the cache API
     /// reports.
     fn stamp_from_epoch(epoch: i64) -> String {
@@ -916,17 +1070,26 @@ mod tests {
         )
     }
 
+    fn report_class<'a>(report: &'a BudgetReport, id: &str) -> &'a ClassBudgetTotal {
+        must_some(
+            report.classes.iter().find(|class| class.id == id),
+            "budget report class exists",
+        )
+    }
+
     #[test]
     fn purpose_is_the_retention_identity_and_markers_only_match_entries() {
         const HOUR: i64 = 3_600;
         let policy = RetentionPolicy::default_policy();
         let expected = [
             ("toolchain-seeds", CachePurpose::Toolchains, Tier::Protected),
+            ("runtime-binary", CachePurpose::Generic, Tier::Rolling),
             (
                 "source-bundles",
                 CachePurpose::CargoSources,
                 Tier::Protected,
             ),
+            ("unit-caches", CachePurpose::Generic, Tier::Rolling),
             ("docker-seed", CachePurpose::DockerSeed, Tier::Baseline),
             ("compiler-snapshots", CachePurpose::Outputs, Tier::Rolling),
         ];
@@ -986,15 +1149,21 @@ mod tests {
             )
         };
 
-        assert!(CacheKeyMatcher::CiRustCargoSources.matches("ci-Linux-rust-unit-abc123"));
-        let source = generic_class("ci-Linux-rust-unit-abc123");
+        assert!(CacheKeyMatcher::CiRustCargoSources.matches("ci-Linux-X64-rust-abc123"));
+        assert!(CacheKeyMatcher::CiRustCargoSources
+            .matches("ci-release-Linux-rust-example-runner-abc123"));
+        let source = generic_class("ci-Linux-X64-rust-abc123");
         assert_eq!(source.0.as_str(), "source-bundles");
         assert_eq!(source.1, CachePurpose::CargoSources);
+        let release_source = generic_class("ci-release-Linux-rust-example-runner-abc123");
+        assert_eq!(release_source.0.as_str(), "source-bundles");
+        assert_eq!(release_source.1, CachePurpose::CargoSources);
 
         for key in [
             "ci-Linux-docs-docs-abc123",
             "ci-Linux-bun-package-abc123",
             "ci-Linux-opentofu-opentofu-abc123",
+            "ci-release-Linux-bun-example-abc123",
             "prefix-ci-Linux-rust-unit-abc123",
             "ci-Linux-rustlike-abc123",
         ] {
@@ -1002,18 +1171,107 @@ mod tests {
                 !CacheKeyMatcher::CiRustCargoSources.matches(key),
                 "generic key must not match the Rust Cargo-source matcher: {key}"
             );
+        }
+        for key in [
+            "ci-Linux-docs-docs-abc123",
+            "ci-Linux-bun-package-abc123",
+            "ci-Linux-opentofu-opentofu-abc123",
+            "ci-release-Linux-bun-example-abc123",
+        ] {
+            assert!(
+                CacheKeyMatcher::CiGenericUnitCaches.matches(key),
+                "unit cache key must match the generic unit matcher: {key}"
+            );
+            let actual = generic_class(key);
+            assert_eq!(
+                actual.0.as_str(),
+                "unit-caches",
+                "unit cache key must land in unit-caches: {key}"
+            );
+            assert_eq!(actual.1, CachePurpose::Generic, "unit cache key: {key}");
+        }
+        for key in [
+            "prefix-ci-Linux-rust-unit-abc123",
+            "ci-Linux-rustlike-abc123",
+        ] {
             let actual = generic_class(key);
             assert_eq!(
                 actual.0.as_str(),
                 "unclassified",
-                "generic key must remain generic: {key}"
-            );
-            assert_eq!(
-                actual.1,
-                CachePurpose::Generic,
-                "generic key must remain generic: {key}"
+                "unknown key must remain unclassified: {key}"
             );
         }
+    }
+
+    #[test]
+    fn emitted_key_families_classify_into_retention_classes() {
+        const HOUR: i64 = 3_600;
+        let policy = RetentionPolicy::default_policy();
+        let entries = vec![
+            aged("mise", "mise-v1-linux-x64-ubuntu24", 1, 30 * HOUR),
+            aged(
+                "runtime",
+                "velnor-workflow-v1-Linux-X64-deadbeef",
+                1,
+                30 * HOUR,
+            ),
+            aged("guest", "guest-seed-x86_64-deadbeef", 1, 30 * HOUR),
+            aged(
+                "policy",
+                "velnor-policy-mbx-1.11.1-Linux-X64-deadbeef",
+                1,
+                30 * HOUR,
+            ),
+        ];
+        let classified = classify(&entries, &policy, NOW);
+        let actual = classified
+            .iter()
+            .map(|candidate| candidate.class.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                "toolchain-seeds",
+                "runtime-binary",
+                "docker-seed",
+                "compiler-snapshots"
+            ]
+        );
+    }
+
+    #[test]
+    fn budget_report_exposes_per_class_totals_and_headroom() {
+        let policy = RetentionPolicy::default_policy();
+        let entries = vec![
+            entry(
+                "a",
+                "velnor-rustup-Linux-X64-seed",
+                100,
+                "2026-09-01T00:00:00Z",
+            ),
+            entry(
+                "b",
+                "mise-v1-linux-x64-ubuntu24",
+                200,
+                "2026-09-01T00:00:00Z",
+            ),
+            entry(
+                "c",
+                "velnor-workflow-v1-Linux-X64-deadbeef",
+                300,
+                "2026-09-01T00:00:00Z",
+            ),
+        ];
+        let report = budget_report(&entries, &policy);
+        assert_eq!(report.total_budget_bytes, policy.total_bytes);
+        assert_eq!(report.total_held_bytes, 600);
+        assert_eq!(report.headroom_bytes, 8_589_933_992);
+        let toolchain = report_class(&report, "toolchain-seeds");
+        assert_eq!(toolchain.held_bytes, 300);
+        assert_eq!(toolchain.entry_count, 2);
+        let runtime = report_class(&report, "runtime-binary");
+        assert_eq!(runtime.held_bytes, 300);
+        assert_eq!(runtime.entry_count, 1);
     }
 
     #[test]

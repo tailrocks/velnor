@@ -14,17 +14,22 @@ pub fn is_package_socket_mode() -> bool {
     storage_root_prefix().is_some_and(|prefix| prefix == Path::new("/var"))
 }
 
-/// Root directory for `<instance>/control.sock` and `<instance>/admin.sock`.
+/// Root directory for `<instance>/control.sock` and `<instance>/admin.sock`,
+/// for this process's own `VELNOR_STORAGE_ROOT`.
 #[must_use]
 pub fn socket_root() -> PathBuf {
-    if let Some(prefix) = storage_root_prefix() {
-        if prefix == Path::new("/var") {
-            PathBuf::from("/run/velnor")
-        } else {
-            prefix.join("run/velnor")
-        }
-    } else {
-        user_runtime_dir().join("velnor")
+    socket_root_for_storage_root(storage_root_prefix().as_deref())
+}
+
+/// Socket root for a daemon running under `storage_root` (its
+/// `VELNOR_STORAGE_ROOT`): the storage layout's runtime root, `/run/velnor`
+/// for the packaged `/var`. `None` is the user-mode runtime directory.
+#[must_use]
+pub fn socket_root_for_storage_root(storage_root: Option<&Path>) -> PathBuf {
+    match storage_root {
+        Some(prefix) if prefix == Path::new("/var") => PathBuf::from("/run/velnor"),
+        Some(prefix) => prefix.join("run/velnor"),
+        None => user_runtime_dir().join("velnor"),
     }
 }
 

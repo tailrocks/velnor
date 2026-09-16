@@ -75,6 +75,7 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
             "microVM preflight passed (Firecracker {}).",
             crate::execution::FIRECRACKER_VERSION
         );
+        report_compiler_store_budget(&preflight_work_dir(args.work_dir)?);
         return Ok(());
     }
     let work_dir = preflight_work_dir(args.work_dir)?;
@@ -91,6 +92,17 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     crate::execution::verify_docker_job_cgroup_boundary_with_image(
         runner,
         Some(&args.docker_image),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    // A probed capability, not a gate: a daemon that cannot back a
+    // read-through store layer still runs jobs, on their write scope alone,
+    // and every such admission says so in its job log. Preflight records the
+    // verdict so the operator learns it before the first PR job does.
+    let store_overlay = crate::execution::store_overlay_support(
+        runner,
+        Some(&args.docker_image),
+        &work_dir,
+        docker_host_work_dir.as_deref(),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if args.require_buildx {
@@ -142,7 +154,28 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
         println!("Docker host work dir: {}", path.display());
     }
     println!("Image: {}", args.docker_image);
+    println!(
+        "Read-through store overlay (D18): {}",
+        store_overlay.summary()
+    );
+    report_compiler_store_budget(&work_dir);
     Ok(())
+}
+
+/// The one number that bounds the compiler stores on this host, and its
+/// derivation — the same [`crate::capacity::StoreBudgetPolicy`] the daemon
+/// enforces at startup and at every admission, read from the daemon's
+/// environment (`VELNOR_EMERGENCY_RESERVE_BYTES`, `VELNOR_JOB_PEAK_BYTES`,
+/// `VELNOR_SLOTS`, defaults as the daemon's flags). Reporting only: a probe
+/// failure is printed, never a preflight failure.
+fn report_compiler_store_budget(work_dir: &Path) {
+    match crate::capacity::StoreBudgetPolicy::probe_from_env(work_dir) {
+        Ok(policy) => println!(
+            "Compiler store budget: {}",
+            policy.describe_compiler_store_budget()
+        ),
+        Err(error) => println!("Compiler store budget: unmeasured ({error:#})"),
+    }
 }
 
 fn run_required(
@@ -484,6 +517,7 @@ mod tests {
                     "velnor-script-ok\n",
                 )?;
             }
+            let inspected_mountpoints;
             let stdout = if program == "docker"
                 && args
                     == [
@@ -492,6 +526,18 @@ mod tests {
                         "{{.CgroupDriver}} {{.CgroupVersion}}".to_string(),
                     ] {
                 "systemd 2\n"
+            } else if program == "docker"
+                && args.starts_with(&["volume".to_string(), "inspect".to_string()])
+            {
+                // The store overlay probe asks for its scratch volumes' data
+                // directories; answer like a daemon whose volumes live under
+                // its root.
+                inspected_mountpoints = args
+                    [args.iter().position(|arg| arg == "--").unwrap() + 1..]
+                    .iter()
+                    .map(|name| format!("/var/lib/docker/volumes/{name}/_data\n"))
+                    .collect::<String>();
+                inspected_mountpoints.as_str()
             } else if program == "getconf" && args == ["_NPROCESSORS_ONLN".to_string()] {
                 "1\n"
             } else if program == "systemctl"

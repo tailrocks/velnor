@@ -636,6 +636,8 @@ fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
     Ok(content)
 }
 
+/// Test-only view of [`classify_job_name`]: the lane of a comparison job.
+#[cfg(test)]
 fn lane_of_job_name(name: &str) -> Option<Lane> {
     match classify_job_name(name) {
         JobRole::Comparison { lane, .. } => Some(lane),
@@ -684,28 +686,26 @@ enum JobRole<'a> {
     Comparison { lane: Lane, key: &'a str },
 }
 
-/// Generated identity: `GitHub|Velnor / <kind> / <unit>`.
-/// The first segment is the lane; `velnor` inside a unit id is not a lane token.
-fn parse_lane_first(name: &str) -> Option<(Lane, &str)> {
-    let (lane, rest) = if let Some(rest) = name.strip_prefix("GitHub / ") {
-        (Lane::GitHub, rest)
-    } else if let Some(rest) = name.strip_prefix("Velnor / ") {
-        (Lane::Velnor, rest)
-    } else {
-        return None;
+/// Generated identity: `<Kind> · <unit> / GitHub|Velnor` (D1).
+/// The lane is the trailing segment; `velnor` inside a unit label is not a lane token.
+fn parse_unit_first(name: &str) -> Option<(Lane, &str)> {
+    let (prefix, lane_token) = name.rsplit_once(" / ")?;
+    let lane = match lane_token {
+        "GitHub" => Lane::GitHub,
+        "Velnor" => Lane::Velnor,
+        _ => return None,
     };
-    let (kind, unit) = rest.rsplit_once(" / ")?;
-    if kind.is_empty() || unit.is_empty() {
+    if prefix.is_empty() || prefix.starts_with("Control /") {
         return None;
     }
-    Some((lane, rest))
+    Some((lane, prefix))
 }
 
 fn classify_job_name(name: &str) -> JobRole<'_> {
     if name.starts_with("Control /") {
         return JobRole::Control;
     }
-    if let Some((lane, key)) = parse_lane_first(name) {
+    if let Some((lane, key)) = parse_unit_first(name) {
         return JobRole::Comparison { lane, key };
     }
     let lower = name.to_ascii_lowercase();
@@ -835,6 +835,8 @@ fn pair_lane_census(jobs: &[Job]) -> PairingCensus {
     census
 }
 
+/// Test-only view of [`pair_lane_census`]: just the matched pairs.
+#[cfg(test)]
 fn pair_lane_jobs(jobs: &[Job]) -> Vec<(Job, Job)> {
     pair_lane_census(jobs).matched_pairs()
 }
@@ -1640,22 +1642,22 @@ mod tests {
     #[test]
     fn generated_matched_pair_passes_strict_bijection() {
         let jobs = vec![
-            named_job(1, "GitHub / Rust / rust-policy"),
-            named_job(2, "Velnor / Rust / rust-policy"),
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job(2, "Rust · rust-policy / Velnor"),
         ];
         let census = pair_lane_census(&jobs);
         assert_eq!(census.matched.len(), 1);
-        assert_eq!(census.matched[0].2, "Rust / rust-policy");
+        assert_eq!(census.matched[0].2, "Rust · rust-policy");
         assert!(!census.has_parity_failures());
         let report = format_pairing_report(&census).unwrap();
         assert!(report.contains("### Matched pairs"));
-        assert!(report.contains("GitHub / Rust / rust-policy"));
-        assert!(report.contains("Velnor / Rust / rust-policy"));
+        assert!(report.contains("Rust · rust-policy / GitHub"));
+        assert!(report.contains("Rust · rust-policy / Velnor"));
     }
 
     #[test]
     fn github_only_unit_fails_strict() {
-        let jobs = vec![named_job(1, "GitHub / Rust / rust-policy")];
+        let jobs = vec![named_job(1, "Rust · rust-policy / GitHub")];
         let census = pair_lane_census(&jobs);
         assert_eq!(census.github_only.len(), 1);
         assert!(census.has_parity_failures());
@@ -1667,7 +1669,7 @@ mod tests {
 
     #[test]
     fn velnor_only_unit_fails_strict() {
-        let jobs = vec![named_job(2, "Velnor / Rust / rust-policy")];
+        let jobs = vec![named_job(2, "Rust · rust-policy / Velnor")];
         let census = pair_lane_census(&jobs);
         assert_eq!(census.velnor_only.len(), 1);
         assert!(census.has_parity_failures());
@@ -1679,9 +1681,9 @@ mod tests {
     #[test]
     fn duplicate_pair_fails_strict() {
         let jobs = vec![
-            named_job(1, "GitHub / Rust / rust-policy"),
-            named_job(3, "GitHub / Rust / rust-policy"),
-            named_job(2, "Velnor / Rust / rust-policy"),
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job(3, "Rust · rust-policy / GitHub"),
+            named_job(2, "Rust · rust-policy / Velnor"),
         ];
         let census = pair_lane_census(&jobs);
         assert_eq!(census.duplicate_github.len(), 1);
@@ -1695,10 +1697,10 @@ mod tests {
     #[test]
     fn skipped_counterpart_fails_strict() {
         let jobs = vec![
-            named_job(1, "GitHub / Rust / rust-policy"),
+            named_job(1, "Rust · rust-policy / GitHub"),
             named_job_status(
                 2,
-                "Velnor / Rust / rust-policy",
+                "Rust · rust-policy / Velnor",
                 "completed",
                 Some("skipped"),
             ),
@@ -1709,8 +1711,8 @@ mod tests {
         assert!(census.has_parity_failures());
 
         let status_skipped = vec![
-            named_job(1, "GitHub / Rust / rust-policy"),
-            named_job_status(2, "Velnor / Rust / rust-policy", "skipped", None),
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job_status(2, "Rust · rust-policy / Velnor", "skipped", None),
         ];
         let census = pair_lane_census(&status_skipped);
         assert_eq!(census.skipped_counterpart.len(), 1);
@@ -1723,11 +1725,11 @@ mod tests {
     #[test]
     fn control_jobs_do_not_create_false_parity_failure() {
         let jobs = vec![
-            named_job(1, "GitHub / Rust / rust-policy"),
-            named_job(2, "Velnor / Rust / rust-policy"),
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job(2, "Rust · rust-policy / Velnor"),
             named_job(3, "Control / Planning"),
             named_job(4, "Control / Aggregate"),
-            named_job(5, "Control / Rust / prepare-cargo"),
+            named_job(5, "Control / Prepare Cargo"),
             named_job(6, "lint"),
         ];
         let census = pair_lane_census(&jobs);
@@ -1744,10 +1746,10 @@ mod tests {
     #[test]
     fn unit_id_containing_velnor_is_not_a_lane_token() {
         let jobs = vec![
-            named_job(1, "GitHub / Rust / rust-velnor-tools"),
-            named_job(2, "Velnor / Rust / rust-velnor-tools"),
-            named_job(3, "GitHub / Rust / rust-policy"),
-            named_job(4, "Velnor / Rust / rust-policy"),
+            named_job(1, "Rust · rust-velnor-tools / GitHub"),
+            named_job(2, "Rust · rust-velnor-tools / Velnor"),
+            named_job(3, "Rust · rust-policy / GitHub"),
+            named_job(4, "Rust · rust-policy / Velnor"),
         ];
         let census = pair_lane_census(&jobs);
         assert_eq!(census.matched.len(), 2);
@@ -1756,8 +1758,8 @@ mod tests {
             .iter()
             .map(|(_, _, key)| key.as_str())
             .collect();
-        assert!(keys.contains(&"Rust / rust-velnor-tools"));
-        assert!(keys.contains(&"Rust / rust-policy"));
+        assert!(keys.contains(&"Rust · rust-velnor-tools"));
+        assert!(keys.contains(&"Rust · rust-policy"));
         assert!(census.ambiguous.is_empty());
         assert!(!census.has_parity_failures());
     }
@@ -1765,8 +1767,8 @@ mod tests {
     #[test]
     fn unambiguous_mapping_failure_fails_strict() {
         let jobs = vec![
-            named_job(1, "GitHub / Rust / rust-policy"),
-            named_job(2, "Velnor / Rust / rust-policy"),
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job(2, "Rust · rust-policy / Velnor"),
             named_job(3, "github-to-velnor sync"),
         ];
         let census = pair_lane_census(&jobs);

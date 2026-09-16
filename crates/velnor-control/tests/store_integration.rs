@@ -581,24 +581,116 @@ fn next_slot_transition_retained_retry_survives_newer_generation() {
     );
 }
 
+/// Sentry `velnor-daemon@dogfood` slot-4 (pid 2535016), 2026-09-15 13:41Z.
+/// The daemon keyed slot requests by JIT agent id; agent 7202 was first the
+/// promoted successor (recycling/idle keyed by it) and then the torn-down
+/// predecessor, so its second `recycling` request collided with the first as
+/// `idempotency_conflict`, the write was skipped, and the projection stuck in
+/// `teardown` until the next cycle declared `teardown` again — refused as
+/// `teardown → teardown`. The store must keep refusing both: the caller is
+/// what has to stop producing them.
 #[test]
-fn latest_slot_transition_request_requires_matching_slot_identity() {
-    let temp = TempDb::new("latest-slot-request-identity");
+fn colliding_request_keys_skip_writes_and_strand_the_slot_in_teardown() {
+    let temp = TempDb::new("next-slot-agent-key-collision");
     let store = Store::open(&temp.path).unwrap();
-    let identity = slot_identity("latest-slot-request-identity");
-    assert!(store
+    let identity = slot_identity("next-slot-agent-key-collision");
+    let request = |key: &str, target: SlotPhase, message: &str| {
+        next_slot_request(key, 1, target, None, Some(message))
+    };
+    // Cycle 8 recycle: teardown of the consumed agent, then recycling/idle
+    // keyed by the promoted successor 7202.
+    for (key, target, message) in [
+        (
+            "jit-agent-7100-generation-1-teardown",
+            SlotPhase::Teardown,
+            "cycle 8",
+        ),
+        (
+            "jit-agent-7202-generation-1-recycling",
+            SlotPhase::Recycling,
+            "cycle 8",
+        ),
+        (
+            "jit-agent-7202-generation-1-idle",
+            SlotPhase::Idle,
+            "cycle 8",
+        ),
+        // Cycle 9: agent 7202's registration disappeared; it is torn down.
+        (
+            "jit-agent-7202-generation-1-teardown",
+            SlotPhase::Teardown,
+            "cycle 9",
+        ),
+    ] {
+        assert!(store
+            .record_next_slot_transition(&identity, &request(key, target, message))
+            .unwrap());
+    }
+    // Reconfigure keyed by the retained agent id reuses cycle 8's recycling
+    // key with a different message: refused, nothing written.
+    let collision = store
         .record_next_slot_transition(
             &identity,
-            &next_slot_request("identity-request", 1, SlotPhase::Teardown, None, None),
+            &request(
+                "jit-agent-7202-generation-1-recycling",
+                SlotPhase::Recycling,
+                "cycle 9",
+            ),
         )
-        .unwrap());
+        .unwrap_err();
+    assert_eq!(
+        collision.envelope.reason,
+        "store.slot.transition.idempotency_conflict"
+    );
+    let stranded = store
+        .slot("next-slot-agent-key-collision", &identity.slot_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stranded.phase, SlotPhase::Teardown);
+    // The new agent's idle and the following cycle's teardown are then both
+    // illegal from the stranded phase.
+    for (key, target) in [
+        ("jit-agent-7206-generation-1-idle", SlotPhase::Idle),
+        ("jit-agent-7206-generation-1-teardown", SlotPhase::Teardown),
+    ] {
+        let illegal = store
+            .record_next_slot_transition(&identity, &request(key, target, "cycle 10"))
+            .unwrap_err();
+        assert_eq!(illegal.envelope.reason, "store.slot.transition.illegal");
+    }
+    assert_eq!(store.illegal_transition_edges(), 2);
 
-    let mut wrong = identity.clone();
-    wrong.slot_index = 1;
-    let error = store
-        .latest_slot_transition_request_key(&wrong, Generation(1))
-        .expect_err("recovery must reject mismatched slot metadata");
-    assert_eq!(error.envelope.reason, "store.slot.identity.mismatch");
+    // The same lifecycle declared with sequence-derived keys never collides:
+    // every request is distinct, every edge is legal, and the slot is idle.
+    let identity = SlotIdentity {
+        slot_id: SlotId("fixture-2".to_owned()),
+        ..slot_identity("next-slot-agent-key-collision")
+    };
+    let ring = [
+        (SlotPhase::Teardown, "cycle 8"),
+        (SlotPhase::Recycling, "cycle 8"),
+        (SlotPhase::Idle, "cycle 8"),
+        (SlotPhase::Teardown, "cycle 9"),
+        (SlotPhase::Recycling, "cycle 9"),
+        (SlotPhase::Idle, "cycle 9"),
+        (SlotPhase::Teardown, "cycle 10"),
+        (SlotPhase::Recycling, "cycle 10"),
+        (SlotPhase::Idle, "cycle 10"),
+    ];
+    for (offset, (target, message)) in ring.into_iter().enumerate() {
+        let sequence = offset + 1;
+        let key = format!("slot-g1-s{sequence}-{}", target.as_str());
+        assert!(store
+            .record_next_slot_transition(&identity, &request(&key, target, message))
+            .unwrap());
+    }
+    let converged = store
+        .slot("next-slot-agent-key-collision", &identity.slot_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(converged.phase, SlotPhase::Idle);
+    assert_eq!(converged.transition_sequence, 9);
+    assert_eq!(store.illegal_transition_edges(), 2);
 }
 
 #[test]

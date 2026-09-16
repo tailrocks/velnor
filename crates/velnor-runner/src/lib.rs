@@ -29,11 +29,16 @@ mod command_files;
 mod config;
 pub use config::config_dir;
 mod container;
+pub mod daemon_instance;
 pub mod docker;
 mod docker_argv;
 mod docker_lease;
 pub mod execution;
 mod executor;
+/// The host-process seam the execution probes run through, so `velnorctl`
+/// diagnostics can drive the runner's own capability probes against the
+/// daemon they selected instead of re-implementing them.
+pub use executor::{CommandResult, CommandRunner};
 mod expression;
 #[cfg(test)]
 #[allow(
@@ -51,9 +56,11 @@ pub(crate) mod gha_cache;
 mod git_mirror;
 mod github_adapter;
 pub mod host_capacity;
+mod job_claim;
 mod job_message;
 mod leftover_disk;
 pub mod manifest;
+pub(crate) mod mbx_store;
 mod mise;
 /// The locked-mise install contract the generator must emit against:
 /// `install_args` tokens are tool keys the committed lock pins. Re-exported so
@@ -66,6 +73,9 @@ mod platform;
 mod preflight;
 pub mod protocol;
 mod release;
+/// The compile-time build identity, shared with `velnorctl --version` so the
+/// operator CLI reports the same release/source SHA as `release export`.
+pub use release::{embedded as embedded_build_identity, EmbeddedIdentity};
 pub mod runner;
 mod runtime_env;
 mod sccache_compat;

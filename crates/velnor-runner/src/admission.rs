@@ -375,7 +375,7 @@ impl ContentsApiMetadataSource {
         Self::with_api_url(token, scope.api_base_url.as_str())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "test-support"))]
     #[allow(
         clippy::unwrap_used,
         clippy::expect_used,

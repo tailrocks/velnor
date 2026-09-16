@@ -182,6 +182,229 @@ pub fn prefer_canonical_or_existing_legacy(canonical: PathBuf, legacy: PathBuf) 
     }
 }
 
+/// One read-through store layer for the Docker backend (D18).
+///
+/// `lower` is the trusted scope's store on the host, read beneath a
+/// job-scoped upper. The layer is an overlay the *daemon* mounts — a `local`
+/// volume with `type=overlay` — so the runner needs no `CAP_SYS_ADMIN` of its
+/// own and a VM-hosted daemon (OrbStack, Docker Desktop) mounts it inside the
+/// VM kernel that also runs the job. The job container sees one merged tree
+/// at `target`.
+///
+/// The overlay's `upperdir` and `workdir` are two job-labelled Docker named
+/// volumes with no host bind ([`Self::scratch_volumes`]). They live on the
+/// daemon's own volume storage — the VM disk under OrbStack/Docker Desktop,
+/// the Docker root on native Linux — so overlayfs never has to write through
+/// virtiofs, whose upper it can only mount read-only. A PR job's writes are
+/// job scratch: they never reach the trusted store, and they are discarded
+/// with the rest of the job's Docker resources at teardown
+/// ([`crate::docker_lease::remove_job_owned`], which force-removes every
+/// `velnor.job-id`-labelled volume), on a failed start
+/// ([`crate::docker_lease::reclaim_stale_job_owned`]), and at daemon start
+/// for jobs a crash or drain left behind
+/// ([`crate::docker_lease::reclaim_daemon_orphan_jobs`]).
+///
+/// Whether the daemon can mount such a layer is a probed capability
+/// ([`crate::execution::store_overlay_support`]); admission only asks for a
+/// layer when the probe passed, so a failure to mount one at job start is a
+/// job error, never a silent fallback to the write scope alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreOverlay {
+    /// Overlay volume name; carries the job-id label so job-owned reclaim
+    /// removes it with the rest of the job's Docker resources.
+    pub volume: String,
+    /// Host-visible trusted store directory read beneath the upper.
+    pub lower: PathBuf,
+    /// Job-labelled named volume whose data directory is the overlayfs
+    /// `upperdir`: every write the job makes through `target`.
+    pub upper_volume: String,
+    /// Job-labelled named volume whose data directory is the overlayfs
+    /// `workdir`; same daemon filesystem as the upper by construction.
+    pub work_volume: String,
+    /// Container path the merged tree is mounted at.
+    pub target: String,
+}
+
+/// The daemon-side data directories of a job's overlay scratch volumes, as
+/// `docker volume inspect` reports them: the paths the overlay volume's
+/// `upperdir`/`workdir` operands name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScratchMountpoints(std::collections::BTreeMap<String, PathBuf>);
+
+impl ScratchMountpoints {
+    /// Pair the volume names passed to `docker volume inspect` with the
+    /// `{{.Mountpoint}}` lines it printed, one per name in argument order.
+    ///
+    /// # Errors
+    /// The line count does not match the names, or a mountpoint is not an
+    /// absolute path — either means the daemon did not answer for exactly
+    /// these volumes and the overlay must not be built on a guess.
+    pub fn parse(names: &[String], stdout: &str) -> std::io::Result<Self> {
+        let lines = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if lines.len() != names.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "docker volume inspect answered {} mountpoint(s) for {} volume(s): {stdout:?}",
+                    lines.len(),
+                    names.len()
+                ),
+            ));
+        }
+        let mut map = std::collections::BTreeMap::new();
+        for (name, line) in names.iter().zip(lines) {
+            let path = Path::new(line);
+            if !path.is_absolute() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("docker volume {name} has no absolute mountpoint: {line:?}"),
+                ));
+            }
+            map.insert(name.clone(), path.to_path_buf());
+        }
+        Ok(Self(map))
+    }
+
+    fn get(&self, volume: &str) -> std::io::Result<&Path> {
+        self.0.get(volume).map(PathBuf::as_path).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no mountpoint was inspected for overlay scratch volume {volume}"),
+            )
+        })
+    }
+}
+
+impl StoreOverlay {
+    /// The overlay layers of the Cargo store for one job: every daemon-shared
+    /// Cargo subtree gets a job-scoped upper layered over `lower_scope`.
+    ///
+    /// Pure naming; the executor creates the volumes when the job starts.
+    #[must_use]
+    pub fn cargo_layers(container_name: &str, temp_host: &Path, lower_scope: &str) -> Vec<Self> {
+        let lower_root = crate::container::cargo_store_host(temp_host, lower_scope);
+        crate::container::CARGO_STORE_LAYERS
+            .iter()
+            .map(|(subpath, target)| {
+                let key = crate::container::sanitize_store_key(subpath);
+                let volume = format!("{container_name}-overlay-cargo-{key}");
+                Self {
+                    upper_volume: format!("{volume}-upper"),
+                    work_volume: format!("{volume}-work"),
+                    volume,
+                    lower: lower_root.join(subpath),
+                    target: (*target).to_owned(),
+                }
+            })
+            .collect()
+    }
+
+    /// The two scratch volumes this layer needs before the overlay volume
+    /// can be created: upper first, work second.
+    #[must_use]
+    pub fn scratch_volumes(&self) -> [&str; 2] {
+        [&self.upper_volume, &self.work_volume]
+    }
+
+    /// `docker volume create` argv for one scratch volume: a plain `local`
+    /// volume with no host bind, labelled like every other job-owned Docker
+    /// resource so the job's reclaim removes it.
+    #[must_use]
+    pub fn create_scratch_volume_args(volume: &str, labels: &[(&str, &str)]) -> Vec<String> {
+        let mut args = vec![
+            "volume".to_owned(),
+            "create".to_owned(),
+            "--driver".to_owned(),
+            "local".to_owned(),
+        ];
+        for (key, value) in labels {
+            args.push("--label".to_owned());
+            args.push(format!("{key}={value}"));
+        }
+        args.push(volume.to_owned());
+        args
+    }
+
+    /// `docker volume inspect` argv that prints one `Mountpoint` line per
+    /// named volume, in argument order ([`ScratchMountpoints::parse`]).
+    #[must_use]
+    pub fn inspect_mountpoints_args(volumes: &[String]) -> Vec<String> {
+        let mut args = vec![
+            "volume".to_owned(),
+            "inspect".to_owned(),
+            "--format".to_owned(),
+            "{{.Mountpoint}}".to_owned(),
+            "--".to_owned(),
+        ];
+        args.extend(volumes.iter().cloned());
+        args
+    }
+
+    /// `docker volume create` argv for the overlay volume. `daemon_visible`
+    /// maps the host-visible lower to the path the daemon mounts (identity
+    /// on a native Linux daemon; the VM mapping for Docker Desktop/OrbStack);
+    /// the upper and work operands are the inspected data directories of
+    /// this layer's scratch volumes, already in the daemon's view.
+    ///
+    /// # Errors
+    /// The lower could not be mapped into the daemon's view, or a scratch
+    /// volume's mountpoint was not inspected.
+    pub fn create_volume_args<F>(
+        &self,
+        labels: &[(&str, &str)],
+        scratch: &ScratchMountpoints,
+        mut daemon_visible: F,
+    ) -> std::io::Result<Vec<String>>
+    where
+        F: FnMut(&Path, &str) -> std::io::Result<PathBuf>,
+    {
+        let lower = daemon_visible(&self.lower, "store overlay lower")?;
+        let upper = scratch.get(&self.upper_volume)?;
+        let work = scratch.get(&self.work_volume)?;
+        let mut args = vec![
+            "volume".to_owned(),
+            "create".to_owned(),
+            "--driver".to_owned(),
+            "local".to_owned(),
+        ];
+        for (key, value) in labels {
+            args.push("--label".to_owned());
+            args.push(format!("{key}={value}"));
+        }
+        args.extend([
+            "--opt".to_owned(),
+            "type=overlay".to_owned(),
+            "--opt".to_owned(),
+            "device=overlay".to_owned(),
+            "--opt".to_owned(),
+            format!("o={}", overlay_mount_options(&lower, upper, work)),
+            self.volume.clone(),
+        ]);
+        Ok(args)
+    }
+
+    /// The `-v` operand that mounts the merged tree into the job container.
+    #[must_use]
+    pub fn mount_operand(&self) -> String {
+        format!("{}:{}", self.volume, self.target)
+    }
+}
+
+/// overlayfs `-o` options for one lower/upper/work triple.
+#[must_use]
+pub fn overlay_mount_options(lower: &Path, upper: &Path, work: &Path) -> String {
+    format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lower.display(),
+        upper.display(),
+        work.display()
+    )
+}
+
 pub fn append_legacy_trust(root: PathBuf, trust_scope: &str) -> PathBuf {
     if root
         .file_name()

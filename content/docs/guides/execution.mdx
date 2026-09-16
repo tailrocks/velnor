@@ -118,6 +118,8 @@ Stated, not implied by omission:
 - **`actions/cache` subpaths other than `restore` and `save`.**
 - **Kache and the former Velnor compiler-cache service.**
 - **macOS and Windows.** Execution is Linux-only and macOS labels are rejected.
+  A Mac can still host Linux container jobs through its Docker VM; see the
+  [macOS on-demand host](/guides/macos-host) guide.
 
 ### MicroVM is narrower than Docker
 
@@ -201,14 +203,56 @@ boundary. Cancellation signals containers; it does not remove them. Removal is
 teardown's job, and teardown also reclaims services, networks, and BuildKit
 resources.
 
+#### Dual-lane cache transport
+
+Generated CI runs the same verification units on two lanes. Cache **keys**
+are lane-agnostic; transport, budget, and retention differ.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Same unit keys (rustup, mold, cargo, mbx, docker seed) per verification │
+│  Different transport + budget + observability per lane                   │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  GitHub lane                          Velnor lane
+  ───────────                          ───────────
+  Transport: actions/cache API         Transport: host bind mounts
+  Budget: 8 GiB (internal class table) Budget: 50 GiB caches class + mbx
+  Platform cap: 10 GB (7-day LRU)       Platform cap: host disk + slot GC
+  mbx: backend github, objects         mbx: backend local, per-slot store
+  PR: restore-only (no trusted save)   PR: host store writes (trust-scoped)
+  Outcomes: exact | prefix | cold      Outcomes: host_warm (persistent paths)
+```
+
+Each unit job emits a `VELNOR_CI_REPORT` line and a step summary through
+`report-velnor-ci-outcomes`. On the GitHub lane, `cache_outcomes.{rustup,mold,
+cargo,mbx,docker_seed}` classify `actions/cache/restore` results with
+`cache-primary-key` versus `cache-matched-key` (`exact`, `prefix`, or `cold`);
+mbx also consults its setup outputs and step-summary wording. On the Velnor
+lane the same fields report `host_warm` for layers backed by host-persistent
+stores (cargo registry/git, mise, mbx local backend, image-baked rustup/mold).
+Cold layers log `::warning::` and never fail the job.
+
+Trusted producers (`push` to the default branch, `schedule`, and trusted
+`workflow_dispatch`) save GitHub-lane snapshots; pull requests and fork PRs
+are restore-only on GitHub. Fork pull requests that require the Velnor lane are
+rejected at admission until an explicit GitHub-only policy is chosen.
+
+Unit jobs may declare `cache-mode: read` on low-trust triggers as defense in
+depth; Velnor ignores GitHub cache transport for host-persistent paths entirely.
+
 #### Docker Rust acceleration
 
-The default job image pins Mr Boxington (`mbx`) 1.8.3 and runs
+The default job image pins Mr Boxington (`mbx`) 1.11.1 and runs
 `mbx setup --yes` while building the image. The generated Cargo launcher is
 first on `PATH`, so workflow steps continue to invoke plain `cargo`; those
 commands transparently enter Mr Boxington. There is no default
 `RUSTC_WRAPPER`. Mr Boxington discovers the container's cgroup constraints and
 available resources instead of Velnor hardcoding CPU or memory values for it.
+The image deliberately uses standalone setup because noninteractive Velnor
+execs require the stable absolute Cargo shim path `/opt/mbx/bin/cargo`; the
+image bootstraps mise at 2026.9.9, which supports the current locked mbx
+backend.
 
 Velnor mounts the job's host-persistent Mr Boxington cache and managed target
 directories at `/var/cache/mbx`. The host store is partitioned by the job's

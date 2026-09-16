@@ -13,7 +13,7 @@ use std::{
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
@@ -24,8 +24,9 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{Generation, SlotId, SlotPhase, Slug, TelemetryEvent, Timestamp};
+use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
 
+use crate::job_claim::JobClaim;
 use crate::{
     action::{
         composite_action_invocations, composite_repository_action_plans,
@@ -417,36 +418,6 @@ struct RunServiceJobContext {
 struct AcquiredJobIdentity {
     plan_id: String,
     job_id: String,
-}
-
-/// Host-wide ownership of one run-service job.
-///
-/// GitHub can deliver the same runner request to sibling JIT slots. The run
-/// service acquisition is not a sufficient exclusion boundary, so claim the
-/// plan/job pair locally before either slot touches its deterministic workspace.
-struct JobClaim {
-    _file: File,
-}
-
-impl JobClaim {
-    fn try_acquire(run_root: &Path, plan_id: &str, job_id: &str) -> Result<Option<Self>> {
-        let claims = run_root.join("job-claims");
-        fs::create_dir_all(&claims)
-            .with_context(|| format!("create job claim directory {}", claims.display()))?;
-        let name = crate::container::sanitize_store_key(&format!("{plan_id}-{job_id}"));
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(claims.join(name))
-            .context("open host job claim")?;
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-            Err(error) => Err(error).context("lock host job claim"),
-        }
-    }
 }
 
 /// Serialize the complete configure transaction for one runner directory.
@@ -2972,7 +2943,72 @@ fn start_drain_listener(config_base: PathBuf) {
     });
 }
 
+/// Why a daemon process is ending, in one line.
+///
+/// Every return from [`daemon`] — early or after a full lifetime, `Ok` or
+/// `Err` — is a `DaemonExit` reported by [`report_daemon_exit`]. The
+/// Sentry restart storm was a daemon that inherited a leftover journal drain
+/// marker and returned `Ok(())` before `READY=1` with no line of its own:
+/// systemd logged only `Failed with result 'protocol'` 7 700 times. There is
+/// no exit path here that can be silent again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonExit {
+    reason: String,
+}
+
+impl DaemonExit {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Log one error-level line naming the exit, hand the same line to systemd
+/// as `STATUS=` (visible in `systemctl status` next to `Result: protocol`),
+/// and keep it in the daemon forensic log.
+fn report_daemon_exit(config_base: Option<&Path>, reason: &str) -> String {
+    let line = format!("daemon exiting: {}", reason.replace('\n', " "));
+    tracing::error!(target: "velnor::daemon", pid = std::process::id(), "{line}");
+    crate::sd_notify::status(&line);
+    if let Some(config_base) = config_base {
+        daemon_forensic_log(config_base, &line);
+    }
+    line
+}
+
+/// The drain source a startup-time exit saw, so the line says whether this
+/// process was signalled or is honoring a marker left in the journal.
+fn drain_exit_reason(journal_path: Option<&Path>, when: &str) -> String {
+    let source = if draining() {
+        "SIGTERM/SIGINT received by this process".to_owned()
+    } else {
+        match journal_path {
+            Some(path) => format!("drain marker latched in journal {}", path.display()),
+            None => "drain latch set".to_owned(),
+        }
+    };
+    format!("drain active {when}: {source}; no slot registered and READY=1 was not sent")
+}
+
 pub async fn daemon(args: DaemonArgs) -> Result<()> {
+    let config_base = daemon_config_dir(&args).ok();
+    match daemon_lifetime(args).await {
+        Ok(exit) => {
+            report_daemon_exit(config_base.as_deref(), &exit.reason);
+            Ok(())
+        }
+        Err(error) => {
+            report_daemon_exit(
+                config_base.as_deref(),
+                &format!("failed: {}", sanitized_retry_error(&error)),
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
     let slots = validate_daemon_slots(args.slots)?;
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
@@ -2999,7 +3035,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // accept a job. This runs once per daemon process, outside pass retries.
     reap_checkout_credentials_at_startup(supervised).await?;
     if effective_draining(drain_journal.as_deref()) {
-        return Ok(());
+        return Ok(DaemonExit::new(drain_exit_reason(
+            drain_journal.as_deref(),
+            "before startup",
+        )));
     }
 
     // Operator-facing fail-fast: a token that is structurally impossible
@@ -3039,7 +3078,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 
     if !supervised {
-        return daemon_pass(&args, slots).await;
+        daemon_pass(&args, slots).await?;
+        return Ok(DaemonExit::new(
+            "one-shot daemon pass completed (not supervised: no --url, --once, or --dry-run-registration)",
+        ));
     }
 
     // Retention belongs to the daemon lifetime, not an individual retryable
@@ -3050,13 +3092,17 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     loop {
         if effective_draining(drain_journal.as_deref()) {
             stop_retention_lifecycle(&mut retention_lifecycle).await;
-            println!("drain complete during registration retry: exiting");
-            return Ok(());
+            return Ok(DaemonExit::new(drain_exit_reason(
+                drain_journal.as_deref(),
+                "during registration retry",
+            )));
         }
         match daemon_pass(&args, slots).await {
             Ok(()) => {
                 stop_retention_lifecycle(&mut retention_lifecycle).await;
-                return Ok(());
+                return Ok(DaemonExit::new(
+                    "supervised daemon pass completed: every slot deregistered or finished draining",
+                ));
             }
             Err(error) => {
                 attempt += 1;
@@ -3082,8 +3128,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                 for _ in 0..delay.as_secs().max(1) {
                     if effective_draining(drain_journal.as_deref()) {
                         stop_retention_lifecycle(&mut retention_lifecycle).await;
-                        println!("drain complete during registration backoff: exiting");
-                        return Ok(());
+                        return Ok(DaemonExit::new(drain_exit_reason(
+                            drain_journal.as_deref(),
+                            &format!("during registration backoff (attempt {attempt})"),
+                        )));
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
@@ -3141,7 +3189,13 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     crate::ops::init_at(instance_slug_for_store(), args.state_db.as_deref())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
-    let _storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
+    let storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
+    if args.url.is_some() && !args.dry_run_registration {
+        // Before preflight and before any slot can admit a job: delete every
+        // mbx store layout the current code no longer produces, then bring
+        // the compiler stores under the host budget.
+        startup_store_maintenance(args, &config_base, &storage_layout, slots);
+    }
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
@@ -3529,12 +3583,19 @@ pub(crate) async fn run_daemon_slot(
         return run_with_jit_prewarmer(slot_args, None, storage_mode).await;
     }
 
-    let slot_config_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
     // Let the normal job-runner preflight classify missing, corrupt, or
     // incomplete runner.json as LocalRunnerIdentityUnavailable. That error is
     // handled below by the existing JIT reconfiguration loop. Loading the
     // config here would bypass that recovery path before the loop exists.
-    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation, slot_config_dir)?;
+    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation)?;
+    // A worker starts ready to acquire. Declaring it converges the durable
+    // projection from wherever the previous worker of this generation left
+    // it (a drain or fence exit ends in `teardown`) instead of letting the
+    // first post-job teardown collide with that stale phase.
+    let _ = durable_slot.transition(
+        SlotPhase::Idle,
+        format!("slot worker started pid={}", std::process::id()),
+    );
 
     // The controller launches this loop in a separate job-worker process. A
     // signal listener in the controller alone cannot cancel that process's
@@ -3545,6 +3606,10 @@ pub(crate) async fn run_daemon_slot(
 
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
+    // The requested identity is fixed for this worker's lifetime, so drift
+    // can be retired at most once; a fresh registration that still reports
+    // drift is a predicate/GitHub disagreement, never a reason to churn.
+    let mut stale_identity_retired = false;
     // Disk pressure is a bounded state machine rather than an indefinite park.
     // The slot reclaims, then refuses admission against a deadline, then drains
     // — it never sleeps and retries forever with no terminal state.
@@ -3647,6 +3712,44 @@ pub(crate) async fn run_daemon_slot(
                     .await;
                     return Ok(());
                 }
+            }
+        }
+        // A stored identity (including a successor promoted by an earlier
+        // worker) is reusable only if it is the registration the current
+        // configuration would request. Labels, group, name and scope are
+        // fixed at JIT-config creation, so drift is retired through the same
+        // delete-and-re-register path as a lost registration.
+        if let Some(drift) = stored_jit_config_drift_at(
+            &args,
+            &daemon_slot_config_dir(&config_base, slot_index, slots),
+            slot_index,
+            slots,
+        ) {
+            if stale_identity_retired {
+                eprintln!(
+                    "daemon slot-{slot_index}: freshly registered JIT config still reports drift ({drift}); keeping it to avoid registration churn"
+                );
+            } else {
+                stale_identity_retired = true;
+                let note = format!(
+                    "stored JIT config for slot-{slot_index} is stale ({drift}); re-registering"
+                );
+                println!("{note}");
+                daemon_forensic_log(&config_base, &note);
+                let _ = durable_slot.transition(
+                    SlotPhase::Teardown,
+                    format!("retiring stale JIT identity before cycle {cycle}"),
+                );
+                reconfigure_daemon_slot_forever(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
+                continue;
             }
         }
         let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
@@ -3864,30 +3967,39 @@ pub(crate) async fn run_daemon_slot(
     }
 }
 
+/// The daemon's durable slot cursor: the phases it declares for one slot
+/// generation, projected onto the store's closed [`SlotPhase`] graph.
+///
+/// The daemon never issues an edge blind. Every declaration reads the
+/// materialized phase of its generation first and converges toward the
+/// target along legal edges only: a target equal to the current phase is a
+/// no-op, a directly legal edge is written as is, and anything else walks
+/// the daemon's own lifecycle ring (`idle → teardown → recycling → idle`)
+/// through the intermediate phases it skipped — for instance a worker that
+/// exited in `teardown` and was respawned for the same generation. Illegal
+/// edges are therefore impossible to issue from here by construction, not by
+/// catching the store's conflict after the fact.
+///
+/// Request keys are derived from the store's own per-generation transition
+/// sequence, so no two declarations ever share a key: a JIT agent id is not
+/// unique across lifecycle passes (the promoted successor is later the torn
+/// down predecessor), and keying by it silently dropped writes as
+/// `idempotency_conflict`, which is what let the projection drift into
+/// `teardown → teardown` and `teardown → idle` in the first place.
 #[derive(Debug, Clone)]
 struct DurableSlotLifecycle {
     slot_id: SlotId,
     slot_index: u32,
     generation: Generation,
-    config_dir: PathBuf,
-    agent_id: Arc<AtomicI64>,
-    agent_id_available: Arc<AtomicBool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunnerIdentityState {
-    Available(i64),
-    Configless,
-    Unavailable,
-}
+/// Phases the daemon itself declares, in ring order. Every consecutive pair
+/// (wrapping) is a legal edge of the closed slot graph.
+const DAEMON_SLOT_RING: [SlotPhase; 3] =
+    [SlotPhase::Idle, SlotPhase::Teardown, SlotPhase::Recycling];
 
 impl DurableSlotLifecycle {
-    fn new(
-        slot_id: SlotId,
-        one_based_index: usize,
-        generation: Generation,
-        config_dir: PathBuf,
-    ) -> Result<Self> {
+    fn new(slot_id: SlotId, one_based_index: usize, generation: Generation) -> Result<Self> {
         let zero_based_index = one_based_index.checked_sub(1).ok_or_else(|| {
             anyhow::anyhow!("durable slot index must be one-based at the runner boundary")
         })?;
@@ -3897,130 +4009,137 @@ impl DurableSlotLifecycle {
             slot_id,
             slot_index,
             generation,
-            config_dir,
-            agent_id: Arc::new(AtomicI64::new(0)),
-            agent_id_available: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    /// Refresh the registration identity used for durable transition keys.
-    ///
-    /// A missing runner.json is the expected configless gap while a consumed
-    /// JIT registration is being torn down. Preserve the prior identity only
-    /// for that gap. Existing-but-invalid JSON and valid config without an
-    /// agent id clear the identity and fail closed.
-    fn refresh_agent_id(&self) -> RunnerIdentityState {
-        let config_path = self.config_dir.join("runner.json");
-        // Teardown temporarily removes runner.json. Keep the prior identity
-        // for that boundary, then adopt the replacement as soon as configure
-        // or promotion makes the live config available again.
-        match config::load(&self.config_dir) {
-            Ok(stored) => {
-                if let Some(agent_id) = stored.settings.agent_id {
-                    self.agent_id.store(agent_id, Ordering::Release);
-                    self.agent_id_available.store(true, Ordering::Release);
-                    RunnerIdentityState::Available(agent_id)
-                } else {
-                    self.agent_id_available.store(false, Ordering::Release);
-                    RunnerIdentityState::Unavailable
-                }
-            }
-            Err(_) => {
-                let configless = fs::symlink_metadata(&config_path)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-                if configless {
-                    if self.agent_id_available.load(Ordering::Acquire) {
-                        RunnerIdentityState::Available(self.agent_id.load(Ordering::Acquire))
-                    } else {
-                        RunnerIdentityState::Configless
-                    }
-                } else {
-                    self.agent_id_available.store(false, Ordering::Release);
-                    RunnerIdentityState::Unavailable
-                }
-            }
-        }
-    }
-
-    fn request_key(&self, target: SlotPhase) -> Option<String> {
-        self.request_key_with_sink(crate::ops::global().map(AsRef::as_ref), target)
-    }
-
-    fn request_key_with_sink(
-        &self,
-        sink: Option<&crate::ops::OpsSink>,
-        target: SlotPhase,
-    ) -> Option<String> {
-        match self.refresh_agent_id() {
-            RunnerIdentityState::Available(agent_id) => Some(format!(
-                "jit-agent-{agent_id}-generation-{}-{}",
-                self.generation.0,
-                target.as_str()
-            )),
-            RunnerIdentityState::Configless => {
-                let sink = sink?;
-                let intent = match sink.latest_slot_transition_request_key(
-                    &self.slot_id,
-                    self.slot_index,
-                    self.generation,
-                ) {
-                    Ok(Some(intent)) => intent,
-                    Ok(None) => return None,
-                    Err(error) => {
-                        sink.record_slot_transition_lookup_failure(&error);
-                        eprintln!(
-                            "forensics.ops event=slot-transition-rejected reason=store-request-ledger-unavailable slot={} generation={} phase={}",
-                            self.slot_id.0,
-                            self.generation.0,
-                            target.as_str()
-                        );
-                        return None;
-                    }
-                };
-                if intent.target == target {
-                    return Some(intent.request_key);
-                }
-                recover_following_request_key(&intent.request_key, intent.target, target)
-            }
-            RunnerIdentityState::Unavailable => None,
-        }
-    }
-
     fn transition(&self, target: SlotPhase, message: impl Into<String>) -> bool {
-        let Some(request_key) = self.request_key(target) else {
-            eprintln!(
-                "forensics.ops event=slot-transition-rejected reason=runner-identity-unavailable slot={} generation={} phase={}",
-                self.slot_id.0,
-                self.generation.0,
-                target.as_str()
-            );
-            return false;
-        };
         let Some(sink) = crate::ops::global() else {
             return false;
         };
-        let applied = sink.transition_slot(
-            &self.slot_id,
-            self.slot_index,
-            self.generation,
-            &request_key,
-            target,
-            Some(message.into()),
-        );
-        if !applied {
-            // Best-effort observation, never a job outcome: a stale
-            // generation, an illegal edge, or a replayed request key leaves
-            // control state behind instead of failing work. The line exists
-            // to measure how often that happens.
-            eprintln!(
-                "forensics.ops event=slot-transition-not-applied slot={} generation={} phase={} request_key={request_key}",
-                self.slot_id.0,
-                self.generation.0,
-                target.as_str()
-            );
-        }
-        applied
+        self.transition_with_sink(sink, target, message)
     }
+
+    /// Converge the durable projection onto `target`; see the type docs.
+    ///
+    /// Best-effort observation, never a job outcome: a store read failure, a
+    /// stale generation, or a refused write leaves control state behind and
+    /// emits one forensic line so drift is measured instead of hidden.
+    fn transition_with_sink(
+        &self,
+        sink: &crate::ops::OpsSink,
+        target: SlotPhase,
+        message: impl Into<String>,
+    ) -> bool {
+        let message = message.into();
+        let cursor = match sink.slot_cursor(&self.slot_id, self.slot_index, self.generation) {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                eprintln!(
+                    "forensics.ops event=slot-transition-rejected reason=store-cursor-unavailable slot={} generation={} phase={}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    target.as_str()
+                );
+                return false;
+            }
+        };
+        let (current, mut sequence) = match cursor {
+            crate::ops::SlotCursor::Owned { phase, sequence } => (Some(phase), sequence),
+            crate::ops::SlotCursor::Fresh => (None, 0),
+            crate::ops::SlotCursor::Superseded { owner } => {
+                eprintln!(
+                    "forensics.ops event=slot-transition-rejected reason=generation-superseded slot={} generation={} owner={} phase={}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    owner.0,
+                    target.as_str()
+                );
+                return false;
+            }
+        };
+        for step in slot_lifecycle_path(current, target) {
+            sequence = sequence.saturating_add(1);
+            let request_key = format!("slot-g{}-s{sequence}-{}", self.generation.0, step.as_str());
+            let step_message = if step == target {
+                message.clone()
+            } else {
+                eprintln!(
+                    "forensics.ops event=slot-lifecycle-catch-up slot={} generation={} from={} via={} target={}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    current.map_or("none", SlotPhase::as_str),
+                    step.as_str(),
+                    target.as_str()
+                );
+                format!("lifecycle catch-up toward {}: {message}", target.as_str())
+            };
+            let applied = sink.transition_slot(
+                &self.slot_id,
+                self.slot_index,
+                self.generation,
+                &request_key,
+                step,
+                Some(step_message),
+            );
+            if !applied {
+                eprintln!(
+                    "forensics.ops event=slot-transition-not-applied slot={} generation={} phase={} request_key={request_key}",
+                    self.slot_id.0,
+                    self.generation.0,
+                    step.as_str()
+                );
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// The legal edges that take a slot from `current` to `target`.
+///
+/// Empty when the slot is already there. A fresh generation (`None`) has no
+/// `from` edge to validate and declares `target` directly. Otherwise a
+/// directly legal edge is used; anything else enters the daemon ring at the
+/// phase the closed graph permits from `current` and walks it to `target`.
+/// Total over every `(SlotPhase, ring target)` pair, and every returned step
+/// is a legal edge from its predecessor — asserted exhaustively in tests.
+fn slot_lifecycle_path(current: Option<SlotPhase>, target: SlotPhase) -> Vec<SlotPhase> {
+    let Some(current) = current else {
+        return vec![target];
+    };
+    if current == target {
+        return Vec::new();
+    }
+    if velnor_model::slot_transition_allowed(current, target) || !DAEMON_SLOT_RING.contains(&target)
+    {
+        // A legal edge is declared as is. A target outside the daemon ring
+        // has no catch-up path here; declare it and let the store adjudicate
+        // rather than walk toward a phase the ring can never reach.
+        return vec![target];
+    }
+    let mut path = Vec::new();
+    let mut phase = if DAEMON_SLOT_RING.contains(&current) {
+        current
+    } else {
+        // Every phase outside the ring has exactly one legal ring entry:
+        // configuring/parked may become idle; every active or faulted
+        // phase must pass through teardown.
+        let entry = match current {
+            SlotPhase::Configuring | SlotPhase::Parked => SlotPhase::Idle,
+            _ => SlotPhase::Teardown,
+        };
+        path.push(entry);
+        entry
+    };
+    while phase != target {
+        let position = DAEMON_SLOT_RING
+            .iter()
+            .position(|candidate| *candidate == phase)
+            .unwrap_or(0);
+        phase = DAEMON_SLOT_RING[(position + 1) % DAEMON_SLOT_RING.len()];
+        path.push(phase);
+    }
+    path
 }
 
 /// Best-effort job transition with a forensics line when the store refuses
@@ -4050,23 +4169,6 @@ fn record_job_transition(
         );
     }
     applied
-}
-
-fn recover_following_request_key(
-    previous_key: &str,
-    previous_target: SlotPhase,
-    target: SlotPhase,
-) -> Option<String> {
-    let expected_target = match (previous_target, target) {
-        (SlotPhase::Teardown, SlotPhase::Recycling) | (SlotPhase::Recycling, SlotPhase::Idle) => {
-            target
-        }
-        _ => return None,
-    };
-    let suffix = format!("-{}", previous_target.as_str());
-    let prefix = previous_key.strip_suffix(&suffix)?;
-    let key = format!("{prefix}-{}", expected_target.as_str());
-    Slug::validate("request_key", &key).ok().map(|_| key)
 }
 
 /// Re-create this slot's JIT config, retrying forever with capped backoff.
@@ -4154,16 +4256,32 @@ async fn prewarm_daemon_slot_successor(
     cycle: u64,
 ) -> Result<()> {
     let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
-    if config::load(&next_dir).is_ok() {
-        return Ok(());
-    }
-
-    if next_dir.exists() {
-        delete_and_remove_daemon_slot_jit_config(args, &next_dir)
-            .await
-            .with_context(|| {
-                format!("remove stale successor JIT config for daemon slot-{slot_index}")
-            })?;
+    // A successor pre-created by an earlier worker is reused only under the
+    // same predicate as the live identity; otherwise its registration is
+    // deleted and a successor for the current configuration replaces it.
+    match config::load(&next_dir) {
+        Ok(existing) => {
+            let Some(drift) = stored_jit_config_drift(args, slot_index, slots, &existing.settings)
+            else {
+                return Ok(());
+            };
+            println!(
+                "stored successor JIT config for slot-{slot_index} is stale ({drift}); re-registering"
+            );
+            delete_and_remove_daemon_slot_jit_config(args, &next_dir)
+                .await
+                .with_context(|| {
+                    format!("retire stale successor JIT config for daemon slot-{slot_index}")
+                })?;
+        }
+        Err(_) if next_dir.exists() => {
+            delete_and_remove_daemon_slot_jit_config(args, &next_dir)
+                .await
+                .with_context(|| {
+                    format!("remove stale successor JIT config for daemon slot-{slot_index}")
+                })?;
+        }
+        Err(_) => {}
     }
 
     let mut configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
@@ -4199,6 +4317,17 @@ async fn recycle_daemon_slot(
         format!("tearing down consumed JIT identity after cycle {cycle}"),
     );
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
+    let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
+    // The successor is promoted only under the reuse predicate: a prepared
+    // identity that no longer matches the current configuration is deleted
+    // (an unused JIT registration never expires on its own) so the fresh
+    // configure below replaces it.
+    if let Some(drift) = stored_jit_config_drift_at(args, &next_dir, slot_index, slots) {
+        println!(
+            "stored successor JIT config for slot-{slot_index} is stale ({drift}); discarding before promotion"
+        );
+        cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await?;
+    }
     // A JIT runner is server-side ephemeral: GitHub automatically
     // deregisters it after its single job. Only discard the consumed local
     // identity here. Calling DELETE after every successful job wastes one
@@ -4209,7 +4338,6 @@ async fn recycle_daemon_slot(
         let _configure_lock = ConfigureLock::acquire(&slot_dir)?;
         remove_completed_daemon_slot_jit_config_locked(&slot_dir)
             .with_context(|| format!("discard consumed daemon slot-{slot_index} JIT identity"))?;
-        let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
         if pending_jit_registration_exists(&slot_dir) || pending_jit_registration_exists(&next_dir)
         {
             bail!(
@@ -4840,6 +4968,239 @@ fn daemon_slot_should_configure_jit(
         || config::load(slot_config_dir).is_err()
 }
 
+/// One way a stored JIT config differs from the registration the current
+/// daemon configuration would request. Labels, runner group, agent name and
+/// scope are fixed by GitHub at JIT-config creation, so any drift means the
+/// stored identity can only be retired and re-registered, never patched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JitIdentityDrift {
+    Labels {
+        stored: Vec<String>,
+        requested: Vec<String>,
+    },
+    RunnerGroup {
+        stored: String,
+        requested: String,
+    },
+    AgentName {
+        stored: String,
+        requested: String,
+    },
+    Scope {
+        stored: String,
+        requested: String,
+    },
+    TrustScope {
+        label: String,
+        trust_scope: String,
+    },
+}
+
+impl std::fmt::Display for JitIdentityDrift {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Labels { stored, requested } => {
+                write!(f, "labels {} → {}", stored.join(","), requested.join(","))
+            }
+            Self::RunnerGroup { stored, requested } => {
+                write!(f, "runner group {stored} → {requested}")
+            }
+            Self::AgentName { stored, requested } => {
+                write!(f, "agent name {stored} → {requested}")
+            }
+            Self::Scope { stored, requested } => write!(f, "scope {stored} → {requested}"),
+            Self::TrustScope { label, trust_scope } => write!(
+                f,
+                "label {label} is trust-gated but trust scope is {trust_scope}"
+            ),
+        }
+    }
+}
+
+/// The runner group `configure` would request for these daemon args. Mirrors
+/// the `runner_group_id` resolution in `configure`: a pre-resolved or
+/// dry-run id is used as-is, a bare pool name is a live lookup by
+/// (case-insensitive) name, and no pool at all is GitHub's Default group 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RequestedRunnerGroup {
+    Id(i64),
+    Name(String),
+}
+
+impl RequestedRunnerGroup {
+    fn for_daemon(args: &DaemonArgs) -> Self {
+        match args.pool_name.as_deref().filter(|name| !name.is_empty()) {
+            Some(_) if args.pool_id_pre_resolved => Self::Id(args.pool_id.unwrap_or(1)),
+            Some(_) if args.dry_run_registration && args.pool_id.is_some() => {
+                Self::Id(args.pool_id.unwrap_or(1))
+            }
+            Some(name) => Self::Name(name.to_owned()),
+            None => Self::Id(args.pool_id.unwrap_or(1)),
+        }
+    }
+
+    fn matches(&self, stored: &RunnerSettings) -> bool {
+        match self {
+            Self::Id(id) => stored.pool_id == Some(*id),
+            Self::Name(name) => stored
+                .pool_name
+                .as_deref()
+                .is_some_and(|stored| stored.eq_ignore_ascii_case(name)),
+        }
+    }
+
+    fn describe_stored(stored: &RunnerSettings) -> String {
+        match (stored.pool_id, stored.pool_name.as_deref()) {
+            (Some(id), Some(name)) => format!("{name} (id {id})"),
+            (Some(id), None) => format!("id {id}"),
+            (None, Some(name)) => name.to_owned(),
+            (None, None) => "unknown".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for RequestedRunnerGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Id(id) => write!(f, "id {id}"),
+            Self::Name(name) => f.write_str(name),
+        }
+    }
+}
+
+/// Case-folded scope identity (`https://host/owner/repo`, no query, fragment
+/// or trailing slash). GitHub owner/org/repo paths are case-insensitive, and
+/// the decoded JIT config may return the canonical spelling.
+fn jit_scope_identity(url: &str) -> Option<String> {
+    let scope = GitHubScope::parse(url).ok()?;
+    pending_scope_url(&scope)
+        .ok()
+        .map(|url| url.to_ascii_lowercase())
+}
+
+/// `velnor-{host}-{instance}-{slot}-next-{pid}-{cycle}` → `(pid, cycle)`.
+fn parse_successor_agent_name_suffix(agent_name: &str) -> Option<(u32, u64)> {
+    let (_, tail) = agent_name.rsplit_once("-next-")?;
+    let (pid, cycle) = tail.split_once('-')?;
+    Some((pid.parse().ok()?, cycle.parse().ok()?))
+}
+
+/// A stored agent name is current when it is exactly the name this slot would
+/// register now, or a successor name composed for this slot by any earlier
+/// worker (the pid/cycle suffix is that worker's, so it is reconstructed from
+/// the stored name rather than compared to the current process).
+fn daemon_slot_agent_name_is_current(
+    base_name: Option<&str>,
+    slot_index: usize,
+    slot_count: usize,
+    stored_agent_name: &str,
+) -> bool {
+    if daemon_slot_agent_name(base_name, slot_index, slot_count).as_deref()
+        == Some(stored_agent_name)
+    {
+        return true;
+    }
+    let Some((pid, cycle)) = parse_successor_agent_name_suffix(stored_agent_name) else {
+        return false;
+    };
+    let host = github_runner_host_slug();
+    let instance = instance_slug_from_operator_name(base_name, &host);
+    compose_github_runner_successor_name(
+        &host,
+        &instance,
+        zero_based_slot_index(slot_index),
+        pid,
+        cycle,
+    ) == stored_agent_name
+}
+
+/// The reuse predicate for a stored daemon slot JIT config: it is reusable
+/// only when its effective identity equals what `configure` would request
+/// from the current daemon configuration. Returns the first drift found:
+///
+/// - label set == `normalize_labels(args.labels, target packs)`;
+/// - runner group == the group `configure` would resolve (id, or name);
+/// - agent name == this slot's name or a successor name for this slot;
+/// - scope == `args.url`, compared as a case-folded normalized scope URL;
+/// - the trust-gated label is only claimed under a trusted scope.
+///
+/// `None` for config-only daemons (`args.url` is `None`): they never
+/// register, so there is no identity to reproduce.
+fn stored_jit_config_drift(
+    args: &DaemonArgs,
+    slot_index: usize,
+    slot_count: usize,
+    stored: &RunnerSettings,
+) -> Option<JitIdentityDrift> {
+    let url = args.url.as_deref()?;
+    let requested_labels = normalize_labels(
+        args.labels.clone(),
+        args.target_mvp_labels,
+        args.target_mvp_arm_label,
+    );
+    let stored_labels: BTreeSet<&str> = stored.labels.iter().map(String::as_str).collect();
+    let requested_label_set: BTreeSet<&str> = requested_labels.iter().map(String::as_str).collect();
+    if stored_labels != requested_label_set {
+        return Some(JitIdentityDrift::Labels {
+            stored: stored_labels.into_iter().map(str::to_owned).collect(),
+            requested: requested_labels,
+        });
+    }
+
+    let requested_group = RequestedRunnerGroup::for_daemon(args);
+    if !requested_group.matches(stored) {
+        return Some(JitIdentityDrift::RunnerGroup {
+            stored: RequestedRunnerGroup::describe_stored(stored),
+            requested: requested_group.to_string(),
+        });
+    }
+
+    if !daemon_slot_agent_name_is_current(
+        args.name.as_deref(),
+        slot_index,
+        slot_count,
+        &stored.agent_name,
+    ) {
+        return Some(JitIdentityDrift::AgentName {
+            stored: stored.agent_name.clone(),
+            requested: daemon_slot_agent_name(args.name.as_deref(), slot_index, slot_count)
+                .unwrap_or_default(),
+        });
+    }
+
+    let requested_scope = jit_scope_identity(url);
+    let stored_scope = jit_scope_identity(&stored.github_url);
+    if requested_scope.is_none() || stored_scope != requested_scope {
+        return Some(JitIdentityDrift::Scope {
+            stored: stored.github_url.clone(),
+            requested: url.to_owned(),
+        });
+    }
+
+    if validate_trusted_label_requires_trusted_scope(&stored.labels, Some(&args.trust_scope))
+        .is_err()
+    {
+        return Some(JitIdentityDrift::TrustScope {
+            label: TRUST_GATED_RUNNER_LABEL.to_owned(),
+            trust_scope: args.trust_scope.clone(),
+        });
+    }
+
+    None
+}
+
+/// Evaluate the reuse predicate against the config stored in `dir`. A missing
+/// or unreadable config is not drift: the identity-unavailable path owns it.
+fn stored_jit_config_drift_at(
+    args: &DaemonArgs,
+    dir: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Option<JitIdentityDrift> {
+    let stored = config::load(dir).ok()?;
+    stored_jit_config_drift(args, slot_index, slot_count, &stored.settings)
+}
+
 fn daemon_should_poll_after_jit_config(args: &DaemonArgs) -> bool {
     !args.dry_run_registration
 }
@@ -4850,18 +5211,31 @@ pub(crate) fn daemon_config_dir(args: &DaemonArgs) -> Result<PathBuf> {
     }
 
     let base = config::config_dir(None)?;
-    let Some(identity) = args
+    let identity = args
         .name
         .as_deref()
         .or(args.work_dir.as_deref().and_then(Path::to_str))
-        .or(args.url.as_deref())
-    else {
-        return Ok(base);
-    };
+        .or(args.url.as_deref());
+    Ok(daemon_config_dir_under(&base, identity))
+}
 
-    Ok(base
-        .join("daemons")
-        .join(sanitize_daemon_config_component(identity)))
+/// The daemon-scoped config directory below a resolved config base:
+/// `<base>/daemons/<sanitized identity>`, or the base itself when the daemon
+/// has no identity. This is the one spelling of that path; the packaged
+/// instance resolver (`daemon_instance`) calls it with the identity the unit
+/// environment gives the daemon, so `velnorctl` lands in the same directory.
+pub fn daemon_config_dir_under(base: &Path, identity: Option<&str>) -> PathBuf {
+    match identity {
+        Some(identity) => base
+            .join("daemons")
+            .join(sanitize_daemon_config_component(identity)),
+        None => base.to_path_buf(),
+    }
+}
+
+/// The work directory a daemon uses when `--work-dir` is not passed.
+pub(crate) fn default_daemon_work_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("_work")
 }
 
 fn sanitize_daemon_config_component(value: &str) -> String {
@@ -5720,6 +6094,33 @@ pub fn github_runner_host_slug() -> String {
     }
 }
 
+/// Operator name of an on-demand host started without `--name`:
+/// `velnor-local-{host}`, with the host slug this process registers under.
+///
+/// The one spelling shared by `velnorctl host start` (which uses it as the
+/// control-socket instance, the config directory and the daemon `--name`) and
+/// [`strip_composed_instance`] (which collapses it back to the `local`
+/// instance). Both sides must derive the host segment from
+/// [`github_runner_host_slug`] byte-for-byte, otherwise the collapse never
+/// matches and the GitHub runner name repeats the host twice and overflows
+/// the 64-character limit.
+#[must_use]
+pub fn default_local_operator_name() -> String {
+    default_local_operator_name_for(&github_runner_host_slug())
+}
+
+/// Operator names double as control-socket instance names, which
+/// `velnor_client` caps at 64 bytes. The host segment is cut to fit; the
+/// collapse in [`strip_composed_instance`] compares against this same
+/// function, so a cut host still collapses to `local`.
+const OPERATOR_NAME_MAX: usize = 64;
+const LOCAL_OPERATOR_PREFIX: &str = "velnor-local-";
+
+fn default_local_operator_name_for(host: &str) -> String {
+    let budget = OPERATOR_NAME_MAX - LOCAL_OPERATOR_PREFIX.len();
+    format!("{LOCAL_OPERATOR_PREFIX}{}", truncate_slug(host, budget))
+}
+
 /// Canonical GitHub registration name: `velnor-{host}-{instance}-{slot}`.
 ///
 /// `slot` is the 0-based store `Slot.index`. If `instance` is already a full
@@ -5766,7 +6167,7 @@ fn strip_composed_instance(slug: &str, host: &str) -> String {
     let host_prefix = format!("velnor-{host}-");
     let rest = if let Some(rest) = slug.strip_prefix(&host_prefix) {
         rest
-    } else if slug == format!("velnor-{host}") || slug == format!("velnor-local-{host}") {
+    } else if slug == format!("velnor-{host}") || slug == default_local_operator_name_for(host) {
         return "local".to_owned();
     } else {
         return slug.to_owned();
@@ -6334,6 +6735,124 @@ fn reserve_job_peak_capacity(
                 .with_context(|| {
                     format!("{first_error:#}; reclaim completed but reservation still unavailable")
                 })
+        }
+    }
+}
+
+/// The daemon-shared work root the stores hang off, for a slot's `RunArgs`.
+fn daemon_work_root(config_dir: &Path, work_dir: Option<&Path>) -> PathBuf {
+    crate::container::daemon_shared_root(
+        work_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| config_dir.join("_work")),
+    )
+}
+
+/// Enforce the host compiler store budget at job admission (see
+/// [`crate::capacity::StoreBudgetPolicy`]). Best-effort: a failed probe or
+/// pass warns and the job proceeds; the capacity reservation remains the
+/// fail-closed guard on real free space.
+fn enforce_compiler_store_budget_at_admission(
+    storage_layout: &crate::storage::StorageLayout,
+    config_dir: &Path,
+    args: &RunArgs,
+) {
+    let work_root = daemon_work_root(config_dir, args.work_dir.as_deref());
+    let policy = match crate::capacity::StoreBudgetPolicy::probe(
+        &work_root,
+        args.emergency_reserve_bytes,
+        args.job_peak_bytes,
+        args.slot_count.get(),
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("Warning: compiler store budget probe failed at admission: {error:#}");
+            return;
+        }
+    };
+    enforce_compiler_store_budget_logged(&work_root, storage_layout, policy, "admission");
+}
+
+/// One budget pass with its operator-visible log lines. `moment` names the
+/// trigger (`startup`, `admission`).
+fn enforce_compiler_store_budget_logged(
+    work_root: &Path,
+    storage_layout: &crate::storage::StorageLayout,
+    policy: crate::capacity::StoreBudgetPolicy,
+    moment: &str,
+) {
+    let budget = policy.compiler_store_budget_bytes();
+    match crate::cache::enforce_compiler_store_budget(work_root, storage_layout, budget) {
+        Ok(report) => {
+            for deleted in &report.deleted {
+                eprintln!(
+                    "forensics.lifecycle: compiler store budget ({moment}) evicted {}",
+                    deleted.display()
+                );
+            }
+            for failure in &report.failures {
+                eprintln!("Warning: compiler store budget ({moment}) eviction failed: {failure}");
+            }
+            if report.freed_bytes > 0 {
+                eprintln!(
+                    "forensics.lifecycle: compiler store budget ({moment}) freed {} bytes; budget {}",
+                    report.freed_bytes,
+                    policy.describe_compiler_store_budget()
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("Warning: compiler store budget pass ({moment}) failed: {error:#}");
+        }
+    }
+}
+
+/// Daemon-start store maintenance: the one-shot mbx layout migration, then
+/// the first compiler budget pass. Both log what they removed, with sizes.
+fn startup_store_maintenance(
+    args: &DaemonArgs,
+    config_base: &Path,
+    storage_layout: &crate::storage::StorageLayout,
+    slots: usize,
+) {
+    let work_root = daemon_work_root(config_base, args.work_dir.as_deref());
+    let canonical = crate::storage::StorageLayout::resolve();
+    let migration = crate::mbx_store::migrate_at_daemon_start(&work_root, canonical.as_ref());
+    for (path, bytes) in &migration.removed {
+        eprintln!(
+            "forensics.lifecycle: mbx store migration removed {} ({bytes} bytes): layout no longer produced",
+            path.display()
+        );
+    }
+    for (path, error) in &migration.failures {
+        eprintln!(
+            "Warning: mbx store migration could not remove {}: {error}",
+            path.display()
+        );
+    }
+    if !migration.removed.is_empty() {
+        eprintln!(
+            "forensics.lifecycle: mbx store migration removed {} path(s), {} bytes total",
+            migration.removed.len(),
+            migration.total_bytes()
+        );
+    }
+    let slots = u32::try_from(slots).unwrap_or(u32::MAX);
+    match crate::capacity::StoreBudgetPolicy::probe(
+        &work_root,
+        args.emergency_reserve_bytes,
+        args.job_peak_bytes,
+        slots,
+    ) {
+        Ok(policy) => {
+            println!(
+                "Compiler store budget: {}",
+                policy.describe_compiler_store_budget()
+            );
+            enforce_compiler_store_budget_logged(&work_root, storage_layout, policy, "startup");
+        }
+        Err(error) => {
+            eprintln!("Warning: compiler store budget probe failed at startup: {error:#}");
         }
     }
 }
@@ -7175,16 +7694,7 @@ async fn handle_job_request(
     // admission row and every observation below record this admitted scope,
     // never the raw pool flag — the secrets gate, the storage leases, the
     // container spec, and the executor all enforce it.
-    let admitted_trust = crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope);
-    let effective_trust_scope = admitted_trust.effective_scope().to_owned();
-    forensics.lifecycle(&format!(
-        "job admitted job_id={} trust={} admitted_scope={} pool_scope={}",
-        job.job_id,
-        admitted_trust.class().as_str(),
-        effective_trust_scope,
-        args.trust_scope,
-    ));
-
+    //
     // One load for persist and advertise. Execute already fail-closes here;
     // do not swallow a missing or invalid execution.toml into a null
     // isolation fact.
@@ -7207,11 +7717,87 @@ async fn handle_job_request(
             anyhow::bail!("{REASON}: {error}");
         }
     };
+    // The backend's ability to mount D18 read-through store layers is part of
+    // the admission input: a job whose class and pool call for a layer the
+    // backend cannot mount is admitted on its write scope alone, with the
+    // denial recorded and shown in its "Set up job" log. The Docker answer is
+    // the probed daemon capability (one probe per daemon generation).
+    let read_through_support = match execution_backend {
+        velnor_model::ExecutionBackendKind::Docker => {
+            let work_dir = args
+                .work_dir
+                .clone()
+                .unwrap_or_else(|| config_dir.join("_work"));
+            let docker_host_work_dir = args.docker_host_work_dir.clone();
+            let docker_image = args.docker_image.clone();
+            let probed = tokio::task::spawn_blocking(move || {
+                crate::execution::store_overlay_support(
+                    &mut ProcessCommandRunner,
+                    Some(&docker_image),
+                    &work_dir,
+                    docker_host_work_dir.as_deref(),
+                )
+            })
+            .await
+            .context("store overlay capability probe task")?;
+            match probed {
+                Ok(support) => crate::trust_class::ReadThroughSupport::from_store_overlay(&support),
+                Err(error) => {
+                    const REASON: &str = "Docker store overlay capability probe could not reach a verdict; job failed closed before execution";
+                    let completion = complete_acquired_job_failure(
+                        &run_service_job,
+                        &AcquiredJobIdentity::from_job(&job),
+                        Some(&job),
+                        Some("store_overlay_probe".to_string()),
+                        &format!("{REASON}: {error}"),
+                    )
+                    .await;
+                    completion.context(
+                        "failed to complete the job rejected for the store overlay probe",
+                    )?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear completed in-flight job")?;
+                    anyhow::bail!("{REASON}: {error}");
+                }
+            }
+        }
+        velnor_model::ExecutionBackendKind::MicroVm => {
+            crate::trust_class::ReadThroughSupport::Unsupported {
+                reason: "the microVM backend shares stores without a read-through layer".to_owned(),
+            }
+        }
+    };
+    let admitted_trust =
+        crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope, &read_through_support);
+    let effective_trust_scope = admitted_trust.effective_scope().to_owned();
+    let store_read_through = admitted_trust.store_read_through();
+    forensics.lifecycle(&format!(
+        "job admitted job_id={} trust={} admitted_scope={} pool_scope={} read_through={}",
+        job.job_id,
+        admitted_trust.class().as_str(),
+        effective_trust_scope,
+        args.trust_scope,
+        match &store_read_through {
+            crate::trust_class::StoreReadThrough::Layered { lower_scope } =>
+                format!("{lower_scope} (overlay)"),
+            crate::trust_class::StoreReadThrough::Denied { reason } => format!("denied ({reason})"),
+            crate::trust_class::StoreReadThrough::None => "none".to_owned(),
+        },
+    ));
 
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
     // explicitly as infrastructure rejection instead of executing
     // unrecorded work.
+    //
+    // The job's secret masks live in the sink exactly as long as this scope:
+    // it is created before the admission write and dropped on every exit of
+    // this function — after the terminal transition, the rejection
+    // completion, or the executor's last event. A slot worker runs one job
+    // per cycle for its whole life; scoping the masks to the job is what
+    // keeps admission from failing closed once enough unique per-job tokens
+    // have accumulated (Sentry dogfood slot-3, cycles 41..52).
+    let _job_mask_scope = crate::ops::global().map(|sink| sink.job_mask_scope(&job.job_id));
     let telemetry_admission = if let Some(sink) = crate::ops::global() {
         let admission = crate::ops::JobAdmission {
             instance_slug: sink.instance_slug().to_owned(),
@@ -7271,10 +7857,13 @@ async fn handle_job_request(
                 AdmissionPersistenceOutcome::DeadlineExceeded => DEADLINE_REASON,
                 _ => WORKER_FAILURE_REASON,
             };
-            // No admission row exists on either failure path. Writing a
-            // JobRejected event would amplify an over-budget store or recurse
-            // into an unavailable store. Completion below is the truthful
-            // run-service diagnostic and is always attempted.
+            // No admission row exists on any of these failure paths. The
+            // completion below records the terminal `job.rejected` edge only
+            // through the store's own existence check: without a row the
+            // store refuses it as `store.job.missing`, which is reported as
+            // a forensic line and never changes the run-service outcome.
+            // Completion is the truthful run-service diagnostic and is
+            // always attempted.
             let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
@@ -7377,7 +7966,7 @@ async fn handle_job_request(
                 ));
                 let stale_after = Duration::from_secs(24 * 3600);
                 let lease_holder = crate::container::sanitize_store_key(&job.job_id);
-                [
+                let mut leases = vec![
                     ("actions-cache", actions_cache_scope),
                     ("artifacts", artifact_run_scope),
                     ("cargo", "registry".into()),
@@ -7386,21 +7975,36 @@ async fn handle_job_request(
                     ("mise", "cache".into()),
                     ("mise", mise_install_scope),
                     ("mise", mise_binary_scope),
-                ]
-                .into_iter()
-                .map(|(class, scope)| {
-                    // ScopeLease is intentionally exclusive. Give every active job its own
-                    // child lease while the GC's ancestor-overlap check protects the shared
-                    // candidate scope for all concurrent holders.
-                    let holder_scope = format!("{scope}/{lease_holder}");
-                    crate::capacity::ScopeLease::acquire(
-                        capacity_run_root,
-                        class,
-                        &holder_scope,
-                        stale_after,
-                    )
-                })
-                .collect()
+                ];
+                // The compiler stores are namespaced by repository id
+                // (`github_rust_store_host`) and are routinely GC-managed
+                // under the host compiler budget, so the job must lease
+                // its repository's store or the budget pass could evict the
+                // tree it is compiling into. Without a valid id the store is
+                // job-ephemeral and needs no lease.
+                if let Some(repository_id) =
+                    crate::github_adapter::job_variable(&job, "github.repository_id")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|id| *id != 0)
+                {
+                    leases.push(("mbx", repository_id.to_string()));
+                    leases.push(("sccache", repository_id.to_string()));
+                }
+                leases
+                    .into_iter()
+                    .map(|(class, scope)| {
+                        // ScopeLease is intentionally exclusive. Give every active job its own
+                        // child lease while the GC's ancestor-overlap check protects the shared
+                        // candidate scope for all concurrent holders.
+                        let holder_scope = format!("{scope}/{lease_holder}");
+                        crate::capacity::ScopeLease::acquire(
+                            capacity_run_root,
+                            class,
+                            &holder_scope,
+                            stale_after,
+                        )
+                    })
+                    .collect()
             })
             .transpose()
     };
@@ -7741,6 +8345,11 @@ async fn handle_job_request(
                 return Err(error).context("acquire storage leases for active job");
             }
         };
+        // Admission-time enforcement of the host compiler store budget. Runs
+        // after this job's leases are published, so the store it is about to
+        // compile into is protected and only idle repositories' slot trees
+        // are candidates. Hygiene, not safety: a failed pass warns.
+        enforce_compiler_store_budget_at_admission(storage_layout, config_dir, args);
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }
@@ -7820,6 +8429,7 @@ async fn handle_job_request(
         let slot_count = args.slot_count;
         let node_action_image = args.node_action_image.clone();
         let effective_trust_scope = effective_trust_scope.clone();
+        let store_read_through = store_read_through.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
         let daemon_id = args
@@ -7851,6 +8461,7 @@ async fn handle_job_request(
                 &node_action_image,
                 &admission_graph,
                 &effective_trust_scope,
+                &store_read_through,
                 &run_service_url,
                 billing_owner_id,
                 &job_to_execute,
@@ -9876,6 +10487,7 @@ fn execute_script_job(
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
+    store_read_through: &crate::trust_class::StoreReadThrough,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -9902,6 +10514,7 @@ fn execute_script_job(
         node_action_image,
         admission_graph,
         effective_trust_scope,
+        store_read_through,
         run_service_url,
         billing_owner_id,
         job,
@@ -9915,14 +10528,16 @@ fn execute_script_job(
         teardown_slot,
         runner_name,
     );
-    if result.is_err()
-        && !has_teardown_owner(teardown_slot)
-        && let Err(e) = fs::remove_dir_all(&job_dir)
-    {
-        eprintln!(
-            "Warning: failed to clean up job workspace at {}: {e:#}",
-            job_dir.display()
-        );
+    if result.is_err() && !has_teardown_owner(teardown_slot) {
+        if let Err(e) = fs::remove_dir_all(&job_dir) {
+            eprintln!(
+                "Warning: failed to clean up job workspace at {}: {e:#}",
+                job_dir.display()
+            );
+        }
+        // No teardown owner means no container ever ran, so the slot's
+        // stable tree is released here rather than by `TeardownHandle::run`.
+        reclaim_stable_workspaces_after_job(&slot_work_dir);
     }
     result
 }
@@ -10012,6 +10627,7 @@ fn execute_microvm_script_job(
         node_action_image,
         "microvm".into(),
         effective_trust_scope,
+        None,
     )?;
     if container.mount_docker_socket {
         return Err(microvm_capability_error(
@@ -10400,6 +11016,7 @@ fn execute_script_job_inner(
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     effective_trust_scope: &str,
+    store_read_through: &crate::trust_class::StoreReadThrough,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -10486,6 +11103,7 @@ fn execute_script_job_inner(
         node_action_image,
         daemon_id,
         effective_trust_scope,
+        store_read_through.lower_scope(),
     )?;
     let identity = identity_from_agent_name(runner_name);
     crate::github_adapter::push_runner_identity_env(&mut container.env, &identity);
@@ -10501,21 +11119,40 @@ fn execute_script_job_inner(
         });
     }
     let setup_ts = unix_now_iso8601();
+    let mut setup_lines =
+        setup_job_lines(job, docker_image, Some(&identity), Some(execution_backend));
+    let (store_lines, store_warning) = store_read_through.setup_job_lines(effective_trust_scope);
+    setup_lines.push("##[group]Persistent stores".to_string());
+    setup_lines.extend(store_lines);
+    setup_lines.push("##[endgroup]".to_string());
+    let store_annotations: Vec<crate::script_step::StepAnnotation> = store_warning
+        .into_iter()
+        .map(|message| crate::script_step::StepAnnotation {
+            level: crate::script_step::StepAnnotationLevel::Warning,
+            message,
+            title: Some("Read-through store unavailable".to_string()),
+            path: None,
+            start_line: None,
+            end_line: None,
+            start_column: None,
+            end_column: None,
+        })
+        .collect();
     let setup_log = StepLog {
         step_id: setup_step_id,
         display_name: "Set up job".to_string(),
         order: 1,
         started_at: setup_ts.clone(),
         completed_at: setup_ts,
-        lines: setup_job_lines(job, docker_image, Some(&identity), Some(execution_backend)),
+        lines: setup_lines,
         masks: Vec::new(),
-        annotations: Vec::new(),
+        warning_count: i32::try_from(store_annotations.len()).unwrap_or(i32::MAX),
+        annotations: store_annotations,
         telemetry: Vec::new(),
         exit_code: 0,
         skipped: false,
         failure_ignored: false,
         error_count: 0,
-        warning_count: 0,
         notice_count: 0,
         summary: String::new(),
     };
@@ -11256,7 +11893,26 @@ impl TeardownHandle {
             .join()
             .map_err(|panic| anyhow::anyhow!("BuildKit teardown worker panicked: {panic:?}"))??;
         remove_job_workspace(&job_dir)?;
+        // The job's stable workspace (if any) is released once its container
+        // and job directory are gone; the next job on this slot joins this
+        // teardown before it allocates, so the pass cannot race an allocation.
+        if let Some(slot_work_dir) = job_dir.parent() {
+            reclaim_stable_workspaces_after_job(slot_work_dir);
+        }
         Ok(())
+    }
+}
+
+/// Post-job stable-workspace budget pass: reclaim over-budget scopes
+/// oldest-first so growth during the job is bounded before the next
+/// admission, not discovered by it.
+fn reclaim_stable_workspaces_after_job(slot_work_dir: &Path) {
+    let outcome = crate::stable_workspace::reclaim_after_job(slot_work_dir);
+    for evicted in &outcome.evicted {
+        eprintln!(
+            "forensics.lifecycle: post-job stable workspace reclaim evicted {}",
+            evicted.display()
+        );
     }
 }
 
@@ -12547,7 +13203,7 @@ fn append_native_action_step_from_plan(
 fn slot_work_dir(config_dir: &std::path::Path, work_dir: Option<&std::path::Path>) -> PathBuf {
     work_dir
         .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| config_dir.join("_work"))
+        .unwrap_or_else(|| default_daemon_work_dir(config_dir))
 }
 
 fn job_work_dir(
@@ -16046,26 +16702,6 @@ mod tests {
     }
 
     #[test]
-    fn job_claim_excludes_duplicate_slots_until_owner_drops() {
-        let root = std::env::temp_dir().join(format!("velnor-job-claim-{}", uuid::Uuid::new_v4()));
-
-        let owner = JobClaim::try_acquire(&root, "plan", "job").unwrap();
-        assert!(owner.is_some());
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_none());
-        assert!(JobClaim::try_acquire(&root, "plan", "other-job")
-            .unwrap()
-            .is_some());
-
-        drop(owner);
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_some());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn configure_lock_excludes_concurrent_transactions() {
         let dir = unique_temp_dir("configure-lock");
         let owner = ConfigureLock::acquire(&dir).unwrap();
@@ -16363,6 +16999,229 @@ mod tests {
         DRAINING.store(previous_draining, Ordering::SeqCst);
         reset_drain_hint_cache_for_tests();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every `tracing` ERROR event's message, for asserting on the one line a
+    /// daemon exit must produce.
+    #[derive(Clone, Default)]
+    struct ErrorLineCapture(Arc<Mutex<Vec<String>>>);
+
+    impl ErrorLineCapture {
+        fn lines(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for ErrorLineCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            if *event.metadata().level() == tracing::Level::ERROR {
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(message.0);
+            }
+        }
+    }
+
+    /// A systemd stand-in: a datagram socket in `$NOTIFY_SOCKET` collecting
+    /// every `sd_notify` state the process sends while the guard lives.
+    struct NotifySocket {
+        socket: std::os::unix::net::UnixDatagram,
+        previous: Option<std::ffi::OsString>,
+        dir: PathBuf,
+    }
+
+    impl NotifySocket {
+        fn bind(label: &str) -> Self {
+            // `/tmp`, not the platform temp dir: macOS's is longer than the
+            // 104-byte Unix socket path limit.
+            let dir = PathBuf::from(format!(
+                "/tmp/velnor-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("n.sock");
+            let socket = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let previous = env::var_os("NOTIFY_SOCKET");
+            // SAFETY: callers hold the trust-scope serialization lock, which
+            // is the process-wide lock every environment-mutating test takes.
+            unsafe { env::set_var("NOTIFY_SOCKET", &path) };
+            Self {
+                socket,
+                previous,
+                dir,
+            }
+        }
+
+        fn states(&self) -> Vec<String> {
+            let mut states = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            self.socket.set_nonblocking(true).unwrap();
+            while let Ok(read) = self.socket.recv(&mut buffer) {
+                states.push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+            }
+            states
+        }
+    }
+
+    impl Drop for NotifySocket {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: see `bind`.
+                Some(value) => unsafe { env::set_var("NOTIFY_SOCKET", value) },
+                None => unsafe { env::remove_var("NOTIFY_SOCKET") },
+            }
+            fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    /// The Sentry storm: a daemon that honors a leftover journal drain
+    /// marker returns before `READY=1`. That exit must now leave exactly one
+    /// error-level line naming the marker and the journal, hand the same line
+    /// to systemd as `STATUS=`, and record it in the daemon forensic log —
+    /// so `systemctl status` and `journalctl` say why instead of only
+    /// `Failed with result 'protocol'`.
+    #[tokio::test]
+    async fn daemon_exit_on_leftover_drain_marker_is_logged_and_reported_to_systemd() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = crate::trust_scope::test_support::serialized();
+        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        let config_dir = unique_temp_dir("daemon-exit-drain");
+        fs::create_dir_all(&config_dir).unwrap();
+        let journal_path = config_dir.join("journal.db");
+        let mut journal = velnor_control::journal::Journal::open(&journal_path).unwrap();
+        assert!(journal.set_drain(14).unwrap());
+        drop(journal);
+        reset_drain_hint_cache_for_tests();
+
+        let capture = ErrorLineCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let notify = NotifySocket::bind("daemon-exit-notify");
+
+        // Not supervised (no --url): the leftover marker is honored, as the
+        // v0.1.158 supervised daemon honored it, and the daemon returns Ok.
+        let mut args = daemon_args(1);
+        args.config_dir = Some(config_dir.clone());
+        daemon(args).await.unwrap();
+
+        let lines = capture.lines();
+        let exit_lines: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("daemon exiting:"))
+            .collect();
+        assert_eq!(exit_lines.len(), 1, "exactly one exit line: {lines:?}");
+        let line = exit_lines[0];
+        assert!(line.contains("drain active before startup"), "{line}");
+        assert!(
+            line.contains(&format!(
+                "drain marker latched in journal {}",
+                journal_path.display()
+            )),
+            "{line}"
+        );
+        assert!(line.contains("READY=1 was not sent"), "{line}");
+        assert!(!line.contains('\n'), "single line: {line:?}");
+
+        let states = notify.states();
+        assert!(
+            states.iter().any(
+                |state| state.starts_with("STATUS=daemon exiting: drain active before startup")
+            ),
+            "systemd STATUS must carry the exit reason: {states:?}"
+        );
+        let forensic =
+            fs::read_to_string(config_dir.join("logs").join(slot_log::DAEMON_LOG)).unwrap();
+        assert!(
+            forensic.contains("daemon exiting: drain active before startup"),
+            "{forensic}"
+        );
+
+        drop(notify);
+        DRAINING.store(previous_draining, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    /// A failed startup (here: an invalid slot count) is an exit too, and is
+    /// reported through the same single line before the error propagates.
+    #[tokio::test]
+    async fn daemon_startup_failure_is_reported_as_an_exit_line() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = crate::trust_scope::test_support::serialized();
+        let capture = ErrorLineCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let notify = NotifySocket::bind("daemon-exit-failed");
+
+        let config_dir = unique_temp_dir("daemon-exit-invalid-slots");
+        fs::create_dir_all(&config_dir).unwrap();
+        let mut args = daemon_args(0);
+        args.config_dir = Some(config_dir.clone());
+        let error = daemon(args).await.unwrap_err();
+
+        let lines = capture.lines();
+        let exit_lines: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("daemon exiting: failed:"))
+            .collect();
+        assert_eq!(exit_lines.len(), 1, "{lines:?}");
+        assert!(
+            exit_lines[0].contains(&sanitized_retry_error(&error)),
+            "{} vs {error:#}",
+            exit_lines[0]
+        );
+        assert!(notify
+            .states()
+            .iter()
+            .any(|state| state.starts_with("STATUS=daemon exiting: failed:")));
+        drop(notify);
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn drain_exit_reason_names_the_signal_or_the_journal() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
+        let journal = Path::new("/var/lib/velnor-x/runner/daemons/velnor-x/journal.db");
+        let reason = drain_exit_reason(Some(journal), "before startup");
+        assert!(reason.contains("drain marker latched in journal /var/lib/velnor-x/runner/daemons/velnor-x/journal.db"), "{reason}");
+        assert!(drain_exit_reason(None, "before startup").contains("drain latch set"));
+        DRAINING.store(true, Ordering::SeqCst);
+        assert!(
+            drain_exit_reason(Some(journal), "during registration retry")
+                .contains("SIGTERM/SIGINT received by this process")
+        );
+        DRAINING.store(previous_draining, Ordering::SeqCst);
     }
 
     #[test]
@@ -16857,7 +17716,11 @@ mod tests {
         // event, narrow the pool ceiling by it, and enforce the admitted scope
         // on all three axes — secrets, socket, stores.
         let job = admission_job("pull_request", Some("mallory/base"), true);
-        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        let admitted = crate::trust_class::AdmittedTrust::admit(
+            &job,
+            "trusted",
+            &crate::trust_class::ReadThroughSupport::Supported,
+        );
         assert_eq!(admitted.class(), TrustClass::ForkPR);
         assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
 
@@ -16893,7 +17756,11 @@ mod tests {
             }
         }));
 
-        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        let admitted = crate::trust_class::AdmittedTrust::admit(
+            &job,
+            "trusted",
+            &crate::trust_class::ReadThroughSupport::Supported,
+        );
         assert_eq!(admitted.class(), TrustClass::ForkPR);
         let admitted_scope = admitted.effective_scope().to_owned();
         validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
@@ -16916,6 +17783,7 @@ mod tests {
             "",
             "daemon".into(),
             &admitted_scope,
+            None,
         )
         .unwrap();
 
@@ -16945,7 +17813,11 @@ mod tests {
         // signals keeps the trusted pool's capabilities — secrets flow and the
         // admitted scope is the pool value itself.
         let job = admission_job("push", None, true);
-        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        let admitted = crate::trust_class::AdmittedTrust::admit(
+            &job,
+            "trusted",
+            &crate::trust_class::ReadThroughSupport::Supported,
+        );
         assert_eq!(admitted.class(), TrustClass::Trusted);
         assert_eq!(admitted.effective_scope(), "trusted");
         validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
@@ -16974,7 +17846,11 @@ mod tests {
         ] {
             let job = admission_job(event, head, false);
             assert_eq!(TrustClass::derive(&job), class);
-            let trust = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+            let trust = crate::trust_class::AdmittedTrust::admit(
+                &job,
+                "trusted",
+                &crate::trust_class::ReadThroughSupport::Supported,
+            );
             assert_eq!(trust.class(), class);
             assert_eq!(trust.effective_scope(), scope);
 
@@ -18602,6 +19478,482 @@ jobs:
         assert!(daemon_slot_should_configure_jit(&dir, false, false));
     }
 
+    /// Daemon args for the Sentry dogfood shape: repository scope, operator
+    /// name, no runner group (GitHub Default id 1), trusted pool.
+    fn dogfood_daemon_args(url: &str, labels: &[&str]) -> DaemonArgs {
+        let mut args = daemon_args(5);
+        args.url = Some(url.to_owned());
+        args.name = Some("velnor-dogfood".into());
+        args.labels = labels.iter().map(|label| (*label).to_owned()).collect();
+        args
+    }
+
+    /// A stored JIT config exactly as `configure` would have written it for
+    /// `args` on slot `slot_index`, so `stored_jit_config_drift` must be `None`.
+    fn stored_config_registered_by(
+        args: &DaemonArgs,
+        slot_index: usize,
+        agent_id: i64,
+    ) -> StoredRunnerConfig {
+        let mut stored = stored_config();
+        stored.settings.github_url = args.url.clone().unwrap();
+        stored.settings.pool_id = Some(1);
+        stored.settings.pool_name = Some("Default".into());
+        stored.settings.agent_id = Some(agent_id);
+        stored.settings.agent_name =
+            daemon_slot_agent_name(args.name.as_deref(), slot_index, args.slots).unwrap();
+        stored.settings.labels = normalize_labels(
+            args.labels.clone(),
+            args.target_mvp_labels,
+            args.target_mvp_arm_label,
+        );
+        stored.settings.ephemeral = true;
+        stored
+    }
+
+    #[test]
+    fn stored_jit_config_with_identical_identity_is_reused() {
+        let args = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &["velnor", "velnor-target-mvp", "dogfood"],
+        );
+        let stored = stored_config_registered_by(&args, 3, 2);
+
+        assert_eq!(stored_jit_config_drift(&args, 3, 5, &stored.settings), None);
+
+        // Label order, scope spelling and a promoted successor name are not
+        // identity: only the requested registration matters.
+        let mut reordered = stored.clone();
+        reordered.settings.labels.reverse();
+        reordered.settings.github_url = "https://GitHub.com/TailRocks/Velnor/".into();
+        let host = github_runner_host_slug();
+        let instance = instance_slug_from_operator_name(args.name.as_deref(), &host);
+        reordered.settings.agent_name =
+            compose_github_runner_successor_name(&host, &instance, 2, 2_219_932, 8);
+        assert!(reordered.settings.agent_name.contains("-next-2219932-8"));
+        assert_eq!(
+            stored_jit_config_drift(&args, 3, 5, &reordered.settings),
+            None
+        );
+    }
+
+    #[test]
+    fn stored_jit_config_with_stale_labels_reports_operator_visible_drift() {
+        // Sentry: VELNOR_LABELS gained velnor-host-docker; the stored config
+        // still carries the set fixed at its JIT-config creation.
+        let old = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &["velnor", "velnor-target-mvp", "dogfood"],
+        );
+        let new = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &[
+                "velnor",
+                "velnor-target-mvp",
+                "dogfood",
+                "velnor-host-docker",
+            ],
+        );
+        let stored = stored_config_registered_by(&old, 1, 2);
+
+        let drift = stored_jit_config_drift(&new, 1, 5, &stored.settings).unwrap();
+
+        assert_eq!(
+            drift.to_string(),
+            "labels dogfood,self-hosted,velnor,velnor-target-mvp → dogfood,self-hosted,velnor,velnor-host-docker,velnor-target-mvp"
+        );
+        assert_eq!(
+            format!("stored JIT config for slot-1 is stale ({drift}); re-registering"),
+            "stored JIT config for slot-1 is stale (labels dogfood,self-hosted,velnor,velnor-target-mvp → dogfood,self-hosted,velnor,velnor-host-docker,velnor-target-mvp); re-registering"
+        );
+    }
+
+    #[test]
+    fn stored_jit_config_drift_covers_every_identity_component() {
+        let args = dogfood_daemon_args("https://github.com/tailrocks/velnor", &["velnor"]);
+        let stored = stored_config_registered_by(&args, 2, 2);
+
+        // Runner group: id when resolved, name when only a pool name is known.
+        let mut other_group = args.clone();
+        other_group.pool_id = Some(7);
+        assert!(matches!(
+            stored_jit_config_drift(&other_group, 2, 5, &stored.settings),
+            Some(JitIdentityDrift::RunnerGroup { .. })
+        ));
+        let mut named_group = args.clone();
+        named_group.pool_name = Some("default".into());
+        assert_eq!(
+            stored_jit_config_drift(&named_group, 2, 5, &stored.settings),
+            None,
+            "runner group names compare case-insensitively like find_runner_group"
+        );
+        named_group.pool_name = Some("Trusted".into());
+        assert!(matches!(
+            stored_jit_config_drift(&named_group, 2, 5, &stored.settings),
+            Some(JitIdentityDrift::RunnerGroup { .. })
+        ));
+        named_group.pool_id = Some(1);
+        named_group.pool_id_pre_resolved = true;
+        assert_eq!(
+            stored_jit_config_drift(&named_group, 2, 5, &stored.settings),
+            None,
+            "a pre-resolved group compares by id, exactly as configure requests it"
+        );
+
+        // Agent name: another slot's identity, a renamed instance, or a
+        // successor name that was not composed for this slot.
+        assert!(matches!(
+            stored_jit_config_drift(&args, 3, 5, &stored.settings),
+            Some(JitIdentityDrift::AgentName { .. })
+        ));
+        let mut renamed = args.clone();
+        renamed.name = Some("velnor-staging".into());
+        assert!(matches!(
+            stored_jit_config_drift(&renamed, 2, 5, &stored.settings),
+            Some(JitIdentityDrift::AgentName { .. })
+        ));
+        let mut foreign_successor = stored.clone();
+        foreign_successor.settings.agent_name = format!(
+            "{}-next-1-1",
+            daemon_slot_agent_name(args.name.as_deref(), 4, 5).unwrap()
+        );
+        assert!(matches!(
+            stored_jit_config_drift(&args, 2, 5, &foreign_successor.settings),
+            Some(JitIdentityDrift::AgentName { .. })
+        ));
+
+        // Scope: a different repository, or an unparsable stored URL.
+        let mut other_repo = stored.clone();
+        other_repo.settings.github_url = "https://github.com/tailrocks/other".into();
+        assert!(matches!(
+            stored_jit_config_drift(&args, 2, 5, &other_repo.settings),
+            Some(JitIdentityDrift::Scope { .. })
+        ));
+        let mut garbage = stored.clone();
+        garbage.settings.github_url = "not a url".into();
+        assert!(matches!(
+            stored_jit_config_drift(&args, 2, 5, &garbage.settings),
+            Some(JitIdentityDrift::Scope { .. })
+        ));
+
+        // Trust: the gated label may only be held under a trusted scope.
+        let gated = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &["velnor", TRUST_GATED_RUNNER_LABEL],
+        );
+        let gated_stored = stored_config_registered_by(&gated, 2, 2);
+        assert_eq!(
+            stored_jit_config_drift(&gated, 2, 5, &gated_stored.settings),
+            None
+        );
+        let mut untrusted = gated.clone();
+        untrusted.trust_scope = "untrusted".into();
+        assert!(matches!(
+            stored_jit_config_drift(&untrusted, 2, 5, &gated_stored.settings),
+            Some(JitIdentityDrift::TrustScope { .. })
+        ));
+
+        // Config-only daemons never register, so nothing can drift.
+        let mut config_only = args.clone();
+        config_only.url = None;
+        assert_eq!(
+            stored_jit_config_drift(&config_only, 2, 5, &stored.settings),
+            None
+        );
+
+        // Missing or unreadable configs belong to the identity-unavailable
+        // recovery path, not to drift.
+        let dir = unique_temp_dir("drift-missing-config");
+        assert_eq!(stored_jit_config_drift_at(&args, &dir, 2, 5), None);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("runner.json"), b"{not json").unwrap();
+        assert_eq!(stored_jit_config_drift_at(&args, &dir, 2, 5), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Build a GitHub `generate-jitconfig` 201 body whose decoded `.runner`
+    /// file reproduces exactly the identity `configure` requested, with every
+    /// endpoint on the mock origin so endpoint validation passes.
+    #[cfg(feature = "test-support")]
+    fn jit_config_response(
+        origin: &str,
+        agent_id: i64,
+        agent_name: &str,
+        labels: &[String],
+    ) -> serde_json::Value {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use rsa::{
+            pkcs8::DecodePrivateKey as _,
+            traits::{PrivateKeyParts as _, PublicKeyParts as _},
+            RsaPrivateKey,
+        };
+
+        let key_pair = crate::protocol::RunnerKeyPair::generate().unwrap();
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&key_pair.private_key_pem).unwrap();
+        let primes = private_key.primes();
+        let rsa_params = serde_json::json!({
+            "d": STANDARD.encode(private_key.d().to_bytes_be()),
+            "exponent": STANDARD.encode(private_key.e().to_bytes_be()),
+            "modulus": STANDARD.encode(private_key.n().to_bytes_be()),
+            "p": STANDARD.encode(primes[0].to_bytes_be()),
+            "q": STANDARD.encode(primes[1].to_bytes_be()),
+        });
+        let files = std::collections::BTreeMap::from([
+            (
+                ".runner".to_string(),
+                STANDARD.encode(
+                    serde_json::json!({
+                        "AgentId": agent_id,
+                        "AgentName": agent_name,
+                        "PoolId": 1,
+                        "PoolName": "Default",
+                        "ServerUrl": format!("{origin}/pipelines/"),
+                        "ServerUrlV2": format!("{origin}/broker/"),
+                        "GitHubUrl": format!("{origin}/owner/repo"),
+                        "UseV2Flow": true,
+                        "Ephemeral": true,
+                        "DisableUpdate": true,
+                    })
+                    .to_string(),
+                ),
+            ),
+            (
+                ".credentials".to_string(),
+                STANDARD.encode(
+                    serde_json::json!({
+                        "Scheme": "OAuth",
+                        "Data": {
+                            "clientId": "client-id",
+                            "authorizationUrl": format!("{origin}/token"),
+                            "requireFipsCryptography": "false",
+                        }
+                    })
+                    .to_string(),
+                ),
+            ),
+            (
+                ".credentials_rsaparams".to_string(),
+                STANDARD.encode(rsa_params.to_string()),
+            ),
+        ]);
+        let encoded = STANDARD.encode(serde_json::to_string(&files).unwrap());
+        serde_json::json!({
+            "runner": {
+                "id": agent_id,
+                "name": agent_name,
+                "os": "linux",
+                "status": "offline",
+                "busy": false,
+                "labels": labels.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
+                "runner_group_id": 1,
+            },
+            "encoded_jit_config": encoded,
+        })
+    }
+
+    /// (a) A live slot identity whose labels no longer match the configured
+    /// set is deleted from GitHub and re-registered with the current set, on
+    /// the same retire-and-configure path a lost registration takes. The
+    /// fresh config then satisfies the reuse predicate, so the next cycle
+    /// reuses it instead of churning.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn stale_slot_jit_config_is_deleted_and_reregistered_with_current_labels() {
+        use wiremock::{
+            matchers::{body_partial_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let url = format!("{}/owner/repo", server.uri());
+        let old_args = dogfood_daemon_args(&url, &["velnor", "dogfood"]);
+        let mut args = dogfood_daemon_args(&url, &["velnor", "dogfood", "velnor-host-docker"]);
+        args.pat = Some("token".into());
+        let requested_labels = normalize_labels(args.labels.clone(), false, false);
+        let agent_name = daemon_slot_agent_name(args.name.as_deref(), 1, 5).unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/repos/owner/repo/actions/runners/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v3/repos/owner/repo/actions/runners/generate-jitconfig",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "name": agent_name,
+                "runner_group_id": 1,
+                "labels": requested_labels,
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(jit_config_response(
+                    &server.uri(),
+                    9,
+                    &agent_name,
+                    &requested_labels,
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = unique_temp_dir("stale-slot-jit-reregister");
+        let slot_dir = daemon_slot_config_dir(&base, 1, 5);
+        config::save(&slot_dir, &stored_config_registered_by(&old_args, 1, 2)).unwrap();
+        assert_eq!(
+            stored_jit_config_drift_at(&old_args, &slot_dir, 1, 5),
+            None,
+            "the previous configuration reuses its own registration"
+        );
+
+        let drift = stored_jit_config_drift_at(&args, &slot_dir, 1, 5).unwrap();
+        assert_eq!(
+            drift.to_string(),
+            "labels dogfood,self-hosted,velnor → dogfood,self-hosted,velnor,velnor-host-docker"
+        );
+        retry_daemon_slot_jit_config(&args, &base, 1, 5, 1)
+            .await
+            .unwrap();
+
+        let fresh = config::load(&slot_dir).unwrap();
+        assert_eq!(fresh.settings.agent_id, Some(9));
+        assert_eq!(fresh.settings.labels, requested_labels);
+        assert_eq!(
+            stored_jit_config_drift_at(&args, &slot_dir, 1, 5),
+            None,
+            "the freshly registered identity satisfies the reuse predicate"
+        );
+        server.verify().await;
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// (c) A successor pre-created by an earlier worker with a stale label
+    /// set is deleted from GitHub and discarded before promotion; the slot
+    /// then registers a fresh identity for the current configuration instead
+    /// of promoting the stale one.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn stale_successor_jit_config_is_discarded_before_promotion() {
+        use wiremock::{
+            matchers::{body_partial_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let url = format!("{}/owner/repo", server.uri());
+        let old_args = dogfood_daemon_args(&url, &["velnor", "dogfood"]);
+        let mut args = dogfood_daemon_args(&url, &["velnor", "dogfood", "velnor-host-docker"]);
+        args.pat = Some("token".into());
+        let requested_labels = normalize_labels(args.labels.clone(), false, false);
+        let agent_name = daemon_slot_agent_name(args.name.as_deref(), 2, 5).unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/repos/owner/repo/actions/runners/31"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v3/repos/owner/repo/actions/runners/generate-jitconfig",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "name": agent_name,
+                "labels": requested_labels,
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(jit_config_response(
+                    &server.uri(),
+                    40,
+                    &agent_name,
+                    &requested_labels,
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = unique_temp_dir("stale-successor-jit-discard");
+        let slot_dir = daemon_slot_config_dir(&base, 2, 5);
+        let next_dir = daemon_slot_successor_config_dir(&base, 2, 5);
+        // The consumed live identity (GitHub already deregistered it after
+        // its job) and the successor the previous worker pid prepared.
+        config::save(&slot_dir, &stored_config_registered_by(&args, 2, 30)).unwrap();
+        let mut successor = stored_config_registered_by(&old_args, 2, 31);
+        let host = github_runner_host_slug();
+        let instance = instance_slug_from_operator_name(args.name.as_deref(), &host);
+        successor.settings.agent_name =
+            compose_github_runner_successor_name(&host, &instance, 1, 1_665_549, 23);
+        config::save(&next_dir, &successor).unwrap();
+        // No global operational store in tests: durable transitions are
+        // best-effort observations and skip when the sink is absent.
+        let durable_slot =
+            DurableSlotLifecycle::new(SlotId("velnor-dogfood-2".into()), 2, Generation::INITIAL)
+                .unwrap();
+
+        recycle_daemon_slot(&args, &base, 2, 5, 23, &durable_slot)
+            .await
+            .unwrap();
+
+        let live = config::load(&slot_dir).unwrap();
+        assert_eq!(
+            live.settings.agent_id,
+            Some(40),
+            "stale successor was not promoted"
+        );
+        assert_eq!(live.settings.labels, requested_labels);
+        assert!(
+            !next_dir.exists(),
+            "stale successor directory was discarded"
+        );
+        assert_eq!(stored_jit_config_drift_at(&args, &slot_dir, 2, 5), None);
+        server.verify().await;
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// (b) A successor whose identity matches the current configuration is
+    /// promoted as-is: no GitHub request, no fresh registration.
+    #[tokio::test]
+    async fn current_successor_jit_config_is_promoted_without_reregistration() {
+        let url = "https://github.com/owner/repo";
+        let mut args = dogfood_daemon_args(url, &["velnor", "dogfood"]);
+        args.pat = Some("token".into());
+        let base = unique_temp_dir("current-successor-jit-promote");
+        let slot_dir = daemon_slot_config_dir(&base, 2, 5);
+        let next_dir = daemon_slot_successor_config_dir(&base, 2, 5);
+        config::save(&slot_dir, &stored_config_registered_by(&args, 2, 30)).unwrap();
+        let mut successor = stored_config_registered_by(&args, 2, 31);
+        let host = github_runner_host_slug();
+        let instance = instance_slug_from_operator_name(args.name.as_deref(), &host);
+        successor.settings.agent_name =
+            compose_github_runner_successor_name(&host, &instance, 1, 1_665_549, 23);
+        config::save(&next_dir, &successor).unwrap();
+        let durable_slot =
+            DurableSlotLifecycle::new(SlotId("velnor-dogfood-2".into()), 2, Generation::INITIAL)
+                .unwrap();
+
+        // No mock GitHub origin exists: any DELETE or JIT request would fail.
+        recycle_daemon_slot(&args, &base, 2, 5, 23, &durable_slot)
+            .await
+            .unwrap();
+
+        let live = config::load(&slot_dir).unwrap();
+        assert_eq!(
+            live.settings.agent_id,
+            Some(31),
+            "prepared successor was promoted"
+        );
+        assert_eq!(live.settings.agent_name, successor.settings.agent_name);
+        assert!(!next_dir.join("runner.json").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test]
     async fn configure_replace_dry_run_preserves_registered_local_identity() {
         let dir = unique_temp_dir("configure-replace-dry-run");
@@ -19099,6 +20451,58 @@ jobs:
             assert!(!name.contains("github_pat_"));
             assert!(!name.contains('@'));
         }
+    }
+
+    #[test]
+    fn default_local_operator_name_collapses_to_the_local_instance_without_truncation() {
+        // A 25-character macOS nodename: the shape that used to be truncated
+        // to 24 characters by velnorctl and left uncut by the runner, so the
+        // `velnor-local-{host}` collapse never matched.
+        let nodename = "Alexeys-MacBook-Pro.local";
+        assert!(nodename.len() >= 25);
+        let host = github_identity_slug(nodename);
+        assert_eq!(host, "alexeys-macbook-pro-local");
+        let operator_name = format!("velnor-local-{host}");
+
+        for slot in [0, 1, 7] {
+            let name = compose_github_runner_name(&host, &operator_name, slot);
+            assert_eq!(name, format!("velnor-{host}-local-{slot}"));
+            assert!(name.len() <= GITHUB_RUNNER_NAME_MAX, "{name}");
+            assert!(
+                name.contains(&format!("-{host}-")),
+                "host segment must not be truncated: {name}"
+            );
+            assert!(!name.contains("velnor-local"), "{name}");
+            let (instance, parsed_slot) = parse_instance_and_slot(&name, &host).unwrap();
+            assert_eq!(instance, "local");
+            assert_eq!(parsed_slot, slot.to_string());
+        }
+
+        // A nodename longer than the control-socket instance budget: the
+        // operator default is cut to 64 bytes and still collapses to `local`.
+        let long_host = "a".repeat(70);
+        let long_name = default_local_operator_name_for(&long_host);
+        assert_eq!(long_name.len(), OPERATOR_NAME_MAX);
+        assert_eq!(
+            instance_slug_from_operator_name(Some(&long_name), &long_host),
+            "local"
+        );
+
+        // Live process identity: the operator default and the registration
+        // path must agree on this machine's actual nodename too.
+        let live_host = github_runner_host_slug();
+        let default_name = default_local_operator_name();
+        assert_eq!(default_name, format!("velnor-local-{live_host}"));
+        let registered = daemon_slot_agent_name(Some(&default_name), 1, 1).unwrap();
+        assert_eq!(
+            registered,
+            compose_github_runner_name(&live_host, "local", 0)
+        );
+        assert!(!registered.contains("velnor-local"), "{registered}");
+        let identity = identity_from_agent_name(&registered);
+        assert_eq!(identity.host, live_host);
+        assert_eq!(identity.instance, "local");
+        assert_eq!(identity.slot, "0");
     }
 
     #[test]
@@ -21855,67 +23259,6 @@ jobs:
     }
 
     #[test]
-    fn durable_slot_request_key_tracks_live_jit_agent_identity() {
-        let config_dir = unique_temp_dir("durable-slot-request-key");
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".to_owned()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-42-generation-7-recycling")
-        );
-
-        stored.settings.agent_id = Some(43);
-        config::save(&config_dir, &stored).unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-43-generation-7-recycling")
-        );
-
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
-    fn durable_slot_request_key_rejects_invalid_identity_but_keeps_gap_identity() {
-        let config_dir = unique_temp_dir("durable-slot-request-key-invalid");
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".to_owned()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-
-        assert!(lifecycle.request_key(SlotPhase::Teardown).is_some());
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-42-generation-7-recycling")
-        );
-
-        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
-        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
-
-        config::save(&config_dir, &stored).unwrap();
-        stored.settings.agent_id = None;
-        config::save(&config_dir, &stored).unwrap();
-        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
-
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
     fn record_job_transition_reports_rejected_edges() {
         let base = unique_temp_dir("transition-verdict");
         fs::create_dir_all(&base).unwrap();
@@ -21947,167 +23290,177 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[test]
-    fn configless_request_key_reports_request_ledger_read_failure() {
-        let root = unique_temp_dir("configless-request-ledger-read-failure");
+    fn lifecycle_sink(label: &str) -> (std::path::PathBuf, Arc<crate::ops::OpsSink>) {
+        let root = unique_temp_dir(label);
         fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap(),
+        );
+        (root, sink)
+    }
 
-        let connection = rusqlite::Connection::open(root.join("state.db")).unwrap();
-        connection
-            .execute_batch("DROP TABLE slot_transition_requests;")
+    fn durable_phase(root: &Path, slot_id: &SlotId) -> SlotPhase {
+        velnor_control::store::Store::open(root.join("state.db"))
+            .unwrap()
+            .slot("test-instance", slot_id)
+            .unwrap()
+            .unwrap()
+            .phase
+    }
+
+    /// Every daemon target is reachable from every phase through legal edges
+    /// only, and the ring itself is legal. This is the proof that the daemon
+    /// can no longer issue an illegal slot edge.
+    #[test]
+    fn slot_lifecycle_path_is_total_and_every_step_is_a_legal_edge() {
+        for target in DAEMON_SLOT_RING {
+            assert_eq!(slot_lifecycle_path(None, target), vec![target]);
+            for current in SlotPhase::ALL {
+                let path = slot_lifecycle_path(Some(current), target);
+                if current == target {
+                    assert!(path.is_empty(), "{current:?} -> {target:?} must be a no-op");
+                    continue;
+                }
+                assert_eq!(path.last(), Some(&target), "{current:?} -> {target:?}");
+                let mut from = current;
+                for step in path {
+                    assert!(
+                        velnor_model::slot_transition_allowed(from, step),
+                        "{current:?} -> {target:?} walks illegal edge {from:?} -> {step:?}"
+                    );
+                    from = step;
+                }
+            }
+        }
+        for (index, from) in DAEMON_SLOT_RING.iter().enumerate() {
+            let next = DAEMON_SLOT_RING[(index + 1) % DAEMON_SLOT_RING.len()];
+            assert!(velnor_model::slot_transition_allowed(*from, next));
+        }
+        // Targets outside the ring are declared directly for the store to
+        // adjudicate rather than walked toward forever.
+        assert_eq!(
+            slot_lifecycle_path(Some(SlotPhase::Idle), SlotPhase::Draining),
+            vec![SlotPhase::Draining]
+        );
+    }
+
+    /// Sentry dogfood slot-5 (pid 2535037 → 2641434): the previous worker
+    /// exited in `teardown` after a capacity fence and the controller
+    /// respawned the same generation; the new worker's first post-job
+    /// teardown was refused as `teardown → teardown`. A repeated declaration
+    /// is a no-op, and the restarted worker converges to idle legally.
+    #[test]
+    fn durable_slot_repeated_teardown_is_a_noop_and_restart_converges_to_idle() {
+        let (root, sink) = lifecycle_sink("durable-slot-double-teardown");
+        let slot_id = SlotId("slot-1".to_owned());
+        let exited = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(exited.transition_with_sink(&sink, SlotPhase::Idle, "started"));
+        assert!(exited.transition_with_sink(&sink, SlotPhase::Teardown, "fence exit"));
+        let events_after_exit = sink
+            .store_for_tests()
+            .event_count("test-instance", "slot-1")
             .unwrap();
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            root.join("config"),
-        )
-        .unwrap();
 
-        assert!(lifecycle
-            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
-            .is_none());
-        assert!(sink.degraded());
-        assert!(sink
-            .forensic_failures()
-            .iter()
-            .any(|line| line.contains("store.slot.transition.lookup")));
+        let restarted = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(restarted.transition_with_sink(&sink, SlotPhase::Teardown, "again"));
+        assert_eq!(
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            events_after_exit,
+            "a repeated declaration writes nothing"
+        );
+        assert_eq!(durable_phase(&root, &slot_id), SlotPhase::Teardown);
 
+        // The restarted worker declares idle: teardown → recycling → idle.
+        assert!(restarted.transition_with_sink(&sink, SlotPhase::Idle, "worker started"));
+        assert_eq!(durable_phase(&root, &slot_id), SlotPhase::Idle);
+        assert_eq!(
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            events_after_exit + 2
+        );
+        assert_eq!(sink.store_for_tests().illegal_transition_edges(), 0);
+        assert!(!sink.degraded());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Sentry dogfood slot-4 (pid 2535016): recycle after cycle 8, the
+    /// registration of the promoted agent disappeared in cycle 9, cleanup +
+    /// reconfigure, then recycle after cycle 10. With agent-id request keys
+    /// the reconfigure's `recycling` collided with cycle 8's and the slot
+    /// stranded in `teardown`; the sequence-derived keys never collide.
+    #[test]
+    fn durable_slot_lifecycle_passes_never_collide_or_strand() {
+        let (root, sink) = lifecycle_sink("durable-slot-lifecycle-passes");
+        let slot_id = SlotId("slot-1".to_owned());
+        let slot = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(slot.transition_with_sink(&sink, SlotPhase::Idle, "started"));
+        for (target, message) in [
+            (
+                SlotPhase::Teardown,
+                "tearing down consumed JIT identity after cycle 8",
+            ),
+            (SlotPhase::Recycling, "recycling JIT identity after cycle 8"),
+            (
+                SlotPhase::Idle,
+                "promoted prewarmed JIT identity after cycle 8",
+            ),
+            (
+                SlotPhase::Teardown,
+                "cleaning failed JIT identity after cycle 9",
+            ),
+            (
+                SlotPhase::Recycling,
+                "reconfiguring JIT identity after cycle 9",
+            ),
+            (SlotPhase::Idle, "JIT identity ready after cycle 9"),
+            (
+                SlotPhase::Teardown,
+                "tearing down consumed JIT identity after cycle 10",
+            ),
+            (
+                SlotPhase::Recycling,
+                "recycling JIT identity after cycle 10",
+            ),
+            (
+                SlotPhase::Idle,
+                "promoted prewarmed JIT identity after cycle 10",
+            ),
+        ] {
+            assert!(
+                slot.transition_with_sink(&sink, target, message),
+                "{message} must apply"
+            );
+            assert_eq!(durable_phase(&root, &slot_id), target);
+        }
+        assert_eq!(sink.store_for_tests().illegal_transition_edges(), 0);
+        assert!(sink.forensic_failures().is_empty());
+        assert_eq!(
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            10
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn fresh_process_configless_recycling_to_idle_recovers_durable_key() {
-        let root = unique_temp_dir("fresh-process-slot-recovery");
-        let config_dir = root.join("config");
-        fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-
-        let restarted = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        let recycling_key = restarted
-            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
-            .expect("durable predecessor recovers recycling key");
-        assert_eq!(recycling_key, "jit-agent-42-generation-7-recycling");
-        assert!(sink.transition_slot(
-            &restarted.slot_id,
-            restarted.slot_index,
-            restarted.generation,
-            &recycling_key,
-            SlotPhase::Recycling,
-            None,
-        ));
-
-        let idle_key = restarted
-            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-            .expect("durable recycling intent recovers idle key during configless gap");
-        assert_eq!(idle_key, "jit-agent-42-generation-7-idle");
-        assert!(sink.transition_slot(
-            &restarted.slot_id,
-            restarted.slot_index,
-            restarted.generation,
-            &idle_key,
-            SlotPhase::Idle,
-            None,
-        ));
-        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
+    fn durable_slot_never_mutates_a_superseded_generation() {
+        let (root, sink) = lifecycle_sink("durable-slot-superseded");
+        let slot_id = SlotId("slot-1".to_owned());
+        let newer = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(2)).unwrap();
+        assert!(newer.transition_with_sink(&sink, SlotPhase::Idle, "generation 2 started"));
+        let stale = DurableSlotLifecycle::new(slot_id.clone(), 1, Generation(1)).unwrap();
+        assert!(!stale.transition_with_sink(&sink, SlotPhase::Teardown, "stale worker"));
+        assert_eq!(durable_phase(&root, &slot_id), SlotPhase::Idle);
         assert_eq!(
-            reopened
-                .slot("test-instance", &restarted.slot_id)
-                .unwrap()
-                .unwrap()
-                .phase,
-            SlotPhase::Idle
+            sink.store_for_tests()
+                .event_count("test-instance", "slot-1")
+                .unwrap(),
+            1
         );
-
-        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
-        let invalid = DurableSlotLifecycle::new(
-            restarted.slot_id.clone(),
-            1,
-            restarted.generation,
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert!(invalid
-            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-            .is_none());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn fresh_process_configless_rejects_skipping_recycling() {
-        let root = unique_temp_dir("fresh-process-slot-recovery-negative");
-        let config_dir = root.join("config");
-        fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-
-        let restarted = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert!(
-            restarted
-                .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-                .is_none(),
-            "configless recovery must not synthesize an illegal Teardown -> Idle edge"
-        );
-        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
-        assert_eq!(
-            reopened
-                .slot("test-instance", &restarted.slot_id)
-                .unwrap()
-                .unwrap()
-                .phase,
-            SlotPhase::Teardown
-        );
-        assert_eq!(reopened.event_count("test-instance", "slot-1").unwrap(), 1);
-
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -24480,32 +25833,6 @@ runs:
     }
 
     #[test]
-    fn job_claim_remains_exclusive_when_transferred_to_teardown_owner() {
-        let root = unique_temp_dir("job-claim-teardown-owner");
-        let claim = JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .unwrap();
-        let release = Arc::new(AtomicBool::new(false));
-        let release_in_teardown = Arc::clone(&release);
-        let teardown = std::thread::spawn(move || {
-            let _claim = claim;
-            while !release_in_teardown.load(Ordering::SeqCst) {
-                std::thread::yield_now();
-            }
-        });
-
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_none());
-        release.store(true, Ordering::SeqCst);
-        teardown.join().unwrap();
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_some());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn missing_job_workspace_is_successfully_removed() {
         let job_dir = unique_temp_dir("missing-job-workspace");
 
@@ -24843,6 +26170,7 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             store_trust_scope: "trusted".to_owned(),
+            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         }

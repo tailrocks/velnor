@@ -29,11 +29,44 @@ pub mod http;
 #[cfg(target_os = "macos")]
 pub mod local_diagnostics;
 pub mod man;
+pub mod packaged;
 pub mod preflight;
 pub mod runtime;
 
 /// Binary name used across generated surfaces.
 pub const BIN_NAME: &str = "velnorctl";
+
+/// The version line `velnorctl --version` and `velnorctl version` print.
+///
+/// `velnorctl`'s own crate version is a constant `0.1.0` that names every
+/// build ever made; the release version is `velnor-runner`'s (the version the
+/// `v*` tag names). The line therefore carries the identity
+/// `velnor-runner/build.rs` stamps at compile time — the same record
+/// `velnor-runner release export` prints and the deb ships as
+/// `/usr/share/velnor/build-identity.json` — because `velnorctl` is built in
+/// the same workspace build (its `release-build` feature forwards to the
+/// runner's). Shape: `<release version> <kind> <tag> <source sha>`, e.g.
+/// `0.1.274 release v0.1.274 3f2ceb67…` or `0.1.274 development`.
+static VERSION_LINE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| version_line(&velnor_runner::embedded_build_identity()));
+
+/// Render the version line from an embedded build identity.
+#[must_use]
+pub fn version_line(identity: &velnor_runner::EmbeddedIdentity) -> String {
+    if identity.source_sha == "development" {
+        return format!("{} development", identity.crate_version);
+    }
+    format!(
+        "{} {} {} {}",
+        identity.crate_version, identity.kind, identity.tag, identity.source_sha
+    )
+}
+
+/// The version line as a static string for clap's `--version`.
+#[must_use]
+pub fn cli_version() -> &'static str {
+    VERSION_LINE.as_str()
+}
 
 /// CLI-facing output-format choice converted explicitly into the domain
 /// renderer type so `velnor-render` stays framework-independent.
@@ -70,7 +103,7 @@ impl From<OutputArg> for OutputFormat {
 #[derive(Debug, Parser)]
 #[command(
     name = BIN_NAME,
-    version = velnor_model::CRATE_VERSION,
+    version = cli_version(),
     about = "Velnor operator CLI",
     long_about = "Velnor operator CLI.\n\n\
         Inspect and operate a Velnor runner fleet from the command line.\n\
@@ -505,7 +538,15 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Man(args) => man::run(&args),
         Command::Completion(args) => completion::run(&args),
         Command::Version => {
-            println!("{}", velnor_model::CRATE_VERSION);
+            if globals.output_format().is_machine() {
+                println!(
+                    "{}",
+                    serde_json::to_string(&velnor_runner::embedded_build_identity())
+                        .map_err(|error| CommandError::operation(error.to_string()))?
+                );
+            } else {
+                println!("{}", cli_version());
+            }
             Ok(())
         }
         Command::ApiResources => {
@@ -533,7 +574,10 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Recycle(args) => execute_lifecycle(&globals, "recycle", args).await,
         Command::Scale(args) => execute_scale(&globals, args).await,
         Command::Cache(args) => {
-            run_runtime(velnor_runner::args::Command::Cache((*args).into())).await
+            run_runtime(velnor_runner::args::Command::Cache(
+                (*args).into_runtime(globals.instance.clone()),
+            ))
+            .await
         }
         Command::Capabilities(args) => {
             run_runtime(velnor_runner::args::Command::Capabilities((*args).into())).await
@@ -575,17 +619,24 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
         }
         Command::Status(args) => {
+            // Same selection as `get`: the daemon's own directory, from its
+            // unit environment on a packaged host.
+            let selected = packaged::select(&globals)?;
             if args.json || globals.output_format().is_machine() {
-                return status_health_json(&args);
+                return status_health_json(&args, &selected);
             }
             #[cfg(target_os = "macos")]
             {
-                let runtime_args = velnor_runner::args::Command::Status((*args).clone().into());
+                let runtime_args =
+                    velnor_runner::args::Command::Status((*args).clone().into_runtime(&selected)?);
                 let runner_result = run_status(runtime_args).await;
                 local_diagnostics::status(&globals, &args, runner_result)
             }
             #[cfg(not(target_os = "macos"))]
-            run_status(velnor_runner::args::Command::Status((*args).into())).await
+            run_status(velnor_runner::args::Command::Status(
+                (*args).into_runtime(&selected)?,
+            ))
+            .await
         }
         Command::Daemon(args) => runtime::run_daemon((*args).clone())
             .await
@@ -668,9 +719,10 @@ fn validate_remove_target_selectors(globals: &GlobalArgs) -> Result<(), CommandE
     Ok(())
 }
 
+/// Control client for query/mutation commands. The global `--repo` is a
+/// command input for repository-scoped verbs (`host start`, `workflow check`,
+/// `run dispatch`), not a query filter, so the v1 query API rejects it here.
 fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, CommandError> {
-    use velnor_control::config::ContextStore;
-
     if globals.repo.is_some() {
         return Err(CommandError::new(
             ExitClass::Usage,
@@ -678,36 +730,69 @@ fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, 
             "global --repo is not supported by the v1 query API",
         ));
     }
+    endpoint_client_for(globals)
+}
+
+/// The repository named by the global `--repo OWNER/NAME` selector, required.
+fn required_repo(globals: &GlobalArgs) -> Result<&str, CommandError> {
+    match globals.repo.as_deref().map(str::trim) {
+        Some(repo) if repo.contains('/') => Ok(repo),
+        _ => Err(CommandError::new(
+            ExitClass::Usage,
+            "repo.required",
+            "pass --repo OWNER/NAME",
+        )),
+    }
+}
+
+/// Control client resolved from context/instance selection only.
+fn endpoint_client_for(
+    globals: &GlobalArgs,
+) -> Result<velnor_client::UnixControlClient, CommandError> {
+    use velnor_control::config::ContextStore;
 
     let contexts = context_store()?.list()?;
-    let (endpoint, context_selected) = if let Some(context_name) = &globals.context {
-        let context = contexts
-            .iter()
-            .find(|context| context.name == *context_name)
-            .ok_or_else(|| CommandError::unavailable("named context was not found"))?;
-        (context.endpoint.as_str().to_owned(), true)
-    } else if let Some(context) = contexts.iter().find(|context| context.current) {
-        (context.endpoint.as_str().to_owned(), true)
-    } else {
-        let instance = globals
-            .instance
-            .clone()
-            .or_else(|| std::env::var("VELNOR_INSTANCE").ok());
-        (
-            format!(
-                "unix://{}/{}",
-                velnor_client::socket_root().display(),
-                instance.as_deref().unwrap_or("default")
-            ),
-            false,
+    let context = if let Some(context_name) = &globals.context {
+        Some(
+            contexts
+                .iter()
+                .find(|context| context.name == *context_name)
+                .ok_or_else(|| CommandError::unavailable("named context was not found"))?,
         )
+    } else {
+        contexts.iter().find(|context| context.current)
     };
-    let endpoint = velnor_client::UnixEndpoint::parse(&endpoint).map_err(|error| {
-        CommandError::new(ExitClass::Usage, "endpoint.invalid", error.to_string())
-    })?;
-    if context_selected {
-        validate_context_instance(&endpoint, globals.instance.as_deref())?;
-    }
+    let Some(context) = context else {
+        // No context: the daemon is selected the way systemd configured it —
+        // a packaged instance's socket lives under that instance's storage
+        // root, not under whatever this shell's environment names.
+        let selected = packaged::select(globals)?;
+        let endpoint = selected.endpoint()?;
+        if let Some(instance) = selected.packaged() {
+            let control = endpoint.socket_path(velnor_client::SocketKind::Control);
+            if !control.exists() {
+                // The address is right; the daemon behind it is not serving.
+                // Say which unit and which path, so the operator does not go
+                // hunting for the socket under this shell's socket root.
+                return Err(CommandError::unavailable(format!(
+                    "packaged instance {} ({}) has no control socket at {}; its daemon \
+                     serves only {} (the unit runs `velnor-runner daemon`, whose control \
+                     API is `velnorctl daemon`). Inspect it with `velnorctl --instance {} status`",
+                    instance.instance,
+                    instance.unit,
+                    control.display(),
+                    instance.health_socket().display(),
+                    instance.instance,
+                )));
+            }
+        }
+        return Ok(velnor_client::UnixControlClient::new(endpoint));
+    };
+    let endpoint =
+        velnor_client::UnixEndpoint::parse(context.endpoint.as_str()).map_err(|error| {
+            CommandError::new(ExitClass::Usage, "endpoint.invalid", error.to_string())
+        })?;
+    validate_context_instance(&endpoint, globals.instance.as_deref())?;
     Ok(velnor_client::UnixControlClient::new(endpoint))
 }
 
@@ -727,14 +812,31 @@ fn validate_context_instance(
     Ok(())
 }
 
-fn client_query(args: &commands::ResourceQueryArgs) -> velnor_client::ResourceQuery {
-    velnor_client::ResourceQuery {
-        selector: args.selector.clone(),
-        field_selector: args.field_selector.clone(),
+/// Build the wire query from the global filters plus per-command pagination.
+///
+/// The control API accepts `since` only as an RFC 3339 instant, so the parsed
+/// global [`Since`] (absolute or relative) is resolved against now here; a
+/// relative bound that cannot be represented is a usage error, never an
+/// approximation.
+fn client_query(
+    globals: &GlobalArgs,
+    args: &commands::ResourceQueryArgs,
+) -> Result<velnor_client::ResourceQuery, CommandError> {
+    let since = globals
+        .since
+        .map(|since| since.resolve(velnor_model::Timestamp::now()))
+        .transpose()
+        .map_err(|error| CommandError::new(ExitClass::Usage, "since.invalid", error.to_string()))?
+        .map(|instant| instant.to_rfc3339())
+        .transpose()
+        .map_err(|error| CommandError::new(ExitClass::Usage, "since.invalid", error.to_string()))?;
+    Ok(velnor_client::ResourceQuery {
+        selector: globals.selector.clone(),
+        field_selector: globals.field_selector.clone(),
         page_token: args.page_token.clone(),
-        since: args.since.clone(),
+        since,
         limit: args.limit,
-    }
+    })
 }
 
 fn render_resources(
@@ -784,9 +886,8 @@ async fn execute_explain(
 
 async fn execute_get(globals: &GlobalArgs, args: commands::GetArgs) -> Result<(), CommandError> {
     let (resource, query) = get_target(args);
-    let page = client_for(globals)?
-        .get_resources(resource, &client_query(&query))
-        .await?;
+    let query = client_query(globals, &query)?;
+    let page = client_for(globals)?.get_resources(resource, &query).await?;
     render_resources(globals, &page.resources)
 }
 
@@ -887,7 +988,7 @@ async fn execute_events(
     globals: &GlobalArgs,
     args: commands::EventsArgs,
 ) -> Result<(), CommandError> {
-    let query = client_query(&args.query);
+    let query = client_query(globals, &args.query)?;
     let page = client_for(globals)?.get_resources("events", &query).await?;
     render_resources(globals, &page.resources)
 }
@@ -1111,13 +1212,11 @@ async fn execute_workflow(
     globals: &GlobalArgs,
     args: commands::WorkflowArgs,
 ) -> Result<(), CommandError> {
-    let info = client_for(globals)?.info().await?;
+    let repo = required_repo(globals)?;
+    let info = endpoint_client_for(globals)?.info().await?;
     match args.command {
         commands::WorkflowCommand::Check(args) => {
-            if !args.repo.contains('/')
-                || args.reference.trim().is_empty()
-                || args.workflow.trim().is_empty()
-            {
+            if args.reference.trim().is_empty() || args.workflow.trim().is_empty() {
                 return Err(CommandError::new(
                     ExitClass::Usage,
                     "workflow.invalid",
@@ -1126,7 +1225,7 @@ async fn execute_workflow(
             }
             print_json(serde_json::json!({
                 "valid": true,
-                "repo": args.repo,
+                "repo": repo,
                 "ref": args.reference,
                 "workflow": args.workflow,
                 "apiVersion": info.api_version,
@@ -1399,14 +1498,24 @@ fn print_json<T: serde::Serialize>(value: T) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
+/// The node health vector of the selected daemon.
+///
+/// `journal.db` and `health.sock` live in the daemon-scoped directory
+/// (`<config base>/daemons/<name>`), which the selection resolves from the
+/// daemon's unit environment on a packaged host. This used to default to
+/// `/run/velnor`, a directory no packaged daemon journals in, so `status
+/// --json` on a multi-instance host read a stale file that belonged to
+/// nobody.
+fn status_health_json(
+    args: &runtime::StatusArgs,
+    selected: &packaged::Selected,
+) -> Result<(), CommandError> {
     use velnor_control::journal::Journal;
     use velnor_model::HealthDocument;
-    let dir = args
-        .state_dir
-        .clone()
-        .or_else(|| args.config_dir.clone())
-        .unwrap_or_else(|| std::path::PathBuf::from("/run/velnor"));
+    let dir = match args.state_dir.clone().or_else(|| args.config_dir.clone()) {
+        Some(dir) => dir,
+        None => selected.daemon_dir()?,
+    };
     let config_dir = args.config_dir.clone().unwrap_or_else(|| dir.clone());
     let execution = velnor_runner::execution::load_execution_file(&config_dir, None)
         .or_else(|_| velnor_runner::execution::load_execution_file(&dir, None))
@@ -1637,6 +1746,38 @@ mod tests {
     }
 
     #[test]
+    fn version_line_carries_release_identity_not_only_the_crate_version() {
+        let release = velnor_runner::EmbeddedIdentity {
+            source_sha: "3f2ceb67".repeat(5),
+            tag: "v0.1.0".into(),
+            kind: "release".into(),
+            crate_version: "0.1.0".into(),
+        };
+        assert_eq!(
+            version_line(&release),
+            format!("0.1.0 release v0.1.0 {}", "3f2ceb67".repeat(5))
+        );
+        let development = velnor_runner::EmbeddedIdentity {
+            source_sha: "development".into(),
+            tag: "development".into(),
+            kind: "development".into(),
+            crate_version: "0.1.0".into(),
+        };
+        assert_eq!(version_line(&development), "0.1.0 development");
+        // `--version` and `version` print the identity this binary was built
+        // with: the *release* crate version (`velnor-runner`, the version the
+        // `v*` tag names), never velnorctl's own never-bumped `0.1.0`.
+        let embedded = velnor_runner::embedded_build_identity();
+        assert!(cli_version().starts_with(&embedded.crate_version));
+        assert!(cli_version().contains(&embedded.source_sha));
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(cli_version()),
+            "clap --version must use the stamped line"
+        );
+    }
+
+    #[test]
     fn anyhow_chain_survives_command_error_conversion() {
         let error = anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -1698,7 +1839,7 @@ mod tests {
             globals: globals_with_output(OutputArg::Json),
             command: Command::Status(Box::new(runtime::StatusArgs {
                 config_dir: Some(dir.clone()),
-                slots: 1,
+                slots: Some(1),
                 check_target_mvp: false,
                 json: false,
                 state_dir: None,
@@ -1712,5 +1853,85 @@ mod tests {
         let envelope = serde_json::to_string(&error.envelope()).expect("envelope JSON");
         assert!(envelope.contains(&missing), "{envelope}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every clap definition error (duplicate ids across global and local
+    /// arguments, conflicting attributes, missing value parsers) is a runtime
+    /// panic in the shipped binary. `debug_assert` walks the complete command
+    /// tree, so a definition mistake anywhere fails here, not in production.
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    /// `debug_assert` validates each command in isolation, so it cannot see
+    /// the one definition error clap only detects at parse time: a local
+    /// argument whose id equals a `global = true` argument of an ancestor.
+    /// The global is propagated into the subcommand's matches under that id
+    /// and the local typed accessor then panics ("Mismatch between definition
+    /// and access"). Walk the tree and refuse any such shadowing.
+    #[test]
+    fn no_local_argument_shadows_a_global_argument() {
+        fn walk(
+            command: &clap::Command,
+            inherited: &[String],
+            path: &str,
+            failures: &mut Vec<String>,
+        ) {
+            let mut globals = inherited.to_vec();
+            for arg in command.get_arguments() {
+                let id = arg.get_id().to_string();
+                if inherited.contains(&id) {
+                    failures.push(format!(
+                        "{path}: local argument `{id}` shadows a global one"
+                    ));
+                }
+                if arg.is_global_set() && !globals.contains(&id) {
+                    globals.push(id);
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(
+                    sub,
+                    &globals,
+                    &format!("{path} {}", sub.get_name()),
+                    failures,
+                );
+            }
+        }
+        let root = Cli::command();
+        let mut failures = Vec::new();
+        walk(&root, &[], root.get_name(), &mut failures);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The exact invocation that panicked on Sentry: the global `--since`
+    /// was also declared on the `get` resource query with a different type.
+    #[test]
+    fn get_jobs_with_global_since_parses_and_resolves_to_rfc3339() {
+        let cli =
+            Cli::try_parse_from(["velnorctl", "get", "jobs", "--since", "1h", "--limit", "5"])
+                .expect("get jobs --since must parse");
+        let Command::Get(args) = cli.command else {
+            panic!("expected get");
+        };
+        let (resource, query) = get_target(args);
+        assert_eq!(resource, "jobs");
+        let wire = client_query(&cli.globals, &query).expect("query");
+        assert_eq!(wire.limit, Some(5));
+        let since = wire.since.expect("since is forwarded");
+        let instant = velnor_model::Timestamp::parse(&since).expect("RFC 3339 wire form");
+        let age_seconds = velnor_model::Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            - instant.as_offset_datetime().unix_timestamp();
+        assert!(
+            (3540..=3660).contains(&age_seconds),
+            "relative --since must resolve to roughly one hour ago, got {since}"
+        );
+
+        let cli = Cli::try_parse_from(["velnorctl", "--since", "1h", "get", "jobs"])
+            .expect("global --since before the subcommand must parse");
+        assert!(cli.globals.since.is_some());
     }
 }

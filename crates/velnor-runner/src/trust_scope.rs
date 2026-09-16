@@ -42,6 +42,10 @@ pub const FAIL_CLOSED: &str = "untrusted";
 /// compares against exactly this, case-insensitively.
 pub const TRUSTED: &str = "trusted";
 
+/// Store namespace for same-repo pull-request jobs on a trusted pool. Writes
+/// land here; reads may overlay the trusted scope (D18).
+pub const PR_STORE_SCOPE: &str = "pr";
+
 const HELP: &str = "Trust boundary for this daemon/pool. \"trusted\" keeps full capabilities; \
      any other value disables shared Docker socket access, privileged container options, \
      privileged service containers, host port publishing, and user secrets. \
@@ -206,6 +210,18 @@ pub(crate) fn normalize_scope(raw: &str) -> &str {
     } else {
         trimmed
     }
+}
+
+/// The boundary a daemon resolves from a `VELNOR_TRUST_SCOPE` value it was
+/// (or was not) given, without touching this process's cell.
+///
+/// This is [`TrustScopeArg`]'s answer for an environment that is not this
+/// process's: unset falls to the flag default [`FAIL_CLOSED`], set values are
+/// normalized exactly as [`resolve`] normalizes them. The packaged instance
+/// resolver uses it to report the trust boundary of another daemon.
+#[must_use]
+pub fn configured(value: Option<&str>) -> String {
+    TrustScope::normalize(value.unwrap_or(FAIL_CLOSED)).into_string()
 }
 
 /// The boundary this process resolved, or [`FAIL_CLOSED`] if it resolved none.

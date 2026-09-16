@@ -51,6 +51,144 @@ fn reservation_ttl_from(value: Option<&str>) -> Duration {
 /// Retry interval while an acquired job waits for host disk peak.
 pub const CAPACITY_WAIT_RETRY_SECS: u64 = 15;
 
+/// Default filesystem bytes never available to new jobs
+/// (`--emergency-reserve-bytes`, `VELNOR_EMERGENCY_RESERVE_BYTES`).
+pub const DEFAULT_EMERGENCY_RESERVE_BYTES: u64 = 10 * GIB;
+
+/// Default disk peak reserved for every active job
+/// (`--job-peak-bytes`, `VELNOR_JOB_PEAK_BYTES`).
+pub const DEFAULT_JOB_PEAK_BYTES: u64 = 30 * GIB;
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// The compiler stores may hold this fraction of the persistent allowance:
+/// one half. They are the largest warm state a Rust host keeps (mbx's
+/// content-addressed cache and managed targets, sccache's object cache);
+/// the other half is for every other store class, Docker's own storage and
+/// the operating system.
+const COMPILER_STORE_SHARE_DIVISOR: u64 = 2;
+
+/// The host-level store budget, derived from the same capacity policy that
+/// admits jobs.
+///
+/// The admission ledger promises every active job `job_peak_bytes` above
+/// `emergency_reserve_bytes` of free space. Persistent stores may therefore
+/// hold at most what is left of the filesystem once every slot could run a
+/// job at peak simultaneously — the *persistent allowance*. The compiler
+/// class, which had no host-level bound at all (mbx's `MBX_GC_MAX_TOTAL_SIZE`
+/// is per slot, and slots × repositories × daemon instances multiply it
+/// without limit), is capped at a fixed share of that allowance.
+///
+/// One formula, one number, printed by `velnor-runner preflight` and by the
+/// daemon at startup, enforced by the daemon at every admission and by
+/// `cache gc`:
+///
+/// ```text
+/// persistent_allowance = total − emergency_reserve − slots × job_peak
+/// compiler_store_budget = persistent_allowance / 2
+/// ```
+///
+/// Co-located daemon instances derive their own budget from their own slot
+/// count; the smallest wins, because each enforces at its own admissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreBudgetPolicy {
+    /// Capacity of the filesystem holding the stores (`statvfs` total).
+    pub total_bytes: u64,
+    pub emergency_reserve_bytes: u64,
+    pub job_peak_bytes: u64,
+    /// Slots this daemon advertises: the number of jobs that may hold a peak
+    /// reservation at once.
+    pub slots: u32,
+}
+
+impl StoreBudgetPolicy {
+    /// Probe the filesystem holding `work_root` and bind the daemon's
+    /// admission parameters to it.
+    pub fn probe(
+        work_root: &Path,
+        emergency_reserve_bytes: u64,
+        job_peak_bytes: u64,
+        slots: u32,
+    ) -> Result<Self> {
+        let capacity = crate::host_capacity::HostCapacity::probe(work_root)?;
+        Ok(Self {
+            total_bytes: capacity.total_bytes,
+            emergency_reserve_bytes,
+            job_peak_bytes,
+            slots,
+        })
+    }
+
+    /// The policy as a process that has no daemon flags sees it: the
+    /// packaged units export the same values as environment
+    /// (`VELNOR_EMERGENCY_RESERVE_BYTES`, `VELNOR_JOB_PEAK_BYTES`,
+    /// `VELNOR_SLOTS`), and the defaults are the daemon's flag defaults, so
+    /// `preflight` and `cache gc` derive the daemon's number.
+    pub fn probe_from_env(work_root: &Path) -> Result<Self> {
+        Self::probe_from_lookup(work_root, |name| std::env::var(name).ok())
+    }
+
+    /// The policy of a packaged daemon instance: the same variables as
+    /// [`Self::probe_from_env`], read from the instance's replayed unit
+    /// environment (`daemon_instance`) instead of this process's. An operator
+    /// pass over another daemon's stores must derive that daemon's number, not
+    /// the number a process with no daemon flags would derive.
+    pub fn probe_from_environment(
+        work_root: &Path,
+        environment: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self> {
+        Self::probe_from_lookup(work_root, |name| environment.get(name).cloned())
+    }
+
+    fn probe_from_lookup(
+        work_root: &Path,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
+        let var = |name: &str| lookup(name)?.trim().parse::<u64>().ok();
+        Self::probe(
+            work_root,
+            var("VELNOR_EMERGENCY_RESERVE_BYTES").unwrap_or(DEFAULT_EMERGENCY_RESERVE_BYTES),
+            var("VELNOR_JOB_PEAK_BYTES").unwrap_or(DEFAULT_JOB_PEAK_BYTES),
+            var("VELNOR_SLOTS")
+                .and_then(|slots| u32::try_from(slots).ok())
+                .filter(|slots| *slots > 0)
+                .unwrap_or(1),
+        )
+    }
+
+    /// Bytes persistent stores may hold while every slot can still admit a
+    /// job at peak: `total − emergency_reserve − slots × job_peak`,
+    /// saturating at zero.
+    pub fn persistent_allowance_bytes(&self) -> u64 {
+        self.total_bytes
+            .saturating_sub(self.emergency_reserve_bytes)
+            .saturating_sub(self.job_peak_bytes.saturating_mul(u64::from(self.slots)))
+    }
+
+    /// The compiler-class (mbx + sccache) budget across every trust scope,
+    /// repository and slot on this host.
+    pub fn compiler_store_budget_bytes(&self) -> u64 {
+        self.persistent_allowance_bytes() / COMPILER_STORE_SHARE_DIVISOR
+    }
+
+    /// One line an operator can read: the number and how it was derived.
+    pub fn describe_compiler_store_budget(&self) -> String {
+        format!(
+            "{} = ({} total - {} emergency reserve - {} slot(s) x {} job peak) / {}",
+            gib(self.compiler_store_budget_bytes()),
+            gib(self.total_bytes),
+            gib(self.emergency_reserve_bytes),
+            self.slots,
+            gib(self.job_peak_bytes),
+            COMPILER_STORE_SHARE_DIVISOR,
+        )
+    }
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / GIB as f64)
+}
+
 /// Default bound on the post-acquire disk-peak wait. Override with
 /// `VELNOR_CAPACITY_WAIT_SECS`. Floor is one retry interval so a single
 /// reclaim pass can finish. This is not an unbounded hang: once the bound
@@ -248,29 +386,112 @@ pub struct ScopeLease {
 /// Lease files remain the fine-grained liveness authority. The coordinator
 /// closes the cross-daemon race where a reaper snapshots those files while a
 /// different daemon is publishing a lease for the same store.
+#[derive(Debug)]
 pub struct FilesystemCoordinator {
     _file: fs::File,
+    path: PathBuf,
+    exclusive: bool,
+}
+
+/// Coordinator holds registered by the current thread, per lock file.
+#[derive(Default)]
+struct ThreadHolds {
+    exclusive: usize,
+    shared: usize,
+}
+
+thread_local! {
+    /// Coordinators this thread currently holds.
+    ///
+    /// `flock` locks belong to the open file description, so a second `open`
+    /// of the same lock file from the thread that already holds a conflicting
+    /// lock blocks until that thread releases — which it never can while
+    /// blocked. That is a deadlock with no error and no log line (it is how
+    /// `velnorctl cache gc` hung on itself: `run_gc` held the coordinator and
+    /// the leftover reclaim it called locked it again). Cross-thread and
+    /// cross-process contention is legitimate blocking and stays untouched;
+    /// only same-thread conflicting re-entry is refused, with an error naming
+    /// the fix. Holds are never carried across `.await`, so a thread-local is
+    /// the right scope.
+    static HELD: std::cell::RefCell<std::collections::BTreeMap<PathBuf, ThreadHolds>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
 impl FilesystemCoordinator {
     pub fn lock_shared(run_root: &Path) -> Result<Self> {
-        Self::lock(run_root, rustix::fs::FlockOperation::LockShared)
+        Self::lock(run_root, false)
     }
 
     pub fn lock_exclusive(run_root: &Path) -> Result<Self> {
-        Self::lock(run_root, rustix::fs::FlockOperation::LockExclusive)
+        Self::lock(run_root, true)
     }
 
-    fn lock(run_root: &Path, operation: rustix::fs::FlockOperation) -> Result<Self> {
+    fn lock(run_root: &Path, exclusive: bool) -> Result<Self> {
         fs::create_dir_all(run_root)?;
+        let path = run_root.join("filesystem-coordinator.lock");
+        let conflict = HELD.with_borrow(|held| {
+            held.get(&path).and_then(|holds| {
+                if holds.exclusive > 0 {
+                    Some("exclusively")
+                } else if exclusive && holds.shared > 0 {
+                    Some("shared")
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(mode) = conflict {
+            bail!(
+                "filesystem coordinator {} is already held {mode} by this thread; \
+                 a re-entrant {} flock would never return — pass the held coordinator down \
+                 instead of locking again",
+                path.display(),
+                if exclusive { "exclusive" } else { "shared" },
+            );
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(run_root.join("filesystem-coordinator.lock"))?;
+            .open(&path)?;
+        let operation = if exclusive {
+            rustix::fs::FlockOperation::LockExclusive
+        } else {
+            rustix::fs::FlockOperation::LockShared
+        };
         rustix::fs::flock(&file, operation).context("lock filesystem coordinator")?;
-        Ok(Self { _file: file })
+        HELD.with_borrow_mut(|held| {
+            let holds = held.entry(path.clone()).or_default();
+            if exclusive {
+                holds.exclusive += 1;
+            } else {
+                holds.shared += 1;
+            }
+        });
+        Ok(Self {
+            _file: file,
+            path,
+            exclusive,
+        })
+    }
+}
+
+impl Drop for FilesystemCoordinator {
+    fn drop(&mut self) {
+        HELD.with_borrow_mut(|held| {
+            let Some(holds) = held.get_mut(&self.path) else {
+                return;
+            };
+            if self.exclusive {
+                holds.exclusive = holds.exclusive.saturating_sub(1);
+            } else {
+                holds.shared = holds.shared.saturating_sub(1);
+            }
+            if holds.exclusive == 0 && holds.shared == 0 {
+                held.remove(&self.path);
+            }
+        });
     }
 }
 
@@ -638,6 +859,70 @@ fn unix_now() -> u64 {
 mod tests {
     use super::*;
 
+    /// The budget is one formula over the admission policy: what is left of
+    /// the disk once every slot could run a job at peak above the emergency
+    /// reserve, halved. Sentry's `velnor` instance (919 GiB, 10 GiB reserve,
+    /// 4 slots × 16 GiB) derives 422.5 GiB — a bound the 513 GiB the host
+    /// actually held would have tripped.
+    #[test]
+    fn compiler_store_budget_is_half_the_persistent_allowance() {
+        let policy = StoreBudgetPolicy {
+            total_bytes: 919 * GIB,
+            emergency_reserve_bytes: 10 * GIB,
+            job_peak_bytes: 16 * GIB,
+            slots: 4,
+        };
+        assert_eq!(policy.persistent_allowance_bytes(), 845 * GIB);
+        assert_eq!(policy.compiler_store_budget_bytes(), 845 * GIB / 2);
+        assert!(policy.compiler_store_budget_bytes() < 513 * GIB);
+        let line = policy.describe_compiler_store_budget();
+        assert!(line.starts_with("422.5 GiB = ("), "{line}");
+        assert!(line.contains("4 slot(s) x 16.0 GiB job peak"), "{line}");
+    }
+
+    /// More slots reserve more transient space and leave less for stores;
+    /// a daemon whose slots alone exhaust the disk gets no compiler budget
+    /// rather than a negative or wrapped one.
+    #[test]
+    fn compiler_store_budget_shrinks_with_slots_and_saturates_at_zero() {
+        let base = StoreBudgetPolicy {
+            total_bytes: 200 * GIB,
+            emergency_reserve_bytes: 10 * GIB,
+            job_peak_bytes: 30 * GIB,
+            slots: 1,
+        };
+        let two = StoreBudgetPolicy { slots: 2, ..base };
+        assert!(two.compiler_store_budget_bytes() < base.compiler_store_budget_bytes());
+        assert_eq!(base.compiler_store_budget_bytes(), 80 * GIB);
+        assert_eq!(two.compiler_store_budget_bytes(), 65 * GIB);
+        let exhausted = StoreBudgetPolicy { slots: 10, ..base };
+        assert_eq!(exhausted.persistent_allowance_bytes(), 0);
+        assert_eq!(exhausted.compiler_store_budget_bytes(), 0);
+    }
+
+    /// `probe` binds the daemon's flags to the real filesystem; the number it
+    /// derives is the one the daemon enforces and preflight prints.
+    #[test]
+    fn probe_derives_the_budget_from_the_filesystem_holding_the_work_root() {
+        let policy = StoreBudgetPolicy::probe(
+            &std::env::temp_dir(),
+            DEFAULT_EMERGENCY_RESERVE_BYTES,
+            DEFAULT_JOB_PEAK_BYTES,
+            2,
+        )
+        .unwrap();
+        assert!(policy.total_bytes > 0);
+        assert_eq!(policy.slots, 2);
+        assert_eq!(
+            policy.compiler_store_budget_bytes(),
+            policy
+                .total_bytes
+                .saturating_sub(DEFAULT_EMERGENCY_RESERVE_BYTES)
+                .saturating_sub(2 * DEFAULT_JOB_PEAK_BYTES)
+                / 2
+        );
+    }
+
     fn root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("velnor-{name}-{}", uuid::Uuid::new_v4()))
     }
@@ -688,6 +973,51 @@ mod tests {
         let lease = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(lease);
         handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn coordinator_refuses_same_thread_reentry_instead_of_deadlocking() {
+        let root = root("coordinator-reentry");
+        let exclusive = FilesystemCoordinator::lock_exclusive(&root).unwrap();
+        let again = FilesystemCoordinator::lock_exclusive(&root).unwrap_err();
+        assert!(
+            again
+                .to_string()
+                .contains("already held exclusively by this thread"),
+            "{again:#}"
+        );
+        let shared_under_exclusive = FilesystemCoordinator::lock_shared(&root).unwrap_err();
+        assert!(
+            shared_under_exclusive
+                .to_string()
+                .contains("already held exclusively by this thread"),
+            "{shared_under_exclusive:#}"
+        );
+        drop(exclusive);
+
+        // Releasing clears the registration: the same thread can lock again.
+        let shared = FilesystemCoordinator::lock_shared(&root).unwrap();
+        // Shared holds do not conflict with each other on the same thread...
+        let shared_twice = FilesystemCoordinator::lock_shared(&root).unwrap();
+        // ...but an exclusive under a shared hold would block on itself.
+        let exclusive_under_shared = FilesystemCoordinator::lock_exclusive(&root).unwrap_err();
+        assert!(
+            exclusive_under_shared
+                .to_string()
+                .contains("already held shared by this thread"),
+            "{exclusive_under_shared:#}"
+        );
+        drop(shared_twice);
+        drop(shared);
+        drop(FilesystemCoordinator::lock_exclusive(&root).unwrap());
+
+        // Different runtime roots are independent.
+        let other = self::root("coordinator-reentry-other");
+        let outer = FilesystemCoordinator::lock_exclusive(&root).unwrap();
+        drop(FilesystemCoordinator::lock_exclusive(&other).unwrap());
+        fs::remove_dir_all(other).unwrap();
+        drop(outer);
         fs::remove_dir_all(root).unwrap();
     }
 
