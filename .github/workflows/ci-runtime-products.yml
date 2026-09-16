@@ -58,9 +58,11 @@ jobs:
           closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
           [[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }
           tag="velnor-workflow-runtime-v1-${closure:0:16}"
-          echo "value=$closure" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "head-sha=$head" >> "$GITHUB_OUTPUT"
+          {
+            echo "value=$closure"
+            echo "tag=$tag"
+            echo "head-sha=$head"
+          } >> "$GITHUB_OUTPUT"
       - name: Check for an existing product
         id: exists
         shell: bash

@@ -300,9 +300,11 @@ jobs:
           closure="$(printf '%s\n{closure_footer}' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{{print $1}}')"
           [[ "$closure" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::closure resolution failed" >&2; exit 1; }}
           tag="{tag_prefix}${{closure:0:16}}"
-          echo "value=$closure" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "head-sha=$head" >> "$GITHUB_OUTPUT"
+          {{
+            echo "value=$closure"
+            echo "tag=$tag"
+            echo "head-sha=$head"
+          }} >> "$GITHUB_OUTPUT"
       - name: Check for an existing product
         id: exists
         shell: bash
@@ -1338,7 +1340,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "4552f9595d34d6ed9e2985cfbfc0b6594ee1b2e500989cf981c3eb0005e58059";
+        const PINNED: &str = "214ef42e1619bf6e80edf0fdd30d7d8633f5792194c15f61f7cd3709f10f7684";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
