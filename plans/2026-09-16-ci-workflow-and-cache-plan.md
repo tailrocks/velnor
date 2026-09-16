@@ -1,6 +1,6 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — `main` @ [`a720ae04`](https://github.com/tailrocks/velnor/commit/a720ae04) (rev 21: pin `6ea138c1`; report telemetry via action **inputs** @ [`6ea138c1`](https://github.com/tailrocks/velnor/commit/6ea138c1) supersedes `${{ env.* }}` @ `3a0829fc`; maintenance `--json` @ `3a0829fc`; ci-main [35077827269](https://github.com/tailrocks/velnor/actions/runs/35077827269) red on env passthrough; post-input run [35080355567](https://github.com/tailrocks/velnor/actions/runs/35080355567) pending; cache **~9.7 GiB / 39 entries**).
+Status: **in progress** — `main` @ [`285f2cdb`](https://github.com/tailrocks/velnor/commit/285f2cdb) (rev 22: pin [`7e74aa07`](https://github.com/tailrocks/velnor/commit/7e74aa07); policy 11/11 PASS locally; PR [#878](https://github.com/tailrocks/velnor/pull/878)/[#879](https://github.com/tailrocks/velnor/pull/879) wipe restored).
 Date: 2026-09-16 (rev 18: D18 read-through overlay replaced by a copy seed of the `pr` Cargo store, PR writes persist and are host-shared; rev 17: post-push verifier 4/4 PASS @ `c23d7e8a`; P0-8 pre-merge FAIL superseded; ci-main 35059608031 Planning `--force` fix; YAML drift gate literals expected expansion; rev 16: PR #872 merged @ `364347e9`; P0-8 nightly dispatcher on `main` @ `7171fe01`; rev 15: third green `ci-required` rollup @ `1e552afe`; rev 14: pin-decoupled policy validator + config-only trust-gated emission + `velnor-host-docker` online; rev 13: DCO sign-off restored; rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
@@ -1084,3 +1084,14 @@ PR [#872](https://github.com/tailrocks/velnor/pull/872) merged into `main` as me
 | Pin @ rev 21 | V | [`a720ae04`](https://github.com/tailrocks/velnor/commit/a720ae04): D19 pin `6ea138c1`; policy 11/11 PASS |
 | Live GHA cache account | U | `gh api …/actions/cache/usage` @ rev 21: **10,376,029,957 B / 39 entries** (~9.7 GiB; retention not yet run post-fix) |
 | §16 Phase 1 `host_warm` telemetry | P | run 35075927349 (pre-fix): prepare-cargo warm + mbx compiler hits; reports showed `lane: null` / `mbx: cold`; [35077827269](https://github.com/tailrocks/velnor/actions/runs/35077827269) @ `2f51ebf3` still empty env; input fix re-verify [35080355567](https://github.com/tailrocks/velnor/actions/runs/35080355567) pending |
+
+#### Rev 22 delta @ `285f2cdb` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| PR [#878](https://github.com/tailrocks/velnor/pull/878)/[#879](https://github.com/tailrocks/velnor/pull/879) broke workflows | V | deleted 14 yaml, stripped toml |
+| Restore @ [`7e74aa07`](https://github.com/tailrocks/velnor/commit/7e74aa07) + pin [`285f2cdb`](https://github.com/tailrocks/velnor/commit/285f2cdb) pushed to `main` | V | post-wipe recovery |
+| GitHub Phase 1 exact hits | V | [35075927349](https://github.com/tailrocks/velnor/actions/runs/35075927349) etc |
+| §16 Phase 1 `host_warm` telemetry | P | pending post-push `ci-main` |
+| Maintenance dispatched after `--json` fix | V | [35084343322](https://github.com/tailrocks/velnor/actions/runs/35084343322) |
+| Live GHA cache account | U | **~10.4 GiB / 113 entries** — still > 8 GiB budget |
