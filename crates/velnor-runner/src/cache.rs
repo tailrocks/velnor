@@ -212,15 +212,58 @@ fn run_gc(
     args: CacheGcArgs,
     class_budgets: BTreeMap<CacheStore, u64>,
 ) -> Result<()> {
+    let storage_layout = crate::storage::StorageLayout::resolve();
+    let backend = crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None)
+        .ok()
+        .map(|file| file.backend());
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("leftover-after-Velnor host Docker reclaim skipped: {reason}");
+    }
+    let reclaim_backend = backend.unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
+    run_gc_with(
+        work_root,
+        args,
+        class_budgets,
+        storage_layout.as_ref(),
+        |coordinator, run_root| {
+            crate::leftover_disk::reclaim_production_leftovers_under_coordinator(
+                coordinator,
+                run_root,
+                &crate::leftover_disk::discover_daemon_work_roots(),
+                reclaim_backend,
+                false,
+            )
+        },
+    )
+}
+
+/// `cache gc` with its environment made explicit.
+///
+/// Destructive gc holds the [`GcLeaderLock`] and the exclusive
+/// [`crate::capacity::FilesystemCoordinator`] of the runtime root for its whole
+/// run — eviction and the leftover-workspace reclaim that follows it. The
+/// coordinator is a blocking `flock`; taking it a second time from the thread
+/// that holds it never returns, so `reclaim_leftover` receives the held
+/// coordinator instead of resolving and locking the runtime root itself.
+pub fn run_gc_with(
+    work_root: &Path,
+    args: CacheGcArgs,
+    class_budgets: BTreeMap<CacheStore, u64>,
+    storage_layout: Option<&crate::storage::StorageLayout>,
+    reclaim_leftover: impl FnOnce(
+        &crate::capacity::FilesystemCoordinator,
+        &Path,
+    ) -> Result<crate::leftover_disk::LeftoverReclaimReport>,
+) -> Result<()> {
     if !args.dry_run && !args.yes {
         bail!("destructive cache gc requires --yes");
     }
-    let storage_layout = crate::storage::StorageLayout::resolve();
     let run_root = storage_layout
-        .as_ref()
         .map(|layout| layout.run_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_runtime"));
-    let _destructive_locks = if args.dry_run {
+    let destructive_locks = if args.dry_run {
         None
     } else {
         Some((
@@ -238,7 +281,7 @@ fn run_gc(
         Err(error) => return Err(error).context("read active cache-scope leases"),
     };
 
-    let listing = cache_listing_with_layout(work_root, false, storage_layout.as_ref())?;
+    let listing = cache_listing_with_layout(work_root, false, storage_layout)?;
     let max_age = args
         .max_age_days
         .checked_mul(DAY.as_secs())
@@ -253,7 +296,7 @@ fn run_gc(
         in_use_scopes,
         protected_paths: pointer_protected_target_generations_with_layout(
             work_root,
-            storage_layout.as_ref(),
+            storage_layout,
         ),
     };
     let candidates = select_eviction_candidates(&listing, &policy);
@@ -277,8 +320,10 @@ fn run_gc(
         return Ok(());
     }
 
+    let Some((_leader, coordinator)) = destructive_locks.as_ref() else {
+        bail!("destructive cache gc reached deletion without holding its locks");
+    };
     let log_root = storage_layout
-        .as_ref()
         .map(|layout| layout.log_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
     for candidate in candidates {
@@ -300,16 +345,7 @@ fn run_gc(
             );
         }
     }
-    let backend = crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None)
-        .ok()
-        .map(|file| file.backend());
-    if let Some(reason) =
-        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
-    {
-        eprintln!("leftover-after-Velnor host Docker reclaim skipped: {reason}");
-    }
-    let reclaim_backend = backend.unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
-    match crate::leftover_disk::reclaim_production_leftovers_for(reclaim_backend, false) {
+    match reclaim_leftover(coordinator, &run_root) {
         Ok(report) => {
             println!(
                 "leftover_workspace_deleted\t{}",
@@ -1983,6 +2019,89 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("requires --yes"));
+    }
+
+    /// `velnorctl cache gc` end to end against a temp runtime root: the
+    /// destructive pass holds the coordinator, then reclaims leftover
+    /// workspaces under that same hold. Before the fix the reclaim re-locked
+    /// the coordinator on a second descriptor and the process hung on itself
+    /// (with the re-entry guard it would now surface as an error instead).
+    /// Either way the leftover workspace would survive; here it must go.
+    #[test]
+    fn destructive_gc_reclaims_leftovers_without_conflicting_with_itself() {
+        let prefix = std::env::temp_dir().join(format!("velnor-gc-e2e-{}", uuid::Uuid::new_v4()));
+        let layout = crate::storage::StorageLayout::from_prefix(&prefix);
+        let work = layout.lib_root.join("work");
+        let orphan_id = "11111111-2222-3333-4444-555555555555";
+        let orphan = work.join("slot-1").join(orphan_id);
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("marker"), b"job").unwrap();
+        test_clock::backdate(&orphan, crate::leftover_disk::WORKSPACE_MIN_IDLE * 2);
+        // A cache entry old enough to evict, so the eviction pass has work too.
+        let stale_cache = work.join("_velnor_caches/trusted/stale/key");
+        fs::create_dir_all(&stale_cache).unwrap();
+        fs::write(stale_cache.join("data"), vec![0; 16]).unwrap();
+        test_clock::backdate(&stale_cache, DAY * 40);
+
+        let args = CacheGcArgs {
+            dry_run: false,
+            yes: true,
+            force_no_lease_check: false,
+            keep_newest_targets: 3,
+            max_age_days: 30,
+            max_size_bytes: None,
+        };
+        let reclaim_ran = std::cell::Cell::new(false);
+        let run_root = layout.run_root.clone();
+        run_gc_with(
+            &work,
+            args,
+            BTreeMap::new(),
+            Some(&layout),
+            |coordinator, reclaim_root| {
+                reclaim_ran.set(true);
+                assert_eq!(reclaim_root, run_root.as_path());
+                // The production reclaim under the held coordinator, with the
+                // host Docker socket replaced by a fake.
+                crate::leftover_disk::reclaim_leftover_under_coordinator(
+                    coordinator,
+                    reclaim_root,
+                    std::slice::from_ref(&work),
+                    &BTreeSet::new(),
+                    |_| Ok(String::new()),
+                    |path| {
+                        fs::remove_dir_all(path)?;
+                        Ok(())
+                    },
+                    false,
+                )
+            },
+        )
+        .unwrap();
+
+        assert!(reclaim_ran.get(), "gc must run the leftover reclaim");
+        assert!(!orphan.exists(), "leftover workspace must be reclaimed");
+        assert!(!stale_cache.exists(), "stale cache entry must be evicted");
+        // Both locks are released once gc returns: another gc can start. The
+        // coordinator re-entry guard would refuse immediately if this thread
+        // still held it; the blocking flock then only waits out a sibling
+        // test's fork window (a child briefly inherits every open fd).
+        drop(crate::capacity::FilesystemCoordinator::lock_exclusive(&layout.run_root).unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match GcLeaderLock::acquire(&layout.run_root) {
+                Ok(leader) => break drop(leader),
+                Err(error) if std::time::Instant::now() < deadline => {
+                    assert!(
+                        error.downcast_ref::<GcLeaderLockHeld>().is_some(),
+                        "{error:#}"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("gc leader lock still held after gc returned: {error:#}"),
+            }
+        }
+        fs::remove_dir_all(prefix).unwrap();
     }
 
     #[test]

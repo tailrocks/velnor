@@ -248,29 +248,112 @@ pub struct ScopeLease {
 /// Lease files remain the fine-grained liveness authority. The coordinator
 /// closes the cross-daemon race where a reaper snapshots those files while a
 /// different daemon is publishing a lease for the same store.
+#[derive(Debug)]
 pub struct FilesystemCoordinator {
     _file: fs::File,
+    path: PathBuf,
+    exclusive: bool,
+}
+
+/// Coordinator holds registered by the current thread, per lock file.
+#[derive(Default)]
+struct ThreadHolds {
+    exclusive: usize,
+    shared: usize,
+}
+
+thread_local! {
+    /// Coordinators this thread currently holds.
+    ///
+    /// `flock` locks belong to the open file description, so a second `open`
+    /// of the same lock file from the thread that already holds a conflicting
+    /// lock blocks until that thread releases — which it never can while
+    /// blocked. That is a deadlock with no error and no log line (it is how
+    /// `velnorctl cache gc` hung on itself: `run_gc` held the coordinator and
+    /// the leftover reclaim it called locked it again). Cross-thread and
+    /// cross-process contention is legitimate blocking and stays untouched;
+    /// only same-thread conflicting re-entry is refused, with an error naming
+    /// the fix. Holds are never carried across `.await`, so a thread-local is
+    /// the right scope.
+    static HELD: std::cell::RefCell<std::collections::BTreeMap<PathBuf, ThreadHolds>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
 impl FilesystemCoordinator {
     pub fn lock_shared(run_root: &Path) -> Result<Self> {
-        Self::lock(run_root, rustix::fs::FlockOperation::LockShared)
+        Self::lock(run_root, false)
     }
 
     pub fn lock_exclusive(run_root: &Path) -> Result<Self> {
-        Self::lock(run_root, rustix::fs::FlockOperation::LockExclusive)
+        Self::lock(run_root, true)
     }
 
-    fn lock(run_root: &Path, operation: rustix::fs::FlockOperation) -> Result<Self> {
+    fn lock(run_root: &Path, exclusive: bool) -> Result<Self> {
         fs::create_dir_all(run_root)?;
+        let path = run_root.join("filesystem-coordinator.lock");
+        let conflict = HELD.with_borrow(|held| {
+            held.get(&path).and_then(|holds| {
+                if holds.exclusive > 0 {
+                    Some("exclusively")
+                } else if exclusive && holds.shared > 0 {
+                    Some("shared")
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(mode) = conflict {
+            bail!(
+                "filesystem coordinator {} is already held {mode} by this thread; \
+                 a re-entrant {} flock would never return — pass the held coordinator down \
+                 instead of locking again",
+                path.display(),
+                if exclusive { "exclusive" } else { "shared" },
+            );
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(run_root.join("filesystem-coordinator.lock"))?;
+            .open(&path)?;
+        let operation = if exclusive {
+            rustix::fs::FlockOperation::LockExclusive
+        } else {
+            rustix::fs::FlockOperation::LockShared
+        };
         rustix::fs::flock(&file, operation).context("lock filesystem coordinator")?;
-        Ok(Self { _file: file })
+        HELD.with_borrow_mut(|held| {
+            let holds = held.entry(path.clone()).or_default();
+            if exclusive {
+                holds.exclusive += 1;
+            } else {
+                holds.shared += 1;
+            }
+        });
+        Ok(Self {
+            _file: file,
+            path,
+            exclusive,
+        })
+    }
+}
+
+impl Drop for FilesystemCoordinator {
+    fn drop(&mut self) {
+        HELD.with_borrow_mut(|held| {
+            let Some(holds) = held.get_mut(&self.path) else {
+                return;
+            };
+            if self.exclusive {
+                holds.exclusive = holds.exclusive.saturating_sub(1);
+            } else {
+                holds.shared = holds.shared.saturating_sub(1);
+            }
+            if holds.exclusive == 0 && holds.shared == 0 {
+                held.remove(&self.path);
+            }
+        });
     }
 }
 
@@ -688,6 +771,51 @@ mod tests {
         let lease = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(lease);
         handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn coordinator_refuses_same_thread_reentry_instead_of_deadlocking() {
+        let root = root("coordinator-reentry");
+        let exclusive = FilesystemCoordinator::lock_exclusive(&root).unwrap();
+        let again = FilesystemCoordinator::lock_exclusive(&root).unwrap_err();
+        assert!(
+            again
+                .to_string()
+                .contains("already held exclusively by this thread"),
+            "{again:#}"
+        );
+        let shared_under_exclusive = FilesystemCoordinator::lock_shared(&root).unwrap_err();
+        assert!(
+            shared_under_exclusive
+                .to_string()
+                .contains("already held exclusively by this thread"),
+            "{shared_under_exclusive:#}"
+        );
+        drop(exclusive);
+
+        // Releasing clears the registration: the same thread can lock again.
+        let shared = FilesystemCoordinator::lock_shared(&root).unwrap();
+        // Shared holds do not conflict with each other on the same thread...
+        let shared_twice = FilesystemCoordinator::lock_shared(&root).unwrap();
+        // ...but an exclusive under a shared hold would block on itself.
+        let exclusive_under_shared = FilesystemCoordinator::lock_exclusive(&root).unwrap_err();
+        assert!(
+            exclusive_under_shared
+                .to_string()
+                .contains("already held shared by this thread"),
+            "{exclusive_under_shared:#}"
+        );
+        drop(shared_twice);
+        drop(shared);
+        drop(FilesystemCoordinator::lock_exclusive(&root).unwrap());
+
+        // Different runtime roots are independent.
+        let other = self::root("coordinator-reentry-other");
+        let outer = FilesystemCoordinator::lock_exclusive(&root).unwrap();
+        drop(FilesystemCoordinator::lock_exclusive(&other).unwrap());
+        fs::remove_dir_all(other).unwrap();
+        drop(outer);
         fs::remove_dir_all(root).unwrap();
     }
 

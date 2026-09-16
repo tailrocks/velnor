@@ -399,6 +399,15 @@ pub struct LeftoverReclaimReport {
     pub skipped_docker: bool,
 }
 
+/// Reclaim leftover workspaces, acquiring the filesystem coordinator here.
+///
+/// This is the entry point for callers that hold no coordinator (the daemon's
+/// disk-pressure paths). A caller that already holds it must use
+/// [`reclaim_leftover_under_coordinator`]: the coordinator is a blocking
+/// `flock`, and a second open of the same lock file from the thread that
+/// holds it never returns, which is how `velnorctl cache gc` deadlocked on
+/// itself. [`crate::capacity::FilesystemCoordinator`] refuses that re-entry
+/// with an error, so the mistake is loud, but the fix is to lock once.
 pub fn reclaim_leftover_after_velnor(
     work_roots: &[PathBuf],
     live_job_ids: &BTreeSet<String>,
@@ -406,29 +415,55 @@ pub fn reclaim_leftover_after_velnor(
     remove_dir: impl FnMut(&Path) -> Result<()>,
     prune_dangling_images: bool,
 ) -> Result<LeftoverReclaimReport> {
-    let liveness = match runtime_root() {
+    match runtime_root() {
         // Hold the same coordinator the cache reclaimer takes, so no daemon can
         // publish a lease between the liveness snapshot and the deletions it
         // authorizes.
         Some(run_root) => {
-            let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?;
-            return reclaim_with_liveness(
+            let coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?;
+            reclaim_leftover_under_coordinator(
+                &coordinator,
+                &run_root,
                 work_roots,
-                &WorkspaceLiveness::collect(&run_root, live_job_ids.clone()),
+                live_job_ids,
                 docker,
                 remove_dir,
                 prune_dangling_images,
-            );
+            )
         }
-        None => WorkspaceLiveness {
-            running: live_job_ids.clone(),
-            min_idle: WORKSPACE_MIN_IDLE,
-            ..WorkspaceLiveness::default()
-        },
-    };
+        None => reclaim_with_liveness(
+            work_roots,
+            &WorkspaceLiveness {
+                running: live_job_ids.clone(),
+                min_idle: WORKSPACE_MIN_IDLE,
+                ..WorkspaceLiveness::default()
+            },
+            docker,
+            remove_dir,
+            prune_dangling_images,
+        ),
+    }
+}
+
+/// Reclaim leftover workspaces under a coordinator the caller already holds.
+///
+/// `_coordinator` is the proof of ownership: a [`FilesystemCoordinator`] can
+/// only be obtained by locking, so this function cannot be reached without
+/// the lock and never takes it again.
+///
+/// [`FilesystemCoordinator`]: crate::capacity::FilesystemCoordinator
+pub fn reclaim_leftover_under_coordinator(
+    _coordinator: &crate::capacity::FilesystemCoordinator,
+    run_root: &Path,
+    work_roots: &[PathBuf],
+    live_job_ids: &BTreeSet<String>,
+    docker: impl FnMut(&[String]) -> Result<String>,
+    remove_dir: impl FnMut(&Path) -> Result<()>,
+    prune_dangling_images: bool,
+) -> Result<LeftoverReclaimReport> {
     reclaim_with_liveness(
         work_roots,
-        &liveness,
+        &WorkspaceLiveness::collect(run_root, live_job_ids.clone()),
         docker,
         remove_dir,
         prune_dangling_images,
@@ -540,6 +575,41 @@ pub fn reclaim_production_leftovers_for(
     } else {
         reclaim_microvm_leftovers()
     }
+}
+
+/// [`reclaim_production_leftovers_for`] for a caller that already holds the
+/// filesystem coordinator of `run_root` (the destructive `cache gc` path,
+/// which takes it before its own eviction pass and must keep holding it
+/// through this reclaim instead of locking twice).
+pub fn reclaim_production_leftovers_under_coordinator(
+    coordinator: &crate::capacity::FilesystemCoordinator,
+    run_root: &Path,
+    work_roots: &[PathBuf],
+    backend: velnor_model::ExecutionBackendKind,
+    prune_dangling_images: bool,
+) -> Result<LeftoverReclaimReport> {
+    if !backend.uses_host_docker_socket() {
+        return reclaim_microvm_leftovers();
+    }
+    let live = match live_job_ids_from_host_docker() {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
+            return Ok(LeftoverReclaimReport {
+                skipped_docker: true,
+                ..LeftoverReclaimReport::default()
+            });
+        }
+    };
+    reclaim_leftover_under_coordinator(
+        coordinator,
+        run_root,
+        work_roots,
+        &live,
+        host_docker_if_safe,
+        remove_dir_all,
+        prune_dangling_images,
+    )
 }
 
 fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
