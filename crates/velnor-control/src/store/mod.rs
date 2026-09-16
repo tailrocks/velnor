@@ -412,6 +412,20 @@ mod tests {
         }
     }
 
+    fn upsert_instance_with_retry(store: &Store, row: &InstanceRow) {
+        let mut attempt = 0;
+        loop {
+            match store.upsert_instance(row) {
+                Ok(()) => return,
+                Err(error) if is_transient_contention(&error) && attempt < SETUP_RETRIES => {
+                    attempt += 1;
+                    thread::sleep(SETUP_BACKOFF_STEP * attempt);
+                }
+                Err(error) => panic!("upsert_instance: {error}"),
+            }
+        }
+    }
+
     fn job(slug: &str, uid: &str, repository: &str) -> JobRow {
         JobRow {
             instance_slug: slug.to_owned(),
@@ -1193,7 +1207,7 @@ mod tests {
                         if index < 5 {
                             let slug = format!("daemon-{index}");
                             for write_iteration in 0..10 {
-                                store.upsert_instance(&instance(&slug)).unwrap();
+                                upsert_instance_with_retry(&store, &instance(&slug));
                                 let row = job(&slug, &format!("job-{index}"), "org/concurrent");
                                 store.record_job(&row).unwrap();
                                 assert!(store

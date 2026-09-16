@@ -12,10 +12,31 @@
 use std::time::Duration;
 
 use velnor_control::store::{
-    EventRow, InstanceRow, JobRow, RetentionBudget, SlotIdentity, SlotTransition, Store,
-    StoreAccounting,
+    EventRow, InstanceRow, JobRow, PruneReport, RetentionBudget, SlotIdentity, SlotTransition,
+    Store, StoreAccounting, StoreError,
 };
 use velnor_model::{Generation, SlotId, SlotKind, SlotPhase, Slug, Timestamp};
+
+const SETUP_RETRIES: u32 = 5;
+const SETUP_BACKOFF_STEP: Duration = Duration::from_millis(40);
+
+fn is_retention_deadline(error: &StoreError) -> bool {
+    error.envelope.reason == "store.retention.deadline"
+}
+
+fn prune_with_retry(store: &Store, budget: &RetentionBudget) -> PruneReport {
+    let mut attempt = 0;
+    loop {
+        match store.prune_history(budget) {
+            Ok(report) => return report,
+            Err(error) if is_retention_deadline(&error) && attempt < SETUP_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(SETUP_BACKOFF_STEP * attempt);
+            }
+            Err(error) => panic!("prune_history: {error}"),
+        }
+    }
+}
 
 struct TempDb {
     dir: std::path::PathBuf,
@@ -250,7 +271,7 @@ fn row_caps_keep_the_newest_generation() {
     budget.max_event_age = None;
     budget.max_terminal_job_rows = 3;
     budget.max_event_rows = 3;
-    store.prune_history(&budget).unwrap();
+    prune_with_retry(&store, &budget);
 
     assert_eq!(total_jobs(&store), 3);
     assert_eq!(total_events(&store), 3);
@@ -269,7 +290,7 @@ fn row_caps_keep_the_newest_generation() {
     );
 
     // Idempotent: a second identical pass deletes nothing further.
-    let again = store.prune_history(&budget).unwrap();
+    let again = prune_with_retry(&store, &budget);
     assert_eq!(again.deleted_jobs, 0);
     assert_eq!(again.deleted_events, 0);
     assert_eq!(total_jobs(&store), 3);
@@ -297,13 +318,13 @@ fn byte_ceiling_prunes_until_under_budget_or_exhausted() {
     budget.max_event_age = None;
     budget.max_terminal_job_age = None;
     budget.max_database_bytes = 1;
-    let mut report = store.prune_history(&budget).unwrap();
+    let mut report = prune_with_retry(&store, &budget);
     // A pass has a fixed transaction budget. A later pass converges the
     // remaining backlog without extending one writer lock indefinitely.
     let mut deleted_jobs = report.deleted_jobs;
     let mut deleted_events = report.deleted_events;
     while total_jobs(&store) > 0 || total_events(&store) > 0 {
-        report = store.prune_history(&budget).unwrap();
+        report = prune_with_retry(&store, &budget);
         deleted_jobs += report.deleted_jobs;
         deleted_events += report.deleted_events;
     }
@@ -319,7 +340,7 @@ fn byte_ceiling_prunes_until_under_budget_or_exhausted() {
     let before = store.accounting().unwrap().job_rows;
     let mut satisfied = tiny_budget();
     satisfied.max_database_bytes = u64::MAX;
-    let idle = store.prune_history(&satisfied).unwrap();
+    let idle = prune_with_retry(&store, &satisfied);
     assert_eq!(idle.deleted_jobs, 0);
     assert_eq!(store.accounting().unwrap().job_rows, before);
 }
