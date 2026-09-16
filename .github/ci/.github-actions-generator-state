@@ -7,18 +7,18 @@ generator	45
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
 .github/actions/report-velnor-ci-outcomes/action.yml	5fc0e415658c5fb4
-.github/actions/setup-velnor-workflow/action.yml	7ab3808591ede0dd
+.github/actions/setup-velnor-workflow/action.yml	bacc7bd02e2aaeae
 .github/ci/project.toml	bc84aa93ac482a60
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	e87ae9bf23190415
+.github/workflows/ci-main.yml	57cc99d1c900806d
 .github/workflows/ci-policy.yml	e513067b1eb5a4fe
-.github/workflows/ci-pr.yml	ff8c020c8c863816
+.github/workflows/ci-pr.yml	915044f1ea43a02a
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-.github/workflows/ci-unit-bun.yml	e506677d10bb2753
-.github/workflows/ci-unit-docker.yml	11eb3986620a3934
-.github/workflows/ci-unit-docs.yml	d708b0e2e2a137db
-.github/workflows/ci-unit-opentofu.yml	0c056e24cd96e89f
-.github/workflows/ci-unit-rust.yml	54b85988e3268b34
+.github/workflows/ci-unit-bun.yml	28c16df0e51cc2ac
+.github/workflows/ci-unit-docker.yml	237b2b2209984645
+.github/workflows/ci-unit-docs.yml	5c6230614a6ac108
+.github/workflows/ci-unit-opentofu.yml	6e51c68bc7c56a5e
+.github/workflows/ci-unit-rust.yml	ab5dbb3f0b624549
 .github/workflows/maintenance.yml	c8df970f81c827d0
 .github/workflows/nightly.yml	2057397bf0480d73
 .github/workflows/preview.yml	a95165724663fe20

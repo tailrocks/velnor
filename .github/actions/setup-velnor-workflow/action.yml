@@ -5,6 +5,15 @@
 # trusted default-branch push, schedule, and workflow_dispatch events and
 # same-repository PRs may bootstrap a revision; forks and every other context
 # fail closed without a product.
+#
+# Every revision owns its directory: `~/.cache/velnor/workflow-runtime/<rev>`
+# is the cargo `--root` of a source build, the landing place of a downloaded
+# product, and the cache path — `bin/velnor-workflow` plus `manifest.json`.
+# Nothing is written to `~/.cargo/bin`: a job that sets up two revisions (the
+# pinned validator and the event runtime) must never race for one destination
+# (`cargo install` refuses to overwrite an occupied one), so PATH gains the
+# revision's own `bin/` and a caller that needs a specific revision addresses
+# `~/.cache/velnor/workflow-runtime/<rev>/bin/velnor-workflow` directly.
 name: Set up Velnor workflow runtime
 description: Install the velnor-workflow binary with cache and toolchain-env isolation
 
@@ -20,7 +29,7 @@ inputs:
   cache-key-prefix:
     description: Prefix for the installation cache key
     required: false
-    default: velnor-workflow-v1
+    default: velnor-workflow-v2
   github-token:
     description: GitHub token for authenticated git access
     required: false
@@ -98,13 +107,14 @@ runs:
         actual="$(sha256_digest "$temporary/runtime/velnor-workflow")"
         expected="$(jq -er '.binary_sha256' "$temporary/runtime/manifest.json")"
         [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
         copy_with_mode \
           "$temporary/runtime/velnor-workflow" \
-          "$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV/velnor-workflow" \
+          "$runtime/bin/velnor-workflow" \
           0755
         copy_with_mode \
           "$temporary/runtime/manifest.json" \
-          "$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV/manifest.json" \
+          "$runtime/manifest.json" \
           0644
         echo 'found=true' >> "$GITHUB_OUTPUT"
 
@@ -129,14 +139,6 @@ runs:
             return 1
           fi
         }
-        copy_with_mode() {
-          local source="$1"
-          local destination="$2"
-          local mode="$3"
-          mkdir -p "$(dirname "$destination")"
-          cp "$source" "$destination"
-          chmod "$mode" "$destination"
-        }
         [[ "$CONTROLLED_BOOTSTRAP" == 'true' ]] || {
           echo "::error::no trusted runtime product for $INSTALL_REV; source recovery is default-branch push/schedule/workflow_dispatch or same-repository-PR only" >&2
           exit 1
@@ -156,17 +158,17 @@ runs:
         # export RUSTFLAGS for their own builds (the Linux mold link arg),
         # which macOS runners cannot link, and a caller .cargo/config.toml
         # must not shape foreign code either.
+        # Install straight into the revision's own root: the binary lands at
+        # `$runtime/bin/velnor-workflow`, never in `~/.cargo/bin`, so a second
+        # revision set up in the same job (pinned validator next to the event
+        # runtime) cannot collide with it.
         cd "$RUNNER_TEMP"
-        env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-          cargo install --locked --force --git "$SOURCE_REPOSITORY" \
-            --rev "$INSTALL_REV" velnor-workflow --bin velnor-workflow
         runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
         mkdir -p "$runtime"
-        copy_with_mode \
-          "$HOME/.cargo/bin/velnor-workflow" \
-          "$runtime/velnor-workflow" \
-          0755
-        binary_sha256="$(sha256_digest "$runtime/velnor-workflow")"
+        env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+          cargo install --locked --git "$SOURCE_REPOSITORY" \
+            --rev "$INSTALL_REV" --root "$runtime" velnor-workflow --bin velnor-workflow
+        binary_sha256="$(sha256_digest "$runtime/bin/velnor-workflow")"
         jq -n \
           --arg repository "$GITHUB_REPOSITORY" \
           --arg revision "$INSTALL_REV" \
@@ -202,7 +204,7 @@ runs:
           '.repository == $repository and .revision == $revision and .platform == $platform and (.run_id | test("^[0-9]+$")) and .job_id != ""' \
           "$runtime/manifest.json" >/dev/null
         expected="$(jq -er '.binary_sha256' "$runtime/manifest.json")"
-        actual="$(sha256_digest "$runtime/velnor-workflow")"
+        actual="$(sha256_digest "$runtime/bin/velnor-workflow")"
         [[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }
 
     - name: Add runtime to PATH
@@ -211,22 +213,12 @@ runs:
         INSTALL_REV: ${{ inputs.rev }}
       run: |
         set -euo pipefail
-        copy_with_mode() {
-          local source="$1"
-          local destination="$2"
-          local mode="$3"
-          mkdir -p "$(dirname "$destination")"
-          cp "$source" "$destination"
-          chmod "$mode" "$destination"
-        }
         runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
-        test -x "$runtime/velnor-workflow"
+        test -x "$runtime/bin/velnor-workflow"
         test -s "$runtime/manifest.json"
-        copy_with_mode \
-          "$runtime/velnor-workflow" \
-          "$HOME/.cargo/bin/velnor-workflow" \
-          0755
-        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        reported="$("$runtime/bin/velnor-workflow" --revision)"
+        [[ "$reported" == "$INSTALL_REV" ]] || { echo "::error::runtime at $runtime reports revision $reported, expected $INSTALL_REV" >&2; exit 1; }
+        echo "$runtime/bin" >> "$GITHUB_PATH"
 
     - name: Save runtime cache
       if: inputs.cache == 'true' && steps.cache.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))

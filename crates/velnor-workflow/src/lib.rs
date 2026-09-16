@@ -2795,6 +2795,241 @@ pub(crate) fn validate_policy_jobs_check_out_full_history(
     Ok(())
 }
 
+/// Every `cargo install` of `velnor-workflow` owns its destination.
+///
+/// `cargo install` refuses to overwrite a binary another install left in the
+/// same root (`binary velnor-workflow already exists in destination`), and a
+/// hosted job legitimately provisions two revisions — the pinned validator
+/// and the event runtime — so every install must carry `--root`, the root
+/// must not be the shared `~/.cargo/bin`, an install whose revision is a
+/// shell variable must root itself under that variable (the same step text
+/// runs once per revision), and two installs in one job may share a root only
+/// when they install the identical revision. Composite actions run inside the
+/// caller's job, so their steps are checked as one block. Checked here over
+/// every rendered workflow and action rather than remembered per step.
+///
+/// # Errors
+/// Returns a usage error naming the file, job, and install that breaks the
+/// rule.
+pub(crate) fn validate_workflow_runtime_install_roots(
+    files: &BTreeMap<PathBuf, String>,
+) -> Result<(), GeneratorError> {
+    for (path, rendered) in rendered_workflow_and_action_files(files) {
+        let blocks = if path.starts_with(".github/actions/") {
+            vec![("composite action".to_owned(), rendered.clone())]
+        } else {
+            static_workflow_job_blocks(rendered)
+        };
+        for (job, block) in blocks {
+            if let Some(line) = block.lines().find(|line| {
+                !line.trim_start().starts_with('#') && names_shared_cargo_bin_runtime(line)
+            }) {
+                return Err(GeneratorError::usage(format!(
+                    "{path}: {job} places the velnor-workflow runtime in the shared cargo bin \
+                     directory: `{}`; the runtime is addressed by revision under its own root \
+                     and never copied into `~/.cargo/bin`",
+                    line.trim()
+                )));
+            }
+            let mut roots: BTreeMap<String, String> = BTreeMap::new();
+            for install in workflow_runtime_installs(&block) {
+                let Some(root) = install.root.as_deref() else {
+                    return Err(GeneratorError::usage(format!(
+                        "{path}: {job} installs velnor-workflow without `--root`; cargo refuses \
+                         a destination another install already filled, and a job may provision \
+                         two revisions, so every install owns a revision-specific root: `{}`",
+                        install.command
+                    )));
+                };
+                if root_is_shared_cargo_bin(root) {
+                    return Err(GeneratorError::usage(format!(
+                        "{path}: {job} installs velnor-workflow into the shared cargo bin \
+                         directory `{root}`; the runtime never lives in `~/.cargo/bin` — it is \
+                         restored from the cargo-bin toolchain cache and shared by every install \
+                         in the job: `{}`",
+                        install.command
+                    )));
+                }
+                if let Some(revision) = install.revision.as_deref()
+                    && revision.contains('$')
+                    && !root.contains(revision)
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "{path}: {job} installs velnor-workflow at the variable revision \
+                         `{revision}` into `{root}`, a root that does not embed it; the same \
+                         step runs once per revision, so the root must be addressed by the \
+                         revision: `{}`",
+                        install.command
+                    )));
+                }
+                let revision = install.revision.clone().unwrap_or_default();
+                if let Some(previous) = roots.insert(root.to_owned(), revision.clone())
+                    && previous != revision
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "{path}: {job} installs velnor-workflow at revisions {previous} and \
+                         {revision} into one root `{root}`; cargo refuses the second install, so \
+                         distinct revisions need distinct roots"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One rendered `cargo install … velnor-workflow` invocation.
+struct WorkflowRuntimeInstall {
+    /// The logical command line, continuation lines joined.
+    command: String,
+    /// The `--root` argument, when present.
+    root: Option<String>,
+    /// The `--rev` argument, when present.
+    revision: Option<String>,
+}
+
+/// Every `cargo install` of the `velnor-workflow` crate in a rendered block,
+/// with `\`-continued lines joined so multi-line invocations read as one and
+/// `--root` expanded through the block's own `name="value"` shell assignments
+/// and `NAME: value` step env entries, so a root spelled `"$root"` is judged
+/// by the path it names.
+fn workflow_runtime_installs(block: &str) -> Vec<WorkflowRuntimeInstall> {
+    let mut installs = Vec::new();
+    let mut variables: BTreeMap<String, String> = BTreeMap::new();
+    let mut logical = String::new();
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if let Some(head) = trimmed.strip_suffix('\\') {
+            logical.push_str(head);
+            logical.push(' ');
+            continue;
+        }
+        logical.push_str(trimmed);
+        let command = std::mem::take(&mut logical);
+        if let Some((name, value)) = shell_or_env_assignment(&command) {
+            variables.insert(name, expand_block_variables(&value, &variables));
+        }
+        if command.starts_with('#') || !command.contains("cargo install") {
+            continue;
+        }
+        let tokens: Vec<&str> = command.split_whitespace().collect();
+        let installs_runtime = tokens.iter().enumerate().any(|(index, token)| {
+            *token == "velnor-workflow" && tokens.get(index.wrapping_sub(1)) != Some(&"--bin")
+        });
+        if !installs_runtime {
+            continue;
+        }
+        let argument = |flag: &str| {
+            tokens
+                .iter()
+                .position(|token| *token == flag)
+                .and_then(|index| tokens.get(index + 1))
+                .map(|value| value.trim_matches(|c| c == '"' || c == '\'').to_owned())
+        };
+        installs.push(WorkflowRuntimeInstall {
+            root: argument("--root").map(|root| expand_block_variables(&root, &variables)),
+            revision: argument("--rev")
+                .map(|revision| expand_block_variables(&revision, &variables)),
+            command,
+        });
+    }
+    installs
+}
+
+/// A `name="value"` shell assignment or an `NAME: value` step env entry, with
+/// the value's surrounding quotes removed.
+fn shell_or_env_assignment(line: &str) -> Option<(String, String)> {
+    let is_identifier = |name: &str| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let unquote = |value: &str| {
+        value
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_owned()
+    };
+    if let Some((name, value)) = line.split_once('=')
+        && is_identifier(name)
+        && !value.starts_with('=')
+    {
+        return Some((name.to_owned(), unquote(value)));
+    }
+    if let Some((name, value)) = line.split_once(": ")
+        && is_identifier(name)
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Some((name.to_owned(), unquote(value)));
+    }
+    None
+}
+
+/// Replace `$name` and `${name}` with the block's known assignments.
+fn expand_block_variables(value: &str, variables: &BTreeMap<String, String>) -> String {
+    let mut expanded = value.to_owned();
+    for (name, replacement) in variables.iter().rev() {
+        expanded = expanded
+            .replace(&format!("${{{name}}}"), replacement)
+            .replace(&format!("${name}"), replacement);
+    }
+    expanded
+}
+
+/// Whether a script line names the runtime binary `velnor-workflow` itself
+/// (not `velnor-workflow-policy`, the Velnor lane's distinctly named
+/// host-persistent copy) inside the shared cargo bin directory.
+fn names_shared_cargo_bin_runtime(line: &str) -> bool {
+    [
+        ".cargo/bin/velnor-workflow",
+        ".cargo}/bin/velnor-workflow",
+        "CARGO_HOME/bin/velnor-workflow",
+        "CARGO_HOME}/bin/velnor-workflow",
+    ]
+    .iter()
+    .any(|needle| {
+        line.match_indices(needle).any(|(index, _)| {
+            !line[index + needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|next| next == '-' || next.is_ascii_alphanumeric())
+        })
+    })
+}
+
+/// Whether an install root is the cargo home's shared `bin` directory in any
+/// of the spellings a rendered script may use.
+fn root_is_shared_cargo_bin(root: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    let last = root.rsplit('/').next().unwrap_or(root);
+    let parent = root.rsplit_once('/').map_or("", |(parent, _)| {
+        parent.rsplit('/').next().unwrap_or(parent)
+    });
+    let is_cargo_home = |segment: &str| {
+        matches!(
+            segment,
+            ".cargo" | ".cargo}" | "$CARGO_HOME" | "${CARGO_HOME}" | "CARGO_HOME" | "CARGO_HOME}"
+        ) || segment.ends_with("$HOME/.cargo}")
+    };
+    is_cargo_home(last) || (last == "bin" && is_cargo_home(parent))
+}
+
+/// The rendered workflows plus the composite actions they call, as
+/// `(display path, content)` pairs.
+fn rendered_workflow_and_action_files(
+    files: &BTreeMap<PathBuf, String>,
+) -> impl Iterator<Item = (String, &String)> {
+    files
+        .iter()
+        .filter(|(path, _)| {
+            (path.starts_with(".github/workflows")
+                && path.extension().is_some_and(|extension| extension == "yml"))
+                || (path.starts_with(".github/actions")
+                    && path.file_name().is_some_and(|name| name == "action.yml"))
+        })
+        .map(|(path, content)| (path.display().to_string(), content))
+}
+
 /// Whether a step body invokes the policy validator (`velnor-workflow
 /// policy`) in a `run:` script, as opposed to naming it in a comment.
 fn step_runs_workflow_policy(body: &str) -> bool {
@@ -3677,15 +3912,32 @@ fn workflow_runtime_setup_with_install_rev(
     )
 }
 
+/// Where `setup-velnor-workflow` keeps every hosted runtime it provisions:
+/// one directory per revision, holding the cargo `--root` layout
+/// (`bin/velnor-workflow`) and the product `manifest.json`. The directory is
+/// the action's cache path, the landing place of a downloaded product, and
+/// the install root of a source build, so two revisions set up in one job
+/// never share a destination and a caller that needs a specific revision
+/// addresses it by path instead of by whatever `~/.cargo/bin` holds.
+pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workflow-runtime";
+
+/// The hosted runtime binary that `setup-velnor-workflow` provisioned for
+/// `revision` (a literal SHA or a shell variable holding one).
+pub(crate) fn hosted_workflow_runtime_binary(revision: &str) -> String {
+    format!("{HOSTED_WORKFLOW_RUNTIME_HOME}/{revision}/bin/velnor-workflow")
+}
+
 /// Hosted Planning provisions the **pinned** runtime next to the event
 /// runtime when the two differ (same-repository PRs and default-branch events
-/// install `github.sha`). The pinned binary is proven by the revision it
-/// reports, staged outside `~/.cargo/bin` (the event install overwrites that
-/// path), exported as [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`], and shipped in
-/// the runtime artifact so unit jobs can run the D19 guard offline.
+/// install `github.sha`). Each revision lives in its own
+/// [`HOSTED_WORKFLOW_RUNTIME_HOME`] directory, so the pinned binary is
+/// addressed there directly — proven by the revision it reports, exported as
+/// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`], and shipped in the runtime artifact
+/// so unit jobs can run the D19 guard offline.
 fn workflow_pinned_policy_runtime_setup(repository: &str, revision: &str) -> String {
+    let binary = hosted_workflow_runtime_binary("$PINNED_REVISION");
     format!(
-        "      - name: Set up pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          rev: {revision}\n      - name: Stage pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        shell: bash\n        env:\n          PINNED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-policy\"\n          install -Dm0755 \"$HOME/.cargo/bin/velnor-workflow\" \"$stage/velnor-workflow\"\n          reported=\"$(\"$stage/velnor-workflow\" --revision)\"\n          [[ \"$reported\" == \"$PINNED_REVISION\" ]] || {{ echo \"::error::pinned workflow runtime reports revision $reported, expected $PINNED_REVISION\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$stage/velnor-workflow\" >> \"$GITHUB_ENV\"\n",
+        "      - name: Set up pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          rev: {revision}\n      - name: Resolve pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        shell: bash\n        env:\n          PINNED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          binary=\"{binary}\"\n          reported=\"$(\"$binary\" --revision)\"\n          [[ \"$reported\" == \"$PINNED_REVISION\" ]] || {{ echo \"::error::pinned workflow runtime reports revision $reported, expected $PINNED_REVISION\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n",
         workflow_setup_action_uses(repository, revision)
     )
 }
@@ -3726,10 +3978,19 @@ pub(crate) fn workflow_runtime_setup_with_pinned_policy(
     setup
 }
 
+/// Where a hosted unit job places the runtime pair it downloads from the
+/// Planning artifact (`bin/velnor-workflow` at the event revision,
+/// `bin/velnor-workflow-policy` at the pin). Job-scoped and never
+/// `~/.cargo/bin`: that directory is restored from the cargo-bin toolchain
+/// cache, so a runtime copied there would be saved into a cache keyed by
+/// `mise.lock` and resurface at a stale revision in later jobs.
+pub(crate) const HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME: &str =
+    "$RUNNER_TEMP/velnor-workflow-runtime-artifact";
+
 fn workflow_runtime_download(lane: RunnerMode, revision: &str) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and .policy_revision == $revision and (.policy_binary_sha256 | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n          expected=\"$(jq -er '.policy_binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy \"$HOME/.cargo/bin/velnor-workflow-policy\"\n          reported=\"$(\"$HOME/.cargo/bin/velnor-workflow-policy\" --revision)\"\n          [[ \"$reported\" == \"$EXPECTED_REVISION\" ]] || {{ echo \"::error::policy runtime reports revision $reported, expected $EXPECTED_REVISION\" >&2; exit 1; }}\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$HOME/.cargo/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\"\n",
+            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and .policy_revision == $revision and (.policy_binary_sha256 | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n          expected=\"$(jq -er '.policy_binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$home/bin/velnor-workflow\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy \"$home/bin/velnor-workflow-policy\"\n          reported=\"$(\"$home/bin/velnor-workflow-policy\" --revision)\"\n          [[ \"$reported\" == \"$EXPECTED_REVISION\" ]] || {{ echo \"::error::policy runtime reports revision $reported, expected $EXPECTED_REVISION\" >&2; exit 1; }}\n          echo \"$home/bin\" >> \"$GITHUB_PATH\"\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\"\n",
             ActionPin::DownloadArtifact.reference()
         )
     } else {
@@ -4071,6 +4332,7 @@ fn generated_files_with_surface(
     validate_ruleset_required_status_checks(&config, &files)?;
     validate_hosted_mr_boxington_store_budget(&files)?;
     validate_policy_jobs_check_out_full_history(&files)?;
+    validate_workflow_runtime_install_roots(&files)?;
     // GitHub loads every reusable workflow once per calling job into one
     // 10 MiB template budget; refuse a surface whose expansion passes the
     // generator's 5 MiB ceiling before it can fail every run at startup.
@@ -6623,14 +6885,26 @@ mod tests {
             "{download}"
         );
         assert!(
-            download.contains("$HOME/.cargo/bin/velnor-workflow-policy\" --revision"),
+            download.contains(&format!("home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"")),
+            "{download}"
+        );
+        assert!(
+            download.contains("\"$home/bin/velnor-workflow-policy\" --revision"),
+            "{download}"
+        );
+        assert!(
+            download.contains("echo \"$home/bin\" >> \"$GITHUB_PATH\""),
             "{download}"
         );
         assert!(
             download.contains(&format!(
-                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$HOME/.cargo/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\""
+                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\""
             )),
             "unit jobs export the pinned binary for the D19 guard: {download}"
+        );
+        assert!(
+            !download.contains(".cargo/bin"),
+            "the runtime pair never enters the shared cargo bin: {download}"
         );
         assert!(
             !download.contains("cargo install"),
@@ -6648,26 +6922,37 @@ mod tests {
             owner.find("name: Set up pinned Velnor workflow policy runtime"),
             "pinned policy runtime step",
         );
-        let staged = must_some(
-            owner.find("name: Stage pinned Velnor workflow policy runtime"),
-            "stage step",
+        let resolved = must_some(
+            owner.find("name: Resolve pinned Velnor workflow policy runtime"),
+            "resolve step",
         );
         let event = must_some(
             owner.find("name: Set up Velnor workflow runtime"),
             "event runtime step",
         );
-        assert!(pinned < staged && staged < event, "{owner}");
+        assert!(pinned < resolved && resolved < event, "{owner}");
         assert!(
             owner.contains(&format!(
-                "          rev: {FIXTURE_REVISION}\n      - name: Stage pinned"
+                "          rev: {FIXTURE_REVISION}\n      - name: Resolve pinned"
             )),
             "the pinned install uses the literal pin: {owner}"
         );
         assert!(
             owner.contains(&format!(
-                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$stage/velnor-workflow\" >> \"$GITHUB_ENV\""
+                "binary=\"{}\"",
+                hosted_workflow_runtime_binary("$PINNED_REVISION")
+            )),
+            "the pin is addressed in its own revision directory, never copied out of a shared path: {owner}"
+        );
+        assert!(
+            owner.contains(&format!(
+                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\""
             )),
             "{owner}"
+        );
+        assert!(
+            !owner.contains(".cargo/bin"),
+            "Planning never reads the runtime out of the shared cargo bin: {owner}"
         );
         assert_eq!(
             owner
@@ -6733,7 +7018,11 @@ mod tests {
         assert!(action.contains(&expected_source));
         assert!(!action
             .contains("SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}"));
-        assert!(action.contains("cargo install --locked --force --git \"$SOURCE_REPOSITORY\""));
+        assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
+        assert!(
+            !action.contains("--force"),
+            "a revision-addressed root never needs to overwrite a prior install: {action}"
+        );
         assert!(action.contains("head_sha == env.INSTALL_REV"));
         assert!(action.contains("actions/runs/$artifact_run_id"));
         assert!(action.contains("run_conclusion"));
@@ -9792,6 +10081,263 @@ channel = "stable"
         must(
             validate_policy_jobs_check_out_full_history(&commented),
             "a comment naming the validator does not bind the job",
+        );
+    }
+
+    /// Failure 3 of the post-#872 `main` runs: hosted Planning set up the
+    /// pinned validator and then the event runtime through the same action,
+    /// whose source build ran `cargo install` into the default `~/.cargo/bin`
+    /// that the first install had already filled (`binary velnor-workflow
+    /// already exists in destination`, run 35056570751). Every rendered
+    /// install of the runtime owns a revision-addressed root, nothing puts the
+    /// runtime binary into the shared cargo bin, and the composite action's
+    /// layout is the one Planning and the unit jobs address.
+    #[test]
+    fn every_runtime_install_owns_a_revision_addressed_root() {
+        let files = rendered_repository_files();
+        must(
+            validate_workflow_runtime_install_roots(&files),
+            "every rendered velnor-workflow install owns its root",
+        );
+        let mut installs = Vec::new();
+        for (path, rendered) in rendered_workflow_and_action_files(&files) {
+            assert!(
+                !rendered.lines().any(names_shared_cargo_bin_runtime),
+                "{path} places the runtime in the shared cargo bin"
+            );
+            for install in workflow_runtime_installs(rendered) {
+                let root = must_some(install.root.clone(), &install.command);
+                assert!(
+                    !root_is_shared_cargo_bin(&root),
+                    "{path}: {}",
+                    install.command
+                );
+                installs.push(format!(
+                    "{path}: --root {root} --rev {:?}",
+                    install.revision
+                ));
+            }
+        }
+        // The action's source build, the Velnor lane's pinned build, and the
+        // policy entrypoint's install are the three shapes in this tree.
+        let action = format!(
+            ".github/actions/setup-velnor-workflow/action.yml: --root {HOSTED_WORKFLOW_RUNTIME_HOME}/${{{{ inputs.rev }}}} --rev Some(\"${{{{ inputs.rev }}}}\")"
+        );
+        assert!(installs.contains(&action), "{installs:#?}");
+        assert!(
+            installs.iter().any(|install| {
+                install.starts_with(".github/workflows/ci-unit-rust.yml: --root $RUNNER_TEMP/velnor-workflow-policy-")
+            }),
+            "{installs:#?}"
+        );
+        assert!(
+            installs.iter().any(|install| {
+                install.starts_with(
+                    ".github/workflows/ci-policy.yml: --root ${{ runner.temp }}/velnor-workflow ",
+                )
+            }),
+            "{installs:#?}"
+        );
+
+        // The checked-in action is what those paths address: its cargo root,
+        // downloaded product, cache path, and PATH entry are one revision
+        // directory, and Planning's pinned-binary path is inside it.
+        let action = declared_setup_action();
+        let runtime = format!("runtime=\"{HOSTED_WORKFLOW_RUNTIME_HOME}/$INSTALL_REV\"");
+        assert!(action.contains(&runtime), "{action}");
+        assert!(
+            action.contains(
+                "--rev \"$INSTALL_REV\" --root \"$runtime\" velnor-workflow --bin velnor-workflow"
+            ),
+            "{action}"
+        );
+        assert!(
+            action.contains("\"$runtime/bin/velnor-workflow\""),
+            "{action}"
+        );
+        assert!(
+            action.contains("echo \"$runtime/bin\" >> \"$GITHUB_PATH\""),
+            "{action}"
+        );
+        assert!(
+            action.contains("path: ~/.cache/velnor/workflow-runtime\n"),
+            "{action}"
+        );
+        assert!(
+            action.contains("default: velnor-workflow-v2"),
+            "the product layout changed, so the cache key namespace moves: {action}"
+        );
+        assert!(
+            !action
+                .lines()
+                .any(|line| !line.trim_start().starts_with('#') && line.contains(".cargo/bin")),
+            "no script line touches the shared cargo bin: {action}"
+        );
+        assert!(
+            !action.contains("copy_with_mode \\\n          \"$runtime/velnor-workflow\""),
+            "{action}"
+        );
+        assert_eq!(
+            hosted_workflow_runtime_binary("$PINNED_REVISION"),
+            "$HOME/.cache/velnor/workflow-runtime/$PINNED_REVISION/bin/velnor-workflow"
+        );
+    }
+
+    /// The validator behind the test above, on hand-written shapes.
+    #[test]
+    fn runtime_install_root_validator_refuses_shared_destinations() {
+        let job = |run: &str| {
+            BTreeMap::from([(
+                PathBuf::from(".github/workflows/ci-main.yml"),
+                format!(
+                    "name: CI\njobs:\n  plan:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Install\n        env:\n          PINNED_REVISION: {FIXTURE_REVISION}\n        run: |\n{run}"
+                ),
+            )])
+        };
+        let install = |rev: &str, root: &str| {
+            format!(
+                "          cargo install --locked --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} --rev {rev} {root} velnor-workflow --bin velnor-workflow\n"
+            )
+        };
+
+        must(
+            validate_workflow_runtime_install_roots(&job(&install(
+                "\"$PINNED_REVISION\"",
+                "--root \"$RUNNER_TEMP/velnor-workflow-$PINNED_REVISION\"",
+            ))),
+            "a revision-addressed root is accepted",
+        );
+        let message = must_fail(
+            validate_workflow_runtime_install_roots(&job(&install("\"$PINNED_REVISION\"", ""))),
+            "an install without --root is refused",
+        )
+        .to_string();
+        assert!(
+            message.contains("ci-main.yml: plan installs velnor-workflow without `--root`"),
+            "{message}"
+        );
+
+        for shared in [
+            "\"$HOME/.cargo\"",
+            "\"$HOME/.cargo/bin\"",
+            "\"${CARGO_HOME:-$HOME/.cargo}\"",
+            "\"$CARGO_HOME/bin\"",
+        ] {
+            let message = must_fail(
+                validate_workflow_runtime_install_roots(&job(&install(
+                    "\"$PINNED_REVISION\"",
+                    &format!("--root {shared}"),
+                ))),
+                "the shared cargo bin is refused as a root",
+            )
+            .to_string();
+            assert!(
+                message.contains("shared cargo bin directory"),
+                "{shared}: {message}"
+            );
+        }
+
+        // A variable revision must be part of its root: the same step text
+        // runs once per revision.
+        let message = must_fail(
+            validate_workflow_runtime_install_roots(&job(&install(
+                "\"$INSTALL_REV\"",
+                "--root \"$RUNNER_TEMP/velnor-workflow\"",
+            ))),
+            "a variable revision outside its root is refused",
+        )
+        .to_string();
+        assert!(
+            message.contains("variable revision `$INSTALL_REV`"),
+            "{message}"
+        );
+        // …and a root reached through a shell assignment is judged by the
+        // path it names, the way the composite action spells it.
+        must(
+            validate_workflow_runtime_install_roots(&job(&format!(
+                "          runtime=\"$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV\"\n{}",
+                install("\"$INSTALL_REV\"", "--root \"$runtime\"")
+            ))),
+            "an assigned root that embeds the revision is accepted",
+        );
+
+        // Two revisions in one job need two roots; the identical revision may
+        // share one.
+        let other = "0123456789abcdef0123456789abcdef01234567";
+        let message = must_fail(
+            validate_workflow_runtime_install_roots(&job(&format!(
+                "{}{}",
+                install(FIXTURE_REVISION, "--root \"$RUNNER_TEMP/velnor-workflow\""),
+                install(other, "--root \"$RUNNER_TEMP/velnor-workflow\"")
+            ))),
+            "two revisions into one root are refused",
+        )
+        .to_string();
+        assert!(
+            message.contains("into one root `$RUNNER_TEMP/velnor-workflow`"),
+            "{message}"
+        );
+        must(
+            validate_workflow_runtime_install_roots(&job(&format!(
+                "{}{}",
+                install(FIXTURE_REVISION, "--root \"$RUNNER_TEMP/velnor-workflow\""),
+                install(FIXTURE_REVISION, "--root \"$RUNNER_TEMP/velnor-workflow\"")
+            ))),
+            "the identical revision may share a root",
+        );
+    }
+
+    /// The same validator on the copy and composite-action shapes.
+    #[test]
+    fn runtime_install_root_validator_refuses_shared_copies_and_judges_actions() {
+        let job = |run: &str| {
+            BTreeMap::from([(
+                PathBuf::from(".github/workflows/ci-main.yml"),
+                format!(
+                    "name: CI\njobs:\n  plan:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Install\n        run: |\n{run}"
+                ),
+            )])
+        };
+        let install = |rev: &str, root: &str| {
+            format!(
+                "          cargo install --locked --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} --rev {rev} {root} velnor-workflow --bin velnor-workflow\n"
+            )
+        };
+        // Copying the runtime binary into the shared cargo bin is the other
+        // way to build the collision; the distinctly named Velnor policy copy
+        // is not it.
+        let message = must_fail(
+            validate_workflow_runtime_install_roots(&job(
+                "          install -Dm0755 \"$RUNNER_TEMP/velnor-workflow/bin/velnor-workflow\" \"$HOME/.cargo/bin/velnor-workflow\"\n",
+            )),
+            "copying the runtime into the shared cargo bin is refused",
+        )
+        .to_string();
+        assert!(message.contains("shared cargo bin directory"), "{message}");
+        must(
+            validate_workflow_runtime_install_roots(&job(
+                "          binary=\"${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy\"\n",
+            )),
+            "the Velnor lane's distinctly named policy copy is not the runtime",
+        );
+
+        // Composite actions are judged as one block.
+        let action = BTreeMap::from([(
+            PathBuf::from(".github/actions/setup-velnor-workflow/action.yml"),
+            format!(
+                "name: Setup\nruns:\n  using: composite\n  steps:\n    - name: Install\n      shell: bash\n      env:\n        INSTALL_REV: ${{{{ inputs.rev }}}}\n      run: |\n{}",
+                install("\"$INSTALL_REV\"", "")
+            ),
+        )]);
+        let message = must_fail(
+            validate_workflow_runtime_install_roots(&action),
+            "a composite action install without --root is refused",
+        )
+        .to_string();
+        assert!(
+            message
+                .contains("action.yml: composite action installs velnor-workflow without `--root`"),
+            "{message}"
         );
     }
 
