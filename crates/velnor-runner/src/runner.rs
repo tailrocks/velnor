@@ -3606,6 +3606,10 @@ pub(crate) async fn run_daemon_slot(
 
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
+    // The requested identity is fixed for this worker's lifetime, so drift
+    // can be retired at most once; a fresh registration that still reports
+    // drift is a predicate/GitHub disagreement, never a reason to churn.
+    let mut stale_identity_retired = false;
     // Disk pressure is a bounded state machine rather than an indefinite park.
     // The slot reclaims, then refuses admission against a deadline, then drains
     // — it never sleeps and retries forever with no terminal state.
@@ -3708,6 +3712,44 @@ pub(crate) async fn run_daemon_slot(
                     .await;
                     return Ok(());
                 }
+            }
+        }
+        // A stored identity (including a successor promoted by an earlier
+        // worker) is reusable only if it is the registration the current
+        // configuration would request. Labels, group, name and scope are
+        // fixed at JIT-config creation, so drift is retired through the same
+        // delete-and-re-register path as a lost registration.
+        if let Some(drift) = stored_jit_config_drift_at(
+            &args,
+            &daemon_slot_config_dir(&config_base, slot_index, slots),
+            slot_index,
+            slots,
+        ) {
+            if stale_identity_retired {
+                eprintln!(
+                    "daemon slot-{slot_index}: freshly registered JIT config still reports drift ({drift}); keeping it to avoid registration churn"
+                );
+            } else {
+                stale_identity_retired = true;
+                let note = format!(
+                    "stored JIT config for slot-{slot_index} is stale ({drift}); re-registering"
+                );
+                println!("{note}");
+                daemon_forensic_log(&config_base, &note);
+                let _ = durable_slot.transition(
+                    SlotPhase::Teardown,
+                    format!("retiring stale JIT identity before cycle {cycle}"),
+                );
+                reconfigure_daemon_slot_forever(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
+                continue;
             }
         }
         let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
@@ -4214,16 +4256,32 @@ async fn prewarm_daemon_slot_successor(
     cycle: u64,
 ) -> Result<()> {
     let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
-    if config::load(&next_dir).is_ok() {
-        return Ok(());
-    }
-
-    if next_dir.exists() {
-        delete_and_remove_daemon_slot_jit_config(args, &next_dir)
-            .await
-            .with_context(|| {
-                format!("remove stale successor JIT config for daemon slot-{slot_index}")
-            })?;
+    // A successor pre-created by an earlier worker is reused only under the
+    // same predicate as the live identity; otherwise its registration is
+    // deleted and a successor for the current configuration replaces it.
+    match config::load(&next_dir) {
+        Ok(existing) => {
+            let Some(drift) = stored_jit_config_drift(args, slot_index, slots, &existing.settings)
+            else {
+                return Ok(());
+            };
+            println!(
+                "stored successor JIT config for slot-{slot_index} is stale ({drift}); re-registering"
+            );
+            delete_and_remove_daemon_slot_jit_config(args, &next_dir)
+                .await
+                .with_context(|| {
+                    format!("retire stale successor JIT config for daemon slot-{slot_index}")
+                })?;
+        }
+        Err(_) if next_dir.exists() => {
+            delete_and_remove_daemon_slot_jit_config(args, &next_dir)
+                .await
+                .with_context(|| {
+                    format!("remove stale successor JIT config for daemon slot-{slot_index}")
+                })?;
+        }
+        Err(_) => {}
     }
 
     let mut configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
@@ -4259,6 +4317,17 @@ async fn recycle_daemon_slot(
         format!("tearing down consumed JIT identity after cycle {cycle}"),
     );
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
+    let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
+    // The successor is promoted only under the reuse predicate: a prepared
+    // identity that no longer matches the current configuration is deleted
+    // (an unused JIT registration never expires on its own) so the fresh
+    // configure below replaces it.
+    if let Some(drift) = stored_jit_config_drift_at(args, &next_dir, slot_index, slots) {
+        println!(
+            "stored successor JIT config for slot-{slot_index} is stale ({drift}); discarding before promotion"
+        );
+        cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await?;
+    }
     // A JIT runner is server-side ephemeral: GitHub automatically
     // deregisters it after its single job. Only discard the consumed local
     // identity here. Calling DELETE after every successful job wastes one
@@ -4269,7 +4338,6 @@ async fn recycle_daemon_slot(
         let _configure_lock = ConfigureLock::acquire(&slot_dir)?;
         remove_completed_daemon_slot_jit_config_locked(&slot_dir)
             .with_context(|| format!("discard consumed daemon slot-{slot_index} JIT identity"))?;
-        let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
         if pending_jit_registration_exists(&slot_dir) || pending_jit_registration_exists(&next_dir)
         {
             bail!(
@@ -4898,6 +4966,239 @@ fn daemon_slot_should_configure_jit(
     dry_run_registration
         || pending_jit_registration_exists(slot_config_dir)
         || config::load(slot_config_dir).is_err()
+}
+
+/// One way a stored JIT config differs from the registration the current
+/// daemon configuration would request. Labels, runner group, agent name and
+/// scope are fixed by GitHub at JIT-config creation, so any drift means the
+/// stored identity can only be retired and re-registered, never patched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JitIdentityDrift {
+    Labels {
+        stored: Vec<String>,
+        requested: Vec<String>,
+    },
+    RunnerGroup {
+        stored: String,
+        requested: String,
+    },
+    AgentName {
+        stored: String,
+        requested: String,
+    },
+    Scope {
+        stored: String,
+        requested: String,
+    },
+    TrustScope {
+        label: String,
+        trust_scope: String,
+    },
+}
+
+impl std::fmt::Display for JitIdentityDrift {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Labels { stored, requested } => {
+                write!(f, "labels {} → {}", stored.join(","), requested.join(","))
+            }
+            Self::RunnerGroup { stored, requested } => {
+                write!(f, "runner group {stored} → {requested}")
+            }
+            Self::AgentName { stored, requested } => {
+                write!(f, "agent name {stored} → {requested}")
+            }
+            Self::Scope { stored, requested } => write!(f, "scope {stored} → {requested}"),
+            Self::TrustScope { label, trust_scope } => write!(
+                f,
+                "label {label} is trust-gated but trust scope is {trust_scope}"
+            ),
+        }
+    }
+}
+
+/// The runner group `configure` would request for these daemon args. Mirrors
+/// the `runner_group_id` resolution in `configure`: a pre-resolved or
+/// dry-run id is used as-is, a bare pool name is a live lookup by
+/// (case-insensitive) name, and no pool at all is GitHub's Default group 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RequestedRunnerGroup {
+    Id(i64),
+    Name(String),
+}
+
+impl RequestedRunnerGroup {
+    fn for_daemon(args: &DaemonArgs) -> Self {
+        match args.pool_name.as_deref().filter(|name| !name.is_empty()) {
+            Some(_) if args.pool_id_pre_resolved => Self::Id(args.pool_id.unwrap_or(1)),
+            Some(_) if args.dry_run_registration && args.pool_id.is_some() => {
+                Self::Id(args.pool_id.unwrap_or(1))
+            }
+            Some(name) => Self::Name(name.to_owned()),
+            None => Self::Id(args.pool_id.unwrap_or(1)),
+        }
+    }
+
+    fn matches(&self, stored: &RunnerSettings) -> bool {
+        match self {
+            Self::Id(id) => stored.pool_id == Some(*id),
+            Self::Name(name) => stored
+                .pool_name
+                .as_deref()
+                .is_some_and(|stored| stored.eq_ignore_ascii_case(name)),
+        }
+    }
+
+    fn describe_stored(stored: &RunnerSettings) -> String {
+        match (stored.pool_id, stored.pool_name.as_deref()) {
+            (Some(id), Some(name)) => format!("{name} (id {id})"),
+            (Some(id), None) => format!("id {id}"),
+            (None, Some(name)) => name.to_owned(),
+            (None, None) => "unknown".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for RequestedRunnerGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Id(id) => write!(f, "id {id}"),
+            Self::Name(name) => f.write_str(name),
+        }
+    }
+}
+
+/// Case-folded scope identity (`https://host/owner/repo`, no query, fragment
+/// or trailing slash). GitHub owner/org/repo paths are case-insensitive, and
+/// the decoded JIT config may return the canonical spelling.
+fn jit_scope_identity(url: &str) -> Option<String> {
+    let scope = GitHubScope::parse(url).ok()?;
+    pending_scope_url(&scope)
+        .ok()
+        .map(|url| url.to_ascii_lowercase())
+}
+
+/// `velnor-{host}-{instance}-{slot}-next-{pid}-{cycle}` → `(pid, cycle)`.
+fn parse_successor_agent_name_suffix(agent_name: &str) -> Option<(u32, u64)> {
+    let (_, tail) = agent_name.rsplit_once("-next-")?;
+    let (pid, cycle) = tail.split_once('-')?;
+    Some((pid.parse().ok()?, cycle.parse().ok()?))
+}
+
+/// A stored agent name is current when it is exactly the name this slot would
+/// register now, or a successor name composed for this slot by any earlier
+/// worker (the pid/cycle suffix is that worker's, so it is reconstructed from
+/// the stored name rather than compared to the current process).
+fn daemon_slot_agent_name_is_current(
+    base_name: Option<&str>,
+    slot_index: usize,
+    slot_count: usize,
+    stored_agent_name: &str,
+) -> bool {
+    if daemon_slot_agent_name(base_name, slot_index, slot_count).as_deref()
+        == Some(stored_agent_name)
+    {
+        return true;
+    }
+    let Some((pid, cycle)) = parse_successor_agent_name_suffix(stored_agent_name) else {
+        return false;
+    };
+    let host = github_runner_host_slug();
+    let instance = instance_slug_from_operator_name(base_name, &host);
+    compose_github_runner_successor_name(
+        &host,
+        &instance,
+        zero_based_slot_index(slot_index),
+        pid,
+        cycle,
+    ) == stored_agent_name
+}
+
+/// The reuse predicate for a stored daemon slot JIT config: it is reusable
+/// only when its effective identity equals what `configure` would request
+/// from the current daemon configuration. Returns the first drift found:
+///
+/// - label set == `normalize_labels(args.labels, target packs)`;
+/// - runner group == the group `configure` would resolve (id, or name);
+/// - agent name == this slot's name or a successor name for this slot;
+/// - scope == `args.url`, compared as a case-folded normalized scope URL;
+/// - the trust-gated label is only claimed under a trusted scope.
+///
+/// `None` for config-only daemons (`args.url` is `None`): they never
+/// register, so there is no identity to reproduce.
+fn stored_jit_config_drift(
+    args: &DaemonArgs,
+    slot_index: usize,
+    slot_count: usize,
+    stored: &RunnerSettings,
+) -> Option<JitIdentityDrift> {
+    let url = args.url.as_deref()?;
+    let requested_labels = normalize_labels(
+        args.labels.clone(),
+        args.target_mvp_labels,
+        args.target_mvp_arm_label,
+    );
+    let stored_labels: BTreeSet<&str> = stored.labels.iter().map(String::as_str).collect();
+    let requested_label_set: BTreeSet<&str> = requested_labels.iter().map(String::as_str).collect();
+    if stored_labels != requested_label_set {
+        return Some(JitIdentityDrift::Labels {
+            stored: stored_labels.into_iter().map(str::to_owned).collect(),
+            requested: requested_labels,
+        });
+    }
+
+    let requested_group = RequestedRunnerGroup::for_daemon(args);
+    if !requested_group.matches(stored) {
+        return Some(JitIdentityDrift::RunnerGroup {
+            stored: RequestedRunnerGroup::describe_stored(stored),
+            requested: requested_group.to_string(),
+        });
+    }
+
+    if !daemon_slot_agent_name_is_current(
+        args.name.as_deref(),
+        slot_index,
+        slot_count,
+        &stored.agent_name,
+    ) {
+        return Some(JitIdentityDrift::AgentName {
+            stored: stored.agent_name.clone(),
+            requested: daemon_slot_agent_name(args.name.as_deref(), slot_index, slot_count)
+                .unwrap_or_default(),
+        });
+    }
+
+    let requested_scope = jit_scope_identity(url);
+    let stored_scope = jit_scope_identity(&stored.github_url);
+    if requested_scope.is_none() || stored_scope != requested_scope {
+        return Some(JitIdentityDrift::Scope {
+            stored: stored.github_url.clone(),
+            requested: url.to_owned(),
+        });
+    }
+
+    if validate_trusted_label_requires_trusted_scope(&stored.labels, Some(&args.trust_scope))
+        .is_err()
+    {
+        return Some(JitIdentityDrift::TrustScope {
+            label: TRUST_GATED_RUNNER_LABEL.to_owned(),
+            trust_scope: args.trust_scope.clone(),
+        });
+    }
+
+    None
+}
+
+/// Evaluate the reuse predicate against the config stored in `dir`. A missing
+/// or unreadable config is not drift: the identity-unavailable path owns it.
+fn stored_jit_config_drift_at(
+    args: &DaemonArgs,
+    dir: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Option<JitIdentityDrift> {
+    let stored = config::load(dir).ok()?;
+    stored_jit_config_drift(args, slot_index, slot_count, &stored.settings)
 }
 
 fn daemon_should_poll_after_jit_config(args: &DaemonArgs) -> bool {
@@ -19175,6 +19476,482 @@ jobs:
 
         fs::remove_dir_all(&dir).unwrap();
         assert!(daemon_slot_should_configure_jit(&dir, false, false));
+    }
+
+    /// Daemon args for the Sentry dogfood shape: repository scope, operator
+    /// name, no runner group (GitHub Default id 1), trusted pool.
+    fn dogfood_daemon_args(url: &str, labels: &[&str]) -> DaemonArgs {
+        let mut args = daemon_args(5);
+        args.url = Some(url.to_owned());
+        args.name = Some("velnor-dogfood".into());
+        args.labels = labels.iter().map(|label| (*label).to_owned()).collect();
+        args
+    }
+
+    /// A stored JIT config exactly as `configure` would have written it for
+    /// `args` on slot `slot_index`, so `stored_jit_config_drift` must be `None`.
+    fn stored_config_registered_by(
+        args: &DaemonArgs,
+        slot_index: usize,
+        agent_id: i64,
+    ) -> StoredRunnerConfig {
+        let mut stored = stored_config();
+        stored.settings.github_url = args.url.clone().unwrap();
+        stored.settings.pool_id = Some(1);
+        stored.settings.pool_name = Some("Default".into());
+        stored.settings.agent_id = Some(agent_id);
+        stored.settings.agent_name =
+            daemon_slot_agent_name(args.name.as_deref(), slot_index, args.slots).unwrap();
+        stored.settings.labels = normalize_labels(
+            args.labels.clone(),
+            args.target_mvp_labels,
+            args.target_mvp_arm_label,
+        );
+        stored.settings.ephemeral = true;
+        stored
+    }
+
+    #[test]
+    fn stored_jit_config_with_identical_identity_is_reused() {
+        let args = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &["velnor", "velnor-target-mvp", "dogfood"],
+        );
+        let stored = stored_config_registered_by(&args, 3, 2);
+
+        assert_eq!(stored_jit_config_drift(&args, 3, 5, &stored.settings), None);
+
+        // Label order, scope spelling and a promoted successor name are not
+        // identity: only the requested registration matters.
+        let mut reordered = stored.clone();
+        reordered.settings.labels.reverse();
+        reordered.settings.github_url = "https://GitHub.com/TailRocks/Velnor/".into();
+        let host = github_runner_host_slug();
+        let instance = instance_slug_from_operator_name(args.name.as_deref(), &host);
+        reordered.settings.agent_name =
+            compose_github_runner_successor_name(&host, &instance, 2, 2_219_932, 8);
+        assert!(reordered.settings.agent_name.contains("-next-2219932-8"));
+        assert_eq!(
+            stored_jit_config_drift(&args, 3, 5, &reordered.settings),
+            None
+        );
+    }
+
+    #[test]
+    fn stored_jit_config_with_stale_labels_reports_operator_visible_drift() {
+        // Sentry: VELNOR_LABELS gained velnor-host-docker; the stored config
+        // still carries the set fixed at its JIT-config creation.
+        let old = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &["velnor", "velnor-target-mvp", "dogfood"],
+        );
+        let new = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &[
+                "velnor",
+                "velnor-target-mvp",
+                "dogfood",
+                "velnor-host-docker",
+            ],
+        );
+        let stored = stored_config_registered_by(&old, 1, 2);
+
+        let drift = stored_jit_config_drift(&new, 1, 5, &stored.settings).unwrap();
+
+        assert_eq!(
+            drift.to_string(),
+            "labels dogfood,self-hosted,velnor,velnor-target-mvp → dogfood,self-hosted,velnor,velnor-host-docker,velnor-target-mvp"
+        );
+        assert_eq!(
+            format!("stored JIT config for slot-1 is stale ({drift}); re-registering"),
+            "stored JIT config for slot-1 is stale (labels dogfood,self-hosted,velnor,velnor-target-mvp → dogfood,self-hosted,velnor,velnor-host-docker,velnor-target-mvp); re-registering"
+        );
+    }
+
+    #[test]
+    fn stored_jit_config_drift_covers_every_identity_component() {
+        let args = dogfood_daemon_args("https://github.com/tailrocks/velnor", &["velnor"]);
+        let stored = stored_config_registered_by(&args, 2, 2);
+
+        // Runner group: id when resolved, name when only a pool name is known.
+        let mut other_group = args.clone();
+        other_group.pool_id = Some(7);
+        assert!(matches!(
+            stored_jit_config_drift(&other_group, 2, 5, &stored.settings),
+            Some(JitIdentityDrift::RunnerGroup { .. })
+        ));
+        let mut named_group = args.clone();
+        named_group.pool_name = Some("default".into());
+        assert_eq!(
+            stored_jit_config_drift(&named_group, 2, 5, &stored.settings),
+            None,
+            "runner group names compare case-insensitively like find_runner_group"
+        );
+        named_group.pool_name = Some("Trusted".into());
+        assert!(matches!(
+            stored_jit_config_drift(&named_group, 2, 5, &stored.settings),
+            Some(JitIdentityDrift::RunnerGroup { .. })
+        ));
+        named_group.pool_id = Some(1);
+        named_group.pool_id_pre_resolved = true;
+        assert_eq!(
+            stored_jit_config_drift(&named_group, 2, 5, &stored.settings),
+            None,
+            "a pre-resolved group compares by id, exactly as configure requests it"
+        );
+
+        // Agent name: another slot's identity, a renamed instance, or a
+        // successor name that was not composed for this slot.
+        assert!(matches!(
+            stored_jit_config_drift(&args, 3, 5, &stored.settings),
+            Some(JitIdentityDrift::AgentName { .. })
+        ));
+        let mut renamed = args.clone();
+        renamed.name = Some("velnor-staging".into());
+        assert!(matches!(
+            stored_jit_config_drift(&renamed, 2, 5, &stored.settings),
+            Some(JitIdentityDrift::AgentName { .. })
+        ));
+        let mut foreign_successor = stored.clone();
+        foreign_successor.settings.agent_name = format!(
+            "{}-next-1-1",
+            daemon_slot_agent_name(args.name.as_deref(), 4, 5).unwrap()
+        );
+        assert!(matches!(
+            stored_jit_config_drift(&args, 2, 5, &foreign_successor.settings),
+            Some(JitIdentityDrift::AgentName { .. })
+        ));
+
+        // Scope: a different repository, or an unparsable stored URL.
+        let mut other_repo = stored.clone();
+        other_repo.settings.github_url = "https://github.com/tailrocks/other".into();
+        assert!(matches!(
+            stored_jit_config_drift(&args, 2, 5, &other_repo.settings),
+            Some(JitIdentityDrift::Scope { .. })
+        ));
+        let mut garbage = stored.clone();
+        garbage.settings.github_url = "not a url".into();
+        assert!(matches!(
+            stored_jit_config_drift(&args, 2, 5, &garbage.settings),
+            Some(JitIdentityDrift::Scope { .. })
+        ));
+
+        // Trust: the gated label may only be held under a trusted scope.
+        let gated = dogfood_daemon_args(
+            "https://github.com/tailrocks/velnor",
+            &["velnor", TRUST_GATED_RUNNER_LABEL],
+        );
+        let gated_stored = stored_config_registered_by(&gated, 2, 2);
+        assert_eq!(
+            stored_jit_config_drift(&gated, 2, 5, &gated_stored.settings),
+            None
+        );
+        let mut untrusted = gated.clone();
+        untrusted.trust_scope = "untrusted".into();
+        assert!(matches!(
+            stored_jit_config_drift(&untrusted, 2, 5, &gated_stored.settings),
+            Some(JitIdentityDrift::TrustScope { .. })
+        ));
+
+        // Config-only daemons never register, so nothing can drift.
+        let mut config_only = args.clone();
+        config_only.url = None;
+        assert_eq!(
+            stored_jit_config_drift(&config_only, 2, 5, &stored.settings),
+            None
+        );
+
+        // Missing or unreadable configs belong to the identity-unavailable
+        // recovery path, not to drift.
+        let dir = unique_temp_dir("drift-missing-config");
+        assert_eq!(stored_jit_config_drift_at(&args, &dir, 2, 5), None);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("runner.json"), b"{not json").unwrap();
+        assert_eq!(stored_jit_config_drift_at(&args, &dir, 2, 5), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Build a GitHub `generate-jitconfig` 201 body whose decoded `.runner`
+    /// file reproduces exactly the identity `configure` requested, with every
+    /// endpoint on the mock origin so endpoint validation passes.
+    #[cfg(feature = "test-support")]
+    fn jit_config_response(
+        origin: &str,
+        agent_id: i64,
+        agent_name: &str,
+        labels: &[String],
+    ) -> serde_json::Value {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use rsa::{
+            pkcs8::DecodePrivateKey as _,
+            traits::{PrivateKeyParts as _, PublicKeyParts as _},
+            RsaPrivateKey,
+        };
+
+        let key_pair = crate::protocol::RunnerKeyPair::generate().unwrap();
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&key_pair.private_key_pem).unwrap();
+        let primes = private_key.primes();
+        let rsa_params = serde_json::json!({
+            "d": STANDARD.encode(private_key.d().to_bytes_be()),
+            "exponent": STANDARD.encode(private_key.e().to_bytes_be()),
+            "modulus": STANDARD.encode(private_key.n().to_bytes_be()),
+            "p": STANDARD.encode(primes[0].to_bytes_be()),
+            "q": STANDARD.encode(primes[1].to_bytes_be()),
+        });
+        let files = std::collections::BTreeMap::from([
+            (
+                ".runner".to_string(),
+                STANDARD.encode(
+                    serde_json::json!({
+                        "AgentId": agent_id,
+                        "AgentName": agent_name,
+                        "PoolId": 1,
+                        "PoolName": "Default",
+                        "ServerUrl": format!("{origin}/pipelines/"),
+                        "ServerUrlV2": format!("{origin}/broker/"),
+                        "GitHubUrl": format!("{origin}/owner/repo"),
+                        "UseV2Flow": true,
+                        "Ephemeral": true,
+                        "DisableUpdate": true,
+                    })
+                    .to_string(),
+                ),
+            ),
+            (
+                ".credentials".to_string(),
+                STANDARD.encode(
+                    serde_json::json!({
+                        "Scheme": "OAuth",
+                        "Data": {
+                            "clientId": "client-id",
+                            "authorizationUrl": format!("{origin}/token"),
+                            "requireFipsCryptography": "false",
+                        }
+                    })
+                    .to_string(),
+                ),
+            ),
+            (
+                ".credentials_rsaparams".to_string(),
+                STANDARD.encode(rsa_params.to_string()),
+            ),
+        ]);
+        let encoded = STANDARD.encode(serde_json::to_string(&files).unwrap());
+        serde_json::json!({
+            "runner": {
+                "id": agent_id,
+                "name": agent_name,
+                "os": "linux",
+                "status": "offline",
+                "busy": false,
+                "labels": labels.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
+                "runner_group_id": 1,
+            },
+            "encoded_jit_config": encoded,
+        })
+    }
+
+    /// (a) A live slot identity whose labels no longer match the configured
+    /// set is deleted from GitHub and re-registered with the current set, on
+    /// the same retire-and-configure path a lost registration takes. The
+    /// fresh config then satisfies the reuse predicate, so the next cycle
+    /// reuses it instead of churning.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn stale_slot_jit_config_is_deleted_and_reregistered_with_current_labels() {
+        use wiremock::{
+            matchers::{body_partial_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let url = format!("{}/owner/repo", server.uri());
+        let old_args = dogfood_daemon_args(&url, &["velnor", "dogfood"]);
+        let mut args = dogfood_daemon_args(&url, &["velnor", "dogfood", "velnor-host-docker"]);
+        args.pat = Some("token".into());
+        let requested_labels = normalize_labels(args.labels.clone(), false, false);
+        let agent_name = daemon_slot_agent_name(args.name.as_deref(), 1, 5).unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/repos/owner/repo/actions/runners/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v3/repos/owner/repo/actions/runners/generate-jitconfig",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "name": agent_name,
+                "runner_group_id": 1,
+                "labels": requested_labels,
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(jit_config_response(
+                    &server.uri(),
+                    9,
+                    &agent_name,
+                    &requested_labels,
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = unique_temp_dir("stale-slot-jit-reregister");
+        let slot_dir = daemon_slot_config_dir(&base, 1, 5);
+        config::save(&slot_dir, &stored_config_registered_by(&old_args, 1, 2)).unwrap();
+        assert_eq!(
+            stored_jit_config_drift_at(&old_args, &slot_dir, 1, 5),
+            None,
+            "the previous configuration reuses its own registration"
+        );
+
+        let drift = stored_jit_config_drift_at(&args, &slot_dir, 1, 5).unwrap();
+        assert_eq!(
+            drift.to_string(),
+            "labels dogfood,self-hosted,velnor → dogfood,self-hosted,velnor,velnor-host-docker"
+        );
+        retry_daemon_slot_jit_config(&args, &base, 1, 5, 1)
+            .await
+            .unwrap();
+
+        let fresh = config::load(&slot_dir).unwrap();
+        assert_eq!(fresh.settings.agent_id, Some(9));
+        assert_eq!(fresh.settings.labels, requested_labels);
+        assert_eq!(
+            stored_jit_config_drift_at(&args, &slot_dir, 1, 5),
+            None,
+            "the freshly registered identity satisfies the reuse predicate"
+        );
+        server.verify().await;
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// (c) A successor pre-created by an earlier worker with a stale label
+    /// set is deleted from GitHub and discarded before promotion; the slot
+    /// then registers a fresh identity for the current configuration instead
+    /// of promoting the stale one.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn stale_successor_jit_config_is_discarded_before_promotion() {
+        use wiremock::{
+            matchers::{body_partial_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let url = format!("{}/owner/repo", server.uri());
+        let old_args = dogfood_daemon_args(&url, &["velnor", "dogfood"]);
+        let mut args = dogfood_daemon_args(&url, &["velnor", "dogfood", "velnor-host-docker"]);
+        args.pat = Some("token".into());
+        let requested_labels = normalize_labels(args.labels.clone(), false, false);
+        let agent_name = daemon_slot_agent_name(args.name.as_deref(), 2, 5).unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/repos/owner/repo/actions/runners/31"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v3/repos/owner/repo/actions/runners/generate-jitconfig",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "name": agent_name,
+                "labels": requested_labels,
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(jit_config_response(
+                    &server.uri(),
+                    40,
+                    &agent_name,
+                    &requested_labels,
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = unique_temp_dir("stale-successor-jit-discard");
+        let slot_dir = daemon_slot_config_dir(&base, 2, 5);
+        let next_dir = daemon_slot_successor_config_dir(&base, 2, 5);
+        // The consumed live identity (GitHub already deregistered it after
+        // its job) and the successor the previous worker pid prepared.
+        config::save(&slot_dir, &stored_config_registered_by(&args, 2, 30)).unwrap();
+        let mut successor = stored_config_registered_by(&old_args, 2, 31);
+        let host = github_runner_host_slug();
+        let instance = instance_slug_from_operator_name(args.name.as_deref(), &host);
+        successor.settings.agent_name =
+            compose_github_runner_successor_name(&host, &instance, 1, 1_665_549, 23);
+        config::save(&next_dir, &successor).unwrap();
+        // No global operational store in tests: durable transitions are
+        // best-effort observations and skip when the sink is absent.
+        let durable_slot =
+            DurableSlotLifecycle::new(SlotId("velnor-dogfood-2".into()), 2, Generation::INITIAL)
+                .unwrap();
+
+        recycle_daemon_slot(&args, &base, 2, 5, 23, &durable_slot)
+            .await
+            .unwrap();
+
+        let live = config::load(&slot_dir).unwrap();
+        assert_eq!(
+            live.settings.agent_id,
+            Some(40),
+            "stale successor was not promoted"
+        );
+        assert_eq!(live.settings.labels, requested_labels);
+        assert!(
+            !next_dir.exists(),
+            "stale successor directory was discarded"
+        );
+        assert_eq!(stored_jit_config_drift_at(&args, &slot_dir, 2, 5), None);
+        server.verify().await;
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// (b) A successor whose identity matches the current configuration is
+    /// promoted as-is: no GitHub request, no fresh registration.
+    #[tokio::test]
+    async fn current_successor_jit_config_is_promoted_without_reregistration() {
+        let url = "https://github.com/owner/repo";
+        let mut args = dogfood_daemon_args(url, &["velnor", "dogfood"]);
+        args.pat = Some("token".into());
+        let base = unique_temp_dir("current-successor-jit-promote");
+        let slot_dir = daemon_slot_config_dir(&base, 2, 5);
+        let next_dir = daemon_slot_successor_config_dir(&base, 2, 5);
+        config::save(&slot_dir, &stored_config_registered_by(&args, 2, 30)).unwrap();
+        let mut successor = stored_config_registered_by(&args, 2, 31);
+        let host = github_runner_host_slug();
+        let instance = instance_slug_from_operator_name(args.name.as_deref(), &host);
+        successor.settings.agent_name =
+            compose_github_runner_successor_name(&host, &instance, 1, 1_665_549, 23);
+        config::save(&next_dir, &successor).unwrap();
+        let durable_slot =
+            DurableSlotLifecycle::new(SlotId("velnor-dogfood-2".into()), 2, Generation::INITIAL)
+                .unwrap();
+
+        // No mock GitHub origin exists: any DELETE or JIT request would fail.
+        recycle_daemon_slot(&args, &base, 2, 5, 23, &durable_slot)
+            .await
+            .unwrap();
+
+        let live = config::load(&slot_dir).unwrap();
+        assert_eq!(
+            live.settings.agent_id,
+            Some(31),
+            "prepared successor was promoted"
+        );
+        assert_eq!(live.settings.agent_name, successor.settings.agent_name);
+        assert!(!next_dir.join("runner.json").exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]
