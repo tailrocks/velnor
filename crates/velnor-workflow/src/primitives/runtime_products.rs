@@ -433,6 +433,9 @@ jobs:
             [[ "$expected" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::malformed digest for $asset" >&2; exit 1; }}
             actual="$(sha256sum "dist/$asset" | awk '{{print $1}}')"
             [[ "$actual" == "$expected" ]] || {{ echo "::error::transport digest mismatch for $asset" >&2; exit 1; }}
+            # Artifact transport strips POSIX execute bits; restore them after
+            # the digest proof so the native spot check below can execute.
+            chmod 0755 "dist/$asset"
           done
           reported="$(./dist/velnor-workflow-Linux-X64 --closure)"
           [[ "$reported" == "$CLOSURE" ]] || {{ echo "::error::published binary reports closure $reported, expected $CLOSURE" >&2; exit 1; }}
@@ -1340,7 +1343,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "214ef42e1619bf6e80edf0fdd30d7d8633f5792194c15f61f7cd3709f10f7684";
+        const PINNED: &str = "983f15a1a544b7c84c863adfd32a3bef345ec133194ae6e7dd8389b80c485a43";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

@@ -222,6 +222,9 @@ jobs:
             [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::malformed digest for $asset" >&2; exit 1; }
             actual="$(sha256sum "dist/$asset" | awk '{print $1}')"
             [[ "$actual" == "$expected" ]] || { echo "::error::transport digest mismatch for $asset" >&2; exit 1; }
+            # Artifact transport strips POSIX execute bits; restore them after
+            # the digest proof so the native spot check below can execute.
+            chmod 0755 "dist/$asset"
           done
           reported="$(./dist/velnor-workflow-Linux-X64 --closure)"
           [[ "$reported" == "$CLOSURE" ]] || { echo "::error::published binary reports closure $reported, expected $CLOSURE" >&2; exit 1; }
