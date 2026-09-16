@@ -47,8 +47,8 @@ velnor_rust_needs = "dependency-closure"
 # A repo-wide group with cancel-in-progress would cancel every in-progress run
 # on each push anywhere, making green CI unobtainable. Host capacity stays
 # bounded by runner slots: queued jobs wait for a free slot, they never
-# overload the host. Non-PR triggers (push/schedule/dispatch) fall back to
-# github.ref, so main/nightly runs still supersede per branch.
+# overload the host. Pull-request and nightly groups fall back to github.ref;
+# Main groups append github.run_id so every main execution can run concurrently.
 velnor_concurrency_group = "velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 

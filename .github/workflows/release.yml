@@ -279,8 +279,28 @@ jobs:
         with:
           path: ~/.cargo/bin
           key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
+      - name: Verify cargo bin tools
+        if: ${{ steps.cargo-bin-toolchain.outputs.cache-hit == 'true' }}
+        id: cargo-bin-verify
+        shell: bash
+        env:
+          CARGO_BIN_TOOLS: cargo-deny
+        run: |
+          set -euo pipefail
+          missing=0
+          IFS=',' read -ra tools <<< "$CARGO_BIN_TOOLS"
+          for tool in "${tools[@]}"; do
+            tool="${tool#"${tool%%[![:space:]]*}"}"
+            tool="${tool%"${tool##*[![:space:]]}"}"
+            [[ -z "$tool" ]] && continue
+            if ! command -v "$tool" >/dev/null; then
+              missing=1
+              break
+            fi
+          done
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
       - name: Set up cargo bin tools
-        if: ${{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' }}
+        if: ${{ steps.cargo-bin-toolchain.outputs.cache-hit != 'true' || steps.cargo-bin-verify.outputs.missing == 'true' }}
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-deny

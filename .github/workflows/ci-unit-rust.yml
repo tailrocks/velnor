@@ -295,18 +295,38 @@ jobs:
         with:
           path: ~/.cargo/bin
           key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
-      - name: Save cargo bin toolchain
-        if: ${{ inputs.cargo_bin_tools != '' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cargo-bin-toolchain.outputs.cache-hit != 'true') }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin
-          key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
+      - name: Verify cargo bin tools
+        if: ${{ inputs.cargo_bin_tools != '' && (steps.cargo-bin-toolchain.outputs.cache-hit == 'true') }}
+        id: cargo-bin-verify
+        shell: bash
+        env:
+          CARGO_BIN_TOOLS: ${{ inputs.cargo_bin_tools }}
+        run: |
+          set -euo pipefail
+          missing=0
+          IFS=',' read -ra tools <<< "$CARGO_BIN_TOOLS"
+          for tool in "${tools[@]}"; do
+            tool="${tool#"${tool%%[![:space:]]*}"}"
+            tool="${tool%"${tool##*[![:space:]]}"}"
+            [[ -z "$tool" ]] && continue
+            if ! command -v "$tool" >/dev/null; then
+              missing=1
+              break
+            fi
+          done
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
       - name: Set up cargo bin tools
-        if: ${{ inputs.cargo_bin_tools != '' && (steps.cargo-bin-toolchain.outputs.cache-hit != 'true') }}
+        if: ${{ inputs.cargo_bin_tools != '' && (steps.cargo-bin-toolchain.outputs.cache-hit != 'true' || steps.cargo-bin-verify.outputs.missing == 'true') }}
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: ${{ inputs.cargo_bin_tools }}
           fallback: none
+      - name: Save cargo bin toolchain
+        if: ${{ inputs.cargo_bin_tools != '' && (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && (steps.cargo-bin-toolchain.outputs.cache-hit != 'true' || steps.cargo-bin-verify.outputs.missing == 'true')) }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin
+          key: velnor-cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', 'mise.toml') }}
       - name: Restore mold 2.42.0 cache
         id: mold-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
