@@ -1,0 +1,63 @@
+schema = 1
+
+[generator]
+repository = "tailrocks/velnor-actions"
+revision = "03f9409b3f649a8973169dde0ebba3fe58a92ac9"
+
+[workflow]
+profile = "generic"
+runners = "both"
+automatic = "both"
+github_runner = "ubuntu-24.04"
+velnor_labels = ["self-hosted", "velnor-target-mvp"]
+default_branch = "main"
+files = ["ci-apt.yml", "ci-code.yml", "ci-fixture.yml", "ci-native.yml", "ci-tap.yml", "ci.yml", "fanout-smoke.yml", "fleet-audit.yml", "owner-fanout-canary.yml", "package-signer.yml", "package-updater.yml", "release-check.yml"]
+
+[[static_files]]
+file = ".github/workflows/ci-apt.yml"
+source = ".github-gen/sources/workflows/ci-apt.yml"
+
+[[static_files]]
+file = ".github/workflows/ci-code.yml"
+source = ".github-gen/sources/workflows/ci-code.yml"
+
+[[static_files]]
+file = ".github/workflows/ci-fixture.yml"
+source = ".github-gen/sources/workflows/ci-fixture.yml"
+
+[[static_files]]
+file = ".github/workflows/ci-native.yml"
+source = ".github-gen/sources/workflows/ci-native.yml"
+
+[[static_files]]
+file = ".github/workflows/ci-tap.yml"
+source = ".github-gen/sources/workflows/ci-tap.yml"
+
+[[static_files]]
+file = ".github/workflows/ci.yml"
+source = ".github-gen/sources/workflows/ci.yml"
+
+[[static_files]]
+file = ".github/workflows/fanout-smoke.yml"
+source = ".github-gen/sources/workflows/fanout-smoke.yml"
+
+[[static_files]]
+file = ".github/workflows/fleet-audit.yml"
+source = ".github-gen/sources/workflows/fleet-audit.yml"
+
+[[static_files]]
+file = ".github/workflows/owner-fanout-canary.yml"
+source = ".github-gen/sources/workflows/owner-fanout-canary.yml"
+
+[[static_files]]
+file = ".github/workflows/package-signer.yml"
+source = ".github-gen/sources/workflows/package-signer.yml"
+
+[[static_files]]
+file = ".github/workflows/package-updater.yml"
+source = ".github-gen/sources/workflows/package-updater.yml"
+
+[[static_files]]
+file = ".github/workflows/release-check.yml"
+source = ".github-gen/sources/workflows/release-check.yml"
+
