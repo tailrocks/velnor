@@ -5,7 +5,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source_root="${VELNOR_WORKFLOW_SOURCE_DIR:-$repo_root/../velnor}"
 manifest="$source_root/Cargo.toml"
 velnor_repository="https://github.com/tailrocks/velnor.git"
-velnor_revision="${VELNOR_WORKFLOW_SOURCE_REV:-07d083181537b3b51c98e35879ffc16bd7f9b288}"
+velnor_revision="${VELNOR_WORKFLOW_SOURCE_REV:-03f9409b3f649a8973169dde0ebba3fe58a92ac9}"
 
 if test -f "$manifest"; then
   exec cargo run --manifest-path "$manifest" --locked -p velnor-workflow -- "$@"
