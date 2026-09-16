@@ -47,10 +47,9 @@ pub(crate) use command_output::{
 pub(crate) use composite_scopes::{CompositeConclusionScopes, StepOutcome};
 pub(crate) use docker::verify_docker_job_cgroup_boundary_with_image;
 pub use docker::{
-    store_overlay_support, validate_docker_isolation, validate_docker_resource_projection,
-    DockerBackend, DockerIsolationMode, DockerResourceCapabilities, HostPlatform,
-    StoreOverlaySupport, DOCKER_JOB_CGROUP_PARENT, DOCKER_RESOURCE_BOUNDARY_CHECK,
-    MACOS_DOCKER_CAPABILITY_PROBE_IMAGE, STORE_OVERLAY_PROBE_LABEL,
+    validate_docker_isolation, validate_docker_resource_projection, DockerBackend,
+    DockerIsolationMode, DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
+    DOCKER_RESOURCE_BOUNDARY_CHECK, MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
 };
 pub use firecracker::{
     create_golden_snapshot, restore_or_cold_boot, FirecrackerApi, FirecrackerBackend,

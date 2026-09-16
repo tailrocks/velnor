@@ -182,227 +182,331 @@ pub fn prefer_canonical_or_existing_legacy(canonical: PathBuf, legacy: PathBuf) 
     }
 }
 
-/// One read-through store layer for the Docker backend (D18).
-///
-/// `lower` is the trusted scope's store on the host, read beneath a
-/// job-scoped upper. The layer is an overlay the *daemon* mounts — a `local`
-/// volume with `type=overlay` — so the runner needs no `CAP_SYS_ADMIN` of its
-/// own and a VM-hosted daemon (OrbStack, Docker Desktop) mounts it inside the
-/// VM kernel that also runs the job. The job container sees one merged tree
-/// at `target`.
-///
-/// The overlay's `upperdir` and `workdir` are two job-labelled Docker named
-/// volumes with no host bind ([`Self::scratch_volumes`]). They live on the
-/// daemon's own volume storage — the VM disk under OrbStack/Docker Desktop,
-/// the Docker root on native Linux — so overlayfs never has to write through
-/// virtiofs, whose upper it can only mount read-only. A PR job's writes are
-/// job scratch: they never reach the trusted store, and they are discarded
-/// with the rest of the job's Docker resources at teardown
-/// ([`crate::docker_lease::remove_job_owned`], which force-removes every
-/// `velnor.job-id`-labelled volume), on a failed start
-/// ([`crate::docker_lease::reclaim_stale_job_owned`]), and at daemon start
-/// for jobs a crash or drain left behind
-/// ([`crate::docker_lease::reclaim_daemon_orphan_jobs`]).
-///
-/// Whether the daemon can mount such a layer is a probed capability
-/// ([`crate::execution::store_overlay_support`]); admission only asks for a
-/// layer when the probe passed, so a failure to mount one at job start is a
-/// job error, never a silent fallback to the write scope alone.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreOverlay {
-    /// Overlay volume name; carries the job-id label so job-owned reclaim
-    /// removes it with the rest of the job's Docker resources.
-    pub volume: String,
-    /// Host-visible trusted store directory read beneath the upper.
-    pub lower: PathBuf,
-    /// Job-labelled named volume whose data directory is the overlayfs
-    /// `upperdir`: every write the job makes through `target`.
-    pub upper_volume: String,
-    /// Job-labelled named volume whose data directory is the overlayfs
-    /// `workdir`; same daemon filesystem as the upper by construction.
-    pub work_volume: String,
-    /// Container path the merged tree is mounted at.
-    pub target: String,
+/// Prefix of the temporary name a seed copy is written under, beside its
+/// destination, before it is linked into place.
+pub const SEED_TEMP_PREFIX: &str = ".velnor-seed-";
+
+static SEED_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What one Cargo store seed did ([`seed_cargo_store`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CargoStoreSeedReport {
+    /// Regular files copied into the destination store.
+    pub files: usize,
+    /// Bytes those files hold.
+    pub bytes: u64,
+    /// Seed units the budget refused (files under `registry/`, whole bare
+    /// repositories under `git/db`).
+    pub skipped_units: usize,
+    /// Files those refused units would have copied.
+    pub skipped_files: usize,
+    /// Bytes those refused units would have copied.
+    pub skipped_bytes: u64,
+    pub elapsed: std::time::Duration,
 }
 
-/// The daemon-side data directories of a job's overlay scratch volumes, as
-/// `docker volume inspect` reports them: the paths the overlay volume's
-/// `upperdir`/`workdir` operands name.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ScratchMountpoints(std::collections::BTreeMap<String, PathBuf>);
-
-impl ScratchMountpoints {
-    /// Pair the volume names passed to `docker volume inspect` with the
-    /// `{{.Mountpoint}}` lines it printed, one per name in argument order.
-    ///
-    /// # Errors
-    /// The line count does not match the names, or a mountpoint is not an
-    /// absolute path — either means the daemon did not answer for exactly
-    /// these volumes and the overlay must not be built on a guess.
-    pub fn parse(names: &[String], stdout: &str) -> std::io::Result<Self> {
-        let lines = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
-        if lines.len() != names.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "docker volume inspect answered {} mountpoint(s) for {} volume(s): {stdout:?}",
-                    lines.len(),
-                    names.len()
-                ),
-            ));
-        }
-        let mut map = std::collections::BTreeMap::new();
-        for (name, line) in names.iter().zip(lines) {
-            let path = Path::new(line);
-            if !path.is_absolute() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("docker volume {name} has no absolute mountpoint: {line:?}"),
-                ));
-            }
-            map.insert(name.clone(), path.to_path_buf());
-        }
-        Ok(Self(map))
+impl CargoStoreSeedReport {
+    /// The one daemon log line every pr-scope job admission prints.
+    #[must_use]
+    pub fn summary_line(&self, to_scope: &str, from_scope: &str) -> String {
+        format!(
+            "seeded {to_scope} cargo store from {from_scope}: {} files, {} bytes, {} ms",
+            self.files,
+            self.bytes,
+            self.elapsed.as_millis()
+        )
     }
 
-    fn get(&self, volume: &str) -> std::io::Result<&Path> {
-        self.0.get(volume).map(PathBuf::as_path).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("no mountpoint was inspected for overlay scratch volume {volume}"),
+    /// The daemon log line naming what the budget refused, when anything.
+    #[must_use]
+    pub fn skipped_line(&self, to_scope: &str, budget_bytes: u64) -> Option<String> {
+        (self.skipped_units > 0).then(|| {
+            format!(
+                "{to_scope} cargo store seed skipped {} unit(s) ({} files, {} bytes): the store budget left {budget_bytes} bytes of headroom; newest entries were seeded first",
+                self.skipped_units, self.skipped_files, self.skipped_bytes
             )
         })
     }
 }
 
-impl StoreOverlay {
-    /// The overlay layers of the Cargo store for one job: every daemon-shared
-    /// Cargo subtree gets a job-scoped upper layered over `lower_scope`.
-    ///
-    /// Pure naming; the executor creates the volumes when the job starts.
-    #[must_use]
-    pub fn cargo_layers(container_name: &str, temp_host: &Path, lower_scope: &str) -> Vec<Self> {
-        let lower_root = crate::container::cargo_store_host(temp_host, lower_scope);
-        crate::container::CARGO_STORE_LAYERS
-            .iter()
-            .map(|(subpath, target)| {
-                let key = crate::container::sanitize_store_key(subpath);
-                let volume = format!("{container_name}-overlay-cargo-{key}");
-                Self {
-                    upper_volume: format!("{volume}-upper"),
-                    work_volume: format!("{volume}-work"),
-                    volume,
-                    lower: lower_root.join(subpath),
-                    target: (*target).to_owned(),
+/// Seed the daemon-shared Cargo subtrees of the store at `to` from the store
+/// at `from`, by copy (D18).
+///
+/// Same-repo PR jobs on a trusted pool write the `pr` scope's Cargo store,
+/// which is a persistent host directory bind-mounted read-write into every
+/// such job like every other `pr`-scope store; concurrent jobs share it under
+/// Cargo's own package-cache locking. Before a PR job's container starts, the
+/// daemon fills that store with whatever the `trusted` store already holds,
+/// so a PR build starts as warm as a trusted one and one `Prepare Cargo` job
+/// warms every unit that follows it on the host.
+///
+/// The seed is a **copy**, never a hard link and never an overlay: a hard
+/// link would give PR code an inode it shares with the trusted store, and a
+/// file modified in place through the `pr` mount would then be modified in
+/// `trusted` — exactly the poisoning D18 exists to prevent. (The filesystem
+/// may share blocks copy-on-write beneath the copy, as APFS clones and
+/// `copy_file_range` reflinks do; it never shares the inode, so a write
+/// through one path is never visible through the other.) An overlay cannot
+/// share one upper between the concurrent mounts of several slots, so its
+/// writes could never be the shared, persistent `pr` store this seed fills.
+///
+/// For every regular file below `from/<subtree>` (the subtrees in
+/// [`crate::container::CARGO_STORE_SUBTREES`]) that is absent in `to` —
+/// absent as anything: an existing file, directory or symlink is never
+/// touched — the file is copied to a [`SEED_TEMP_PREFIX`] name in the
+/// destination directory and linked into place with a no-replace rename
+/// (`link(2)` of the temp onto the destination name, then `unlink` of the
+/// temp): readers see either no file or a complete one, a concurrent seed or
+/// job that created the name first wins, and nothing in `to` is ever
+/// overwritten. Symlinks in `from` are skipped, not followed: a link out of
+/// the trusted store is not trusted content.
+///
+/// `budget_bytes` bounds what the seed may add. Seed units — one file under
+/// `registry/`, one whole bare repository under `git/db` (a partially copied
+/// repository is corrupt to git, so a repository is copied whole or not at
+/// all) — are taken newest first by modification time; a unit that does not
+/// fit the remaining budget is skipped and counted in the report. `None` is
+/// unbounded.
+///
+/// # Errors
+/// A store subtree could not be read, or a copy could not be written. A
+/// missing `from` subtree is not an error: there is nothing to seed from.
+pub fn seed_cargo_store(
+    from: &Path,
+    to: &Path,
+    budget_bytes: Option<u64>,
+) -> std::io::Result<CargoStoreSeedReport> {
+    let started = std::time::Instant::now();
+    if from == to {
+        // One store root for both scopes (the legacy layout carries no
+        // trust segment on the Cargo root): nothing is missing from itself.
+        return Ok(CargoStoreSeedReport {
+            elapsed: started.elapsed(),
+            ..CargoStoreSeedReport::default()
+        });
+    }
+    let mut units = Vec::new();
+    for (subtree, _) in crate::container::CARGO_STORE_SUBTREES {
+        collect_seed_units(from, to, Path::new(subtree), &mut units)?;
+    }
+    // Newest first, so a budget too small for everything keeps the entries a
+    // current build is most likely to need.
+    units.sort_by(|a, b| {
+        b.newest
+            .cmp(&a.newest)
+            .then_with(|| a.files[0].relative.cmp(&b.files[0].relative))
+    });
+    let mut report = CargoStoreSeedReport::default();
+    let mut remaining = budget_bytes;
+    for unit in units {
+        if let Some(headroom) = remaining
+            && unit.bytes > headroom
+        {
+            report.skipped_units += 1;
+            report.skipped_files += unit.files.len();
+            report.skipped_bytes += unit.bytes;
+            continue;
+        }
+        for file in &unit.files {
+            if let Some(bytes) = seed_file(&from.join(&file.relative), &to.join(&file.relative))? {
+                report.files += 1;
+                report.bytes += bytes;
+                if let Some(headroom) = remaining.as_mut() {
+                    *headroom = headroom.saturating_sub(bytes);
                 }
-            })
-            .collect()
-    }
-
-    /// The two scratch volumes this layer needs before the overlay volume
-    /// can be created: upper first, work second.
-    #[must_use]
-    pub fn scratch_volumes(&self) -> [&str; 2] {
-        [&self.upper_volume, &self.work_volume]
-    }
-
-    /// `docker volume create` argv for one scratch volume: a plain `local`
-    /// volume with no host bind, labelled like every other job-owned Docker
-    /// resource so the job's reclaim removes it.
-    #[must_use]
-    pub fn create_scratch_volume_args(volume: &str, labels: &[(&str, &str)]) -> Vec<String> {
-        let mut args = vec![
-            "volume".to_owned(),
-            "create".to_owned(),
-            "--driver".to_owned(),
-            "local".to_owned(),
-        ];
-        for (key, value) in labels {
-            args.push("--label".to_owned());
-            args.push(format!("{key}={value}"));
+            }
         }
-        args.push(volume.to_owned());
-        args
     }
+    report.elapsed = started.elapsed();
+    Ok(report)
+}
 
-    /// `docker volume inspect` argv that prints one `Mountpoint` line per
-    /// named volume, in argument order ([`ScratchMountpoints::parse`]).
-    #[must_use]
-    pub fn inspect_mountpoints_args(volumes: &[String]) -> Vec<String> {
-        let mut args = vec![
-            "volume".to_owned(),
-            "inspect".to_owned(),
-            "--format".to_owned(),
-            "{{.Mountpoint}}".to_owned(),
-            "--".to_owned(),
-        ];
-        args.extend(volumes.iter().cloned());
-        args
-    }
+/// One file the seed would copy: its path relative to the store root and
+/// what the source's metadata says about it.
+#[derive(Debug)]
+struct SeedFile {
+    relative: PathBuf,
+    bytes: u64,
+    modified: std::time::SystemTime,
+}
 
-    /// `docker volume create` argv for the overlay volume. `daemon_visible`
-    /// maps the host-visible lower to the path the daemon mounts (identity
-    /// on a native Linux daemon; the VM mapping for Docker Desktop/OrbStack);
-    /// the upper and work operands are the inspected data directories of
-    /// this layer's scratch volumes, already in the daemon's view.
-    ///
-    /// # Errors
-    /// The lower could not be mapped into the daemon's view, or a scratch
-    /// volume's mountpoint was not inspected.
-    pub fn create_volume_args<F>(
-        &self,
-        labels: &[(&str, &str)],
-        scratch: &ScratchMountpoints,
-        mut daemon_visible: F,
-    ) -> std::io::Result<Vec<String>>
-    where
-        F: FnMut(&Path, &str) -> std::io::Result<PathBuf>,
-    {
-        let lower = daemon_visible(&self.lower, "store overlay lower")?;
-        let upper = scratch.get(&self.upper_volume)?;
-        let work = scratch.get(&self.work_volume)?;
-        let mut args = vec![
-            "volume".to_owned(),
-            "create".to_owned(),
-            "--driver".to_owned(),
-            "local".to_owned(),
-        ];
-        for (key, value) in labels {
-            args.push("--label".to_owned());
-            args.push(format!("{key}={value}"));
+/// The all-or-nothing unit the budget decides on.
+#[derive(Debug)]
+struct SeedUnit {
+    files: Vec<SeedFile>,
+    bytes: u64,
+    newest: std::time::SystemTime,
+}
+
+impl SeedUnit {
+    fn new(files: Vec<SeedFile>) -> Self {
+        let bytes = files.iter().map(|file| file.bytes).sum();
+        let newest = files
+            .iter()
+            .map(|file| file.modified)
+            .max()
+            .unwrap_or(std::time::UNIX_EPOCH);
+        Self {
+            files,
+            bytes,
+            newest,
         }
-        args.extend([
-            "--opt".to_owned(),
-            "type=overlay".to_owned(),
-            "--opt".to_owned(),
-            "device=overlay".to_owned(),
-            "--opt".to_owned(),
-            format!("o={}", overlay_mount_options(&lower, upper, work)),
-            self.volume.clone(),
-        ]);
-        Ok(args)
-    }
-
-    /// The `-v` operand that mounts the merged tree into the job container.
-    #[must_use]
-    pub fn mount_operand(&self) -> String {
-        format!("{}:{}", self.volume, self.target)
     }
 }
 
-/// overlayfs `-o` options for one lower/upper/work triple.
-#[must_use]
-pub fn overlay_mount_options(lower: &Path, upper: &Path, work: &Path) -> String {
-    format!(
-        "lowerdir={},upperdir={},workdir={}",
-        lower.display(),
-        upper.display(),
-        work.display()
-    )
+/// The relative paths under `git/db` are bare repositories, one directory
+/// each; they are seeded whole.
+const CARGO_GIT_DB_SUBTREE: &str = "git/db";
+
+fn collect_seed_units(
+    from: &Path,
+    to: &Path,
+    subtree: &Path,
+    units: &mut Vec<SeedUnit>,
+) -> std::io::Result<()> {
+    let source_root = from.join(subtree);
+    let entries = match fs::read_dir(&source_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if subtree == Path::new(CARGO_GIT_DB_SUBTREE) {
+        for entry in entries {
+            let entry = entry?;
+            let relative = subtree.join(entry.file_name());
+            let file_type = entry.file_type()?;
+            let mut files = Vec::new();
+            if file_type.is_dir() {
+                collect_missing_files(from, to, &relative, &mut files)?;
+                // Objects before refs: a reader that sees a ref sees the
+                // objects it points at.
+                files.sort_by_key(|file| (git_copy_rank(&file.relative), file.relative.clone()));
+            } else if file_type.is_file()
+                && let Some(file) = missing_file(from, to, &relative)?
+            {
+                files.push(file);
+            }
+            if !files.is_empty() {
+                units.push(SeedUnit::new(files));
+            }
+        }
+        return Ok(());
+    }
+    let mut files = Vec::new();
+    collect_missing_files(from, to, subtree, &mut files)?;
+    units.extend(files.into_iter().map(|file| SeedUnit::new(vec![file])));
+    Ok(())
+}
+
+/// Every regular file below `from/<relative>` that `to` lacks. Symlinks are
+/// neither followed nor copied.
+fn collect_missing_files(
+    from: &Path,
+    to: &Path,
+    relative: &Path,
+    files: &mut Vec<SeedFile>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(from.join(relative))? {
+        let entry = entry?;
+        let child = relative.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_missing_files(from, to, &child, files)?;
+        } else if file_type.is_file()
+            && let Some(file) = missing_file(from, to, &child)?
+        {
+            files.push(file);
+        }
+    }
+    Ok(())
+}
+
+fn missing_file(from: &Path, to: &Path, relative: &Path) -> std::io::Result<Option<SeedFile>> {
+    if fs::symlink_metadata(to.join(relative)).is_ok() {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(from.join(relative))?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(SeedFile {
+        relative: relative.to_path_buf(),
+        bytes: metadata.len(),
+        modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+    }))
+}
+
+/// Copy order inside one bare repository: objects first, refs last.
+fn git_copy_rank(relative: &Path) -> u8 {
+    let name = relative
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let in_refs = relative
+        .components()
+        .any(|component| component.as_os_str() == "refs");
+    if in_refs
+        || matches!(
+            name.as_ref(),
+            "HEAD" | "FETCH_HEAD" | "ORIG_HEAD" | "packed-refs"
+        )
+    {
+        2
+    } else if relative
+        .components()
+        .any(|component| component.as_os_str() == "objects")
+    {
+        0
+    } else {
+        1
+    }
+}
+
+/// The temporary name a seed of `dest` is written under: a sibling in the
+/// same directory, so the final link is within one directory and one
+/// filesystem.
+fn seed_temp_path(dest: &Path) -> PathBuf {
+    let sequence = SEED_TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("{SEED_TEMP_PREFIX}{}-{sequence}", std::process::id());
+    match dest.parent() {
+        Some(parent) => parent.join(name),
+        None => PathBuf::from(name),
+    }
+}
+
+/// Copy `src` to `dest` without ever replacing an existing `dest`.
+///
+/// Returns the bytes copied, or `None` when `dest` came into existence
+/// first (a concurrent seed or a job's own Cargo write); the temp copy is
+/// removed on every path.
+fn seed_file(src: &Path, dest: &Path) -> std::io::Result<Option<u64>> {
+    if fs::symlink_metadata(dest).is_ok() {
+        return Ok(None);
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp = seed_temp_path(dest);
+    let bytes = match fs::copy(src, &temp) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+    };
+    // `link(2)` fails with EEXIST instead of replacing, which `rename(2)`
+    // would do: this is the no-replace rename. The link is temp → dest
+    // inside the destination store; nothing here ever links to `src`.
+    let linked = fs::hard_link(&temp, dest);
+    let _ = fs::remove_file(&temp);
+    match linked {
+        Ok(()) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn append_legacy_trust(root: PathBuf, trust_scope: &str) -> PathBuf {
@@ -550,6 +654,292 @@ mod tests {
             canonical
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn seed_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-seed-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write(root: &Path, relative: &str, contents: &[u8]) -> PathBuf {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    fn set_modified(path: &Path, seconds_ago: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds_ago);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    fn temp_files_below(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(SEED_TEMP_PREFIX))
+                {
+                    found.push(path.clone());
+                }
+                if path.is_dir() {
+                    walk(&path, found);
+                }
+            }
+        }
+        walk(root, &mut found);
+        found
+    }
+
+    #[test]
+    fn seed_copies_only_missing_files_and_never_overwrites() {
+        let root = seed_root("missing");
+        let trusted = root.join("trusted");
+        let pr = root.join("pr");
+        write(&trusted, "registry/cache/index/a-1.0.0.crate", b"a-trusted");
+        write(&trusted, "registry/cache/index/b-1.0.0.crate", b"b-trusted");
+        write(&trusted, "registry/index/index/.cache/3/a/abc", b"index-a");
+        write(&trusted, "registry/index/index/config.json", b"{}");
+        // Outside the daemon-shared subtrees: never seeded.
+        write(&trusted, "registry/src/index/a-1.0.0/lib.rs", b"src");
+        write(&trusted, "bin/cargo-nextest", b"exe");
+        write(&pr, "registry/cache/index/b-1.0.0.crate", b"b-pr-modified");
+        // A `pr` directory or symlink where trusted has a file is also
+        // "present": nothing is replaced by the seed.
+        fs::create_dir_all(pr.join("registry/index/index/config.json")).unwrap();
+
+        let report = seed_cargo_store(&trusted, &pr, None).unwrap();
+        assert_eq!(report.files, 2, "{report:?}");
+        assert_eq!(
+            report.bytes,
+            b"a-trusted".len() as u64 + b"index-a".len() as u64
+        );
+        assert_eq!(report.skipped_units, 0);
+        assert_eq!(
+            fs::read(pr.join("registry/cache/index/a-1.0.0.crate")).unwrap(),
+            b"a-trusted"
+        );
+        assert_eq!(
+            fs::read(pr.join("registry/cache/index/b-1.0.0.crate")).unwrap(),
+            b"b-pr-modified",
+            "an existing pr file is never overwritten"
+        );
+        assert_eq!(
+            fs::read(pr.join("registry/index/index/.cache/3/a/abc")).unwrap(),
+            b"index-a"
+        );
+        assert!(pr.join("registry/index/index/config.json").is_dir());
+        assert!(!pr.join("registry/src").exists());
+        assert!(!pr.join("bin").exists());
+        assert_eq!(
+            report.summary_line("pr", "trusted"),
+            format!(
+                "seeded pr cargo store from trusted: 2 files, {} bytes, {} ms",
+                report.bytes,
+                report.elapsed.as_millis()
+            )
+        );
+
+        // Idempotent: a second seed finds nothing missing.
+        let again = seed_cargo_store(&trusted, &pr, None).unwrap();
+        assert_eq!((again.files, again.bytes), (0, 0));
+        assert_eq!(
+            again.summary_line("pr", "trusted"),
+            format!(
+                "seeded pr cargo store from trusted: 0 files, 0 bytes, {} ms",
+                again.elapsed.as_millis()
+            )
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn seed_writes_a_same_directory_temp_and_leaves_none_behind() {
+        let dest = Path::new("/store/pr/registry/cache/index/a-1.0.0.crate");
+        let temp = seed_temp_path(dest);
+        assert_eq!(temp.parent(), dest.parent());
+        assert!(temp
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(SEED_TEMP_PREFIX));
+        assert_ne!(seed_temp_path(dest), temp, "temp names are unique");
+
+        let root = seed_root("atomic");
+        let trusted = root.join("trusted");
+        let pr = root.join("pr");
+        for index in 0..5 {
+            write(
+                &trusted,
+                &format!("registry/cache/index/crate-{index}.crate"),
+                &[index; 64],
+            );
+        }
+        write(&trusted, "git/db/dep-abc/objects/aa/bb", b"object");
+        write(&trusted, "git/db/dep-abc/refs/heads/main", b"ref");
+        write(&trusted, "git/db/dep-abc/HEAD", b"ref: refs/heads/main");
+        let report = seed_cargo_store(&trusted, &pr, None).unwrap();
+        assert_eq!(report.files, 8);
+        assert_eq!(temp_files_below(&pr), Vec::<PathBuf>::new());
+        assert_eq!(temp_files_below(&trusted), Vec::<PathBuf>::new());
+
+        // A destination the copy cannot be written into is an error, and
+        // still leaves no temp behind.
+        let blocked_root = seed_root("blocked");
+        let blocked_trusted = blocked_root.join("trusted");
+        let blocked_pr = blocked_root.join("pr");
+        write(&blocked_trusted, "registry/cache/index/a.crate", b"a");
+        write(&blocked_pr, "registry/cache/index", b"not a directory");
+        assert!(seed_cargo_store(&blocked_trusted, &blocked_pr, None).is_err());
+        assert_eq!(temp_files_below(&blocked_pr), Vec::<PathBuf>::new());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(blocked_root).unwrap();
+    }
+
+    #[test]
+    fn seed_skips_symlinks_and_never_follows_them() {
+        let root = seed_root("symlinks");
+        let trusted = root.join("trusted");
+        let pr = root.join("pr");
+        let outside = write(&root, "outside/secret.crate", b"outside the store");
+        write(&trusted, "registry/cache/index/real.crate", b"real");
+        std::os::unix::fs::symlink(&outside, trusted.join("registry/cache/index/linked.crate"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            root.join("outside"),
+            trusted.join("registry/cache/linked-dir"),
+        )
+        .unwrap();
+        let report = seed_cargo_store(&trusted, &pr, None).unwrap();
+        assert_eq!(report.files, 1, "{report:?}");
+        assert!(pr.join("registry/cache/index/real.crate").is_file());
+        assert!(fs::symlink_metadata(pr.join("registry/cache/index/linked.crate")).is_err());
+        assert!(fs::symlink_metadata(pr.join("registry/cache/linked-dir")).is_err());
+        assert!(!pr.join("registry/cache/linked-dir/secret.crate").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn modifying_a_seeded_pr_file_leaves_the_trusted_file_unchanged() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+
+        // The poisoning D18 forbids: PR code rewrites a seeded file in place.
+        // The seed is a copy, so the trusted bytes and inode are untouched.
+        let root = seed_root("poison");
+        let trusted = root.join("trusted");
+        let pr = root.join("pr");
+        let trusted_file = write(&trusted, "registry/cache/index/dep-1.0.0.crate", b"trusted");
+        let trusted_git = write(&trusted, "git/db/dep-abc/objects/aa/bb", b"trusted object");
+        seed_cargo_store(&trusted, &pr, None).unwrap();
+        let pr_file = pr.join("registry/cache/index/dep-1.0.0.crate");
+        let pr_git = pr.join("git/db/dep-abc/objects/aa/bb");
+        for (seeded, source) in [(&pr_file, &trusted_file), (&pr_git, &trusted_git)] {
+            let seeded_meta = fs::metadata(seeded).unwrap();
+            let source_meta = fs::metadata(source).unwrap();
+            assert_ne!(seeded_meta.ino(), source_meta.ino(), "{}", seeded.display());
+            assert_eq!(source_meta.nlink(), 1, "{}", source.display());
+            // In-place rewrite through the pr path, as a hostile build
+            // script would do with the read-write mount.
+            fs::OpenOptions::new()
+                .write(true)
+                .truncate(false)
+                .open(seeded)
+                .unwrap()
+                .write_all(b"POISON")
+                .unwrap();
+        }
+        assert_eq!(fs::read(&trusted_file).unwrap(), b"trusted");
+        assert_eq!(fs::read(&trusted_git).unwrap(), b"trusted object");
+        assert!(fs::read(&pr_file).unwrap().starts_with(b"POISON"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn seed_budget_takes_newest_units_first_and_reports_what_it_skipped() {
+        let root = seed_root("budget");
+        let trusted = root.join("trusted");
+        let pr = root.join("pr");
+        let old = write(&trusted, "registry/cache/index/old.crate", &[0; 100]);
+        let mid = write(&trusted, "registry/cache/index/mid.crate", &[0; 100]);
+        let new = write(&trusted, "registry/cache/index/new.crate", &[0; 100]);
+        set_modified(&old, 3_000);
+        set_modified(&mid, 2_000);
+        set_modified(&new, 1_000);
+        // A bare repository is one unit: 150 bytes across three files that
+        // are copied whole or not at all.
+        let object = write(&trusted, "git/db/dep-abc/objects/aa/bb", &[0; 100]);
+        let head = write(&trusted, "git/db/dep-abc/HEAD", &[0; 25]);
+        let reference = write(&trusted, "git/db/dep-abc/refs/heads/main", &[0; 25]);
+        for path in [&object, &head, &reference] {
+            set_modified(path, 1_500);
+        }
+
+        // 250 bytes: the newest crate (100), then the repository (150,
+        // newest 1_500 s ago); `mid` and `old` no longer fit.
+        let report = seed_cargo_store(&trusted, &pr, Some(250)).unwrap();
+        assert_eq!(report.files, 4, "{report:?}");
+        assert_eq!(report.bytes, 250);
+        assert_eq!(report.skipped_units, 2);
+        assert_eq!(report.skipped_files, 2);
+        assert_eq!(report.skipped_bytes, 200);
+        assert!(pr.join("registry/cache/index/new.crate").is_file());
+        assert!(pr.join("git/db/dep-abc/objects/aa/bb").is_file());
+        assert!(pr.join("git/db/dep-abc/refs/heads/main").is_file());
+        assert!(!pr.join("registry/cache/index/mid.crate").exists());
+        assert!(!pr.join("registry/cache/index/old.crate").exists());
+        let skipped = report.skipped_line("pr", 250).unwrap();
+        assert!(skipped.starts_with("pr cargo store seed skipped 2 unit(s) (2 files, 200 bytes)"));
+        assert!(skipped.contains("250 bytes of headroom"), "{skipped}");
+
+        // A budget below one whole repository copies none of it: no
+        // partial bare repository ever lands in the pr store.
+        let partial_root = seed_root("partial");
+        let partial_trusted = partial_root.join("trusted");
+        let partial_pr = partial_root.join("pr");
+        write(&partial_trusted, "git/db/dep-abc/objects/aa/bb", &[0; 100]);
+        write(&partial_trusted, "git/db/dep-abc/HEAD", &[0; 25]);
+        let report = seed_cargo_store(&partial_trusted, &partial_pr, Some(100)).unwrap();
+        assert_eq!(report.files, 0);
+        assert_eq!(report.skipped_units, 1);
+        assert!(!partial_pr.join("git/db/dep-abc").exists());
+        assert!(seed_cargo_store(&partial_trusted, &partial_pr, Some(0))
+            .unwrap()
+            .skipped_line("pr", 0)
+            .is_some());
+        assert!(report.skipped_line("pr", 100).is_some());
+        assert!(CargoStoreSeedReport::default()
+            .skipped_line("pr", 100)
+            .is_none());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(partial_root).unwrap();
+    }
+
+    #[test]
+    fn seed_orders_a_repository_objects_first_and_refs_last() {
+        assert_eq!(git_copy_rank(Path::new("git/db/dep/objects/aa/bb")), 0);
+        assert_eq!(
+            git_copy_rank(Path::new("git/db/dep/objects/pack/p.pack")),
+            0
+        );
+        assert_eq!(git_copy_rank(Path::new("git/db/dep/config")), 1);
+        assert_eq!(git_copy_rank(Path::new("git/db/dep/description")), 1);
+        assert_eq!(git_copy_rank(Path::new("git/db/dep/refs/heads/main")), 2);
+        assert_eq!(git_copy_rank(Path::new("git/db/dep/packed-refs")), 2);
+        assert_eq!(git_copy_rank(Path::new("git/db/dep/HEAD")), 2);
+        assert_eq!(git_copy_rank(Path::new("git/db/dep/FETCH_HEAD")), 2);
     }
 
     #[test]

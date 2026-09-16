@@ -35,10 +35,6 @@ mod docker_argv;
 mod docker_lease;
 pub mod execution;
 mod executor;
-/// The host-process seam the execution probes run through, so `velnorctl`
-/// diagnostics can drive the runner's own capability probes against the
-/// daemon they selected instead of re-implementing them.
-pub use executor::{CommandResult, CommandRunner};
 mod expression;
 #[cfg(test)]
 #[allow(

@@ -55,9 +55,8 @@ target/debug/velnorctl docker report
 ```
 
 The report names the resolved endpoint, its source (env, context, or default),
-the provider, cgroup mode, the resource-boundary check, and the read-through
-store overlay capability (see [Stores](#stores-and-the-read-through-layer)).
-Add `--output json` for a stable object.
+the provider, cgroup mode, and the resource-boundary check. Add `--output
+json` for a stable object.
 
 ## Build the job image
 
@@ -118,7 +117,7 @@ Only the exact `trusted` scope adds the `velnor-host-docker` label, which the
 workflow uses for jobs that need the host Docker socket. An untrusted host
 never claims it. The scope is a ceiling, not a grant: fork and unknown jobs
 still run under the untrusted floor, and same-repository PR jobs on a trusted
-host write to the `pr` store scope (see [Stores](#stores-and-the-read-through-layer)).
+host write to the `pr` store scope (see [Stores](#stores-and-the-pr-seed)).
 Every host also carries `self-hosted` and `velnor-target-mvp`, plus the ARM
 label on Apple silicon.
 
@@ -185,62 +184,53 @@ Beneath the prefix the layout is the packaged one:
 
 Set `VELNOR_STORAGE_ROOT` explicitly to relocate everything.
 
-## Stores and the read-through layer
+## Stores and the `pr` seed
 
 Persistent stores are partitioned by trust scope. On a trusted host, a
-same-repository pull-request job writes to the `pr` scope and reads the
-`trusted` scope's Cargo stores beneath a job-scoped layer (D18): PR writes
-never reach trusted stores, and a PR build starts warm from them.
+same-repository pull-request job writes to the `pr` scope (D18): trusted
+events (push, schedule, dispatch) write `trusted`, PR writes never reach it,
+and the `pr` stores are ordinary persistent host directories bind-mounted
+read-write into every PR job — shared across slots, under Cargo's own
+package-cache locking, exactly like the mise installs and every other
+`pr`-scope store.
 
-That layer is a daemon-mounted overlay volume (`docker volume create --driver
-local --opt type=overlay`), so the runner needs no mount privileges of its own
-and the overlay is mounted by the kernel that runs the job. Only the overlay's
-*lower* is the host store. Its `upperdir` and `workdir` are two job-labelled
-Docker named volumes with no host bind — on OrbStack and Docker Desktop they
-live on the VM's own disk, on Linux under the Docker root — and they are
-removed with the rest of the job's Docker resources at teardown. A PR job's
-Cargo writes are therefore job scratch: they are discarded at job end and
-persist nowhere.
+Before a PR job's container starts, the daemon **seeds** the `pr` Cargo store
+from this host's `trusted` one by copy: every regular file under
+`cargo/registry/cache`, `cargo/registry/index` and `cargo/git/db` that
+`trusted` holds and `pr` lacks is copied to a temp name beside its destination
+and linked into place without ever replacing an existing `pr` file, so
+concurrent seeds and running jobs are safe and a reader sees either no file
+or a complete one. Symlinks are skipped. Bare repositories under `git/db` are
+seeded whole or not at all. The seed is a copy, never a hard link and never an
+overlay: a hard link would share an inode with the trusted store, and a file
+rewritten in place through the `pr` mount would then rewrite `trusted` — the
+poisoning D18 exists to prevent. The seed is bounded by the same store budget
+the compiler stores are held to (`Compiler store budget:` at daemon start and
+in `velnor-runner preflight`); when the `pr` store plus the seed would exceed
+it, the newest entries are seeded first and the daemon log names what was
+skipped.
 
-Whether the daemon can mount such a layer is a probed capability, checked once
-per daemon generation and reported by `velnor-runner preflight` and
-`velnorctl docker report` (`Read-through store overlay (D18): …`,
-`capabilities.readThroughStoreOverlay` in JSON). On OrbStack the verdict is
-`supported`: overlayfs reads the store over virtiofs as a lower and writes to
-the VM-local upper. (An upper on the virtiofs bind is what the VM kernel
-mounts read-only; the layer no longer puts one there.)
+Because PR writes persist in `pr` and are shared by every slot, the first
+`Control / Prepare Cargo` job a host runs warms every Velnor Rust unit that
+lands on it afterwards — the units run Cargo offline and find what
+`Prepare Cargo` fetched, whether the host's `trusted` store was warm or not.
+A PR that adds a dependency works the same way: `Prepare Cargo` fetches it
+into `pr`, and the units read it there.
 
-The layer reads whatever *this host's* `trusted` Cargo store holds — stores
-are per host, not per pool. A host that has never run a push or schedule job
-has an empty one, and a PR job cannot fill it: its `Prepare Cargo` fetch lands
-in the discarded upper. With `tailrocks/velnor`'s workflow, whose Velnor Rust
-units run Cargo offline after `Control / Prepare Cargo`, every PR Rust unit
-such a host claims fails at `cargo metadata --locked` with `can't checkout
-from '…' : you are in the offline mode (--offline)` while the same unit
-passes on a host whose trusted store is warm — and the host, sharing the
-`self-hosted, velnor-target-mvp` labels with the fleet, keeps claiming them.
-Do not serve pull requests from a host whose trusted store has not been
-populated by a trusted job on that host; drain it (`velnorctl host drain`)
-if it is. A main-branch unit on a cold host fails the same way unless
-`Prepare Cargo` itself landed on that host, so a new host's first trusted
-run is not guaranteed green either.
-
-Each admission says what its stores read. A trusted-pool PR job's **Set up
-job** log gets a `Persistent stores` group with a `Read-through:` line naming
-the lower scope and stating that Cargo writes land in job-scoped scratch. If
-a daemon cannot mount the layer, the same group carries a `##[warning]` line
-naming the probe's reason, the job summary carries the warning annotation, and
-the job runs on its write scope alone; push jobs and untrusted hosts never ask
-for a layer. If a layer the probe approved then fails to mount, the job fails
-— there is no fallback path.
+The daemon log carries one line per PR admission,
+`seeded pr cargo store from trusted: N files, M bytes, T ms` (`0 files` when
+nothing was missing), and the job's **Set up job** log states
+`Persistent stores: cargo pr scope (seeded from trusted: N files)`; a trusted
+event's job states `Persistent stores: cargo trusted scope`. There is no
+capability to probe and no fallback path: a seed that cannot copy fails the
+job before its container exists.
 
 ## Cleanup
 
 - Stop the host (`host stop`, or Ctrl-C the foreground process).
-- Job containers, per-job networks, overlay volumes and their scratch
-  volumes carry the `velnor.job-id` label and are reclaimed at job teardown;
-  a crashed host's leftovers — including volumes whose job container is
-  already gone — are reclaimed on the next start.
+- Job containers and per-job networks carry the `velnor.job-id` label and
+  are reclaimed at job teardown; a crashed host's leftovers are reclaimed on
+  the next start.
 - Remove the storage root to discard everything the host persisted:
   `rm -rf ~/.velnor-store` (or your `VELNOR_STORAGE_ROOT`). Stores are caches;
   nothing in them is authoritative.

@@ -169,39 +169,13 @@ impl TrustClass {
 pub struct AdmittedTrust {
     class: TrustClass,
     effective_scope: String,
-    /// When set, the daemon-shared Cargo stores mount a read-through overlay
-    /// with this scope as the lower (trusted) layer and a job-scoped scratch
-    /// upper that is discarded at job end; every other store uses
-    /// [`effective_scope`]. Same-repo PR jobs on trusted pools read `trusted`
-    /// this way so PR writes never reach trusted stores (D18).
-    read_through_scope: Option<String>,
-    /// Set when the class and pool asked for a read-through layer but the
-    /// execution backend cannot mount one: the reason the job runs on its
-    /// write scope alone. Surfaced in the job's "Set up job" log; never a
-    /// silent fallback.
-    read_through_denied: Option<String>,
-}
-
-/// Whether the execution backend can mount D18 read-through store layers for
-/// the jobs admitted on this pool. The Docker backend answers through the
-/// probed daemon capability ([`crate::execution::store_overlay_support`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReadThroughSupport {
-    Supported,
-    Unsupported { reason: String },
-}
-
-impl ReadThroughSupport {
-    /// The Docker backend's answer, from the probed daemon capability.
-    #[must_use]
-    pub fn from_store_overlay(support: &crate::execution::StoreOverlaySupport) -> Self {
-        match support {
-            crate::execution::StoreOverlaySupport::Supported => Self::Supported,
-            crate::execution::StoreOverlaySupport::Unsupported { reason } => Self::Unsupported {
-                reason: reason.clone(),
-            },
-        }
-    }
+    /// When set, the daemon-shared Cargo store of [`effective_scope`] is
+    /// seeded from this scope's store by copy before the job container
+    /// starts ([`crate::storage::seed_cargo_store`]); the job then writes
+    /// [`effective_scope`] like every other store. Same-repo PR jobs on
+    /// trusted pools are seeded from `trusted` into `pr`, so a PR build
+    /// starts warm and PR writes never reach trusted stores (D18).
+    cargo_seed_scope: Option<String>,
 }
 
 impl AdmittedTrust {
@@ -215,12 +189,11 @@ impl AdmittedTrust {
     #[must_use]
     pub fn narrow(class: TrustClass, pool_scope: &str) -> Self {
         let pool = crate::trust_scope::normalize_scope(pool_scope);
-        let (effective_scope, read_through_scope) = store_scopes_for_class(class, pool, None);
+        let (effective_scope, cargo_seed_scope) = store_scopes_for_class(class, pool, None);
         Self {
             class,
             effective_scope,
-            read_through_scope,
-            read_through_denied: None,
+            cargo_seed_scope,
         }
     }
 
@@ -229,33 +202,16 @@ impl AdmittedTrust {
     /// `handle_job_request` and its conformance test call, so the narrowed
     /// pair the test asserts is the one production persists — never a
     /// hand-assembled pair production cannot produce.
-    ///
-    /// `read_through` is the backend's ability to mount the read-through
-    /// layer. When the class and pool call for one and the backend cannot
-    /// provide it, the job is admitted on its write scope alone with the
-    /// denial recorded ([`Self::read_through_denied`]); the store overlay is
-    /// then never attempted, so no job can degrade to that state silently at
-    /// mount time.
     #[must_use]
-    pub fn admit(
-        job: &AgentJobRequestMessage,
-        pool_scope: &str,
-        read_through: &ReadThroughSupport,
-    ) -> Self {
+    pub fn admit(job: &AgentJobRequestMessage, pool_scope: &str) -> Self {
         let class = TrustClass::derive(job);
         let pool = crate::trust_scope::normalize_scope(pool_scope);
         let event = event_name(job);
-        let (effective_scope, read_through_scope) = store_scopes_for_class(class, pool, event);
-        let (read_through_scope, read_through_denied) = match (read_through_scope, read_through) {
-            (Some(scope), ReadThroughSupport::Supported) => (Some(scope), None),
-            (Some(_), ReadThroughSupport::Unsupported { reason }) => (None, Some(reason.clone())),
-            (None, _) => (None, None),
-        };
+        let (effective_scope, cargo_seed_scope) = store_scopes_for_class(class, pool, event);
         Self {
             class,
             effective_scope,
-            read_through_scope,
-            read_through_denied,
+            cargo_seed_scope,
         }
     }
 
@@ -272,86 +228,16 @@ impl AdmittedTrust {
         &self.effective_scope
     }
 
-    /// Trusted scope layered beneath [`Self::effective_scope`] for read-through
-    /// store mounts. Absent when the job uses a single store namespace.
+    /// The scope whose Cargo store seeds [`Self::effective_scope`]'s by copy
+    /// before the job starts. Absent when the job's store needs no seed.
     #[must_use]
-    pub fn read_through_scope(&self) -> Option<&str> {
-        self.read_through_scope.as_deref()
-    }
-
-    /// Why the job runs without the read-through layer its class and pool
-    /// called for. `None` when no layer was called for or one is mounted.
-    #[must_use]
-    pub fn read_through_denied(&self) -> Option<&str> {
-        self.read_through_denied.as_deref()
-    }
-
-    /// The store layering this admission decided, as one value the executor
-    /// threads to the container spec and the job log.
-    #[must_use]
-    pub fn store_read_through(&self) -> StoreReadThrough {
-        match (&self.read_through_scope, &self.read_through_denied) {
-            (Some(lower_scope), _) => StoreReadThrough::Layered {
-                lower_scope: lower_scope.clone(),
-            },
-            (None, Some(reason)) => StoreReadThrough::Denied {
-                reason: reason.clone(),
-            },
-            (None, None) => StoreReadThrough::None,
-        }
+    pub fn cargo_seed_scope(&self) -> Option<&str> {
+        self.cargo_seed_scope.as_deref()
     }
 }
 
-/// What a job's persistent stores read beneath their write scope (D18).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StoreReadThrough {
-    /// A single store namespace: the write scope is the only scope.
-    None,
-    /// `lower_scope` is layered read-only beneath the write scope.
-    Layered { lower_scope: String },
-    /// The class and pool called for a layer the backend cannot mount; the
-    /// job runs on its write scope alone and the log says why.
-    Denied { reason: String },
-}
-
-impl StoreReadThrough {
-    /// The lower scope the container spec layers, when any.
-    #[must_use]
-    pub fn lower_scope(&self) -> Option<&str> {
-        match self {
-            Self::Layered { lower_scope } => Some(lower_scope),
-            Self::None | Self::Denied { .. } => None,
-        }
-    }
-
-    /// Log lines for the "Set up job" step's `Persistent stores` group and
-    /// the warning annotation a denial raises. Every admission says what its
-    /// stores read; a denial is a warning the job's summary counts.
-    #[must_use]
-    pub fn setup_job_lines(&self, write_scope: &str) -> (Vec<String>, Option<String>) {
-        let mut lines = vec![format!("Store scope: '{write_scope}'")];
-        let warning = match self {
-            Self::None => None,
-            Self::Layered { lower_scope } => {
-                lines.push(format!(
-                    "Read-through: '{lower_scope}' (daemon-mounted overlay; Cargo writes land in job-scoped scratch volumes discarded at job end, never in '{lower_scope}')"
-                ));
-                None
-            }
-            Self::Denied { reason } => {
-                let message = format!(
-                    "Read-through store unavailable: this execution backend cannot mount a read-through layer ({reason}); the job runs cold on the '{write_scope}' store only"
-                );
-                lines.push(format!("##[warning]{message}"));
-                Some(message)
-            }
-        };
-        (lines, warning)
-    }
-}
-
-/// Map a job class and pool ceiling to the store write scope and optional
-/// read-through lower scope (D18).
+/// Map a job class and pool ceiling to the store write scope and the
+/// optional scope its Cargo store is seeded from (D18).
 fn store_scopes_for_class(
     class: TrustClass,
     pool_scope: &str,
@@ -1362,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn same_repo_pull_request_on_trusted_pool_uses_pr_store_with_read_through() {
+    fn same_repo_pull_request_on_trusted_pool_writes_pr_store_seeded_from_trusted() {
         let job = signal_job(
             variables("pull_request", "octo/base"),
             Some(json!({
@@ -1373,51 +1259,44 @@ mod tests {
             self_repository("octo/base"),
             Some("scope"),
         );
-        let admitted = AdmittedTrust::admit(&job, "trusted", &ReadThroughSupport::Supported);
+        let admitted = AdmittedTrust::admit(&job, "trusted");
         assert_eq!(admitted.class(), TrustClass::Trusted);
         assert_eq!(
             admitted.effective_scope(),
             crate::trust_scope::PR_STORE_SCOPE
         );
         assert_eq!(
-            admitted.read_through_scope(),
+            admitted.cargo_seed_scope(),
             Some(crate::trust_scope::TRUSTED)
         );
-        assert_eq!(admitted.read_through_denied(), None);
 
-        // A backend that cannot mount the layer admits the same job on the
-        // PR write scope alone and records why: the write scope never
-        // widens, and the denial is a fact of the admission, not a warning
-        // some mount path may or may not log later.
-        let denied = AdmittedTrust::admit(
-            &job,
-            "trusted",
-            &ReadThroughSupport::Unsupported {
-                reason: "virtiofs upper".into(),
-            },
-        );
-        assert_eq!(denied.class(), TrustClass::Trusted);
-        assert_eq!(denied.effective_scope(), crate::trust_scope::PR_STORE_SCOPE);
-        assert_eq!(denied.read_through_scope(), None);
-        assert_eq!(denied.read_through_denied(), Some("virtiofs upper"));
-
-        // A job that never asked for a layer records no denial either way.
+        // A push job writes the pool scope itself and is seeded from nothing.
         let push = signal_job(
             variables("push", "octo/base"),
             None,
             self_repository("octo/base"),
             Some("scope"),
         );
-        let plain = AdmittedTrust::admit(
-            &push,
-            "trusted",
-            &ReadThroughSupport::Unsupported {
-                reason: "virtiofs upper".into(),
-            },
-        );
+        let plain = AdmittedTrust::admit(&push, "trusted");
         assert_eq!(plain.effective_scope(), crate::trust_scope::TRUSTED);
-        assert_eq!(plain.read_through_scope(), None);
-        assert_eq!(plain.read_through_denied(), None);
+        assert_eq!(plain.cargo_seed_scope(), None);
+
+        // A same-repo PR on a non-trusted pool keeps the pool scope: there is
+        // no `trusted` store on that host to seed from.
+        let custom = AdmittedTrust::admit(&job, "public-forks");
+        assert_eq!(custom.effective_scope(), "public-forks");
+        assert_eq!(custom.cargo_seed_scope(), None);
+
+        // A fork PR fails to the floor and is never seeded from trusted.
+        let fork = signal_job(
+            variables("pull_request", "octo/base"),
+            Some(json!({ "event": pull_request_event("mallory/base", 2, 1) })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        let fork = AdmittedTrust::admit(&fork, "trusted");
+        assert_eq!(fork.effective_scope(), crate::trust_scope::FAIL_CLOSED);
+        assert_eq!(fork.cargo_seed_scope(), None);
     }
 
     #[test]

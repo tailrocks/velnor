@@ -19,8 +19,8 @@ use serde_json::Value;
 use velnor_model::{ExecutionBackendKind, ExecutionFile, ExitClass};
 use velnor_runner::docker::{resolve_docker_endpoint, DockerEndpoint};
 use velnor_runner::execution::{
-    store_overlay_support, validate_docker_isolation, validate_docker_resource_projection,
-    DockerIsolationMode, DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
+    validate_docker_isolation, validate_docker_resource_projection, DockerIsolationMode,
+    DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
     DOCKER_RESOURCE_BOUNDARY_CHECK, MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
 };
 
@@ -301,8 +301,6 @@ struct DockerReport {
     velnor_compatible: bool,
     runner_ready: bool,
     capabilities: DockerCapabilities,
-    /// The runner's own words for the read-through store overlay verdict.
-    read_through_store_overlay: String,
     checks: Vec<Check>,
 }
 
@@ -323,11 +321,6 @@ struct DockerCapabilities {
     buildx: bool,
     bind_mount: Option<bool>,
     docker_resource_boundary: bool,
-    /// Whether this daemon can mount D18 read-through store layers (the
-    /// runner's probed capability). `None` when the probe could not run.
-    /// Not a readiness gate: a host without it runs PR jobs on trusted pools
-    /// cold, and every such job's log says so.
-    read_through_store_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -680,25 +673,6 @@ fn collect_docker_report(
         ));
     }
 
-    // The read-through store overlay capability, through the runner's probe
-    // and against the daemon this report selected. Recorded, never gated on.
-    let store_overlay = if server_reachable {
-        store_overlay_support(
-            &mut DiagnosticDockerRunner { target },
-            Some(image.unwrap_or(MACOS_DOCKER_CAPABILITY_PROBE_IMAGE)),
-            work_dir,
-            docker_host_work_dir,
-        )
-    } else {
-        Err(velnor_runner::execution::ExecutionError::DockerPreflight(
-            "not probed because the Docker API is unavailable".to_owned(),
-        ))
-    };
-    let (read_through_store_overlay, store_overlay_summary) = match &store_overlay {
-        Ok(support) => (Some(support.is_supported()), support.summary()),
-        Err(error) => (None, format!("unknown: {error}")),
-    };
-
     let endpoint_ready = server_reachable
         && info_json.is_some()
         && (!require_socket || socket_exists)
@@ -740,43 +714,8 @@ fn collect_docker_report(
             buildx: buildx_result.succeeded(),
             bind_mount: bind_mount.map(|check| check.status == CheckStatus::Pass),
             docker_resource_boundary,
-            read_through_store_overlay,
         },
-        read_through_store_overlay: store_overlay_summary,
         checks,
-    }
-}
-
-/// The runner's `CommandRunner` seam over this report's pinned daemon: every
-/// probe the runner defines runs as `docker --host <endpoint> …` with the
-/// diagnostic timeout. Not a host-process runner, so nothing it learns is
-/// cached as a fact about the host — the report re-probes each time.
-struct DiagnosticDockerRunner<'a> {
-    target: Option<&'a DockerEndpoint>,
-}
-
-impl velnor_runner::CommandRunner for DiagnosticDockerRunner<'_> {
-    fn run(
-        &mut self,
-        program: &str,
-        args: &[String],
-    ) -> anyhow::Result<velnor_runner::CommandResult> {
-        if program != "docker" {
-            anyhow::bail!("diagnostic runner only runs docker, not {program}");
-        }
-        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let result = run_docker_process(self.target, &args, CONTAINER_TIMEOUT);
-        if let Some(error) = result.error {
-            anyhow::bail!("{error}");
-        }
-        if result.timed_out {
-            anyhow::bail!("docker {} timed out", args.join(" "));
-        }
-        Ok(velnor_runner::CommandResult {
-            code: result.status.unwrap_or(-1),
-            stdout: result.stdout,
-            stderr: result.stderr,
-        })
     }
 }
 
@@ -1906,10 +1845,6 @@ fn print_docker_human(report: &DockerReport) {
         report.capabilities.docker_resource_boundary
     );
     println!("{}", format_resource_detail(&report.resources));
-    println!(
-        "Read-through store overlay (D18): {}",
-        report.read_through_store_overlay
-    );
     println!("Velnor-compatible: {}", report.velnor_compatible);
     println!("Runner-ready: {}", report.runner_ready);
     print_checks_from_struct(&report.checks);
@@ -1997,7 +1932,6 @@ mod tests {
                 buildx: true,
                 bind_mount: Some(true),
                 docker_resource_boundary: false,
-                read_through_store_overlay: Some(false),
             }
             .docker_resource_boundary
         );

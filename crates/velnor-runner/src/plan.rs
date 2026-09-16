@@ -127,7 +127,6 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             store_trust_scope: "release".to_owned(),
-            store_overlays: Vec::new(),
             mbx_store_host: None,
             sccache_store_host: None,
         }
