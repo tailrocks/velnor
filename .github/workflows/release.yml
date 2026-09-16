@@ -261,6 +261,9 @@ jobs:
           set -euo pipefail
           rustup toolchain install
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -399,6 +402,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -519,6 +525,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -639,6 +648,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -759,6 +771,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -879,6 +894,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -999,6 +1017,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -1119,6 +1140,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -1239,6 +1263,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -1359,6 +1386,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -1479,6 +1509,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -1599,6 +1632,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -1717,6 +1753,9 @@ jobs:
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install: false
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -2954,6 +2993,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -3214,6 +3256,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -3338,6 +3383,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -3571,6 +3619,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0

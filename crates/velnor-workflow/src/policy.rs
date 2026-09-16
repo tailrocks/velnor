@@ -718,9 +718,46 @@ fn pin_reachable(root: &Path, pin: &str, head: &str, base: Option<&str>) -> Rule
         ),
         None => RuleReport::fail(
             "pin-reachable",
-            format!("{pin} or head {head} is not a commit in this checkout (a full-history checkout is required)"),
+            missing_commit_reason(root, pin, head),
             Vec::new(),
         ),
+    }
+}
+
+/// Whether the checkout is shallow (`git clone --depth`, `actions/checkout`
+/// with the default `fetch-depth: 1`): history stops at a grafted boundary,
+/// so an older commit is absent without having been removed.
+fn is_shallow_checkout(root: &Path) -> bool {
+    git(root, &["rev-parse", "--is-shallow-repository"])
+        .is_ok_and(|output| output.is_some_and(|value| value.trim() == "true"))
+}
+
+/// Why `pin-reachable` could not decide: names the commits the checkout
+/// lacks and separates the two causes — a shallow checkout that cut the
+/// history the rule walks (the job must check out with `fetch-depth: 0`)
+/// from a full checkout that genuinely lacks the commit (the pin or head is
+/// not in this repository's history).
+fn missing_commit_reason(root: &Path, pin: &str, head: &str) -> String {
+    let mut missing = Vec::new();
+    if !commit_exists(root, pin) {
+        missing.push(format!("pin {pin}"));
+    }
+    if !commit_exists(root, head) {
+        missing.push(format!("head {head}"));
+    }
+    let missing = if missing.is_empty() {
+        format!("pin {pin} or head {head}")
+    } else {
+        missing.join(" and ")
+    };
+    if is_shallow_checkout(root) {
+        format!(
+            "{missing} is not a commit in this shallow checkout; the rule walks history from the audited head to the declared pin, so the job that runs the validator must check out full history (actions/checkout `fetch-depth: 0`)"
+        )
+    } else {
+        format!(
+            "{missing} is not a commit in this full-history checkout; the tree must be rendered by a commit its own history contains, so fetch the missing commit or re-pin to one the head descends from"
+        )
     }
 }
 

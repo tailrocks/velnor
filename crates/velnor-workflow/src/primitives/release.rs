@@ -1415,10 +1415,25 @@ fn render_preview_identity_job(config: &ProjectConfig, release: &ReleaseSpec) ->
     };
     let manifest = shell_quote(&manifest);
     format!(
-        "  identity:\n    name: Resolve preview identity\n    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 10\n    runs-on: {runner}\n    outputs:\n      version: ${{{{ steps.identity.outputs.version }}}}\n      crate_version: ${{{{ steps.identity.outputs.crate_version }}}}\n      name: ${{{{ steps.identity.outputs.name }}}}\n      commit: ${{{{ steps.identity.outputs.commit }}}}\n      short_commit: ${{{{ steps.identity.outputs.short_commit }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n{setup}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Resolve the preview version from the crate manifest\n        id: identity\n        env:\n          EVENT_SHA: ${{{{ github.sha }}}}\n          RUN_NUMBER: ${{{{ github.run_number }}}}\n        run: |\n          set -euo pipefail\n          commit=\"$(git rev-parse HEAD)\"\n          case \"$commit\" in\n            *[!0-9a-f]*|'') echo \"::error::HEAD did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#commit}}\" -eq 40 ] || {{ echo \"::error::HEAD is not a 40-hex commit\" >&2; exit 1; }}\n          [ \"$commit\" = \"$EVENT_SHA\" ] || {{ echo \"::error::checkout $commit != event commit $EVENT_SHA\" >&2; exit 1; }}\n          case \"$RUN_NUMBER\" in\n            ''|*[!0-9]*) echo \"::error::invalid workflow run number $RUN_NUMBER\" >&2; exit 1 ;;\n          esac\n          [ \"$RUN_NUMBER\" -gt 0 ] || {{ echo \"::error::run number must be positive\" >&2; exit 1; }}\n          crate=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' {manifest} | head -n1)\"\n          case \"$crate\" in\n            ''|*[!0-9.]*) echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$crate\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1; }}\n          short_commit=\"${{commit:0:7}}\"\n          version=\"${{crate}}~preview.${{RUN_NUMBER}}+${{short_commit}}\"\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n            || {{ echo \"::error::preview version $version violates the preview contract\" >&2; exit 1; }}\n          {{\n            echo \"version=$version\"\n            echo \"crate_version=$crate\"\n            echo \"name=Preview $version\"\n            echo \"commit=$commit\"\n            echo \"short_commit=$short_commit\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        "  identity:\n    name: Resolve preview identity\n    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 10\n    runs-on: {runner}\n    outputs:\n      version: ${{{{ steps.identity.outputs.version }}}}\n      crate_version: ${{{{ steps.identity.outputs.crate_version }}}}\n      name: ${{{{ steps.identity.outputs.name }}}}\n      commit: ${{{{ steps.identity.outputs.commit }}}}\n      short_commit: ${{{{ steps.identity.outputs.short_commit }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Resolve the preview version from the crate manifest\n        id: identity\n        env:\n          EVENT_SHA: ${{{{ github.sha }}}}\n          RUN_NUMBER: ${{{{ github.run_number }}}}\n        run: |\n          set -euo pipefail\n          commit=\"$(git rev-parse HEAD)\"\n          case \"$commit\" in\n            *[!0-9a-f]*|'') echo \"::error::HEAD did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#commit}}\" -eq 40 ] || {{ echo \"::error::HEAD is not a 40-hex commit\" >&2; exit 1; }}\n          [ \"$commit\" = \"$EVENT_SHA\" ] || {{ echo \"::error::checkout $commit != event commit $EVENT_SHA\" >&2; exit 1; }}\n          case \"$RUN_NUMBER\" in\n            ''|*[!0-9]*) echo \"::error::invalid workflow run number $RUN_NUMBER\" >&2; exit 1 ;;\n          esac\n          [ \"$RUN_NUMBER\" -gt 0 ] || {{ echo \"::error::run number must be positive\" >&2; exit 1; }}\n          crate=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' {manifest} | head -n1)\"\n          case \"$crate\" in\n            ''|*[!0-9.]*) echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$crate\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1; }}\n          short_commit=\"${{commit:0:7}}\"\n          version=\"${{crate}}~preview.${{RUN_NUMBER}}+${{short_commit}}\"\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n            || {{ echo \"::error::preview version $version violates the preview contract\" >&2; exit 1; }}\n          {{\n            echo \"version=$version\"\n            echo \"crate_version=$crate\"\n            echo \"name=Preview $version\"\n            echo \"commit=$commit\"\n            echo \"short_commit=$short_commit\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
         config.default_branch,
         runner = yaml_scalar(&config.github_runner),
+        policy = policy_enforcement_step(),
     )
+}
+
+/// The `with:` body of a checkout in a job that runs the policy validator:
+/// full history and no persisted credentials. `pin-reachable` walks from the
+/// audited head to the declared pin, so a validator-running job never checks
+/// out shallow; `validate_policy_jobs_check_out_full_history` refuses a tree
+/// where one does, whichever renderer wrote its checkout.
+const POLICY_CHECKOUT_WITH: &str =
+    "          fetch-depth: 0\n          persist-credentials: false\n";
+
+/// The step that runs `velnor-workflow policy` against the checked-out tree.
+/// It is rendered only after a checkout carrying [`POLICY_CHECKOUT_WITH`].
+fn policy_enforcement_step() -> &'static str {
+    "      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n"
 }
 
 /// The rolling preview publish job: the per-arch preview debs are
@@ -1667,9 +1682,10 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         "permissions:\\n  contents: read\\n  id-token: write\\n  attestations: write\\n\\njobs:\\n  build:",
     )
     .replace(
-        "          persist-credentials: false\\n      - name: Set up sccache",
+        "        with:\\n          persist-credentials: false\\n      - name: Set up sccache",
         &format!(
-            "          persist-credentials: false\\n      - name: Enforce workflow policy\\n        env:\\n          EVENT_NAME: ${{{{ github.event_name }}}}\\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\\n{toolchain_steps}      - name: Set up sccache"
+            "        with:\n{POLICY_CHECKOUT_WITH}{}{toolchain_steps}      - name: Set up sccache",
+            policy_enforcement_step()
         ),
     )
     .replace(
@@ -1931,8 +1947,9 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     output = output.replace(
         "      - name: Set up sccache\n",
         &format!(
-            "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
-            workflow_runtime_setup_for_config(config)
+            "{}{}      - name: Set up sccache\n",
+            workflow_runtime_setup_for_config(config),
+            policy_enforcement_step()
         ),
     );
     output = output.replace(
@@ -1990,8 +2007,9 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     output = output.replace(
         "      - name: Set up sccache\n",
         &format!(
-            "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
-            workflow_runtime_setup_for_config(config)
+            "{}{}      - name: Set up sccache\n",
+            workflow_runtime_setup_for_config(config),
+            policy_enforcement_step()
         ),
     );
     output.push_str(
@@ -2305,10 +2323,11 @@ fn render_package_feed(
     let package = yaml_scalar(package);
     let coordinate = yaml_scalar(coordinate);
     format!(
-        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · {kind} · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n\nconcurrency:\n  group: package-feed-{kind}-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  admit-runner:\n    name: Admit feed runner\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only feed mutation\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo '{kind} feed mutation publishes from GitHub only' >&2\n          exit 1\n  verify:\n    name: Verify {kind} feed\n    needs: [admit-runner]\n    runs-on: {runner}\n    timeout-minutes: 30\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Verify feed inputs\n        run: velnor-workflow release verify-feed --kind {kind} --package {package} --coordinate {coordinate}\n  mutate:\n    name: Update {kind} feed\n    needs: [admit-runner, verify]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event.inputs.runner != 'velnor' }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Update feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n        run: velnor-workflow release update-feed --kind {kind} --package {package} --coordinate {coordinate} --channel \"$CHANNEL\"\n",
+        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · {kind} · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n\nconcurrency:\n  group: package-feed-{kind}-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  admit-runner:\n    name: Admit feed runner\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only feed mutation\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo '{kind} feed mutation publishes from GitHub only' >&2\n          exit 1\n  verify:\n    name: Verify {kind} feed\n    needs: [admit-runner]\n    runs-on: {runner}\n    timeout-minutes: 30\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n{POLICY_CHECKOUT_WITH}{policy}      - name: Verify feed inputs\n        run: velnor-workflow release verify-feed --kind {kind} --package {package} --coordinate {coordinate}\n  mutate:\n    name: Update {kind} feed\n    needs: [admit-runner, verify]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event.inputs.runner != 'velnor' }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Update feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n        run: velnor-workflow release update-feed --kind {kind} --package {package} --coordinate {coordinate} --channel \"$CHANNEL\"\n",
         ActionPin::Checkout.reference(),
         ActionPin::Checkout.reference(),
         branch = config.default_branch,
+        policy = policy_enforcement_step(),
     )
 }
 
@@ -2316,7 +2335,7 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
     let mut output = String::from(GENERATED_HEADER);
     let _ = writeln!(
         output,
-        "name: Release\nrun-name: Release · documentation\n\non:\n  push:\n    branches: [{}]\n  workflow_dispatch:\n\nconcurrency:\n  group: pages-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  deploy:\n    name: Publish documentation\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    environment: github-pages\n    permissions:\n      contents: read\n      pages: write\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up Bun\n        uses: {}\n        with:\n          cache: true\n      - name: Build documentation\n        run: bun run scripts/generate-docs.ts\n      - name: Configure Pages\n        uses: {}\n      - name: Upload Pages artifact\n        uses: {}\n        with:\n          path: {}\n      - name: Deploy Pages\n        uses: {}\n",
+        "name: Release\nrun-name: Release · documentation\n\non:\n  push:\n    branches: [{}]\n  workflow_dispatch:\n\nconcurrency:\n  group: pages-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  deploy:\n    name: Publish documentation\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    environment: github-pages\n    permissions:\n      contents: read\n      pages: write\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n{POLICY_CHECKOUT_WITH}      - name: Set up Bun\n        uses: {}\n        with:\n          cache: true\n      - name: Build documentation\n        run: bun run scripts/generate-docs.ts\n      - name: Configure Pages\n        uses: {}\n      - name: Upload Pages artifact\n        uses: {}\n        with:\n          path: {}\n      - name: Deploy Pages\n        uses: {}\n",
         yaml_scalar(&config.default_branch),
         config.default_branch,
         ActionPin::Checkout.reference(),
@@ -2327,8 +2346,9 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         ActionPin::DeployPages.reference(),
     );
     let verify = format!(
-        "  verify:\n    name: Verify documentation release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n",
+        "  verify:\n    name: Verify documentation release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n{POLICY_CHECKOUT_WITH}{}",
         ActionPin::Checkout.reference(),
+        policy_enforcement_step(),
     );
     let verify = if config.runners == RunnerMode::Velnor {
         let gate = trusted_release_runner_gate(&config.default_branch);
@@ -2370,7 +2390,7 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
     );
     output = output.replace(
         "      - name: Set up Bun\n",
-        "      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up Bun\n",
+        &format!("{}      - name: Set up Bun\n", policy_enforcement_step()),
     );
     output = output.replace(
         "      - name: Enforce workflow policy\n",
@@ -3222,11 +3242,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "e525fe66482e23af4de8305c08d15e73c53b89035d9cf43d27109503005bf755",
+                "eea4d741caae384a6f7d72b5e99be02fae899f074eae57538b510431f609da60",
             ),
             (
                 "preview.yml",
-                "6a38b79eddf0ccef2e5d29b0a9da84a66db82a941714e805797fd908fb924b85",
+                "4e73bc23823140cae838c62c24b9104179cee0c646175ff0cb3756328dc30744",
             ),
             (
                 "maintenance.yml",
@@ -3291,6 +3311,51 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Every release-side family, whichever kind renders it: a job that runs
+    /// `velnor-workflow policy` checks out full history, and a hosted Mr.
+    /// Boxington store is bounded ahead of the action. The shallow preview
+    /// identity checkout that failed `Preview · push · main` was one kind's
+    /// renderer; the rule is on every kind's output.
+    #[test]
+    fn every_release_kind_renders_validator_jobs_with_full_history_and_bounded_stores() {
+        let mut pages = binary_spec();
+        pages.kind = "pages".to_owned();
+        pages.artifact_path = "site".to_owned();
+        let mut apt = binary_spec();
+        apt.kind = "apt".to_owned();
+        apt.consumer_repository = "example/apt".to_owned();
+        let mut homebrew = binary_spec();
+        homebrew.kind = "homebrew".to_owned();
+        homebrew.source_repository = "example/app".to_owned();
+        let mut crates = binary_spec();
+        crates.kind = "crates".to_owned();
+        crates.packages = vec!["example".to_owned()];
+        for spec in [binary_spec(), native_spec(), pages, apt, homebrew, crates] {
+            let kind = spec.kind.clone();
+            let root = scanned_root(&format!("validator-checkout-{kind}"));
+            let config = config(&["release.yml", "preview.yml"], Some(spec));
+            let surface = generate(&root, &config, None);
+            let validator_jobs = surface
+                .files
+                .values()
+                .filter(|rendered| rendered.contains("run: velnor-workflow policy"))
+                .count();
+            assert!(
+                validator_jobs > 0,
+                "the {kind} surface must run the validator somewhere"
+            );
+            must(
+                crate::validate_policy_jobs_check_out_full_history(&surface.files),
+                &format!("{kind}: every validator-running job checks out full history"),
+            );
+            must(
+                crate::validate_hosted_mr_boxington_store_budget(&surface.files),
+                &format!("{kind}: every hosted Mr. Boxington job bounds its store"),
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
     /// The identity release surface, pinned like the legacy one: any renderer
     /// change shows up here and has to be carried into the pin deliberately.
     #[test]
@@ -3298,11 +3363,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5e63188780384d0fc8fcf93211c4e833a73858790aee3914faf448cde6ff6fca",
+                "ab4fbb8d96276111a99eca433a82217011e3a30f68df45ada70b4e55c54ad683",
             ),
             (
                 "preview.yml",
-                "ef2a4ec0451803292fabb985f404dec000653a9b27543b1249d1a1f555c4edb4",
+                "59e2c1c10adff9a11de9be3c6ac01f8665c15484f83a4cdf3e2724eace8da3c8",
             ),
         ];
         let root = scanned_root("identity-pinned");
