@@ -1,7 +1,7 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `8cc755fd` (PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup green @ run 35039991442; §16 post-merge + fleet ops gates open).  
-Date: 2026-09-16 (rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `8cc755fd` (PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup green @ run 35039991442; rerun @ `b3157a10` run 35041695268 failed on intermittent Velnor fleet admission; §16 post-merge + fleet ops gates open).  
+Date: 2026-09-16 (rev 13: DCO sign-off restored on plan-only HEAD; rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
 
@@ -960,3 +960,11 @@ Root cause of the persisting `ci-pr` startup failure (`Invalid workflow file: .g
 | `Rust · velnor-workflow / Velnor` | V | same run (policy runtime provision on Velnor lane) |
 | Docs markdownlint | V | `8cc755fd` escaped table pipes in rev 11 ledger (MD056/MD038); `Documentation · Documentation / GitHub` success on 35039991442 |
 | §16 post-merge gates | P | 3× `ci-main` on `main`, policy on `main`, GHA cache ≤ 8 GiB, 7× maintenance, Phase 6 fleet ops still open |
+
+#### Rev 13 delta @ `5554e5d` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Plan-only commit DCO regression | V | `b3157a10` lacked `Signed-off-by:`; DCO `fail` on PR [#872](https://github.com/tailrocks/velnor/pull/872); fixed via `git commit --amend --signoff` → `5554e5d` |
+| Rerun @ `b3157a10` fleet admission flake | P | run [35041695268](https://github.com/tailrocks/velnor/actions/runs/35041695268): `Rust · velnor-workflow / Velnor` + `Rust · velnor-render / Velnor` `operational store rejected the sanitized admission row` (`runner.rs:7266`); `ci-required` failure; same class as rev 10 run 35036454380 — not generator regression |
+| Stable green rollup still valid | V | run [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442) @ `8cc755fd` remains the ruleset-gate proof; flake is intermittent fleet ops |
