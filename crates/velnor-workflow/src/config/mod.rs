@@ -854,12 +854,21 @@ impl RepoGenerationConfig {
         })?;
         validate_repository_slug(repository)?;
         validate_workflow(&self.workflow)?;
-        if self.units.iter().any(UnitSection::requires_trusted)
-            && self.workflow.velnor_trusted_label.is_none()
-        {
-            return Err(GeneratorError::usage(
-                "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_label is not declared",
-            ));
+        if self.units.iter().any(UnitSection::requires_trusted) {
+            if self.workflow.velnor_trusted_label.is_none() {
+                return Err(GeneratorError::usage(
+                    "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_label is not declared",
+                ));
+            }
+            // Whether trust-gated jobs are emitted or skipped is a rendering
+            // input, so it must be declared: the generator never consults the
+            // live fleet (an earlier `gh api` probe made `--check` and the
+            // policy regeneration depend on which runners were online).
+            if self.workflow.velnor_trusted_runner_available.is_none() {
+                return Err(GeneratorError::usage(
+                    "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_runner_available is not declared; set it to true when an online runner claims velnor_trusted_label, false to render the trust-gated jobs as skips",
+                ));
+            }
         }
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
@@ -2017,12 +2026,25 @@ mod tests {
                 .contains("velnor_trusted_label is not declared"),
             "{error}"
         );
-        let declared = config_for(
+        let undecided = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
+        );
+        let error = must_fail(
+            undecided.validate(&["example".to_owned()], &[], &BTreeSet::new()),
+            "requires_trusted without a declared runner availability must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] velnor_trusted_runner_available is not declared"),
+            "{error}"
+        );
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\nvelnor_trusted_runner_available = false\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
         );
         must(
             declared.validate(&["example".to_owned()], &[], &BTreeSet::new()),
-            "requires_trusted with a trusted label validates",
+            "requires_trusted with a trusted label and a declared availability validates",
         );
     }
 

@@ -1080,6 +1080,7 @@ fn scan_target(
     // whether the rest of the contract is scanned or declared.
     validate_runner_labels(&config)?;
     validate_trusted_units_have_label(&config)?;
+    runners::validate_trusted_runner_availability(&config)?;
     let inputs = GenerationInputs::current(generation.as_ref(), &shape)?;
     Ok(ScannedTarget {
         shape,
@@ -3764,6 +3765,9 @@ fn generated_files_with_surface(
     surface: Option<&primitives::Surface>,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     let config = config.clone();
+    // The trust-gated shape is a rendering input; refuse to render before the
+    // IR silently falls back to skips for an undecided config.
+    runners::validate_trusted_runner_availability(&config)?;
     let workflow = WorkflowIr::from_config(&config);
     primitives::validate_cache_transports(&workflow)?;
     // The toolchain contract is a generation precondition, checked here so no
@@ -7390,6 +7394,66 @@ mod tests {
             error.to_string().contains("velnor_trusted_label"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn trusted_runner_availability_is_declared_never_probed() {
+        let (mut config, index) = both_runner_docker_config();
+        config.velnor_trusted_label = Some("example-trusted".to_owned());
+        assert!(
+            runners::validate_trusted_runner_availability(&config).is_ok(),
+            "ungated surface needs no declaration"
+        );
+        config.units[index].requires_trusted = true;
+
+        config.velnor_trusted_runner_available = None;
+        let error = must_fail(
+            runners::validate_trusted_runner_availability(&config),
+            "an undecided trust-gated shape must fail before rendering",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] velnor_trusted_runner_available is not declared"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            generated_files(&config),
+            "generation refuses the undecided config",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] velnor_trusted_runner_available"),
+            "unexpected error: {error}"
+        );
+        let undecided = runners::resolve_trusted_runner_availability(&config);
+        assert!(
+            !undecided.online,
+            "an undecided config never queues gated work"
+        );
+
+        config.velnor_trusted_runner_available = Some(false);
+        must(
+            runners::validate_trusted_runner_availability(&config),
+            "declared false validates",
+        );
+        let skipped = runners::resolve_trusted_runner_availability(&config);
+        assert!(!skipped.online);
+        assert_eq!(
+            skipped.skip_reason.as_deref(),
+            Some(
+                "no online runner claims example-trusted ([workflow] velnor_trusted_runner_available = false)"
+            )
+        );
+
+        config.velnor_trusted_runner_available = Some(true);
+        must(
+            runners::validate_trusted_runner_availability(&config),
+            "declared true validates",
+        );
+        let online = runners::resolve_trusted_runner_availability(&config);
+        assert!(online.required && online.online && online.skip_reason.is_none());
     }
 
     #[test]

@@ -1,17 +1,20 @@
-//! Generation-time GitHub runner availability probes.
+//! Trust-gated Velnor job availability.
 //!
-//! Trust-gated Velnor jobs need a runner that claims an extra label. When none
-//! are online, the generator skips those jobs instead of emitting work that
-//! would queue indefinitely.
+//! Trust-gated Velnor jobs need a runner that claims an extra label. Whether
+//! such a runner exists is declared in the generation config
+//! (`[workflow] velnor_trusted_runner_available`), never probed: the rendered
+//! tree must be a pure function of the checked-in inputs so that `--check` and
+//! the policy validator's regeneration at the declared pin are reproducible.
+//! When the declaration says no runner is online, the generator renders the
+//! gated jobs as explicit skips instead of emitting work that would queue
+//! indefinitely.
 
-use std::env;
-use std::process::{Command, Stdio};
+use crate::{GeneratorError, ProjectConfig};
 
-use crate::ProjectConfig;
+/// The config key that decides trust-gated job emission.
+pub(crate) const TRUSTED_RUNNER_AVAILABLE_KEY: &str = "[workflow] velnor_trusted_runner_available";
 
-const TRUSTED_RUNNER_AVAILABLE_ENV: &str = "VELNOR_WORKFLOW_TRUSTED_RUNNER_AVAILABLE";
-
-/// Whether trust-gated Velnor jobs may run at generation time.
+/// Whether trust-gated Velnor jobs may run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TrustedRunnerAvailability {
     pub(crate) required: bool,
@@ -45,101 +48,52 @@ impl TrustedRunnerAvailability {
     }
 }
 
-/// Resolve whether an online runner claims the configured trusted label.
+/// True when the config has a unit that routes to the trusted label.
+fn requires_trusted_runner(config: &ProjectConfig) -> Option<&str> {
+    let label = config.velnor_trusted_label.as_deref()?;
+    config
+        .units
+        .iter()
+        .any(|unit| unit.requires_trusted)
+        .then_some(label)
+}
+
+/// Refuse to render a tree whose trust-gated shape is undecided.
 ///
-/// Precedence: environment override, explicit config pin, live `gh api` probe.
-/// When the probe fails and nothing is pinned, fail closed to skip (not queue).
+/// The config loader enforces the same rule for declared configs; this guard
+/// covers every other way a `ProjectConfig` reaches the renderer.
+pub(crate) fn validate_trusted_runner_availability(
+    config: &ProjectConfig,
+) -> Result<(), GeneratorError> {
+    if requires_trusted_runner(config).is_some() && config.velnor_trusted_runner_available.is_none()
+    {
+        return Err(GeneratorError::usage(format!(
+            "a unit requires a trusted runner but {TRUSTED_RUNNER_AVAILABLE_KEY} is not declared; \
+             set it to true when an online runner claims velnor_trusted_label, false to render \
+             the trust-gated jobs as skips"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve whether trust-gated Velnor jobs are emitted, from the config alone.
+///
+/// An undecided config is rendered as unavailable so that a renderer reached
+/// without [`validate_trusted_runner_availability`] fails closed (skips, never
+/// queues); generation itself refuses such a config before rendering.
 pub(crate) fn resolve_trusted_runner_availability(
     config: &ProjectConfig,
 ) -> TrustedRunnerAvailability {
-    let Some(label) = config.velnor_trusted_label.as_deref() else {
+    let Some(label) = requires_trusted_runner(config) else {
         return TrustedRunnerAvailability::not_required();
     };
-    if !config.units.iter().any(|unit| unit.requires_trusted) {
-        return TrustedRunnerAvailability::not_required();
-    }
-
-    if let Ok(value) = env::var(TRUSTED_RUNNER_AVAILABLE_ENV) {
-        return match parse_boolish(&value) {
-            Some(true) => TrustedRunnerAvailability::available(),
-            Some(false) => TrustedRunnerAvailability::unavailable(format!(
-                "no online runner claims {label} ({TRUSTED_RUNNER_AVAILABLE_ENV}=false)"
-            )),
-            None => TrustedRunnerAvailability::unavailable(format!(
-                "{TRUSTED_RUNNER_AVAILABLE_ENV} must be true or false, found `{value}`"
-            )),
-        };
-    }
-
-    if let Some(available) = config.velnor_trusted_runner_available {
-        return if available {
-            TrustedRunnerAvailability::available()
-        } else {
-            TrustedRunnerAvailability::unavailable(format!(
-                "no online runner claims {label} ([workflow] velnor_trusted_runner_available = false)"
-            ))
-        };
-    }
-
-    match probe_online_runner_label(&config.repository, label) {
-        Ok(true) => TrustedRunnerAvailability::available(),
-        Ok(false) => TrustedRunnerAvailability::unavailable(format!(
-            "no online runner claims {label} (generation-time gh api probe)"
+    match config.velnor_trusted_runner_available {
+        Some(true) => TrustedRunnerAvailability::available(),
+        Some(false) => TrustedRunnerAvailability::unavailable(format!(
+            "no online runner claims {label} ({TRUSTED_RUNNER_AVAILABLE_KEY} = false)"
         )),
-        Err(error) => TrustedRunnerAvailability::unavailable(format!(
-            "trusted runner probe failed ({error}); skipping trust-gated Velnor jobs instead of queueing"
+        None => TrustedRunnerAvailability::unavailable(format!(
+            "{TRUSTED_RUNNER_AVAILABLE_KEY} is not declared"
         )),
-    }
-}
-
-fn parse_boolish(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-fn probe_online_runner_label(repository: &str, label: &str) -> Result<bool, String> {
-    let jq = format!(
-        r#".runners[] | select(.status == "online") | .labels[] | select(.name == "{label}") | .name"#
-    );
-    let output = Command::new("gh")
-        .args([
-            "api",
-            &format!("repos/{repository}/actions/runners"),
-            "--paginate",
-            "--jq",
-            &jq,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("spawn gh: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let detail = if stderr.is_empty() {
-            format!("exit status {}", output.status)
-        } else {
-            stderr
-        };
-        return Err(format!(
-            "gh api repos/{repository}/actions/runners: {detail}"
-        ));
-    }
-    Ok(!output.stdout.is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_boolish_accepts_common_literals() {
-        assert_eq!(parse_boolish("true"), Some(true));
-        assert_eq!(parse_boolish("FALSE"), Some(false));
-        assert_eq!(parse_boolish("1"), Some(true));
-        assert_eq!(parse_boolish("off"), Some(false));
-        assert_eq!(parse_boolish("maybe"), None);
     }
 }

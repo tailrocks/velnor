@@ -345,10 +345,9 @@ jobs:
         with:
           job_label: ${{ inputs.unit }}
 
-  # Velnor trusted runner unavailable: no online runner claims velnor-host-docker ([workflow] velnor_trusted_runner_available = false)
   verify-velnor-trusted:
-    name: "Velnor · skipped (no online velnor-host-docker runner)"
-    if: ${{ (inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))))) && false }}
+    name: Velnor
+    if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp, velnor-host-docker]
     timeout-minutes: 45
     steps:

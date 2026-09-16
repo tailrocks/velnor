@@ -1304,10 +1304,17 @@ jobs:
           fi
           if [[ "$selected" == *",docker,"* ]]; then
             result="$(result_for_job velnor-docker)"
-            case "$result" in
-              success|skipped) ;;
-              *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
-            esac
+            if [[ "$FORK_PR" == true ]]; then
+              case "$result" in
+                success|skipped) ;;
+                *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                success) ;;
+                *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;
+              esac
+            fi
           else
             result="$(result_for_job velnor-docker)"
             case "$result" in

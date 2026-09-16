@@ -1818,10 +1818,9 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit bun-velnor
 
-  # Velnor trusted runner unavailable: no online runner claims velnor-host-docker ([workflow] velnor_trusted_runner_available = false)
   release-velnor-docker:
-    name: "Velnor / Docker / docker · skipped (no online velnor-host-docker runner)"
-    if: ${{ ((github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && false }}
+    name: "Velnor / Docker / docker"
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp, velnor-host-docker]
     timeout-minutes: 60

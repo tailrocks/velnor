@@ -32,9 +32,12 @@ default_dispatch_runner = "both"
 # lease socket) receive them. Untrusted hosts must never claim it.
 # Deliberately distinct from org pool velnor-trusted: a label, not a group.
 velnor_trusted_label = "velnor-host-docker"
-# Skip trust-gated Velnor jobs until an online runner claims the label; avoids
-# ~24 h queue stalls when only offline recovery slots carry velnor-host-docker.
-velnor_trusted_runner_available = false
+# Declared, never probed: the generator renders trust-gated Velnor jobs as
+# real jobs (true) or explicit skips (false) from this key alone, so the tree
+# is reproducible. Set false again if no online runner claims the label, or
+# the gated jobs queue until one does. Verified 2026-09-16: dogfood slots 1-5
+# advertise velnor-host-docker.
+velnor_trusted_runner_available = true
 # Recovery: omit velnor_runner_group so repository-scoped macOS/Linux hosts
 # can claim Velnor-lane jobs without joining org pool velnor-trusted.
 # Restore velnor-trusted after Sentry org fleet is healthy.
