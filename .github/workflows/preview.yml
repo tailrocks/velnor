@@ -197,15 +197,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
+          rev: e59767757694fe1156d652bfb7bb15e80a4a29eb
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=e59767757694fe1156d652bfb7bb15e80a4a29eb" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -294,6 +294,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -490,9 +493,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
+          rev: e59767757694fe1156d652bfb7bb15e80a4a29eb
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=e59767757694fe1156d652bfb7bb15e80a4a29eb" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -512,6 +515,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -629,9 +635,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ba2305d94777b4d7c91277f8d17d53efb6b7ba1a
+          rev: e59767757694fe1156d652bfb7bb15e80a4a29eb
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ba2305d94777b4d7c91277f8d17d53efb6b7ba1a" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=e59767757694fe1156d652bfb7bb15e80a4a29eb" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -651,6 +657,9 @@ jobs:
           install_args: aqua:nextest-rs/nextest/cargo-nextest
           cache: true
           cache_save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0

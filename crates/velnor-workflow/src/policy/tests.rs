@@ -284,10 +284,18 @@ fn pin_reachable_fails_for_a_pin_outside_the_head_history() {
     let missing = pin_reachable(&root, PIN_A, &head, None);
     assert!(!missing.passed);
     assert!(
-        missing.reason.contains("not a commit in this checkout"),
+        missing.reason.contains(&format!(
+            "pin {PIN_A} is not a commit in this full-history checkout"
+        )),
         "{}",
         missing.reason
     );
+    assert!(
+        !missing.reason.contains(&format!("head {head}")),
+        "{}",
+        missing.reason
+    );
+    assert!(!missing.reason.contains("shallow"), "{}", missing.reason);
     git_ok(&root, &["checkout", "-q", "-b", "side"]);
     write(&root.join("README.md"), "side\n");
     let side = commit(&root, "side");
@@ -299,6 +307,62 @@ fn pin_reachable_fails_for_a_pin_outside_the_head_history() {
         sideways.reason
     );
     let _ = fs::remove_dir_all(root);
+}
+
+/// A shallow checkout (`actions/checkout` at its default `fetch-depth: 1`)
+/// holds the head but not the pin it descends from. The rule names the
+/// shallow clone as the cause and the full-history checkout as the fix,
+/// instead of reporting the pin as foreign to the repository.
+#[test]
+fn pin_reachable_names_a_shallow_checkout_as_the_cause() {
+    let origin = temporary_directory("ancestry-shallow-origin");
+    git_ok(&origin, &["init", "-q", "-b", "main"]);
+    write(&origin.join("README.md"), "one\n");
+    let pin = commit(&origin, "pin");
+    write(&origin.join(GENERATION_CONFIG), &generation_config(&pin));
+    let head = commit(&origin, "head");
+
+    let shallow = temporary_directory("ancestry-shallow-clone");
+    let _ = fs::remove_dir_all(&shallow);
+    let origin_url = format!("file://{}", origin.display());
+    git_ok(
+        &origin,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &origin_url,
+            &shallow.display().to_string(),
+        ],
+    );
+    assert_eq!(git_ok(&shallow, &["rev-parse", "HEAD"]), head);
+
+    let report = pin_reachable(&shallow, &pin, &head, None);
+    assert!(!report.passed);
+    assert!(
+        report.reason.contains(&format!(
+            "pin {pin} is not a commit in this shallow checkout"
+        )),
+        "{}",
+        report.reason
+    );
+    assert!(
+        report.reason.contains("fetch-depth: 0"),
+        "{}",
+        report.reason
+    );
+    assert!(
+        !report.reason.contains(&format!("head {head}")),
+        "{}",
+        report.reason
+    );
+
+    // The same pin from the full clone is simply reachable.
+    let full = pin_reachable(&origin, &pin, &head, None);
+    assert!(full.passed, "{}", full.reason);
+    let _ = fs::remove_dir_all(origin);
+    let _ = fs::remove_dir_all(shallow);
 }
 
 /// The base branch advanced its validator after this branch forked. A branch

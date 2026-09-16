@@ -6,7 +6,7 @@ repository = "tailrocks/velnor"
 # validator regenerates the tree with the generator built at this commit and
 # requires a byte-identical result; bump it in a single pin commit after the
 # last generator change (see the plan ledger).
-revision = "ba2305d94777b4d7c91277f8d17d53efb6b7ba1a"
+revision = "e59767757694fe1156d652bfb7bb15e80a4a29eb"
 
 [scan]
 exclude = ["migrations/**"]
@@ -47,8 +47,8 @@ velnor_rust_needs = "dependency-closure"
 # A repo-wide group with cancel-in-progress would cancel every in-progress run
 # on each push anywhere, making green CI unobtainable. Host capacity stays
 # bounded by runner slots: queued jobs wait for a free slot, they never
-# overload the host. Non-PR triggers (push/schedule/dispatch) fall back to
-# github.ref, so main/nightly runs still supersede per branch.
+# overload the host. Pull-request and nightly groups fall back to github.ref;
+# Main groups append github.run_id so every main execution can run concurrently.
 velnor_concurrency_group = "velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
