@@ -6,7 +6,7 @@ repository = "tailrocks/velnor"
 # validator regenerates the tree with the generator built at this commit and
 # requires a byte-identical result; bump it in a single pin commit after the
 # last generator change (see the plan ledger).
-revision = "14c1c69acc102db7b744cad160b93f364516f1cc"
+revision = "294cea830a4b7911a127a9075cc6e3322641a094"
 
 [scan]
 exclude = ["migrations/**"]

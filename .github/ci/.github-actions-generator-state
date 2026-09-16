@@ -1,7 +1,7 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	6ac43a3aa8e67e39
+config	3b56bbdd4dafed44
 scan	9f2b61f74d1125ff
 generator	49
 [outputs]
@@ -10,18 +10,18 @@ generator	49
 .github/actions/setup-velnor-workflow/action.yml	e091e9e1bd171bf2
 .github/ci/project.toml	66d5af0f28309fd0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	6eed9be9ffc6dada
-.github/workflows/ci-policy.yml	0cb66b84667219a9
-.github/workflows/ci-pr.yml	a0067b5a6273ad48
+.github/workflows/ci-main.yml	3ebe88867ab8b631
+.github/workflows/ci-policy.yml	e4a999fc09e492c4
+.github/workflows/ci-pr.yml	6c39835746b90552
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-runtime-products.yml	96f29b76e5756893
-.github/workflows/ci-unit-bun.yml	7ad25510d826cb8a
-.github/workflows/ci-unit-docker.yml	e17c3cb996fa1fe3
-.github/workflows/ci-unit-docs.yml	1dc1f7f756cbe598
-.github/workflows/ci-unit-opentofu.yml	c8594e65c78aafe8
-.github/workflows/ci-unit-rust.yml	166a5352d91683a8
-.github/workflows/maintenance.yml	70a5a48ad58c8a7b
+.github/workflows/ci-unit-bun.yml	6f1b1ad802188f41
+.github/workflows/ci-unit-docker.yml	e4f9e0c3657c13da
+.github/workflows/ci-unit-docs.yml	636dbeaa694cd133
+.github/workflows/ci-unit-opentofu.yml	c669d20763ce49dd
+.github/workflows/ci-unit-rust.yml	57cd989441baa1ca
+.github/workflows/maintenance.yml	224b5c61020f1de5
 .github/workflows/nightly.yml	89ca7a50f4a4403b
-.github/workflows/preview.yml	77c37cf9eec37d90
-.github/workflows/release.yml	d631fa087f043732
+.github/workflows/preview.yml	a75538301610f7a2
+.github/workflows/release.yml	95b135367125ecdb
 config/fleet/velnor-host.env	d14b419216449423
