@@ -138,10 +138,10 @@ fn render_file(
 
 fn renovate_runner(config: &ProjectConfig) -> String {
     let mut labels = config.velnor_labels.clone();
-    if let Some(trusted) = config.velnor_trusted_label.as_deref() {
-        if !labels.iter().any(|label| label == trusted) {
-            labels.push(trusted.to_owned());
-        }
+    if let Some(trusted) = config.velnor_trusted_label.as_deref()
+        && !labels.iter().any(|label| label == trusted)
+    {
+        labels.push(trusted.to_owned());
     }
     velnor_runner(&labels, velnor_runner_group(config))
 }
@@ -191,7 +191,7 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
     if spec.cache {
         let _ = write!(
             cache_steps,
-            r#"      - name: Restore Renovate repository cache
+            r"      - name: Restore Renovate repository cache
         id: renovate-cache
         uses: {cache_restore}
         with:
@@ -203,7 +203,7 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
       - name: Fix Renovate cache ownership
         if: steps.renovate-cache.outputs.cache-matched-key != ''
         run: sudo chown -R 12021:0 /tmp/renovate/
-"#
+"
         );
     }
 
@@ -211,13 +211,13 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
     if spec.cache {
         let _ = write!(
             cache_save_step,
-            r#"      - name: Save Renovate repository cache
+            r"      - name: Save Renovate repository cache
         if: always() && ({cache_save_gate}) && steps.renovate-cache.outputs.cache-hit != 'true'
         uses: {cache_save}
         with:
           path: {cache_path}
           key: velnor-renovate-${{{{ github.repository }}}}-{hash_files}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
-"#
+"
         );
     }
 
@@ -344,8 +344,22 @@ fn shell_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
-    use crate::ProjectConfig;
+    use crate::{config::CacheGithubSection, config::CacheVelnorSection, ProjectConfig};
+
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}: missing value"),
+        }
+    }
 
     fn renovate_config() -> ProjectConfig {
         let mut config = ProjectConfig {
@@ -374,7 +388,7 @@ mod tests {
             renovate_reason: String::new(),
             renovate: None,
             units: Vec::new(),
-            workflow_templates: Default::default(),
+            workflow_templates: BTreeMap::default(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
             ci_required: true,
@@ -391,9 +405,9 @@ mod tests {
             velnor_serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
-            mise_lock_keys: Default::default(),
-            github_cache: Default::default(),
-            velnor_host_cache: Default::default(),
+            mise_lock_keys: BTreeSet::default(),
+            github_cache: CacheGithubSection::default(),
+            velnor_host_cache: CacheVelnorSection::default(),
         };
         config.renovate = Some(RenovateSpec {
             enabled: true,
@@ -410,7 +424,7 @@ mod tests {
     #[test]
     fn renovate_writer_references_token_and_action_pin() {
         let config = renovate_config();
-        let spec = config.renovate.as_ref().unwrap();
+        let spec = must_some(config.renovate.as_ref(), "renovate fixture carries a spec");
         let workflow = render_renovate(&config, spec);
         assert!(workflow.contains("secrets.GH_RENOVATE_TOKEN"));
         assert!(workflow.contains(ActionPin::Renovate.reference()));
@@ -427,7 +441,7 @@ mod tests {
     #[test]
     fn renovate_writer_uses_trusted_runner_labels() {
         let config = renovate_config();
-        let spec = config.renovate.as_ref().unwrap();
+        let spec = must_some(config.renovate.as_ref(), "renovate fixture carries a spec");
         let workflow = render_renovate(&config, spec);
         assert!(workflow.contains("example-trusted"));
         assert!(workflow.contains("self-hosted"));
@@ -436,7 +450,7 @@ mod tests {
     #[test]
     fn renovate_validate_uses_docker_validator_without_secrets() {
         let config = renovate_config();
-        let spec = config.renovate.as_ref().unwrap();
+        let spec = must_some(config.renovate.as_ref(), "renovate fixture carries a spec");
         let workflow = render_renovate_validate(&config, spec);
         assert!(workflow.contains("renovate-config-validator --strict --no-global renovate.json"));
         assert!(workflow.contains("ghcr.io/renovatebot/renovate:44.93.6"));

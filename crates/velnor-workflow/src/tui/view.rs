@@ -686,6 +686,7 @@ mod tests {
                 check: false,
                 force: false,
                 plain: false,
+                pin_build: false,
             },
             receiver,
         )

@@ -2744,12 +2744,14 @@ mod tests {
         let root = scanned_root("renovate-validate-config");
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
-        let error = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [renovate]\nenabled = true\nreason = \"test\"\n",
-        )
-        .validate(&unit_ids, &[], &BTreeSet::new())
-        .expect_err("enabled renovate without declare must fail");
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [renovate]\nenabled = true\nreason = \"test\"\n",
+            )
+            .validate(&unit_ids, &[], &BTreeSet::new()),
+            "enabled renovate without declare must fail",
+        );
         assert!(error
             .to_string()
             .contains("[[declare]] primitive = \"renovate\""));

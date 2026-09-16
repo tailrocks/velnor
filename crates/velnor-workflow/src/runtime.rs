@@ -267,6 +267,8 @@ fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
             serde_json::json!({
                 "crate_version": env!("CARGO_PKG_VERSION"),
                 "revision": crate::SOURCE_REVISION,
+                "closure": crate::SOURCE_CLOSURE,
+                "features": env!("VELNOR_WORKFLOW_FEATURES"),
             })
         );
     } else {
@@ -276,6 +278,65 @@ fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
             crate::SOURCE_REVISION
         );
     }
+    Ok(())
+}
+
+/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH] [--candidate]`:
+/// print the source-closure digest of `SHA` in the repository at `--repo`
+/// (the current directory by default). CI jobs use it to name the product
+/// they need; policy resolves the same digest when it verifies.
+/// `--candidate` names the unit job's own debug build (default features); it
+/// cannot combine with `--profile`.
+fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let (candidate, rest): (Vec<&OsString>, Vec<&OsString>) =
+        arguments.iter().partition(|argument| {
+            argument
+                .to_str()
+                .is_some_and(|value| value == "--candidate")
+        });
+    if candidate.len() > 1 {
+        return Err(GeneratorError::usage(
+            "duplicate option: --candidate".to_owned(),
+        ));
+    }
+    let candidate = !candidate.is_empty();
+    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
+    let options = parse_options(&rest, &["rev", "profile", "repo"])?;
+    let rev = options
+        .get("rev")
+        .ok_or_else(|| GeneratorError::usage("closure requires --rev SHA".to_owned()))?;
+    if !crate::is_full_revision(rev) {
+        return Err(GeneratorError::usage(format!(
+            "closure --rev must be a full 40-character commit SHA, got {rev:?}"
+        )));
+    }
+    if candidate && options.contains_key("profile") {
+        return Err(GeneratorError::usage(
+            "closure --candidate cannot combine with --profile".to_owned(),
+        ));
+    }
+    let profile = options
+        .get("profile")
+        .map_or(crate::closure::PROFILE_RELEASE, String::as_str);
+    if !matches!(
+        profile,
+        crate::closure::PROFILE_RELEASE | crate::closure::PROFILE_DEBUG
+    ) {
+        return Err(GeneratorError::usage(format!(
+            "closure --profile must be release or debug, got {profile:?}"
+        )));
+    }
+    let repo = match options.get("repo") {
+        Some(path) => PathBuf::from(path.as_str()),
+        None => env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
+    };
+    let digest = if candidate {
+        crate::closure::candidate_closure_of_tree(&repo, rev)?
+    } else {
+        crate::closure::closure_of_tree(&repo, rev, crate::closure::CI_FEATURES, profile)?
+    };
+    println!("{digest}");
     Ok(())
 }
 
@@ -324,6 +385,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "version" => {
             print_version(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "closure" => {
+            print_closure(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "cache-plan" => {

@@ -1,22 +1,42 @@
 //! Source identity embedding for `velnor-workflow`.
 //!
-//! The D19 coherence guard needs a `velnor-workflow` binary built at the
-//! pinned policy revision and must be able to *prove* which revision a
-//! candidate binary is, instead of trusting the directory it was found in.
-//! This mirrors `crates/velnor-runner/build.rs`: the exact 40-hex `HEAD` of
-//! the crate's checkout is read from git at build time and stamped into the
-//! binary as `VELNOR_WORKFLOW_SOURCE_SHA` (`velnor-workflow --revision`,
-//! `velnor-workflow version --json`).
+//! Two values are stamped into every binary:
 //!
-//! Unlike the runner there is no release gate here: `cargo install --git …
-//! --rev <sha>` builds inside cargo's git checkout, whose detached `HEAD` is
-//! exactly `<sha>`, and a workspace build reports the checked-out commit. A
-//! tree without git (or a git failure) stamps `unknown`, which no
-//! pinned-revision probe can ever match — the guard then fails closed rather
-//! than accept an unprovable binary.
+//! * `VELNOR_WORKFLOW_SOURCE_SHA`: the exact 40-hex `HEAD` of the crate's
+//!   checkout (`velnor-workflow --revision`). Provenance metadata: which
+//!   commit the binary was built from.
+//! * `VELNOR_WORKFLOW_CLOSURE_DIGEST`: the source-closure digest of the
+//!   checkout's `HEAD` tree (`velnor-workflow --closure`, see
+//!   `src/closure.rs`). Product identity: binaries built from different
+//!   commits with the same closure are interchangeable renderers.
+//!
+//! The closure duplicates the canonicalization in `src/closure.rs` (a build
+//! script cannot import the crate it builds): `git ls-tree -r HEAD` over the
+//! closure paths, re-sorted in byte order, plus the footer, hashed with
+//! SHA-256. The footer version and path list are pinned by unit tests against
+//! `src/closure.rs`, so the two implementations cannot drift silently: any
+//! drift fails closed (digests mismatch, no product is accepted).
+//!
+//! A tree without git (or a git failure) stamps `unknown` for both values,
+//! which no pinned-revision or closure probe can ever match.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use sha2::{Digest, Sha256};
+
+/// Closure paths, mirroring `closure::CLOSURE_PATHS`.
+const CLOSURE_PATHS: &[&str] = &[
+    "crates/velnor-workflow",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "rust-toolchain",
+    ".cargo",
+];
+
+/// Closure algorithm version, mirroring `closure::CLOSURE_VERSION`.
+const CLOSURE_VERSION: u8 = 1;
 
 fn main() {
     let manifest_dir =
@@ -38,6 +58,62 @@ fn main() {
         .filter(|value| is_full_sha(value))
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=VELNOR_WORKFLOW_SOURCE_SHA={sha}");
+    println!(
+        "cargo:rustc-env=VELNOR_WORKFLOW_CLOSURE_DIGEST={}",
+        self_closure(&manifest_dir).unwrap_or_else(|| "unknown".to_owned())
+    );
+    println!(
+        "cargo:rustc-env=VELNOR_WORKFLOW_FEATURES={}",
+        cargo_features()
+    );
+}
+
+/// Closure digest of the checkout's `HEAD` tree, or `None` when it cannot be
+/// proven (no git, unknown `HEAD`, or no closure inputs tracked).
+fn self_closure(manifest_dir: &Path) -> Option<String> {
+    let root = git(manifest_dir, &["rev-parse", "--show-toplevel"])?;
+    let root = PathBuf::from(root);
+    let mut arguments = vec!["ls-tree", "-r", "HEAD", "--"];
+    arguments.extend_from_slice(CLOSURE_PATHS);
+    let listing = git(&root, &arguments)?;
+    let mut lines: Vec<&str> = listing.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort_unstable();
+    let mut bytes = Vec::new();
+    for line in lines {
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(b'\n');
+    }
+    bytes.extend_from_slice(
+        format!(
+            "closure-version:{CLOSURE_VERSION}\nfeatures:{}\nprofile:{}\n",
+            cargo_features(),
+            std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned())
+        )
+        .as_bytes(),
+    );
+    let digest = Sha256::digest(&bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        output.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    Some(output)
+}
+
+/// Enabled Cargo features as a sorted comma list (`CARGO_FEATURE_*` is set
+/// per enabled feature, uppercased with `-` mapped to `_`).
+fn cargo_features() -> String {
+    let mut features: Vec<String> = std::env::vars()
+        .filter_map(|(name, _)| {
+            name.strip_prefix("CARGO_FEATURE_")
+                .map(str::to_ascii_lowercase)
+        })
+        .collect();
+    features.sort();
+    features.join(",")
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {

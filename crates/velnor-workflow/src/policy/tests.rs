@@ -13,6 +13,8 @@ use crate::{PolicyJobSpec, ProjectConfig, RunnerMode};
 
 const PIN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PIN_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const CLOSURE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const CLOSURE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
     match result {
@@ -44,13 +46,13 @@ fn write(path: &Path, content: &str) {
     must(fs::write(path, content), "write file");
 }
 
-fn fake_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
+fn fake_velnor_workflow(directory: &Path, revision: &str, closure: &str) -> PathBuf {
     let binary = directory.join("velnor-workflow");
     must(
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nexit 2\n"
+                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\nexit 2\n"
             ),
         ),
         "write fake velnor-workflow",
@@ -66,6 +68,28 @@ fn fake_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
     binary
 }
 
+fn fake_legacy_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
+    let binary = directory.join("velnor-workflow");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo unknown; exit 0; fi\nexit 2\n"
+            ),
+        ),
+        "write fake legacy velnor-workflow",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "mark fake legacy velnor-workflow executable",
+        );
+    }
+    binary
+}
+
 fn lookup(
     pinned_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
@@ -76,6 +100,22 @@ fn lookup(
         search_path,
         install_root,
         build_forbidden: true,
+        candidate_manifest: None,
+    }
+}
+
+fn lookup_with_manifest(
+    pinned_binary: Option<PathBuf>,
+    search_path: Option<std::ffi::OsString>,
+    install_root: PathBuf,
+    candidate_manifest: PathBuf,
+) -> PinnedBinaryLookup {
+    PinnedBinaryLookup {
+        pinned_binary,
+        search_path,
+        install_root,
+        build_forbidden: true,
+        candidate_manifest: Some(candidate_manifest),
     }
 }
 
@@ -91,47 +131,50 @@ fn checkout_source(root: &Path) -> PinSource {
 #[test]
 fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
     let root = temporary_directory("pinned-env");
-    let pinned = fake_velnor_workflow(&root, PIN_A);
+    let pinned = fake_velnor_workflow(&root, PIN_A, CLOSURE_A);
     let lookup = lookup(Some(pinned.clone()), None, root.join("install"));
+    let expected = [CLOSURE_A.to_owned()];
     assert_eq!(
         must(
-            resolve_pinned_binary(PIN_A, &lookup, &checkout_source(&root)),
+            resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
             "env binary at the pin"
         ),
         pinned
     );
+    let other = [CLOSURE_B.to_owned()];
     let error = must_fail(
-        resolve_pinned_binary(PIN_B, &lookup, &checkout_source(&root)),
-        "env binary at another revision",
+        resolve_pinned_binary(PIN_A, Some(&other), &lookup, &checkout_source(&root)),
+        "env binary at another closure",
     )
     .to_string();
     assert!(error.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV), "{error}");
     assert!(
-        error.contains(&format!("reports revision {PIN_A}")),
-        "an explicit pointer at the wrong revision is refused, not skipped: {error}"
+        error.contains(&format!("reports closure {CLOSURE_A}")),
+        "an explicit pointer at the wrong closure is refused, not skipped: {error}"
     );
-    assert!(error.contains(PIN_B), "{error}");
+    assert!(error.contains(PIN_A), "{error}");
     let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(unix)]
 #[test]
-fn path_binary_is_used_when_its_reported_revision_is_the_pin() {
+fn path_binary_is_used_when_its_reported_closure_is_the_pin() {
     let root = temporary_directory("pinned-path");
     let stale = root.join("stale");
     let current = root.join("current");
     must(fs::create_dir_all(&stale), "stale dir");
     must(fs::create_dir_all(&current), "current dir");
-    fake_velnor_workflow(&stale, PIN_B);
-    let wanted = fake_velnor_workflow(&current, PIN_A);
+    fake_velnor_workflow(&stale, PIN_B, CLOSURE_B);
+    let wanted = fake_velnor_workflow(&current, PIN_A, CLOSURE_A);
     let lookup = lookup(
         None,
         env::join_paths([&stale, &current]).ok(),
         root.join("install"),
     );
+    let expected = [CLOSURE_A.to_owned()];
     assert_eq!(
         must(
-            resolve_pinned_binary(PIN_A, &lookup, &checkout_source(&root)),
+            resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
             "PATH search"
         ),
         wanted,
@@ -146,28 +189,74 @@ fn forbidden_build_fails_closed_listing_every_candidate() {
     let root = temporary_directory("pinned-offline");
     let stale_dir = root.join("stale");
     must(fs::create_dir_all(&stale_dir), "stale dir");
-    let stale = fake_velnor_workflow(&stale_dir, PIN_B);
+    let stale = fake_velnor_workflow(&stale_dir, PIN_B, CLOSURE_B);
     let install_root = root.join("install");
     must(fs::create_dir_all(install_root.join("bin")), "install bin");
-    let installed = fake_velnor_workflow(&install_root.join("bin"), PIN_B);
+    let installed = fake_velnor_workflow(&install_root.join("bin"), PIN_B, CLOSURE_B);
     let lookup = lookup(None, env::join_paths([&stale_dir]).ok(), install_root);
+    let expected = [CLOSURE_A.to_owned()];
     let error = must_fail(
-        resolve_pinned_binary(PIN_A, &lookup, &checkout_source(&root)),
+        resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
         "forbidden build miss",
     )
     .to_string();
     assert!(error.contains("building one is forbidden here"), "{error}");
     assert!(error.contains(PIN_A), "{error}");
     assert!(
-        error.contains(&format!("{} reports revision {PIN_B}", stale.display())),
+        error.contains("--pin-build"),
+        "the fail-closed message names the local-development escape hatch: {error}"
+    );
+    assert!(
+        error.contains(&format!("{}: reports closure {CLOSURE_B}", stale.display())),
         "{error}"
     );
     assert!(
-        error.contains(&format!("{} reports revision {PIN_B}", installed.display())),
-        "a previously installed binary is proven by revision, not by its directory name: {error}"
+        error.contains(&format!(
+            "{}: reports closure {CLOSURE_B}",
+            installed.display()
+        )),
+        "a previously installed binary is proven by closure, not by its directory name: {error}"
     );
     assert!(error.contains(VELNOR_WORKFLOW_PINNED_BINARY_ENV), "{error}");
     assert!(!error.contains("cargo install"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn revision_fallback_requires_the_pin_and_a_closure_report() {
+    let root = temporary_directory("pinned-fallback");
+    for name in ["matching", "wrong", "legacy"] {
+        must(fs::create_dir_all(root.join(name)), "fallback dir");
+    }
+    let matching = fake_velnor_workflow(&root.join("matching"), PIN_A, CLOSURE_A);
+    let matching_lookup = lookup(Some(matching.clone()), None, root.join("install"));
+    assert_eq!(
+        must(
+            resolve_pinned_binary(PIN_A, None, &matching_lookup, &checkout_source(&root)),
+            "env binary at the pin without history"
+        ),
+        matching
+    );
+    let wrong = fake_velnor_workflow(&root.join("wrong"), PIN_B, CLOSURE_B);
+    let wrong_lookup = lookup(Some(wrong), None, root.join("install"));
+    let error = must_fail(
+        resolve_pinned_binary(PIN_A, None, &wrong_lookup, &checkout_source(&root)),
+        "env binary at another revision without history",
+    )
+    .to_string();
+    assert!(
+        error.contains(&format!("reports revision {PIN_B}")),
+        "an explicit pointer at the wrong revision is refused, not skipped: {error}"
+    );
+    let legacy = fake_legacy_velnor_workflow(&root.join("legacy"), PIN_A);
+    let legacy_lookup = lookup(Some(legacy), None, root.join("install"));
+    let error = must_fail(
+        resolve_pinned_binary(PIN_A, None, &legacy_lookup, &checkout_source(&root)),
+        "binary without a closure report",
+    )
+    .to_string();
+    assert!(error.contains("source-closure digest"), "{error}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -175,9 +264,15 @@ fn forbidden_build_fails_closed_listing_every_candidate() {
 fn the_running_binary_is_the_pin_when_built_at_it() {
     let root = temporary_directory("pinned-self");
     let lookup = lookup(None, None, root.join("install"));
+    let expected = [SOURCE_CLOSURE.to_owned()];
     let resolved = must(
-        resolve_pinned_binary(SOURCE_REVISION, &lookup, &checkout_source(&root)),
-        "the running binary at its own revision",
+        resolve_pinned_binary(
+            SOURCE_REVISION,
+            Some(&expected),
+            &lookup,
+            &checkout_source(&root),
+        ),
+        "the running binary at its own closure",
     );
     assert_eq!(resolved, must(env::current_exe(), "current exe"));
     let _ = fs::remove_dir_all(root);
@@ -458,6 +553,10 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     );
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
     assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
+    assert!(
+        entrypoint.contains("with no secret references"),
+        "the trust invariant states the absence honestly: {entrypoint}"
+    );
     assert!(!entrypoint.contains("secrets."), "{entrypoint}");
     assert_eq!(
         entrypoint.matches("permissions:\n").count(),
@@ -475,7 +574,49 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
         drift
             .details
             .iter()
-            .any(|detail| detail.contains("--rev") && detail.contains(PIN_A)),
+            .any(|detail| detail.contains(BASE_REVISION_ENV) && detail.contains(PIN_A)),
+        "{:?}",
+        drift.details
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The owner policy job acquires products (no `--rev <sha>` install) and its
+/// candidate step passes shell variables to `closure --rev=`: those variable
+/// references are not pin literals, so the pin rule still passes on the
+/// exported revision and still names it on drift.
+#[test]
+fn owner_entrypoint_pin_ignores_variable_references() {
+    let job = crate::policy_job(&PolicyJobSpec {
+        name: "Policy",
+        revision: PIN_A,
+        runner: "ubuntu-24.04",
+        repository: crate::workflow_setup_action_repository(),
+        cache_backend: "github",
+        trusted_gate: None,
+        default_branch: "main",
+    });
+    assert!(job.contains("--rev=\"$pin\""), "{job}");
+    assert!(
+        !job.contains("--rev "),
+        "rendered templates never use the space form a pre-product base validator scans for: {job}"
+    );
+    assert!(
+        job.contains(&format!(
+            "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
+        )),
+        "the Enforce step binds the candidate manifest through the unset-safe fallback: {job}"
+    );
+    let root = entrypoint_tree("entrypoint-owner-pin", &job);
+    let pin = entrypoint_pin(&root, PIN_A);
+    assert!(pin.passed, "{:?}", pin.details);
+    let drift = entrypoint_pin(&root, PIN_B);
+    assert!(!drift.passed);
+    assert!(
+        drift
+            .details
+            .iter()
+            .any(|detail| detail.contains(BASE_REVISION_ENV) && detail.contains(PIN_A)),
         "{:?}",
         drift.details
     );
@@ -548,11 +689,12 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
         name: "Policy",
         revision: PIN_A,
         runner: "[self-hosted, velnor]",
+        repository: crate::regen_repository_marker(),
         cache_backend: "local",
         trusted_gate: Some(&crate::control_plane_trusted_gate("main")),
         default_branch: "main",
     });
-    assert!(job.contains("--no-pin-build"), "{job}");
+    assert!(!job.contains("--pin-build"), "{job}");
     assert!(job.contains("    if: ${{ github.event_name == 'pull_request_target' ||"));
     assert!(!job.contains("--ruleset-contexts"), "{job}");
 }
@@ -636,6 +778,7 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
         base_revision: PIN_A.to_owned(),
         ruleset_contexts: Some(vec!["ci-required".to_owned(), "DCO".to_owned()]),
         build_pin: false,
+        candidate_manifest: None,
     };
     let report = must(evaluate(&options), "evaluate ungated tree");
     let runners = must_some(report.rule("trusted-runners"), "trusted-runners rule");
@@ -724,5 +867,469 @@ fn cli_requires_the_base_validator_revision() {
     )
     .to_string();
     assert!(unknown.contains("--approved-policy-revision"), "{unknown}");
+    let duplicate = must_fail(
+        run_cli(&[
+            std::ffi::OsString::from("--candidate-manifest"),
+            std::ffi::OsString::from("/first.json"),
+            std::ffi::OsString::from("--candidate-manifest"),
+            std::ffi::OsString::from("/second.json"),
+        ]),
+        "candidate manifest given twice",
+    )
+    .to_string();
+    assert!(duplicate.contains("--candidate-manifest"), "{duplicate}");
+    assert!(duplicate.contains("given twice"), "{duplicate}");
     let _ = fs::remove_dir_all(root);
+}
+
+// ---------------------------------------------------------------------------
+// Candidate render exception
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
+    let binary = directory.join("candidate");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
+            ),
+        ),
+        "write fake candidate renderer",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "mark fake candidate renderer executable",
+        );
+    }
+    binary
+}
+
+#[cfg(unix)]
+fn closure_fixture(name: &str) -> (PathBuf, String) {
+    let root = temporary_directory(name);
+    git_ok(&root, &["init", "-q", "-b", "main"]);
+    write(
+        &root.join("crates/velnor-workflow/src/lib.rs"),
+        "pub fn f() {}\n",
+    );
+    write(&root.join("Cargo.toml"), "[workspace]\n");
+    write(&root.join("Cargo.lock"), "# lock\n");
+    write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
+    let head = commit(&root, "fixture");
+    (root, head)
+}
+
+// NOTE: `candidate_render_is_accepted_only_from_a_head_authentic_binary` was
+// deleted here. It asserted that an env-slot binary is accepted when its
+// `--closure` stdout echoes the wanted closure — but that expectation WAS
+// the vulnerability itself: a `--closure` echo is a self-report by
+// untrusted bytes, and treating it as authenticity let any binary that
+// prints the right string execute as the candidate. Acceptance now
+// requires the manifest binding (closure equality plus digest match before
+// any execution); the tests below pin each clause of that rule.
+
+/// A candidate manifest binding `binary` to `closure`: the digest is the
+/// real SHA-256 of the binary bytes, so only a byte-identical binary
+/// satisfies the binding.
+#[cfg(unix)]
+fn candidate_manifest_for(
+    directory: &Path,
+    name: &str,
+    binary: &Path,
+    closure: &str,
+    revision: &str,
+) -> PathBuf {
+    use sha2::Digest as _;
+    let bytes = must(fs::read(binary), "read fake binary bytes");
+    let mut digest = String::with_capacity(64);
+    for byte in sha2::Sha256::digest(&bytes) {
+        let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
+    }
+    let manifest = directory.join(name);
+    must(
+        fs::write(
+            &manifest,
+            serde_json::json!({
+                "profile": "debug",
+                "platform": "Linux-X64",
+                "repository": crate::workflow_setup_action_repository(),
+                "run_id": "123",
+                "revision": revision,
+                "closure": closure,
+                "binary_sha256": digest,
+            })
+            .to_string(),
+        ),
+        "write candidate manifest",
+    );
+    manifest
+}
+
+/// A fake candidate renderer that records every `--closure` probe in
+/// `sentinel`, so tests can prove the binary was never executed at all.
+#[cfg(unix)]
+fn fake_probed_candidate_renderer(directory: &Path, closure: &str, sentinel: &Path) -> PathBuf {
+    let binary = directory.join("candidate");
+    must(
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --closure ]; then touch \"{}\"; echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n",
+                sentinel.display()
+            ),
+        ),
+        "write fake probed candidate renderer",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
+            "mark fake probed candidate renderer executable",
+        );
+    }
+    binary
+}
+
+#[cfg(unix)]
+#[test]
+fn bound_candidate_matching_head_tree_is_accepted() {
+    let (root, head) = closure_fixture("candidate-bound");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-bound-scratch");
+    let binary = fake_candidate_renderer(&root, &wanted);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    assert_eq!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "bound candidate reproduces the tree",
+        )
+        .as_deref(),
+        Some(wanted.as_str())
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
+    let (root, head) = closure_fixture("candidate-lying");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-lying-scratch");
+    let sentinel = root.join("closure-probed");
+    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
+    // Bind the manifest to *other* bytes, so the binary echoes the wanted
+    // closure but its digest misses.
+    let other = root.join("other-bytes");
+    must(fs::write(&other, "different bytes"), "write decoy bytes");
+    let manifest = candidate_manifest_for(&root, "candidate-manifest.json", &other, &wanted, &head);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    assert!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "digest mismatch never errors, it simply does not prove",
+        )
+        .is_none(),
+        "a binary whose digest misses the manifest is not the candidate"
+    );
+    assert!(
+        !sentinel.exists(),
+        "the digest gate fires before any execution, not even `--closure`"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_for_another_tree_is_rejected() {
+    let (root, head) = closure_fixture("candidate-other-tree");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-other-tree-scratch");
+    // Self-consistent but for another tree: the binary echoes CLOSURE_A and
+    // the manifest binds CLOSURE_A with a matching digest.
+    let binary = fake_candidate_renderer(&root, CLOSURE_A);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    let error = must_fail(
+        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        "manifest for another tree",
+    )
+    .to_string();
+    assert!(error.contains("names closure"), "{error}");
+    assert!(error.contains(CLOSURE_A), "{error}");
+    assert!(error.contains(&wanted), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn unbound_env_candidate_is_rejected_without_manifest() {
+    let (root, head) = closure_fixture("candidate-unbound");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-unbound-scratch");
+    let sentinel = root.join("closure-probed");
+    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
+    let lookup = lookup(Some(binary), None, root.join("install"));
+    let excludes = std::collections::BTreeSet::new();
+    assert!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "missing manifest never errors, it disables the env slot",
+        )
+        .is_none(),
+        "an env-slot binary without a manifest is never the candidate"
+    );
+    assert!(
+        !sentinel.exists(),
+        "an unbound env-slot binary is skipped, never executed"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn malformed_candidate_manifest_is_rejected() {
+    let (root, head) = closure_fixture("candidate-malformed");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-malformed-scratch");
+    let binary = fake_candidate_renderer(&root, &wanted);
+    let digest = {
+        use sha2::Digest as _;
+        let bytes = must(fs::read(&binary), "read fake binary bytes");
+        let mut digest = String::with_capacity(64);
+        for byte in sha2::Sha256::digest(&bytes) {
+            let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
+        }
+        digest
+    };
+    let cases = [
+        ("truncated".to_owned(), "{not json".to_owned()),
+        (
+            "short-revision".to_owned(),
+            serde_json::json!({"revision": "abc", "closure": wanted, "binary_sha256": digest})
+                .to_string(),
+        ),
+        (
+            "short-closure".to_owned(),
+            serde_json::json!({"revision": head, "closure": "abc", "binary_sha256": digest})
+                .to_string(),
+        ),
+        (
+            "short-digest".to_owned(),
+            serde_json::json!({"revision": head, "closure": wanted, "binary_sha256": "abc"})
+                .to_string(),
+        ),
+    ];
+    for (name, body) in &cases {
+        let manifest = root.join(format!("candidate-manifest-{name}.json"));
+        must(fs::write(&manifest, body), "write malformed manifest");
+        let lookup =
+            lookup_with_manifest(Some(binary.clone()), None, root.join("install"), manifest);
+        let excludes = std::collections::BTreeSet::new();
+        let error = must_fail(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            &format!("malformed manifest {name}"),
+        )
+        .to_string();
+        assert!(
+            error.contains(&format!("candidate-manifest-{name}.json")),
+            "{name}: the error names the manifest: {error}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[test]
+fn candidate_manifest_source_prefers_flag_over_env() {
+    // The flag wins over the environment, so generated CI stays auditable.
+    // (In-process: setting process env needs `unsafe`, which this crate
+    // forbids, so the flag directions — which hold in every environment —
+    // are pinned here, and the environment-fallback direction is pinned by
+    // the `policy` CLI subprocess test in `velnor_first_ci.rs`, which owns
+    // the child's environment.)
+    assert_eq!(
+        candidate_manifest_source(Some("/flag/manifest.json")),
+        Some(PathBuf::from("/flag/manifest.json"))
+    );
+    // An explicit empty flag disables the binding.
+    assert_eq!(candidate_manifest_source(Some("")), None);
+    // Without either source the env-slot candidate is disabled. Like
+    // `cli_requires_the_base_validator_revision`, this relies on the ambient
+    // test environment not exporting the variable.
+    assert_eq!(candidate_manifest_source(None), None);
+}
+
+#[test]
+fn from_env_consent_mapping_is_fail_closed() {
+    // Without `--pin-build` the pin is never built, in every environment.
+    assert!(PinnedBinaryLookup::from_env(PIN_A, false, None).build_forbidden);
+    assert!(
+        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
+            .build_forbidden
+    );
+    // The explicit manifest survives; without one the environment fallback
+    // applies (unset in the ambient test environment, so `None` here).
+    assert_eq!(
+        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
+            .candidate_manifest,
+        Some(PathBuf::from("/manifest.json"))
+    );
+    assert_eq!(
+        PinnedBinaryLookup::from_env(PIN_A, false, None).candidate_manifest,
+        None
+    );
+    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`;
+    // setting process env needs `unsafe`, which this crate forbids, so that
+    // direction is pinned by the `--check` CLI subprocess test in
+    // `velnor_first_ci.rs`, which owns the child's environment.
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_render_rejects_a_binary_claiming_another_closure() {
+    let (root, head) = closure_fixture("candidate-foreign");
+    let wanted = must(
+        crate::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-foreign-scratch");
+    // Valid binding for the audited tree (manifest closure plus the real
+    // digest of the binary bytes), but the binary echoes CLOSURE_A: the
+    // `--closure` self-report stays as the final tripwire.
+    let binary = fake_candidate_renderer(&root, CLOSURE_A);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    assert!(
+        must(
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+            "foreign closure never errors, it simply does not prove",
+        )
+        .is_none(),
+        "a binary reporting another closure is not the tree's candidate"
+    );
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[test]
+fn candidate_render_is_unavailable_without_git_history() {
+    let root = temporary_directory("candidate-nogit");
+    let scratch = temporary_directory("candidate-nogit-scratch");
+    let binary = root.join("missing");
+    let lookup = lookup(Some(binary), None, root.join("install"));
+    let excludes = std::collections::BTreeSet::new();
+    assert!(must(
+        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        "no checkout, no candidate",
+    )
+    .is_none());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[test]
+fn generated_tree_report_distinguishes_pin_candidate_and_stale_main() {
+    let pin = generated_tree_report(PIN_A, Ok(TreeComparison::Pin), false);
+    assert!(pin.passed);
+    assert!(pin.reason.contains(PIN_A), "{}", pin.reason);
+    let flight = generated_tree_report(
+        PIN_A,
+        Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
+        false,
+    );
+    assert!(flight.passed, "{:?}", flight.details);
+    assert!(flight.reason.contains("in flight"), "{}", flight.reason);
+    assert!(flight.reason.contains("after merge"), "{}", flight.reason);
+    let stale = generated_tree_report(
+        PIN_A,
+        Ok(TreeComparison::Candidate(CLOSURE_A.to_owned())),
+        true,
+    );
+    assert!(!stale.passed);
+    assert!(
+        stale.reason.contains("stale on mainline"),
+        "{}",
+        stale.reason
+    );
+    let drift = generated_tree_report(
+        PIN_A,
+        Ok(TreeComparison::Differences(vec!["ci-pr.yml".to_owned()])),
+        false,
+    );
+    assert!(!drift.passed);
+    assert_eq!(drift.details, vec!["ci-pr.yml".to_owned()]);
+}
+
+/// A base validator from before the product re-architecture scans the
+/// entrypoint for `--rev ` (space) and the revision env only. Every value it
+/// can see in a current entrypoint must equal the pin, or the transition
+/// itself could never pass policy.
+#[test]
+fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
+    for repository in [
+        crate::workflow_setup_action_repository(),
+        "example/consumer",
+    ] {
+        let job = crate::policy_job(&PolicyJobSpec {
+            name: "Policy",
+            revision: PIN_A,
+            runner: "ubuntu-24.04",
+            repository,
+            cache_backend: "github",
+            trusted_gate: None,
+            default_branch: "main",
+        });
+        let mut values = Vec::new();
+        for line in job.lines() {
+            for marker in ["--rev ", &format!("{BASE_REVISION_ENV}: ")] {
+                if let Some(index) = line.find(marker) {
+                    let value = line[index + marker.len()..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .trim_matches(|character| character == '"' || character == '\\');
+                    values.push(value.to_owned());
+                }
+            }
+        }
+        assert!(
+            !values.is_empty(),
+            "the legacy scan must see the pin it enforces for {repository}"
+        );
+        assert!(
+            values.iter().all(|value| value == PIN_A),
+            "legacy markers must all name the pin for {repository}: {values:?}"
+        );
+    }
 }

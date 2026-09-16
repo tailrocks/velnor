@@ -18,11 +18,16 @@ jobs:
     name: Policy
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # Trust invariant: this job runs the base branch's validator against the
-    # audited tree under pull_request_target. It holds `contents: read` only,
-    # references no secrets, and its checkout persists no credentials, so
-    # building and running the tree's declared generator here is no more
-    # privileged than the pull_request lanes that already build the tree.
+    # Trust invariant: this job runs the base branch's Stage-0 validator
+    # product against the audited tree under pull_request_target. It holds
+    # `contents: read` only, references no secrets, persists no credentials,
+    # and never compiles. When the audited pin's closure differs from the
+    # base validator's, it additionally EXECUTES the PR run's prebuilt
+    # candidate generator — PR-built code, same-repository runs only, bound
+    # to the audited tree by manifest closure plus binary digest before
+    # execution — with no secret references, no persisted credentials, the
+    # read-only github.token confined to the Acquire/Ruleset API steps,
+    # and both candidate exec points tokenless.
     permissions:
       contents: read
     steps:
@@ -43,39 +48,78 @@ jobs:
             git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
           fi
           git checkout --quiet --detach "$HEAD_SHA"
-      - name: Bound the Mr. Boxington store
-        shell: bash
-        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
-      - name: Set up Mr. Boxington
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+      - name: Check out base setup action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          backend: github
-          version: 1.11.1
-          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-ad7317713cf39ca32fb7ae69cf1e04db2f688dbc
-          restore-keys: |
-            velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-
-      - name: Install pinned Velnor workflow runtime
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/actions/setup-velnor-workflow
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        uses: ./.github/actions/setup-velnor-workflow
+        with:
+          rev: ad7317713cf39ca32fb7ae69cf1e04db2f688dbc
+          checkout-path: ${{ github.workspace }}/policy-checkout
+      - name: Acquire candidate generator product
+        working-directory: policy-checkout
         env:
-          CARGO_HOME: ${{ runner.temp }}/velnor-workflow-cargo-home
-          CARGO_TARGET_DIR: ${{ runner.temp }}/velnor-workflow-cargo-target
-          VELNOR_WORKFLOW_INSTALL_DIR: ${{ runner.temp }}/velnor-workflow-install
-          VELNOR_WORKFLOW_ROOT: ${{ runner.temp }}/velnor-workflow
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          BASE_PIN: ad7317713cf39ca32fb7ae69cf1e04db2f688dbc
         run: |
           set -euo pipefail
-          install -d -m 700 \
-            "$CARGO_HOME" \
-            "$CARGO_TARGET_DIR" \
-            "$VELNOR_WORKFLOW_INSTALL_DIR"
-          cd "$VELNOR_WORKFLOW_INSTALL_DIR"
-          env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-            cargo install \
-            --locked \
-            --git https://github.com/tailrocks/velnor \
-            --rev ad7317713cf39ca32fb7ae69cf1e04db2f688dbc \
-            --root "$VELNOR_WORKFLOW_ROOT" \
-            velnor-workflow \
-            --bin velnor-workflow
-          echo "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"
+          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
+          test "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"
+          test "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }
+          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
+          pin_closure="$(velnor-workflow closure --rev="$pin")"
+          if [[ "$pin_closure" == "$base_closure" ]]; then
+            echo "pin $pin shares the base closure; the Stage-0 validator renders"
+            echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || { echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }
+          pin_candidate="$(velnor-workflow closure --rev="$pin" --candidate)"
+          name="velnor-workflow-candidate-${pin_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"
+          deadline=$((SECONDS + 900))
+          run_id=""
+          while (( SECONDS < deadline )); do
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository_id == .repository.id)]')"
+            waiting=false
+            while read -r candidate_run; do
+              test "$candidate_run" != '' || continue
+              status="$(jq -r .status <<<"$candidate_run")"
+              id="$(jq -r .id <<<"$candidate_run")"
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq --arg name "$name" -e '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
+                run_id="$id"
+                break 2
+              fi
+              [[ "$status" == "completed" ]] || waiting=true
+            done <<<"$(jq -c '.[]' <<<"$runs")"
+            [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }
+            sleep 15
+          done
+          [[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }
+          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
+          rm -rf "$candidate"
+          mkdir -p "$candidate"
+          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
+          jq -e --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{40}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{print $1}')"
+          else
+            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{print $1}')"
+          fi
+          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
+          [[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }
+          chmod 0755 "$candidate/velnor-workflow"
+          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
+          [[ "$manifest_closure" == "$pin_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the pin's candidate $pin_candidate" >&2; exit 1; }
+          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
+          [[ "$reported" == "$manifest_closure" ]] || { echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
       - name: Resolve required status checks
         env:
           GH_TOKEN: ${{ github.token }}
@@ -100,7 +144,9 @@ jobs:
             --workflow-root "$WORKFLOW_ROOT" \
             --head-sha "$HEAD_SHA" \
             --base-sha "$BASE_SHA" \
+            --candidate-manifest "${VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}" \
             --ruleset-contexts "$RULESET_CONTEXTS"
+
       - name: Set up actionlint
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
@@ -108,4 +154,6 @@ jobs:
           cache: false
       - name: Lint caller workflows
         working-directory: policy-checkout
+        env:
+          MISE_NO_CONFIG: "1"
         run: mise exec actionlint@1.7.12 -- actionlint
