@@ -57,9 +57,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -101,9 +101,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Restore "Bun package (velnor)" cache
@@ -138,9 +138,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Expose GitHub Actions runtime
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Set up Docker Buildx
@@ -170,9 +170,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Documentation cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -205,9 +205,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
@@ -245,9 +245,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -352,10 +352,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust dependency policy" cache
         id: cache
@@ -390,9 +391,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -460,10 +461,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (unit-collector)" cache
         id: cache
@@ -512,9 +514,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -582,10 +584,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-bench)" cache
         id: cache
@@ -634,9 +637,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -704,10 +707,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-client)" cache
         id: cache
@@ -756,9 +760,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -826,10 +830,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-control)" cache
         id: cache
@@ -878,9 +883,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -948,10 +953,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-model)" cache
         id: cache
@@ -1000,9 +1006,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1070,10 +1076,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-render)" cache
         id: cache
@@ -1122,9 +1129,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1192,10 +1199,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-runner)" cache
         id: cache
@@ -1244,9 +1252,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1314,10 +1322,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-tools)" cache
         id: cache
@@ -1366,9 +1375,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1436,10 +1445,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-workflow)" cache
         id: cache
@@ -1488,9 +1498,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1558,10 +1568,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnor-workflow-contract)" cache
         id: cache
@@ -1610,9 +1621,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1680,10 +1691,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust crate (velnorctl)" cache
         id: cache
@@ -1732,9 +1744,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1800,10 +1812,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Restore "Rust production topology" cache
         id: cache
@@ -2565,7 +2578,7 @@ jobs:
       - name: Provision pinned Velnor workflow policy runtime
         shell: bash
         env:
-          PINNED_REVISION: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          PINNED_REVISION: 541d8926737213542156ee32e420010817f8a323
         run: |
           set -euo pipefail
           binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
@@ -2831,9 +2844,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -3039,10 +3052,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Build the workflow binary for the image
         env:
@@ -3231,9 +3245,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3301,10 +3315,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Export metadata from one release-build binary
         id: export
@@ -3427,10 +3442,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Save mold 2.42.0 cache
         if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true'
@@ -3515,6 +3531,17 @@ jobs:
         if: steps.guest-seed-reuse.outputs.restored != 'true'
         run: |
           set -euo pipefail
+          # Hosted mold setup replaces /usr/bin/ld. Linux kconfig then fails
+          # closed with "ld: unknown linker" / "this linker is not supported".
+          if [ -x /usr/bin/ld.bfd ]; then
+            if [ "$(id -u)" -eq 0 ]; then
+              ln -sf /usr/bin/ld.bfd /usr/bin/ld
+            else
+              sudo ln -sf /usr/bin/ld.bfd /usr/bin/ld
+            fi
+          fi
+          ld --version | grep -Eiq 'GNU (ld|gold)|bfd' \
+            || { echo "::error::kernel build needs GNU ld; mold must not own /usr/bin/ld" >&2; exit 1; }
           mkdir -p dist/microvm
           agent="target/$TARGET/release/velnor-guest-agent"
           mbx run --locked --release --package velnor-runner --bin velnor-guest-image -- \
@@ -3581,9 +3608,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 9466fc714f7c4cc1f8e81a210cb9e07a4c439efb
+          rev: 541d8926737213542156ee32e420010817f8a323
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9466fc714f7c4cc1f8e81a210cb9e07a4c439efb" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=541d8926737213542156ee32e420010817f8a323" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3651,10 +3678,11 @@ jobs:
           printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
           if [[ "$(id -u)" -eq 0 ]]; then
             tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           else
             sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
           fi
-          command -v mold >/dev/null
           mold --version | grep -F "$MOLD_VERSION"
       - name: Add Rust target
         run: rustup target add "$TARGET"
