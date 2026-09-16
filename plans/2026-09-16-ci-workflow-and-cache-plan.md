@@ -1,6 +1,6 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — `main` @ [`3121e5c7`](https://github.com/tailrocks/velnor/commit/3121e5c7) (rev 23: Phase 1 mbx `host_warm` VERIFIED; Phase 0 3× `ci-main` re-opened; PR #886 regen @ `1279c4f9` reverted maintenance `--repo`/nightly `-R` in YAML — re-restoring @ generator rev 49; velnor-control retention test retry hardening; cache ~9.7 GiB pending post-fix retention).
+Status: **in progress** — `main` @ [`d2e23dd2`](https://github.com/tailrocks/velnor/commit/d2e23dd2) (rev 24: nightly [35090298803](https://github.com/tailrocks/velnor/actions/runs/35090298803) VERIFIED 6m54s; Policy PASS @ [35090384230](https://github.com/tailrocks/velnor/actions/runs/35090384230) @ `cd6ea90d`; PR #889/#887 regressed `--repo`/`-R` — re-restored @ [`d2e23dd2`](https://github.com/tailrocks/velnor/commit/d2e23dd2) pin `f5c8466d`; ci-main streak 0/3; Velnor operational_store flakes; cache ~9.78 GiB pending retention).
 Date: 2026-09-16 (rev 18: D18 read-through overlay replaced by a copy seed of the `pr` Cargo store, PR writes persist and are host-shared; rev 17: post-push verifier 4/4 PASS @ `c23d7e8a`; P0-8 pre-merge FAIL superseded; ci-main 35059608031 Planning `--force` fix; YAML drift gate literals expected expansion; rev 16: PR #872 merged @ `364347e9`; P0-8 nightly dispatcher on `main` @ `7171fe01`; rev 15: third green `ci-required` rollup @ `1e552afe`; rev 14: pin-decoupled policy validator + config-only trust-gated emission + `velnor-host-docker` online; rev 13: DCO sign-off restored; rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
@@ -513,9 +513,9 @@ Pre-req: Phase 0 green.
 
 - [x] `cargo check -p velnor-runner` and `cargo test -p velnor-workflow` compile and pass on `main`
 - [x] P0-8: `nightly.yml` dispatches `ci-main@main` (`Control / Dispatch ci-main`) — **VERIFIED @ rev 17 on `main`:** post-push verifier 4/4 PASS @ [`c23d7e8a`](https://github.com/tailrocks/velnor/commit/c23d7e8a) (112 lines, no `pull_request` in mbx save `if`, `--check` green); pre-merge FAIL from Phase 0 verifier superseded; landed [`4a1ab4a1`](https://github.com/tailrocks/velnor/commit/4a1ab4a1) + pin [`7171fe01`](https://github.com/tailrocks/velnor/commit/7171fe01)
-- [ ] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green — **RE-OPENED @ rev 23:** runs [35084377541](https://github.com/tailrocks/velnor/actions/runs/35084377541) @ `285f2cdb`, [35084452873](https://github.com/tailrocks/velnor/actions/runs/35084452873) @ `500d1cf3`, [35085897617](https://github.com/tailrocks/velnor/actions/runs/35085897617) **failed** (supersedes rev 20 3/3 VERIFIED)
+- [ ] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green — **0/3 @ rev 24:** run [35090384230](https://github.com/tailrocks/velnor/actions/runs/35090384230) @ [`cd6ea90d`](https://github.com/tailrocks/velnor/commit/cd6ea90d) **failed** (Velnor operational_store rejections; supersedes rev 23 RE-OPENED: [35084377541](https://github.com/tailrocks/velnor/actions/runs/35084377541), [35084452873](https://github.com/tailrocks/velnor/actions/runs/35084452873), [35085897617](https://github.com/tailrocks/velnor/actions/runs/35085897617))
 - [x] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup` — **VERIFIED:** PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup `ci-required` + `Control / Required` SUCCESS on runs [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442), [35047497124](https://github.com/tailrocks/velnor/actions/runs/35047497124), [35048456675](https://github.com/tailrocks/velnor/actions/runs/35048456675); DCO SUCCESS
-- [ ] Nightly completes in < 2 h (no 24 h queue)
+- [x] Nightly completes in < 2 h (no 24 h queue) — **VERIFIED @ rev 24:** run [35090298803](https://github.com/tailrocks/velnor/actions/runs/35090298803) @ [`6c8e1d7b`](https://github.com/tailrocks/velnor/commit/6c8e1d7b): success **6m54s**
 - [ ] `actions/cache/usage` ≤ 8 GiB after one maintenance run
 
 ### Phase 1 — PR1 merge
@@ -1105,3 +1105,15 @@ PR [#872](https://github.com/tailrocks/velnor/pull/872) merged into `main` as me
 | Maintenance `cache-plan --repo` fix | V | generator rev 49: `maintenance.yml` `cache-budget` passes `--repo ${{ github.repository }}` to `velnor-workflow cache-plan` (was missing → wrong-repo eviction scope) |
 | Nightly dispatch `-R` fix | V | generator rev 49: `nightly.yml` `gh workflow run ci-main.yml -R ${{ github.repository }} --ref main` (was missing `-R` → dispatch to wrong repo) |
 | Live GHA cache account | U | `gh api …/actions/cache/usage` @ rev 23: **~9.7 GiB**; retention pending post-fix maintenance run |
+
+#### Rev 24 delta @ `5e311cac` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Nightly completes in < 2 h | V | run [35090298803](https://github.com/tailrocks/velnor/actions/runs/35090298803) @ [`6c8e1d7b`](https://github.com/tailrocks/velnor/commit/6c8e1d7b): success **6m54s** |
+| Policy generated-tree PASS | V | run [35090384230](https://github.com/tailrocks/velnor/actions/runs/35090384230) @ [`cd6ea90d`](https://github.com/tailrocks/velnor/commit/cd6ea90d); pin [`6c8e1d7b`](https://github.com/tailrocks/velnor/commit/6c8e1d7b) |
+| #886 restore source fixes still in generator | V | maintenance `--repo` + nightly `-R` fixes present in generator source (re-restoring after PR #889 YAML regression) |
+| PR [#889](https://github.com/tailrocks/velnor/pull/889)/[#887](https://github.com/tailrocks/velnor/pull/887) rolled pin back | U | pin reverted to [`2678913a`](https://github.com/tailrocks/velnor/commit/2678913a); YAML fixes dropped; PR #889 regressed `--repo`/`-R` again |
+| §16 Phase 0 gate: 3× consecutive green `ci-main` | C | streak **0/3** @ rev 24; run [35090384230](https://github.com/tailrocks/velnor/actions/runs/35090384230) failed — Velnor `operational_store` rejections |
+| Live GHA cache account | U | `gh api …/actions/cache/usage` @ rev 24: **~9.78 GiB** |
+| Maintenance retention run | U | [35090304019](https://github.com/tailrocks/velnor/actions/runs/35090304019) **skipped** (producers in progress) |
