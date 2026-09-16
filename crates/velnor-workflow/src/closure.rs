@@ -280,6 +280,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stamped_features_match_dev_features() {
+        // The candidate gate compares a binary's stamped features closure
+        // against `candidate_closure_of_tree`, so a default build must stamp
+        // exactly DEV_FEATURES: if `build.rs` spelled the set any other way
+        // (for example by keeping cargo's synthetic `default` marker), no
+        // default build would ever match its own closure and every candidate
+        // publish would fail closed.
+        assert_eq!(
+            env!("VELNOR_WORKFLOW_FEATURES"),
+            DEV_FEATURES,
+            "build.rs and the canonical closure form must spell the default feature set identically"
+        );
+    }
+
     fn git_output(root: &std::path::Path, arguments: &[&str]) -> String {
         let output = must(
             Command::new("git")

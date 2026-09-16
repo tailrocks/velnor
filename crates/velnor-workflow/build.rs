@@ -104,13 +104,17 @@ fn self_closure(manifest_dir: &Path) -> Option<String> {
 }
 
 /// Enabled Cargo features as a sorted comma list (`CARGO_FEATURE_*` is set
-/// per enabled feature, uppercased with `-` mapped to `_`).
+/// per enabled feature, uppercased with `-` mapped to `_`). The synthetic
+/// `default` marker is filtered out: it names no code, and the canonical
+/// closure form (`closure::DEV_FEATURES`) spells the default set without it,
+/// so keeping it would make no default build ever match its own closure.
 fn cargo_features() -> String {
     let mut features: Vec<String> = std::env::vars()
         .filter_map(|(name, _)| {
             name.strip_prefix("CARGO_FEATURE_")
                 .map(str::to_ascii_lowercase)
         })
+        .filter(|feature| feature != "default")
         .collect();
     features.sort();
     features.join(",")
