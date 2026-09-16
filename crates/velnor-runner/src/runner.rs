@@ -2644,6 +2644,29 @@ pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Woken by the drain latch so an idle slot's broker long-poll can be
+/// cancelled the moment SIGTERM arrives, like actions/runner cancels
+/// `GetNextMessageAsync` through its shutdown token.
+static DRAIN_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Resolves once this process is draining: immediately when the latch is
+/// already set, otherwise on the SIGTERM/SIGINT edge. Enabling the waiter
+/// before reading the latch closes the lost-wakeup window.
+pub(crate) async fn until_draining() {
+    let notified = DRAIN_NOTIFY.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if draining() {
+        return;
+    }
+    notified.await;
+}
+
+fn latch_draining() {
+    DRAINING.store(true, std::sync::atomic::Ordering::Relaxed);
+    DRAIN_NOTIFY.notify_waiters();
+}
+
 /// Cached journal-drain reads: one zero-timeout `SELECT` per journal path at
 /// most this often. Poll boundaries tick every ~2s, so a 2s TTL bounds each
 /// boundary to one SQLite open without letting a drain order go stale.
@@ -2926,7 +2949,7 @@ fn start_drain_listener(config_base: PathBuf) {
                 }
             } => {}
         }
-        DRAINING.store(true, std::sync::atomic::Ordering::Relaxed);
+        latch_draining();
         let note =
             "drain requested (SIGTERM/SIGINT): finishing running jobs, idle slots deregister";
         println!("{note}");
@@ -6470,21 +6493,34 @@ async fn run_v2(
         'poll: loop {
             let poll_drain_journal =
                 crate::node::complete::journal_dir_near(&config_dir).join("journal.db");
-            let message = poll_broker_message(
-                &mut broker,
-                &mut run_service,
-                &current_broker_url,
-                &mut broker_token,
-                &stored,
-                session_id,
-                RunnerStatus::Online,
-                stored.settings.disable_update,
-                &mut poll_state,
-                &mut health,
-                &forensics,
-                &poll_drain_journal,
-            )
-            .await?;
+            // The long-poll (up to 70s) is cancelled on the drain edge, as
+            // actions/runner cancels `GetNextMessageAsync` on shutdown. An
+            // idle slot left to finish its poll outlived the controller's
+            // drain budget and was SIGKILLed with its registration intact:
+            // the drain the guide promises ("idle slots deregister") never
+            // ran. Dropping the request mid-flight is what the broker
+            // expects from a departing runner; the session is deleted below.
+            let message = tokio::select! {
+                biased;
+                () = until_draining() => {
+                    forensics.lifecycle("broker long-poll cancelled: daemon drain requested");
+                    None
+                }
+                message = poll_broker_message(
+                    &mut broker,
+                    &mut run_service,
+                    &current_broker_url,
+                    &mut broker_token,
+                    &stored,
+                    session_id,
+                    RunnerStatus::Online,
+                    stored.settings.disable_update,
+                    &mut poll_state,
+                    &mut health,
+                    &forensics,
+                    &poll_drain_journal,
+                ) => message?,
+            };
 
             let Some(message) = message else {
                 println!("No broker message received.");
@@ -16973,6 +17009,30 @@ mod tests {
         DRAINING.store(previous_draining, Ordering::SeqCst);
         reset_drain_hint_cache_for_tests();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The broker long-poll is raced against this future, so it must resolve
+    /// at once when the latch is already set (drain edge before the poll
+    /// started) and on the edge when it is armed first (drain mid-poll) —
+    /// never hang the slot for the remainder of a 70s poll.
+    #[tokio::test]
+    async fn until_draining_resolves_on_the_latch_and_on_the_edge() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        let previous_draining = DRAINING.swap(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1), until_draining())
+            .await
+            .expect("an already-latched drain resolves immediately");
+
+        DRAINING.store(false, Ordering::SeqCst);
+        let armed = tokio::spawn(until_draining());
+        tokio::task::yield_now().await;
+        assert!(!armed.is_finished(), "no drain: the waiter must stay pending");
+        latch_draining();
+        tokio::time::timeout(Duration::from_secs(1), armed)
+            .await
+            .expect("the drain edge wakes an armed waiter")
+            .unwrap();
+        DRAINING.store(previous_draining, Ordering::SeqCst);
     }
 
     #[test]
