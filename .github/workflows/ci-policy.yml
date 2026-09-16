@@ -51,7 +51,7 @@ jobs:
         with:
           backend: github
           version: 1.11.1
-          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-6ea138c16caed7969aa6f6382fa6a63c96de3eac
+          cache-key: velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-7e74aa07926545b4550e420b8ea75a04aef978e3
           restore-keys: |
             velnor-policy-mbx-1.11.1-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -71,7 +71,7 @@ jobs:
             cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 6ea138c16caed7969aa6f6382fa6a63c96de3eac \
+            --rev 7e74aa07926545b4550e420b8ea75a04aef978e3 \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -93,7 +93,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: 6ea138c16caed7969aa6f6382fa6a63c96de3eac
+          VELNOR_WORKFLOW_POLICY_REVISION: 7e74aa07926545b4550e420b8ea75a04aef978e3
         run: |
           set -euo pipefail
           velnor-workflow policy \

@@ -99,10 +99,10 @@ jobs:
         if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '6ea138c16caed7969aa6f6382fa6a63c96de3eac' }}
+          rev: ${{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '7e74aa07926545b4550e420b8ea75a04aef978e3' }}
       - name: Set trusted workflow policy revision
         if: steps.retention-gate.outputs.skip != 'true'
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6ea138c16caed7969aa6f6382fa6a63c96de3eac" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=7e74aa07926545b4550e420b8ea75a04aef978e3" >> "$GITHUB_ENV"
       - name: Sweep closed-PR merge-ref caches
         if: steps.retention-gate.outputs.skip != 'true'
         env:
