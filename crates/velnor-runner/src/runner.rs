@@ -44,8 +44,8 @@ use crate::{
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     execution::condition_is_statically_false,
     executor::{
-        BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
-        ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
+        BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobEnvironmentGuards,
+        JobExecutionSummary, ProcessCommandRunner, StepLog, StepPublishSpill, StepStartEvent,
         STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
@@ -11385,7 +11385,7 @@ fn execute_script_job_inner(
     // Keep clones for synthetic steps after executor (senders are moved into executor below).
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
-    let (environment_started, container_boot_duration, environment_lease) =
+    let (environment_started, container_boot_duration, environment_guards) =
         precreated_environment.claim();
     let container_boot_ms = duration_ms(container_boot_duration);
     // Claim teardown ownership before the first fallible execution step. The
@@ -11428,18 +11428,17 @@ fn execute_script_job_inner(
         }
         log
     });
+    // Adopt the pre-create thread's guards so the in-container docker socket
+    // stays proxied and the job network stays owned until THIS executor's
+    // job cleanup reclaims them.
     let mut executor = DockerJobEngine::inert(command_runner)
         .with_job_environment_started(environment_started)
+        .with_job_environment_guards(environment_guards)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
         .with_trust_scope(effective_trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
-    // Adopt the pre-create thread's lease guard so the in-container docker
-    // socket stays proxied until THIS executor's job cleanup drops it.
-    if let Some(lease) = environment_lease {
-        executor = executor.with_docker_lease(lease);
-    }
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -12083,19 +12082,15 @@ const PRIOR_TEARDOWN_JOIN_DEADLINE: Duration = Duration::from_secs(300);
 
 struct PrecreatedJobEnvironment {
     container: crate::container::JobContainerSpec,
-    task: Option<
-        std::thread::JoinHandle<(
-            Result<Option<crate::docker_lease::DockerLeaseGuard>>,
-            Duration,
-        )>,
-    >,
-    /// Lease guard bound by the pre-create thread. It must outlive the job
-    /// container: the container holds the proxy socket bind-mounted, so
-    /// dropping the guard deletes the socket inode and every in-container
-    /// docker client dies with "Cannot connect to the Docker daemon"
-    /// (0.1.185 regression — the guard used to die with the pre-create
-    /// thread's thread-local executor).
-    lease: Option<crate::docker_lease::DockerLeaseGuard>,
+    task: Option<std::thread::JoinHandle<(Result<JobEnvironmentGuards>, Duration)>>,
+    /// Every guard the pre-create thread's executor armed. They must outlive
+    /// the job container: the lease guard owns the proxy socket the container
+    /// has bind-mounted (dropping it kills every in-container docker client —
+    /// the 0.1.185 regression), and the network guard removes the job network
+    /// on drop. Both used to die with the pre-create thread's thread-local
+    /// executor; the network guard fired `docker network rm` against the
+    /// running container's endpoint on every pre-created job.
+    guards: JobEnvironmentGuards,
     claimed: bool,
     boot_duration: Duration,
 }
@@ -12105,18 +12100,16 @@ impl PrecreatedJobEnvironment {
         Self::spawn_with(container, |container| {
             let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
             let result = executor.start_job_environment(container);
-            // Hand the guard out of the thread-local executor BEFORE it is
-            // dropped; the running container keeps using the proxied socket.
-            let lease = executor.take_docker_lease();
-            result.map(|()| lease)
+            // Hand every guard out of the thread-local executor BEFORE it is
+            // dropped; the running container keeps using what they protect.
+            let guards = executor.take_job_environment_guards();
+            result.map(|()| guards)
         })
     }
 
     fn spawn_with(
         container: crate::container::JobContainerSpec,
-        starter: impl FnOnce(
-                &crate::container::JobContainerSpec,
-            ) -> Result<Option<crate::docker_lease::DockerLeaseGuard>>
+        starter: impl FnOnce(&crate::container::JobContainerSpec) -> Result<JobEnvironmentGuards>
             + Send
             + 'static,
     ) -> Self {
@@ -12129,7 +12122,7 @@ impl PrecreatedJobEnvironment {
         Self {
             container,
             task: Some(task),
-            lease: None,
+            guards: JobEnvironmentGuards::default(),
             claimed: false,
             boot_duration: Duration::ZERO,
         }
@@ -12140,9 +12133,9 @@ impl PrecreatedJobEnvironment {
             return self.claimed;
         };
         match task.join() {
-            Ok((Ok(lease), duration)) => {
+            Ok((Ok(guards), duration)) => {
                 self.boot_duration = duration;
-                self.lease = lease;
+                self.guards = guards;
                 true
             }
             Ok((Err(error), duration)) => {
@@ -12159,15 +12152,13 @@ impl PrecreatedJobEnvironment {
         }
     }
 
-    fn claim(
-        mut self,
-    ) -> (
-        bool,
-        Duration,
-        Option<crate::docker_lease::DockerLeaseGuard>,
-    ) {
+    fn claim(mut self) -> (bool, Duration, JobEnvironmentGuards) {
         self.claimed = self.join();
-        (self.claimed, self.boot_duration, self.lease.take())
+        (
+            self.claimed,
+            self.boot_duration,
+            std::mem::take(&mut self.guards),
+        )
     }
 }
 
@@ -12176,13 +12167,12 @@ impl Drop for PrecreatedJobEnvironment {
         if self.claimed || !self.join() {
             return;
         }
-        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
-        // Hand the pre-create thread's guard to the cleanup executor: its
-        // cleanup drops the guard only AFTER the abandoned environment's
-        // container is removed, so the proxy never dies under a live mount.
-        if let Some(lease) = self.lease.take() {
-            executor = executor.with_docker_lease(lease);
-        }
+        // Hand the pre-create thread's guards to the cleanup executor: its
+        // cleanup drops the lease guard only AFTER the abandoned environment's
+        // container is removed, so the proxy never dies under a live mount,
+        // and defuses the network guard once it has removed the network.
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner)
+            .with_job_environment_guards(std::mem::take(&mut self.guards));
         if let Err(error) = executor.cleanup(&self.container) {
             eprintln!("Warning: abandoned pre-created environment cleanup failed: {error:#}");
         }
@@ -26206,17 +26196,21 @@ runs:
         let environment = PrecreatedJobEnvironment::spawn_with(
             lease_test_container_spec(&root),
             move |_container| {
-                Ok(Some(crate::docker_lease::DockerLeaseGuard::bind_to(
-                    listen_for_starter,
-                    PathBuf::from("/nonexistent-host-docker.sock"),
-                    "job".into(),
-                    "daemon".into(),
-                )?))
+                Ok(JobEnvironmentGuards {
+                    docker_lease: Some(crate::docker_lease::DockerLeaseGuard::bind_to(
+                        listen_for_starter,
+                        PathBuf::from("/nonexistent-host-docker.sock"),
+                        "job".into(),
+                        "daemon".into(),
+                    )?),
+                    job_network: None,
+                })
             },
         );
 
-        let (started, _duration, lease) = environment.claim();
+        let (started, _duration, guards) = environment.claim();
         assert!(started);
+        let lease = guards.docker_lease;
         assert!(
             lease.is_some(),
             "claim must hand the live lease guard to the job executor"
@@ -26258,12 +26252,15 @@ runs:
         spec.network = format!("{}-net", spec.name);
         {
             let _environment = PrecreatedJobEnvironment::spawn_with(spec, move |_container| {
-                Ok(Some(crate::docker_lease::DockerLeaseGuard::bind_to(
-                    listen_for_starter,
-                    PathBuf::from("/nonexistent-host-docker.sock"),
-                    "job".into(),
-                    "daemon".into(),
-                )?))
+                Ok(JobEnvironmentGuards {
+                    docker_lease: Some(crate::docker_lease::DockerLeaseGuard::bind_to(
+                        listen_for_starter,
+                        PathBuf::from("/nonexistent-host-docker.sock"),
+                        "job".into(),
+                        "daemon".into(),
+                    )?),
+                    job_network: None,
+                })
             });
             // Dropped without claim: Drop runs cleanup with a real docker CLI
             // (absent in tests — the cleanup failure is logged and ignored),

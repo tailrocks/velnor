@@ -2030,6 +2030,22 @@ impl LifecycleTelemetry {
     }
 }
 
+/// Every guard a started job environment owns, moved as one value.
+///
+/// `start_job_environment` arms guards inside the executor that ran it. When
+/// that executor is the pre-create thread's, the guards would fire with the
+/// thread while the job container is still using what they protect: the
+/// lease guard drops the proxied socket the container has bind-mounted
+/// (0.1.185 regression), the network guard runs `docker network rm` on the
+/// live job network. Handing them over one field at a time is how the
+/// network guard got left behind after the lease guard was fixed, so the
+/// hand-off is a single value with no per-guard path.
+#[derive(Default)]
+pub(crate) struct JobEnvironmentGuards {
+    pub(crate) docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
+    pub(crate) job_network: Option<crate::docker_lease::JobNetworkGuard>,
+}
+
 /// Host-Docker step engine owned by the docker backend.
 ///
 /// Jobs enter through [`crate::execution::run_validated_job`]. This type is not
@@ -2174,18 +2190,28 @@ where
         self
     }
 
-    /// Adopt the Docker lease guard bound by an earlier (pre-created)
-    /// environment start. The guard must live as long as the job container:
-    /// the container holds the proxy socket bind-mounted, and dropping the
-    /// guard deletes the socket inode, killing in-container docker clients
-    /// (0.1.185 precreate regression, tailrocks/velnor#311 follow-up).
-    pub fn with_docker_lease(mut self, lease: crate::docker_lease::DockerLeaseGuard) -> Self {
-        self.docker_lease = Some(lease);
+    /// Adopt every guard an earlier (pre-created) environment start bound.
+    /// The guards must live as long as the job container: the container
+    /// holds the lease proxy socket bind-mounted, so dropping that guard
+    /// deletes the socket inode and kills in-container docker clients
+    /// (0.1.185 precreate regression, tailrocks/velnor#311 follow-up); the
+    /// network guard fires `docker network rm` on drop, which against the
+    /// live container's endpoint fails with "has active endpoints" and
+    /// against a network without one removes it under the job.
+    pub(crate) fn with_job_environment_guards(mut self, guards: JobEnvironmentGuards) -> Self {
+        self.docker_lease = guards.docker_lease;
+        self.job_network_guard = guards.job_network;
         self
     }
 
-    pub(crate) fn take_docker_lease(&mut self) -> Option<crate::docker_lease::DockerLeaseGuard> {
-        self.docker_lease.take()
+    /// Hand every environment-owned guard out of this executor, leaving it
+    /// with none to fire when it drops. The pre-create thread's executor
+    /// calls this before it dies so the guards travel to the job executor.
+    pub(crate) fn take_job_environment_guards(&mut self) -> JobEnvironmentGuards {
+        JobEnvironmentGuards {
+            docker_lease: self.docker_lease.take(),
+            job_network: self.job_network_guard.take(),
+        }
     }
 
     pub fn into_runner(self) -> R {
@@ -16956,7 +16982,10 @@ esac
             job_rm_saw_lease: false,
             buildkit_saw_dead_lease: false,
         })
-        .with_docker_lease(lease);
+        .with_job_environment_guards(JobEnvironmentGuards {
+            docker_lease: Some(lease),
+            job_network: None,
+        });
         executor.cleanup(&spec).unwrap();
         let runner = executor.into_runner();
         assert!(
@@ -17036,7 +17065,10 @@ esac
             job_rm_saw_lease: false,
             calls: Vec::new(),
         })
-        .with_docker_lease(lease);
+        .with_job_environment_guards(JobEnvironmentGuards {
+            docker_lease: Some(lease),
+            job_network: None,
+        });
         executor.cleanup_without_buildkit(&spec).unwrap();
         let runner = executor.into_runner();
         assert!(runner.job_rm_saw_lease);
@@ -17114,6 +17146,45 @@ esac
             buildx_driver_options(&memory_only, &static_options).unwrap(),
             ["cpu-period=100000", "cpu-quota=250000", "memory=1024"]
         );
+    }
+
+    #[test]
+    fn started_environment_hands_every_guard_to_the_claiming_executor() {
+        // The pre-create thread starts the environment in its own executor
+        // and dies. Every guard that start armed must leave with the
+        // hand-off: a network guard left behind fired `docker network rm`
+        // against the running container's endpoint on every pre-created job
+        // (the lease guard had the same defect in 0.1.185).
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut precreate = DockerJobEngine::inert(RecordingRunner::default());
+        precreate.start_job_environment(&spec).unwrap();
+        assert!(
+            precreate.job_network_guard.is_some(),
+            "start must arm the network guard"
+        );
+
+        let guards = precreate.take_job_environment_guards();
+        assert!(
+            guards.job_network.is_some(),
+            "the network guard must travel with the environment hand-off"
+        );
+        assert!(
+            precreate.job_network_guard.is_none() && precreate.docker_lease.is_none(),
+            "the pre-create executor must own nothing after the hand-off"
+        );
+
+        let mut job = DockerJobEngine::inert(RecordingRunner::default())
+            .with_job_environment_started(true)
+            .with_job_environment_guards(guards);
+        assert!(job.job_network_guard.is_some());
+        job.cleanup(&spec).unwrap();
+        assert!(
+            job.job_network_guard.is_none(),
+            "terminal cleanup must defuse the adopted network guard"
+        );
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
