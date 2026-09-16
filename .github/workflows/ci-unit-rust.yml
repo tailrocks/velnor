@@ -173,12 +173,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-1279c4f92c97b75dc4cc627f122e119f8a5eae16-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-2678913a8e3db842a2f92e82e2e1119fae7dad35-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 1279c4f92c97b75dc4cc627f122e119f8a5eae16
+          EXPECTED_REVISION: 2678913a8e3db842a2f92e82e2e1119fae7dad35
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -192,7 +192,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 1279c4f92c97b75dc4cc627f122e119f8a5eae16
+          EXPECTED_REVISION: 2678913a8e3db842a2f92e82e2e1119fae7dad35
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
@@ -502,19 +502,18 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: always()
-        env:
-          VELNOR_CI_LANE: github
-          VELNOR_CACHE_RUSTUP_PRIMARY: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
-          VELNOR_CACHE_RUSTUP_MATCHED: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
-          VELNOR_CACHE_MOLD_PRIMARY: ${{ steps.mold-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_MOLD_MATCHED: ${{ steps.mold-cache.outputs.cache-matched-key }}
-          VELNOR_CACHE_MBX_HIT: ${{ steps.mbx-cache.outputs.cache-hit }}
-          VELNOR_CACHE_MBX_PRIMARY: ${{ steps.mbx-cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
-          VELNOR_CACHE_CARGO_MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: ${{ inputs.unit }}
+          ci_lane: github
+          cache_rustup_primary: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          cache_rustup_matched: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          cache_mold_primary: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          cache_mold_matched: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          cache_mbx_hit: ${{ steps.mbx-cache.outputs.cache-hit }}
+          cache_mbx_primary: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
+          cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
 
   verify-velnor:
     name: Velnor
@@ -601,7 +600,7 @@ jobs:
         if: ${{ inputs.policy_runtime }}
         shell: bash
         env:
-          PINNED_REVISION: 1279c4f92c97b75dc4cc627f122e119f8a5eae16
+          PINNED_REVISION: 2678913a8e3db842a2f92e82e2e1119fae7dad35
         run: |
           set -euo pipefail
           binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
@@ -713,10 +712,9 @@ jobs:
           fi
       - name: Report phase timings and cache outcomes
         if: always()
-        env:
-          VELNOR_CI_LANE: velnor
-          VELNOR_HOST_WARM_LAYERS: rustup,mold,mbx,cargo
         uses: ./.github/actions/report-velnor-ci-outcomes
         with:
           job_label: ${{ inputs.unit }}
+          ci_lane: velnor
+          host_warm_layers: rustup,mold,mbx,cargo
 
