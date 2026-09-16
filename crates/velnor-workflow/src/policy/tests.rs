@@ -1399,3 +1399,19 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
         );
     }
 }
+
+#[test]
+fn policy_sibling_setup_action_is_a_reviewed_local_path() {
+    assert!(
+        is_approved_local_action(crate::VELNOR_WORKFLOW_POLICY_SETUP_ACTION),
+        "the owner policy job resolves its setup composite out of the sibling checkout"
+    );
+    assert!(
+        !is_approved_local_action("./policy-setup-action/.github/actions/anything-else"),
+        "the sibling allowance is the exact setup composite, never a second local path"
+    );
+    assert!(
+        !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
+        "the sibling checkout carries no reusable workflows"
+    );
+}

@@ -2598,8 +2598,14 @@ fn is_full_sha_reference(value: &str) -> bool {
 /// A repository-local composite action, pinned by the audited tree itself:
 /// the policy audits the pull-request head tree, so a tampered local action
 /// is reviewed code exactly like an inline `run:` step, and a tampered
-/// reference outside `.github/actions/` stays rejected below.
+/// reference outside `.github/actions/` stays rejected below. The owner
+/// policy job's setup composite resolves out of its sibling checkout
+/// instead of the root (a root checkout would wipe `policy-checkout/`),
+/// so that exact reference is reviewed too — but no second sibling path.
 fn is_approved_local_action(value: &str) -> bool {
+    if value == super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION {
+        return true;
+    }
     let Some(path) = value.strip_prefix("./.github/actions/") else {
         return false;
     };

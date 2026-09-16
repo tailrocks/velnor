@@ -65,9 +65,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 43b7effa4c7052da9a09b4205d73fd0096ca6781
+          rev: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=43b7effa4c7052da9a09b4205d73fd0096ca6781" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -84,7 +84,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 43b7effa4c7052da9a09b4205d73fd0096ca6781
+          EXPECTED_REVISION: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -103,7 +103,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-43b7effa4c7052da9a09b4205d73fd0096ca6781-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -161,7 +161,7 @@ jobs:
       - name: Set up Velnor workflow runtime
         uses: ./policy-setup-action/.github/actions/setup-velnor-workflow
         with:
-          rev: 43b7effa4c7052da9a09b4205d73fd0096ca6781
+          rev: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
           checkout-path: ${{ github.workspace }}/policy-checkout
       - name: Acquire candidate generator product
         working-directory: policy-checkout
@@ -169,7 +169,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          BASE_PIN: 43b7effa4c7052da9a09b4205d73fd0096ca6781
+          BASE_PIN: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
         run: |
           set -euo pipefail
           pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
@@ -188,10 +188,12 @@ jobs:
           deadline=$((SECONDS + 900))
           run_id=""
           while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository_id == .repository.id)]')"
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
             waiting=false
+            seen=false
             while read -r candidate_run; do
               test "$candidate_run" != '' || continue
+              seen=true
               status="$(jq -r .status <<<"$candidate_run")"
               id="$(jq -r .id <<<"$candidate_run")"
               # $name in the filter is a jq variable, not a shell expansion.
@@ -202,6 +204,9 @@ jobs:
               fi
               [[ "$status" == "completed" ]] || waiting=true
             done <<<"$(jq -c '.[]' <<<"$runs")"
+            # No runs yet means the API has not indexed the sibling run, not
+            # that it will never come: keep polling until the deadline.
+            [[ "$seen" == "true" ]] || waiting=true
             [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }
             sleep 15
           done
@@ -242,7 +247,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: 43b7effa4c7052da9a09b4205d73fd0096ca6781
+          VELNOR_WORKFLOW_POLICY_REVISION: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
         run: |
           set -euo pipefail
           velnor-workflow policy \
