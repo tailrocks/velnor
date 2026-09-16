@@ -19,6 +19,7 @@ use clap::{Parser, ValueEnum};
 use serde::Serialize;
 use serde_yaml::Value;
 
+mod closure;
 mod config;
 mod estate;
 mod policy;
@@ -27,6 +28,7 @@ mod runners;
 mod runtime;
 mod scan;
 mod template_memory;
+#[cfg(feature = "tui")]
 mod tui;
 
 use crate::primitives::{WorkflowIr, WorkflowKind};
@@ -82,13 +84,26 @@ pub(crate) const VELNOR_CI_LOCAL_REPORT_ACTION: &str =
 const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/velnor";
 /// The source commit this binary was built from, stamped by `build.rs`
 /// (`unknown` when the build tree had no git). `velnor-workflow --revision`
-/// prints it; the D19 guard compares it against the pinned policy revision.
+/// prints it; provenance metadata, never the product lookup key.
 pub const SOURCE_REVISION: &str = env!("VELNOR_WORKFLOW_SOURCE_SHA");
+/// The source-closure digest of the tree this binary was built from (see
+/// [`closure`]), stamped by `build.rs` (`unknown` when the build tree had
+/// no git). `velnor-workflow --closure` prints it; the D19 guard accepts a
+/// renderer whose closure equals the declared pin's closure.
+pub const SOURCE_CLOSURE: &str = env!("VELNOR_WORKFLOW_CLOSURE_DIGEST");
 /// Names a `velnor-workflow` binary built at the pinned policy revision. The
 /// D19 guard consults it first; generated hosted jobs export it after
 /// installing the runtime artifact's policy binary so `--check` never needs
 /// the network.
 pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINARY";
+/// Names the candidate manifest binding the env-slot candidate binary: the
+/// `candidate-manifest.json` the policy job's acquire step downloaded beside
+/// the candidate binary. The `velnor-workflow policy` candidate exception
+/// executes an env-slot binary only when this manifest's closure equals the
+/// audited tree's candidate closure and its digest matches the binary bytes.
+/// `--candidate-manifest` overrides this fallback; empty or missing disables
+/// the env-slot candidate.
+pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_MANIFEST";
 // The D19 generator pin is not a source literal: a constant naming the commit
 // that carries it can never equal that commit, so a tree rendered by the
 // pinned generator could never be byte-identical to the tree that declares the
@@ -353,6 +368,7 @@ pub struct Cli {
     check: bool,
     force: bool,
     plain: bool,
+    pin_build: bool,
 }
 
 /// Clap-owned command-line syntax. Conversion into [`Cli`] preserves the
@@ -410,9 +426,20 @@ struct RawCli {
     #[arg(long)]
     plain: bool,
 
+    /// Allow `--check`'s D19 guard to compile the declared generator pin from
+    /// source when no pinned renderer is provisioned. Local development only;
+    /// never emitted into generated CI. Accepted alongside `--check` (its
+    /// only consumer); accepted-and-ignored otherwise.
+    #[arg(long)]
+    pin_build: bool,
+
     /// Print the source commit this binary was built from and exit.
     #[arg(long, exclusive = true)]
     revision: bool,
+
+    /// Print the source-closure digest this binary was built from and exit.
+    #[arg(long, exclusive = true)]
+    closure: bool,
 }
 
 impl Cli {
@@ -457,6 +484,7 @@ impl TryFrom<RawCli> for Cli {
             check: raw.check,
             force: raw.force,
             plain: raw.plain,
+            pin_build: raw.pin_build,
         })
     }
 }
@@ -2855,9 +2883,12 @@ pub(crate) fn validate_hosted_mr_boxington_store_budget(
 ///
 /// The validator's `pin-reachable` rule walks from the audited head to the
 /// declared pin; a shallow checkout holds neither the pin nor the ancestry,
-/// so the rule fails on any job that runs it from `fetch-depth: 1`. Full
-/// history is a property of running the validator, checked here over every
-/// rendered workflow rather than remembered by each job's checkout.
+/// so the rule fails on any job whose only checkout is `fetch-depth: 1`.
+/// Full history is a property of running the validator, checked here over
+/// every rendered workflow rather than remembered by each job's checkout. A
+/// shallow supplemental checkout may coexist — today only the owner policy
+/// job's sparse base-tree setup-action checkout — but the audited checkout
+/// itself must be full.
 ///
 /// # Errors
 /// Returns a usage error naming the workflow and job whose checkout is
@@ -3540,13 +3571,140 @@ pub(crate) struct PolicyJobSpec<'a> {
     /// rule requires the two to agree.
     pub(crate) revision: &'a str,
     pub(crate) runner: &'a str,
+    /// The repository the generated tree belongs to: the setup action runs
+    /// from the owner's own checkout, or from the published pin for
+    /// consumers.
+    pub(crate) repository: &'a str,
     /// Mr. Boxington backend: `github` on hosted runners, `local` on Velnor
-    /// runners. The Velnor lane never builds pull-request code
-    /// (`--no-pin-build`) and resolves no live ruleset.
+    /// runners. The Velnor lane resolves no live ruleset; like every lane,
+    /// it never passes `--pin-build`, so an unprovisioned pin fails closed.
     pub(crate) cache_backend: &'a str,
     pub(crate) trusted_gate: Option<&'a str>,
     /// The branch whose rulesets are the required status-check contexts.
     pub(crate) default_branch: &'a str,
+}
+
+/// Shell fragment reading the audited tree's declared generator pin into
+/// `$pin` (fails closed when the tree declares none): `[generator]
+/// revision` first, the entrypoint literal second. Callers treat the pin as
+/// a locator hint; `velnor-workflow policy` parses the tree authoritatively
+/// and fails closed on any disagreement.
+fn audited_pin_script() -> &'static str {
+    r#"          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
+          test "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"
+          test "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }
+"#
+}
+
+/// Owner policy step acquiring the PR run's candidate generator product.
+/// When the audited pin shares the base validator's closure the step exits
+/// immediately (the Stage-0 validator renders). Otherwise the step waits for
+/// the same-repository PR run at the audited head to publish the candidate
+/// artifact the Rust unit job packaged, verifies its manifest bindings and
+/// digest, requires the manifest closure to equal the pin's candidate
+/// closure in full (not just the artifact-name prefix), and exports the
+/// binary as the pinned binary plus its manifest for the validator's
+/// manifest binding. The `--closure` probe runs with `GH_TOKEN` and
+/// `GITHUB_TOKEN` emptied: the probe needs no auth, so the exec point holds
+/// no token even though the API steps above it use the job token. Fork
+/// generator changes fail closed: only same-repository runs are even
+/// considered.
+fn policy_candidate_step(revision: &str) -> String {
+    format!(
+        r#"      - name: Acquire candidate generator product
+        working-directory: policy-checkout
+        env:
+          GH_TOKEN: ${{{{ github.token }}}}
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
+          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}
+          BASE_PIN: {revision}
+        run: |
+          set -euo pipefail
+{pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
+          pin_closure="$(velnor-workflow closure --rev="$pin")"
+          if [[ "$pin_closure" == "$base_closure" ]]; then
+            echo "pin $pin shares the base closure; the Stage-0 validator renders"
+            echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
+          pin_candidate="$(velnor-workflow closure --rev="$pin" --candidate)"
+          name="velnor-workflow-candidate-${{pin_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
+          deadline=$((SECONDS + 900))
+          run_id=""
+          while (( SECONDS < deadline )); do
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository_id == .repository.id)]')"
+            waiting=false
+            while read -r candidate_run; do
+              test "$candidate_run" != '' || continue
+              status="$(jq -r .status <<<"$candidate_run")"
+              id="$(jq -r .id <<<"$candidate_run")"
+              # $name in the filter is a jq variable, not a shell expansion.
+              # shellcheck disable=SC2016
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq --arg name "$name" -e '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
+                run_id="$id"
+                break 2
+              fi
+              [[ "$status" == "completed" ]] || waiting=true
+            done <<<"$(jq -c '.[]' <<<"$runs")"
+            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
+            sleep 15
+          done
+          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
+          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
+          rm -rf "$candidate"
+          mkdir -p "$candidate"
+          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
+          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
+          else
+            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{{print $1}}')"
+          fi
+          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
+          [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
+          chmod 0755 "$candidate/velnor-workflow"
+          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
+          [[ "$manifest_closure" == "$pin_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the pin's candidate $pin_candidate" >&2; exit 1; }}
+          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
+          [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
+          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+"#,
+        pin_script = audited_pin_script(),
+    )
+}
+
+/// Consumer policy steps acquiring the audited tree's declared generator as
+/// a release product. Consumer pins always name released generators, so a
+/// second setup call with the runtime-read pin suffices; when the pin equals
+/// the base validator the steps skip and the validator renders directly.
+fn policy_renderer_steps(repository: &str, revision: &str) -> String {
+    format!(
+        r#"      - name: Read declared generator pin
+        id: pin
+        working-directory: policy-checkout
+        run: |
+          set -euo pipefail
+{pin_script}          echo "value=$pin" >> "$GITHUB_OUTPUT"
+      - name: Set up declared generator product
+        id: renderer
+        if: steps.pin.outputs.value != '{revision}'
+        uses: {setup_uses}
+        with:
+          rev: ${{{{ steps.pin.outputs.value }}}}
+          checkout-path: ${{{{ github.workspace }}}}/policy-checkout
+      - name: Resolve declared generator product
+        if: steps.pin.outputs.value != '{revision}'
+        run: |
+          set -euo pipefail
+          binary="$HOME/.cache/velnor/workflow-runtime/${{{{ steps.renderer.outputs.closure }}}}/bin/velnor-workflow"
+          test -x "$binary"
+          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary" >> "$GITHUB_ENV"
+"#,
+        pin_script = audited_pin_script(),
+        setup_uses = workflow_setup_action_uses(repository, revision),
+    )
 }
 
 /// The policy job body. It is deliberately a `steps` job, not a
@@ -3556,23 +3714,32 @@ pub(crate) struct PolicyJobSpec<'a> {
 /// zero jobs until the next push cancels it).
 ///
 /// The job checks out the base repository's full history (so pin ancestry
-/// is decidable), fetches and checks out the audited head, installs the
-/// pinned validator with `cargo install --git … --rev`, resolves the live
+/// is decidable), fetches and checks out the audited head, acquires the
+/// pinned validator as an immutable prebuilt product, resolves the live
 /// ruleset contexts, and runs `velnor-workflow policy` with explicit
-/// `--head-sha` / `--base-sha`. The validator regenerates the tree with the
-/// generator the tree declares and evaluates its own semantic rules; see
-/// `policy.rs`.
+/// `--head-sha` / `--base-sha`. The owner lane additionally checks out the
+/// base tree's setup-action directory sparsely at the workspace root first,
+/// so the local `./…` setup step resolves. The validator regenerates the
+/// tree with the generator the tree declares and evaluates its own semantic
+/// rules; see `policy.rs`.
+///
+/// Nothing here compiles: hosted lanes acquire products through
+/// `setup-velnor-workflow` (and, when the audited tree declares a different
+/// generator than the base, the PR run's candidate product or the declared
+/// release product); the Velnor lane provisions its host-persistent slot.
 pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     let PolicyJobSpec {
         name,
         revision,
         runner,
+        repository,
         cache_backend,
         trusted_gate,
         default_branch,
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
+    let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
     let ruleset_step = if hosted {
         format!(
             "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n        run: |\n          set -euo pipefail\n          contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
@@ -3581,19 +3748,47 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         String::new()
     };
     let policy_arguments = if hosted {
-        "            --ruleset-contexts \"$RULESET_CONTEXTS\""
+        "            --ruleset-contexts \"$RULESET_CONTEXTS\"\n"
     } else {
-        "            --no-pin-build"
+        ""
     };
-    let store_budget = if hosted {
-        mr_boxington_store_budget_step()
+    let validator = if hosted {
+        format!(
+            "      - name: Set up Velnor workflow runtime\n        uses: {}\n        with:\n          rev: {revision}\n          checkout-path: ${{{{ github.workspace }}}}/policy-checkout\n",
+            workflow_setup_action_uses(repository, revision)
+        )
+    } else {
+        workflow_pinned_policy_runtime_velnor(revision, "${{ github.workspace }}/policy-checkout")
+    };
+    // The owner runs the setup action from its own checkout (`./…`), but the
+    // policy job checks the repository out only under `policy-checkout/`, so
+    // without a root checkout the setup step's `uses:` cannot resolve and the
+    // job dies at setup. The sparse checkout provisions exactly the composite
+    // action directory from the BASE tree at the workspace root: never the PR
+    // head, and never resolved out of `policy-checkout/`, either of which
+    // would execute fork-controlled action code under pull_request_target.
+    // Consumers pin the published action and the Velnor lane provisions its
+    // slot, so neither needs a root checkout.
+    let setup_checkout = if hosted && owner {
+        format!(
+            "      - name: Check out base setup action\n        uses: {}\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          sparse-checkout: .github/actions/setup-velnor-workflow\n          fetch-depth: 1\n          persist-credentials: false\n",
+            ActionPin::Checkout.reference()
+        )
+    } else {
+        String::new()
+    };
+    let renderer = if hosted {
+        if owner {
+            policy_candidate_step(revision)
+        } else {
+            policy_renderer_steps(repository, revision)
+        }
     } else {
         String::new()
     };
     format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's validator against the\n    # audited tree under pull_request_target. It holds `contents: read` only,\n    # references no secrets, and its checkout persists no credentials, so\n    # building and running the tree's declared generator here is no more\n    # privileged than the pull_request lanes that already build the tree.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{store_budget}      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: {cache_backend}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{revision}\n          restore-keys: |\n            velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-\n      - name: Install pinned Velnor workflow runtime\n        env:\n          CARGO_HOME: ${{{{ runner.temp }}}}/velnor-workflow-cargo-home\n          CARGO_TARGET_DIR: ${{{{ runner.temp }}}}/velnor-workflow-cargo-target\n          VELNOR_WORKFLOW_INSTALL_DIR: ${{{{ runner.temp }}}}/velnor-workflow-install\n          VELNOR_WORKFLOW_ROOT: ${{{{ runner.temp }}}}/velnor-workflow\n        run: |\n          set -euo pipefail\n          install -d -m 700 \\\n            \"$CARGO_HOME\" \\\n            \"$CARGO_TARGET_DIR\" \\\n            \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cd \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \\\n            cargo install \\\n            --locked \\\n            --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} \\\n            --rev {revision} \\\n            --root \"$VELNOR_WORKFLOW_ROOT\" \\\n            velnor-workflow \\\n            --bin velnor-workflow\n          echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\"\n{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited pin's closure differs from the\n    # base validator's, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
-        ActionPin::MrBoxington.reference(),
         actionlint_setup = actionlint_setup_step(cache_backend),
     )
 }
@@ -3603,8 +3798,12 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
 /// the workspace; the checkout lives under `policy-checkout`, so
 /// `install_args` names the exact tool); the Velnor lane uses the host's mise
 /// directly because `mise-action` is not admitted there. Both lanes run the
-/// binary through `mise exec actionlint@<version>` so no config lookup is
-/// involved.
+/// binary through `mise exec actionlint@<version>` with `MISE_NO_CONFIG=1`:
+/// the pin on the command line selects the tool, but mise would still load
+/// the fork tree's `mise.toml` `[env]` (including `_.path` prepends) for the
+/// lint's working directory — the env var, not the explicit version, is what
+/// neutralizes fork-controlled config. (`mise exec` has no `--no-config`
+/// flag; the env form is the only confinement.)
 fn actionlint_setup_step(cache_backend: &str) -> String {
     if cache_backend == "github" {
         format!(
@@ -3673,6 +3872,7 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
         name: "Policy",
         revision: &config.workflow_revision,
         runner: &runner,
+        repository: &config.repository,
         cache_backend: if velnor { "local" } else { "github" },
         trusted_gate: gate.as_deref(),
         default_branch: &config.default_branch,
@@ -3950,6 +4150,9 @@ pub(crate) fn yaml_scalar(value: &str) -> String {
     }
 }
 
+/// Hosted runtime setup for jobs that also run the policy check: a single
+/// setup of the declared pin, which is both the runtime on PATH and the
+/// policy binary. No second revision is ever provisioned next to it.
 fn workflow_runtime_setup(lane: RunnerMode, repository: &str, revision: &str) -> String {
     workflow_runtime_setup_with_install_rev(lane, repository, revision, revision)
 }
@@ -3975,10 +4178,8 @@ pub(crate) fn ci_report_action_uses(repository: &str, revision: &str) -> String 
     }
 }
 
-/// Hosted `rev:` for `setup-velnor-workflow`. The setup action lives in this
-/// repository; the owner may install its event SHA only where the action's
-/// controlled-bootstrap gate permits it. Fork PRs, merge queues, and
-/// non-default-branch dispatches install the tree's declared pin.
+/// The repository that publishes `setup-velnor-workflow`, derived from the
+/// action's own coordinate so owner/consumer routing cannot drift from it.
 pub(crate) fn workflow_setup_action_repository() -> &'static str {
     match VELNOR_WORKFLOW_SETUP_ACTION.split_once("/.github/") {
         Some((repository, _)) => repository,
@@ -3986,22 +4187,26 @@ pub(crate) fn workflow_setup_action_repository() -> &'static str {
     }
 }
 
-pub(crate) fn workflow_setup_install_rev(repository: &str, revision: &str) -> String {
-    if !repository.is_empty() && repository == workflow_setup_action_repository() {
-        format!(
-            "${{{{ (((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == format('refs/heads/{{0}}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && github.sha) || '{revision}' }}}}"
-        )
-    } else {
-        revision.to_owned()
-    }
+/// Hosted `rev:` for `setup-velnor-workflow`: always the tree's declared
+/// generator pin, for every repository and every event.
+///
+/// The runtime product is identified by the generator revision the tree
+/// declares, never by the event SHA. On `pull_request`, `github.sha` is the
+/// synthetic `refs/pull/<n>/merge` commit; no trusted default-branch product
+/// can ever have been built at that SHA, so resolving the runtime through it
+/// misses by construction and every consumer falls back to compiling from
+/// source. The pin is the Stage-0 product every lane consumes; a candidate
+/// generator under test is produced at most once by the producer job and
+/// shared as an artifact, never rebuilt inside consumers.
+pub(crate) fn workflow_setup_install_rev(_repository: &str, revision: &str) -> String {
+    revision.to_owned()
 }
 
 /// Hosted runtime install. `uses:` is [`workflow_setup_action_uses`] (the
 /// owner's checkout, or the published pin for consumers — GitHub Actions
 /// rejects expressions in `uses:` versions, HTTP 422). `rev:` is
-/// `install_rev`. Same-repo Planning and Maintenance use a context-gated
-/// `${{ github.sha }}` with a static fallback; consumers keep the published
-/// pin.
+/// `install_rev`, always the tree's declared pin: every lane consumes the
+/// same Stage-0 product, never an event SHA.
 fn workflow_runtime_setup_with_install_rev(
     lane: RunnerMode,
     repository: &str,
@@ -4012,75 +4217,57 @@ fn workflow_runtime_setup_with_install_rev(
         return String::new();
     }
     format!(
-        "      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          rev: {install_rev}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={revision}\" >> \"$GITHUB_ENV\"\n",
+        "      - name: Set up Velnor workflow runtime\n        id: runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          rev: {install_rev}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={revision}\" >> \"$GITHUB_ENV\"\n",
         workflow_setup_action_uses(repository, revision)
     )
 }
 
 /// Where `setup-velnor-workflow` keeps every hosted runtime it provisions:
-/// one directory per revision, holding the cargo `--root` layout
+/// one directory per revision, holding the product layout
 /// (`bin/velnor-workflow`) and the product `manifest.json`. The directory is
-/// the action's cache path, the landing place of a downloaded product, and
-/// the install root of a source build, so two revisions set up in one job
-/// never share a destination and a caller that needs a specific revision
-/// addresses it by path instead of by whatever `~/.cargo/bin` holds.
+/// the action's cache path and the landing place of a downloaded product, so
+/// a caller that needs a specific revision addresses it by path instead of by
+/// whatever `~/.cargo/bin` holds.
 pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workflow-runtime";
-
-/// The hosted runtime binary that `setup-velnor-workflow` provisioned for
-/// `revision` (a literal SHA or a shell variable holding one).
-pub(crate) fn hosted_workflow_runtime_binary(revision: &str) -> String {
-    format!("{HOSTED_WORKFLOW_RUNTIME_HOME}/{revision}/bin/velnor-workflow")
-}
-
-/// Hosted Planning provisions the **pinned** runtime next to the event
-/// runtime when the two differ (same-repository PRs and default-branch events
-/// install `github.sha`). Each revision lives in its own
-/// [`HOSTED_WORKFLOW_RUNTIME_HOME`] directory, so the pinned binary is
-/// addressed there directly — proven by the revision it reports, exported as
-/// [`VELNOR_WORKFLOW_PINNED_BINARY_ENV`], and shipped in the runtime artifact
-/// so unit jobs can run the D19 guard offline.
-fn workflow_pinned_policy_runtime_setup(repository: &str, revision: &str) -> String {
-    let binary = hosted_workflow_runtime_binary("$PINNED_REVISION");
-    format!(
-        "      - name: Set up pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}\n        with:\n          rev: {revision}\n      - name: Resolve pinned Velnor workflow policy runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        shell: bash\n        env:\n          PINNED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          binary=\"{binary}\"\n          reported=\"$(\"$binary\" --revision)\"\n          [[ \"$reported\" == \"$PINNED_REVISION\" ]] || {{ echo \"::error::pinned workflow runtime reports revision $reported, expected $PINNED_REVISION\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n",
-        workflow_setup_action_uses(repository, revision)
-    )
-}
 
 /// Velnor lane: the job home is the packaged runtime, whose revision follows
 /// the fleet release rather than the generator pin, so a unit that runs the
-/// generator's `--check` builds the pinned binary itself. `$CARGO_HOME/bin`
-/// is the host-persistent (trust-scoped) executable store, so one build per
-/// slot per pin serves every later job; the binary proves itself through
-/// `--revision` before and after the install, and the step exports it for
-/// the guard (`VELNOR_WORKFLOW_PINNED_BINARY`) so the offline check never
-/// reaches for `cargo install`.
-pub(crate) fn workflow_pinned_policy_runtime_velnor(revision: &str) -> String {
+/// generator's `--check` provisions the pinned binary itself. `$CARGO_HOME/bin`
+/// is the host-persistent (trust-scoped) executable store, so one download per
+/// slot per closure serves every later job. Nothing here compiles: the step
+/// resolves the pin's source-closure digest from the job checkout (fetching
+/// the pin commit when a shallow checkout does not contain it), downloads and
+/// attests the manifest, and compares the slot binary's digest against the
+/// manifest before executing anything: a digest mismatch takes the slow path
+/// (download the asset, verify attestation and digest, install), and only
+/// then — against bytes the digest just proved — does the step execute the
+/// slot binary for its `--closure` self-report gate. Digest decides reuse;
+/// the self-report only confirms. The step exports the slot for the guard
+/// (`VELNOR_WORKFLOW_PINNED_BINARY`) so the offline check never compiles.
+/// The reuse path stays online (one manifest download plus one attestation
+/// verification per run; the asset downloads only on mismatch): offline reuse
+/// of a persistent-host slot on self-report alone is the planted-binary hole
+/// this manifest-first shape closes.
+///
+/// Residual Velnor-lane trust scope (documented, not fixed here):
+/// * `verify-velnor` executes `velnor-workflow run` from the fleet image at
+///   whatever revision the fleet ships; a stale or divergent fleet runtime
+///   silently changes check semantics for **all** Velnor units, with no
+///   per-job digest or self-report gate.
+/// * Only the `velnor-workflow-policy` slot is pinned and verified, and only
+///   when the dispatched unit runs `--plain --check` (today: the generator
+///   owner unit only). Non-owner Velnor units run fully ambient.
+/// * The slot is host-persistent and trust-scoped: reuse spans jobs on the
+///   host, and the check step relies on `VELNOR_WORKFLOW_PINNED_BINARY`,
+///   never `PATH`, for the guard.
+/// * Fleet-vs-pin drift for the `run` binary has no alarm by design; if that
+///   becomes unacceptable, the fix is a new feature (provision and verify
+///   `velnor-workflow` on Velnor per job, mirroring the GitHub
+///   `Download`→`Verify`→`Add to PATH` triple), not a parity restoration.
+pub(crate) fn workflow_pinned_policy_runtime_velnor(revision: &str, checkout: &str) -> String {
     format!(
-        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          PINNED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          reported=\"$(\"$binary\" --revision 2>/dev/null || true)\"\n          if [[ \"$reported\" != \"$PINNED_REVISION\" ]]; then\n            root=\"$RUNNER_TEMP/velnor-workflow-policy-$PINNED_REVISION\"\n            env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \\\n              cargo install --locked --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} --rev \"$PINNED_REVISION\" --root \"$root\" velnor-workflow --bin velnor-workflow\n            install -Dm0755 \"$root/bin/velnor-workflow\" \"$binary\"\n            reported=\"$(\"$binary\" --revision)\"\n          fi\n          [[ \"$reported\" == \"$PINNED_REVISION\" ]] || {{ echo \"::error::pinned workflow policy runtime reports revision $reported, expected $PINNED_REVISION\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
+        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n        run: |\n          set -euo pipefail\n          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
     )
-}
-
-/// Hosted runtime for a job that also runs the pinned policy binary (Planning,
-/// and release jobs of the generator's own unit): the pinned policy runtime
-/// first when the event runtime may differ from it, then the event runtime,
-/// so the event runtime is what ends up on PATH.
-pub(crate) fn workflow_runtime_setup_with_pinned_policy(
-    repository: &str,
-    revision: &str,
-) -> String {
-    let install_rev = workflow_setup_install_rev(repository, revision);
-    let mut setup = String::new();
-    if install_rev != revision {
-        setup.push_str(&workflow_pinned_policy_runtime_setup(repository, revision));
-    }
-    setup.push_str(&workflow_runtime_setup_with_install_rev(
-        RunnerMode::Github,
-        repository,
-        revision,
-        &install_rev,
-    ));
-    setup
 }
 
 /// Where a hosted unit job places the runtime pair it downloads from the
@@ -4095,7 +4282,7 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME: &str =
 fn workflow_runtime_download(lane: RunnerMode, revision: &str) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and .policy_revision == $revision and (.policy_binary_sha256 | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n          expected=\"$(jq -er '.policy_binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$home/bin/velnor-workflow\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy \"$home/bin/velnor-workflow-policy\"\n          reported=\"$(\"$home/bin/velnor-workflow-policy\" --revision)\"\n          [[ \"$reported\" == \"$EXPECTED_REVISION\" ]] || {{ echo \"::error::policy runtime reports revision $reported, expected $EXPECTED_REVISION\" >&2; exit 1; }}\n          echo \"$home/bin\" >> \"$GITHUB_PATH\"\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\"\n",
+            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and (.policy_binary_sha256 | test(\"^[0-9a-f]{{64}}$\")) and (.closure | test(\"^[0-9a-f]{{64}}$\")) and (.policy_closure | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n          expected=\"$(jq -er '.policy_binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          home=\"{HOSTED_WORKFLOW_RUNTIME_ARTIFACT_HOME}\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$home/bin/velnor-workflow\"\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy \"$home/bin/velnor-workflow-policy\"\n          expected_closure=\"$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)\"\n          reported=\"$(\"$home/bin/velnor-workflow-policy\" --closure)\"\n          [[ \"$reported\" == \"$expected_closure\" ]] || {{ echo \"::error::policy runtime reports closure $reported, expected $expected_closure\" >&2; exit 1; }}\n          echo \"$home/bin\" >> \"$GITHUB_PATH\"\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$home/bin/velnor-workflow-policy\" >> \"$GITHUB_ENV\"\n",
             ActionPin::DownloadArtifact.reference()
         )
     } else {
@@ -4105,7 +4292,7 @@ fn workflow_runtime_download(lane: RunnerMode, revision: &str) -> String {
 
 fn workflow_runtime_artifact_upload(revision: &str) -> String {
     format!(
-        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          policy_src=\"${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}\"\n          install -m 0755 \"$policy_src\" \"$stage/velnor-workflow-policy\"\n          policy_revision=\"$(\"$stage/velnor-workflow-policy\" --revision)\"\n          [[ \"$policy_revision\" == \"$EXPECTED_REVISION\" ]] || {{ echo \"::error::policy runtime reports revision $policy_revision, expected $EXPECTED_REVISION\" >&2; exit 1; }}\n          policy_digest=\"$(sha256sum \"$stage/velnor-workflow-policy\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" --arg policy_revision \"$policy_revision\" --arg policy_binary_sha256 \"$policy_digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_binary_sha256: $policy_binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
+        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {revision}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          policy_src=\"${{{VELNOR_WORKFLOW_PINNED_BINARY_ENV}:-$src}}\"\n          install -m 0755 \"$policy_src\" \"$stage/velnor-workflow-policy\"\n          policy_revision=\"$(\"$stage/velnor-workflow-policy\" --revision)\"\n          policy_closure=\"$(\"$stage/velnor-workflow-policy\" --closure)\"\n          [[ \"$policy_closure\" == \"${{{{ steps.runtime.outputs.closure }}}}\" ]] || {{ echo \"::error::policy runtime reports closure $policy_closure, expected ${{{{ steps.runtime.outputs.closure }}}}\" >&2; exit 1; }}\n          policy_digest=\"$(sha256sum \"$stage/velnor-workflow-policy\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg closure \"${{{{ steps.runtime.outputs.closure }}}}\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" --arg policy_revision \"$policy_revision\" --arg policy_closure \"$policy_closure\" --arg policy_binary_sha256 \"$policy_digest\" '{{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{revision}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
         ActionPin::UploadArtifact.reference()
     )
 }
@@ -4274,14 +4461,41 @@ pub fn run_from_env() -> Result<(), GeneratorError> {
         println!("{SOURCE_REVISION}");
         return Ok(());
     }
+    if raw.closure {
+        println!("{SOURCE_CLOSURE}");
+        return Ok(());
+    }
     let cli = raw.try_into()?;
     run(&cli)
 }
 
+/// Interactive dispatch: the TUI owns attached terminals unless `--plain`
+/// forces the line-oriented report. Builds without the `tui` feature always
+/// take the headless path.
+fn use_tui(cli: &Cli) -> bool {
+    if cli.plain {
+        return false;
+    }
+    #[cfg(feature = "tui")]
+    {
+        io::stdin().is_terminal() && io::stdout().is_terminal()
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        false
+    }
+}
+
 fn run(cli: &Cli) -> Result<(), GeneratorError> {
-    if !cli.plain && io::stdin().is_terminal() && io::stdout().is_terminal() {
+    #[cfg(feature = "tui")]
+    if use_tui(cli) {
         return tui::run(cli);
     }
+    #[cfg(not(feature = "tui"))]
+    debug_assert!(
+        !use_tui(cli),
+        "builds without the `tui` feature always take the headless path"
+    );
     let source = RepositorySource::parse(&cli.target)?;
     let checkout = source.checkout()?;
     let default_branch = match cli.default_branch.as_deref() {
@@ -4328,24 +4542,51 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
         // D19: the generator this tree declares must render it byte-identically.
         // `--check` above proved the running binary agrees with the tree; this
         // proves the declared pin does too, which is what the base branch's
-        // policy validator will regenerate the tree with.
-        policy::verify_declared_pin_renders_tree(&output_root, checkout.path(), &config)?;
+        // policy validator will regenerate the tree with. Without `--pin-build`
+        // an unprovisioned pin fails closed; see `resolve_pinned_binary`.
+        policy::verify_declared_pin_renders_tree(
+            &output_root,
+            checkout.path(),
+            &config,
+            cli.pin_build,
+        )?;
     }
     print_report(&cli.target, &config, &files, &outcome, &output_root);
     Ok(())
 }
 
+#[cfg(any(feature = "tui", test))]
 fn generated_files(config: &ProjectConfig) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     generated_files_with_surface(config, None)
 }
 
 /// The generated surface, with the workflow families the declared primitives
 /// own taken from the rendered surface instead of the legacy renderer.
+/// The runtime-product producer is owner-only infrastructure: the repository
+/// that ships the setup action owns `ci-runtime-products.yml` without
+/// declaring it, so the publisher can never fall out of the owner's surface
+/// through a config edit. Consumers never carry the file; the renderer
+/// refuses them, and an adopted surface keeps its reviewed templates.
+fn add_owner_runtime_products_file(config: &mut ProjectConfig) {
+    if !config.adopted_workflow_surface
+        && config.repository == workflow_setup_action_repository()
+        && !config
+            .workflow_files
+            .iter()
+            .any(|file| file == primitives::runtime_products::RUNTIME_PRODUCTS_FILE)
+    {
+        config
+            .workflow_files
+            .push(primitives::runtime_products::RUNTIME_PRODUCTS_FILE.to_owned());
+    }
+}
+
 fn generated_files_with_surface(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
-    let config = config.clone();
+    let mut config = config.clone();
+    add_owner_runtime_products_file(&mut config);
     // The trust-gated shape is a rendering input; refuse to render before the
     // IR silently falls back to skips for an undecided config.
     runners::validate_trusted_runner_availability(&config)?;
@@ -4417,6 +4658,7 @@ fn generated_files_with_surface(
                     "renovate-validate.yml" => {
                         primitives::renovate::renovate_validate_content(&config)
                     }
+                    "ci-runtime-products.yml" => generated_runtime_products(&config),
                     _ => None,
                 }
             });
@@ -4531,6 +4773,10 @@ fn generated_preview(config: &ProjectConfig) -> String {
 
 fn generated_release(config: &ProjectConfig) -> Option<String> {
     primitives::release::release_content(config)
+}
+
+fn generated_runtime_products(config: &ProjectConfig) -> Option<String> {
+    primitives::runtime_products::runtime_products_content(config)
 }
 
 fn render_actionlint_config(config: &ProjectConfig) -> String {
@@ -5047,6 +5293,7 @@ fn write_generated_with_options(
     apply_generated_write_plan(root, files, inputs, dry_run, check, force, &plan)
 }
 
+#[cfg(any(feature = "tui", test))]
 fn plan_generated_write(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -6683,8 +6930,31 @@ mod tests {
             Ok(Cli {
                 target,
                 plain: false,
+                pin_build: false,
                 ..
             }) if target == "."
+        ));
+        let pin_build = Cli::parse_args([
+            OsString::from("--plain"),
+            OsString::from("--check"),
+            OsString::from("--pin-build"),
+        ]);
+        assert!(matches!(
+            pin_build,
+            Ok(Cli {
+                check: true,
+                pin_build: true,
+                ..
+            })
+        ));
+        let accepted_without_check = Cli::parse_args([OsString::from("--pin-build")]);
+        assert!(matches!(
+            accepted_without_check,
+            Ok(Cli {
+                check: false,
+                pin_build: true,
+                ..
+            })
         ));
         let plain = Cli::parse_args([OsString::from("--plain")]);
         assert!(matches!(
@@ -6747,6 +7017,22 @@ mod tests {
                 ..
             }) if branch == "trunk"
         ));
+    }
+
+    #[test]
+    fn plain_mode_never_selects_the_tui() {
+        let plain = must(
+            Cli::parse_args([OsString::from("--plain")]),
+            "parse --plain",
+        );
+        assert!(!use_tui(&plain));
+    }
+
+    #[cfg(not(feature = "tui"))]
+    #[test]
+    fn lean_builds_always_take_the_headless_path() {
+        let interactive = must(Cli::parse_args([]), "parse default args");
+        assert!(!use_tui(&interactive));
     }
 
     #[test]
@@ -6818,11 +7104,12 @@ mod tests {
         let home_workflow = WorkflowIr::from_config(&home).render(WorkflowKind::Main);
         let home_plan = yaml_job(&home_workflow, "plan");
         assert!(
-            home_plan.contains(&format!(
-                "rev: {}",
-                workflow_setup_install_rev(workflow_setup_action_repository(), FIXTURE_REVISION)
-            )),
-            "the setup-action owner uses a context-gated HEAD fallback: {home_plan}"
+            home_plan.contains(&format!("rev: {FIXTURE_REVISION}")),
+            "the setup-action owner installs the declared pin, never an event SHA: {home_plan}"
+        );
+        assert!(
+            !home_plan.contains(&format!("rev: {}", github_expression("github.sha"))),
+            "owner Planning must not resolve the runtime at an event SHA: {home_plan}"
         );
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
@@ -6837,13 +7124,23 @@ mod tests {
     }
 
     #[test]
-    fn github_sha_install_rev_keeps_literal_uses_pin() {
+    fn install_rev_is_always_the_declared_pin() {
+        assert_eq!(
+            workflow_setup_install_rev(workflow_setup_action_repository(), FIXTURE_REVISION),
+            FIXTURE_REVISION,
+            "the owner installs the declared pin: an event SHA (the synthetic merge commit on pull_request) can never name a trusted product"
+        );
+        assert_eq!(
+            workflow_setup_install_rev("example/consumer", FIXTURE_REVISION),
+            FIXTURE_REVISION,
+            "a consumer installs the published pin"
+        );
         let head_rev = github_expression("github.sha");
         let maintenance = workflow_runtime_setup_with_install_rev(
             RunnerMode::Github,
             "example/consumer",
             FIXTURE_REVISION,
-            &head_rev,
+            FIXTURE_REVISION,
         );
         let uses_line = setup_action_uses_line(&maintenance);
         assert!(
@@ -6855,14 +7152,14 @@ mod tests {
             "GitHub Actions forbids expressions in uses: versions: {uses_line}"
         );
         assert!(
-            maintenance.contains(&format!("rev: {head_rev}")),
-            "maintenance must install HEAD runtime: {maintenance}"
+            maintenance.contains(&format!("rev: {FIXTURE_REVISION}")),
+            "maintenance installs the declared pin: {maintenance}"
         );
         let owner = workflow_runtime_setup_with_install_rev(
             RunnerMode::Github,
             workflow_setup_action_repository(),
             FIXTURE_REVISION,
-            &head_rev,
+            FIXTURE_REVISION,
         );
         assert!(
             owner.contains(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n")),
@@ -6894,25 +7191,20 @@ mod tests {
         );
         assert!(
             !planning.contains(&format!("rev: {head_rev}")),
-            "foreign Planning must not cargo-install a foreign github.sha: {planning}"
+            "foreign Planning must not install a foreign github.sha: {planning}"
         );
         let mut home = config.clone();
         home.repository = workflow_setup_action_repository().to_owned();
         let home_workflow = WorkflowIr::from_config(&home).render(WorkflowKind::Main);
         let home_plan = yaml_job(&home_workflow, "plan");
         assert!(
-            home_plan.contains(&format!(
-                "rev: {}",
-                workflow_setup_install_rev(workflow_setup_action_repository(), FIXTURE_REVISION)
-            )),
-            "the setup-action owner uses a context-gated HEAD fallback: {home_plan}"
+            home_plan.contains(&format!("rev: {FIXTURE_REVISION}")),
+            "the setup-action owner installs the declared pin: {home_plan}"
         );
-        let owned_rev =
-            workflow_setup_install_rev(workflow_setup_action_repository(), FIXTURE_REVISION);
-        assert!(owned_rev.contains("github.event_name == 'pull_request'"));
-        assert!(owned_rev.contains("github.event.repository.default_branch"));
-        assert!(owned_rev.contains(FIXTURE_REVISION));
-        assert_ne!(owned_rev, head_rev);
+        assert!(
+            !home_plan.contains(&format!("rev: {head_rev}")),
+            "owner Planning must not install an event SHA: {home_plan}"
+        );
     }
 
     #[test]
@@ -6988,8 +7280,24 @@ mod tests {
         WorkflowIr::from_config(&scanned_fixture(RunnerMode::Github))
             .render_workflow_runtime_download(&mut download, RunnerMode::Github);
         assert!(
-            download.contains(".policy_revision == $revision"),
-            "{download}"
+            download.contains(".revision == $revision"),
+            "the artifact is manifest-bound to the event revision: {download}"
+        );
+        assert!(
+            download.contains(".repository == $repository"),
+            "the artifact is manifest-bound to this repository: {download}"
+        );
+        assert!(
+            download.contains(".run_id == $run_id"),
+            "the artifact is manifest-bound to this run: {download}"
+        );
+        assert!(
+            download.contains(".policy_closure"),
+            "the manifest carries the policy closure: {download}"
+        );
+        assert!(
+            download.contains(".policy_binary_sha256"),
+            "the manifest carries the policy binary digest: {download}"
         );
         assert!(
             download.contains("policy runtime digest mismatch"),
@@ -7000,8 +7308,16 @@ mod tests {
             "{download}"
         );
         assert!(
-            download.contains("\"$home/bin/velnor-workflow-policy\" --revision"),
-            "{download}"
+            download.contains("install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy"),
+            "the pair stages the policy binary beside the event binary: {download}"
+        );
+        assert!(
+            download.contains("\"$home/bin/velnor-workflow-policy\" --closure"),
+            "the staged policy binary self-reports its closure: {download}"
+        );
+        assert!(
+            download.contains("policy runtime reports closure"),
+            "the self-report is checked against the manifest closure: {download}"
         );
         assert!(
             download.contains("echo \"$home/bin\" >> \"$GITHUB_PATH\""),
@@ -7024,42 +7340,112 @@ mod tests {
     }
 
     #[test]
-    fn owner_planning_provisions_the_pinned_policy_runtime_before_the_event_runtime() {
-        let owner = workflow_runtime_setup_with_pinned_policy(
+    fn velnor_provisioner_reuses_the_slot_only_on_manifest_digest_match() {
+        let step = workflow_pinned_policy_runtime_velnor(FIXTURE_REVISION, "checkout");
+        let repository = workflow_setup_action_repository();
+        // Manifest-first: every run downloads and attests the manifest before
+        // any reuse decision, so a planted slot binary cannot self-report its
+        // way into reuse.
+        assert!(
+            step.contains(&format!(
+                "gh release download \"$tag\" --repo {repository} --pattern manifest.json"
+            )),
+            "the manifest is fetched fresh every run: {step}"
+        );
+        assert!(
+            step.contains("gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml"),
+            "the manifest attestation is verified before the manifest is trusted: {step}"
+        );
+        assert!(
+            step.contains("expected=\"$(jq -er --arg platform \"${RUNNER_OS}-${RUNNER_ARCH}\" '.products[$platform].binary' \"$temporary/manifest.json\")\""),
+            "the expected digest comes from the proven manifest: {step}"
+        );
+        assert!(
+            step.contains("if [[ -x \"$binary\" ]]; then"),
+            "a missing slot falls through instead of dying: {step}"
+        );
+        assert!(
+            step.contains("sha256sum \"$binary\"") && step.contains("shasum -a 256 \"$binary\""),
+            "the slot binary's digest is recomputed on both toolchains: {step}"
+        );
+        // Digest-before-exec: the digest comparison alone decides reuse, and
+        // the slot binary is executed exactly once, after the digest has
+        // proven the bytes — never probed before the comparison.
+        assert!(
+            step.contains("if [[ \"$existing\" != \"$expected\" ]]; then"),
+            "reuse requires the manifest digest, decided before any execution: {step}"
+        );
+        assert!(
+            !step.contains("--closure 2>/dev/null || true"),
+            "no probe runs before the digest comparison: {step}"
+        );
+        assert_eq!(
+            step.matches("\"$binary\" --closure").count(),
+            1,
+            "the slot binary is executed exactly once: {step}"
+        );
+        let attested = must_some(
+            step.find("gh attestation verify \"$temporary/manifest.json\""),
+            "manifest attestation renders",
+        );
+        let gate = must_some(
+            step.find("if [[ \"$existing\" != \"$expected\" ]]; then"),
+            "digest reuse gate renders",
+        );
+        let installed = must_some(
+            step.find("install -Dm0755 \"$temporary/$asset\" \"$binary\""),
+            "slow-path install renders",
+        );
+        let probe = must_some(
+            step.find("reported=\"$(\"$binary\" --closure)\""),
+            "post-install self-report probe renders",
+        );
+        let confirmed = must_some(
+            step.find("[[ \"$reported\" == \"$closure\" ]]"),
+            "final self-report gate renders",
+        );
+        assert!(
+            attested < gate && gate < installed && installed < probe && probe < confirmed,
+            "attest precedes the reuse gate precedes the install precedes the probe precedes the final gate: {step}"
+        );
+        assert!(
+            step.contains(&format!(
+                "gh release download \"$tag\" --repo {repository} --pattern \"$asset\""
+            )),
+            "the slow path downloads the asset: {step}"
+        );
+        assert!(
+            step.contains("::error::policy runtime digest mismatch"),
+            "the slow path still gates the install on the digest: {step}"
+        );
+        assert!(
+            step.contains("::error::no policy runtime product for revision"),
+            "a revision with no published product fails closed naming the revision: {step}"
+        );
+        assert!(
+            step.contains("mainline runtime-product publisher"),
+            "the failure names the producer that publishes the product: {step}"
+        );
+    }
+
+    #[test]
+    fn planning_provisions_a_single_pinned_runtime() {
+        let owner = workflow_runtime_setup(
+            RunnerMode::Github,
             workflow_setup_action_repository(),
             FIXTURE_REVISION,
         );
-        let pinned = must_some(
-            owner.find("name: Set up pinned Velnor workflow policy runtime"),
-            "pinned policy runtime step",
-        );
-        let resolved = must_some(
-            owner.find("name: Resolve pinned Velnor workflow policy runtime"),
-            "resolve step",
-        );
-        let event = must_some(
-            owner.find("name: Set up Velnor workflow runtime"),
-            "event runtime step",
-        );
-        assert!(pinned < resolved && resolved < event, "{owner}");
         assert!(
-            owner.contains(&format!(
-                "          rev: {FIXTURE_REVISION}\n      - name: Resolve pinned"
-            )),
-            "the pinned install uses the literal pin: {owner}"
+            owner.contains("name: Set up Velnor workflow runtime"),
+            "the runtime step is present: {owner}"
         );
         assert!(
-            owner.contains(&format!(
-                "binary=\"{}\"",
-                hosted_workflow_runtime_binary("$PINNED_REVISION")
-            )),
-            "the pin is addressed in its own revision directory, never copied out of a shared path: {owner}"
+            !owner.contains("pinned Velnor workflow policy runtime"),
+            "the pin is the runtime: no second revision is provisioned next to it: {owner}"
         );
         assert!(
-            owner.contains(&format!(
-                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\""
-            )),
-            "{owner}"
+            owner.contains(&format!("rev: {FIXTURE_REVISION}")),
+            "the single install uses the literal pin: {owner}"
         );
         assert!(
             !owner.contains(".cargo/bin"),
@@ -7069,8 +7455,8 @@ mod tests {
             owner
                 .matches(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n"))
                 .count(),
-            2,
-            "both installs run the owner's own checkout of the action: {owner}"
+            1,
+            "the single install runs the owner's own checkout of the action: {owner}"
         );
         assert!(
             !owner.contains(VELNOR_WORKFLOW_SETUP_ACTION),
@@ -7078,7 +7464,7 @@ mod tests {
         );
 
         let foreign =
-            workflow_runtime_setup_with_pinned_policy("example/consumer", FIXTURE_REVISION);
+            workflow_runtime_setup(RunnerMode::Github, "example/consumer", FIXTURE_REVISION);
         assert!(
             !foreign.contains("pinned Velnor workflow policy runtime"),
             "a consumer installs the pin as its runtime, so PATH already is the pin: {foreign}"
@@ -7103,66 +7489,150 @@ mod tests {
     }
 
     #[test]
-    fn setup_action_bootstrap_allows_same_repository_prs_only() {
-        let action = declared_setup_action();
-        let bootstrap = must_some(
-            action
-                .lines()
-                .find(|line| line.contains("CONTROLLED_BOOTSTRAP:")),
-            "CONTROLLED_BOOTSTRAP expression",
-        );
-        assert!(action.contains("same-repository PRs may bootstrap"));
-        assert!(action.contains(
-            "CONTROLLED_BOOTSTRAP: ${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
-        ));
-        // The runtime build is foreign code: it runs outside the caller
-        // checkout and without caller-inherited link flags, which macOS
-        // runners cannot link.
-        assert!(action.contains("cd \"$RUNNER_TEMP\""));
-        assert!(action.contains("-u RUSTFLAGS"));
-        assert!(action.contains("-u CARGO_ENCODED_RUSTFLAGS"));
+    fn this_binary_reports_its_own_source_closure() {
         assert!(
-            !bootstrap.contains("github.event_name == 'push' && github.ref =="),
-            "CONTROLLED_BOOTSTRAP must gate on ref, not push&&ref: {bootstrap}"
+            crate::closure::is_full_closure(SOURCE_CLOSURE) || SOURCE_CLOSURE == "unknown",
+            "build.rs stamps a full closure digest or `unknown`: {SOURCE_CLOSURE}"
         );
-        let expected_source = format!("SOURCE_REPOSITORY: {VELNOR_WORKFLOW_INSTALL_GIT_URL}");
-        assert!(action.contains(&expected_source));
-        assert!(!action
-            .contains("SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}"));
-        assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
-        assert!(
-            !action.contains("--force"),
-            "a revision-addressed root never needs to overwrite a prior install: {action}"
-        );
-        assert!(action.contains("head_sha == env.INSTALL_REV"));
-        assert!(action.contains("actions/runs/$artifact_run_id"));
-        assert!(action.contains("run_conclusion"));
-        assert!(!action.contains(".workflow_run.conclusion == \"success\""));
-        assert!(!action.contains("if: steps.cache.outputs.cache-hit != 'true'\n      shell: bash\n      env:\n        INSTALL_REV:"));
-        assert!(!action.contains("default-branch-push-only"));
     }
 
     #[test]
-    fn setup_action_forks_cannot_source_bootstrap() {
+    fn setup_action_acquires_a_product_and_never_compiles() {
         let action = declared_setup_action();
-        let bootstrap = must_some(
-            action
-                .lines()
-                .find(|line| line.contains("CONTROLLED_BOOTSTRAP:")),
-            "CONTROLLED_BOOTSTRAP expression",
-        );
-        assert!(bootstrap.contains("github.event_name == 'schedule'"));
-        assert!(bootstrap.contains("github.event_name == 'workflow_dispatch'"));
-        assert!(bootstrap
-            .contains("github.event.pull_request.head.repo.full_name == github.repository"));
-        assert!(!bootstrap.contains("pull_request_target"));
-        assert!(action.contains(
-            "source recovery is default-branch push/schedule/workflow_dispatch or same-repository-PR only"
-        ));
+        for forbidden in [
+            "cargo install",
+            "cargo build",
+            "CONTROLLED_BOOTSTRAP",
+            "SOURCE_REPOSITORY",
+            "Install runtime from source",
+            "actions/artifacts",
+            "workflow_run",
+        ] {
+            assert!(
+                !action.contains(forbidden),
+                "the consumer acquires products; it never builds: {forbidden}"
+            );
+        }
+        assert!(action.contains("gh release download"), "{action}");
+        assert!(action.contains("gh attestation verify"), "{action}");
+        assert!(action.contains("--signer-workflow"), "{action}");
         assert!(
-            !action.contains("source recovery is default-branch-push or same-repository-PR only")
+            !action.contains("--signer-repo"),
+            "gh rejects --signer-repo combined with --signer-workflow; the workflow flag already pins owner/repo/path: {action}"
         );
-        assert!(!action.contains("pull_request_target"));
+        assert!(
+            action.contains("gh attestation verify \"$temporary/manifest.json\""),
+            "the manifest attestation is verified, not just the asset's: {action}"
+        );
+        assert!(
+            action.contains("\"$runtime/bin/velnor-workflow\" --closure"),
+            "{action}"
+        );
+        assert!(
+            action.contains("no runtime product for revision"),
+            "{action}"
+        );
+        assert!(
+            action.contains("mainline runtime-product publisher"),
+            "{action}"
+        );
+        // Closure resolution: local git first, trees API fallback, same
+        // canonical bytes (byte-sorted ls-tree lines plus the footer).
+        assert!(action.contains("ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo"), "{action}");
+        assert!(
+            action.contains("git/trees/$INSTALL_REV?recursive=1"),
+            "{action}"
+        );
+        assert!(action.contains("LC_ALL=C sort"), "{action}");
+        assert!(action.contains("closure-version:1"), "{action}");
+        assert!(action.contains("profile:release"), "{action}");
+        assert!(action.contains("velnor-workflow-runtime-v1-"), "{action}");
+    }
+
+    #[test]
+    fn setup_action_verifies_the_manifest_before_trusting_it() {
+        let action = declared_setup_action();
+        let asset = must_some(
+            action.find("gh attestation verify \"$temporary/$asset\""),
+            "the asset attestation renders",
+        );
+        let manifest = must_some(
+            action.find("gh attestation verify \"$temporary/manifest.json\""),
+            "the manifest attestation renders",
+        );
+        let filter = must_some(
+            action.find("'.closure == $closure"),
+            "the accept filter renders",
+        );
+        let expected = must_some(
+            action.find("expected=\"$(jq -er"),
+            "the digest extraction renders",
+        );
+        assert!(
+            asset < manifest && manifest < filter && filter < expected,
+            "asset attestation precedes manifest attestation precedes the filter precedes the digest: {action}"
+        );
+        assert_eq!(
+            action.matches("gh attestation verify").count(),
+            2,
+            "exactly the asset and the manifest are attested: {action}"
+        );
+        let repository = workflow_setup_action_repository();
+        for flag in [
+            "--owner tailrocks".to_owned(),
+            format!("--signer-workflow {repository}/.github/workflows/ci-runtime-products.yml"),
+        ] {
+            assert!(
+                action[manifest..filter].contains(flag.as_str()),
+                "the manifest attestation pins {flag}: {action}"
+            );
+        }
+    }
+
+    /// Both acquisition paths re-verify the digest and the installed binary
+    /// must self-report the resolved closure: the download path gates the
+    /// install on the fresh bytes, the cache-restore path re-verifies the
+    /// restored bytes (the cache is a pure acceleration), and the PATH step
+    /// refuses a binary whose own `--closure` report disagrees.
+    #[test]
+    fn setup_action_gates_both_paths_on_digest_and_self_report() {
+        let action = declared_setup_action();
+        assert!(
+            action.contains("::error::runtime digest mismatch"),
+            "the download path gates the install on the digest: {action}"
+        );
+        assert!(
+            action.contains("::error::cached runtime digest mismatch"),
+            "the cache path re-verifies the restored bytes: {action}"
+        );
+        assert_eq!(
+            action.matches("[[ \"$actual\" == \"$expected\" ]]").count(),
+            2,
+            "exactly the download and verify paths compare digests: {action}"
+        );
+        assert!(
+            action.contains("reported=\"$(\"$runtime/bin/velnor-workflow\" --closure)\""),
+            "the PATH step probes the installed binary's self-report: {action}"
+        );
+        assert!(
+            action.contains("[[ \"$reported\" == \"$CLOSURE\" ]]"),
+            "the PATH step gates on the self-report equality: {action}"
+        );
+    }
+
+    #[test]
+    fn setup_action_trust_does_not_depend_on_the_event() {
+        let action = declared_setup_action();
+        // Trust comes from the immutable release, the digest, and the
+        // attestation alone: forks and same-repository PRs acquire the
+        // identical product through the identical path. (Only the cache
+        // *save* step is event-gated, as write hygiene.)
+        for forbidden in ["pull_request_target", "head.repo.full_name"] {
+            assert!(
+                !action.contains(forbidden),
+                "product trust is event-independent: {forbidden}"
+            );
+        }
     }
 
     fn declared_setup_action() -> String {
@@ -10140,10 +10610,22 @@ channel = "stable"
                     }),
                     "{path}: job `{job}` runs the validator from a shallow checkout:\n{block}"
                 );
-                assert!(
-                    !block.contains("fetch-depth: 1"),
-                    "{path}: job `{job}` still declares a shallow checkout:\n{block}"
-                );
+                // The audited checkout above is full; any shallow checkout
+                // beside it must be the base-tree setup-action checkout (base
+                // ref, action directory only), never a head checkout.
+                for (name, body) in &steps {
+                    if !body.lines().any(|line| line.trim() == "fetch-depth: 1") {
+                        continue;
+                    }
+                    assert!(
+                        body.contains(
+                            "ref: ${{ github.event.pull_request.base.sha || github.sha }}"
+                        ) && body
+                            .contains("sparse-checkout: .github/actions/setup-velnor-workflow")
+                            && !body.contains("head.sha"),
+                        "{path}: job `{job}` step `{name}` declares a shallow checkout that is not the base-tree setup-action checkout:\n{block}"
+                    );
+                }
                 validator_jobs.push(format!("{path}#{job}"));
             }
         }
@@ -10238,39 +10720,20 @@ channel = "stable"
                 ));
             }
         }
-        // The action's source build, the Velnor lane's pinned build, and the
-        // policy entrypoint's install are the three shapes in this tree.
-        let action = format!(
-            ".github/actions/setup-velnor-workflow/action.yml: --root {HOSTED_WORKFLOW_RUNTIME_HOME}/${{{{ inputs.rev }}}} --rev Some(\"${{{{ inputs.rev }}}}\")"
-        );
-        assert!(installs.contains(&action), "{installs:#?}");
-        assert!(
-            installs.iter().any(|install| {
-                install.starts_with(".github/workflows/ci-unit-rust.yml: --root $RUNNER_TEMP/velnor-workflow-policy-")
-            }),
-            "{installs:#?}"
-        );
-        assert!(
-            installs.iter().any(|install| {
-                install.starts_with(
-                    ".github/workflows/ci-policy.yml: --root ${{ runner.temp }}/velnor-workflow ",
-                )
-            }),
-            "{installs:#?}"
-        );
+        // No generated consumer compiles the runtime: the setup action, the
+        // Velnor lane, and the policy entrypoint all acquire immutable
+        // prebuilt products. Any `cargo install ... velnor-workflow` left in the
+        // generated tree is a regression of the multi-minute bootstrap class
+        // this test exists to forbid.
+        assert!(installs.is_empty(), "{installs:#?}");
 
         // The checked-in action is what those paths address: its cargo root,
-        // downloaded product, cache path, and PATH entry are one revision
-        // directory, and Planning's pinned-binary path is inside it.
+        // Downloaded product, cache path, and PATH entry are one
+        // closure-addressed directory: every commit sharing the closure
+        // reuses the same product.
         let action = declared_setup_action();
-        let runtime = format!("runtime=\"{HOSTED_WORKFLOW_RUNTIME_HOME}/$INSTALL_REV\"");
+        let runtime = format!("runtime=\"{HOSTED_WORKFLOW_RUNTIME_HOME}/$CLOSURE\"");
         assert!(action.contains(&runtime), "{action}");
-        assert!(
-            action.contains(
-                "--rev \"$INSTALL_REV\" --root \"$runtime\" velnor-workflow --bin velnor-workflow"
-            ),
-            "{action}"
-        );
         assert!(
             action.contains("\"$runtime/bin/velnor-workflow\""),
             "{action}"
@@ -10284,7 +10747,11 @@ channel = "stable"
             "{action}"
         );
         assert!(
-            action.contains("default: velnor-workflow-v2"),
+            action.contains("steps.closure.outputs.value"),
+            "the cache key is closure-addressed: {action}"
+        );
+        assert!(
+            action.contains("default: velnor-workflow-v3"),
             "the product layout changed, so the cache key namespace moves: {action}"
         );
         assert!(
@@ -10293,13 +10760,9 @@ channel = "stable"
                 .any(|line| !line.trim_start().starts_with('#') && line.contains(".cargo/bin")),
             "no script line touches the shared cargo bin: {action}"
         );
-        assert!(
-            !action.contains("copy_with_mode \\\n          \"$runtime/velnor-workflow\""),
-            "{action}"
-        );
         assert_eq!(
-            hosted_workflow_runtime_binary("$PINNED_REVISION"),
-            "$HOME/.cache/velnor/workflow-runtime/$PINNED_REVISION/bin/velnor-workflow"
+            HOSTED_WORKFLOW_RUNTIME_HOME,
+            "$HOME/.cache/velnor/workflow-runtime"
         );
     }
 
@@ -11173,8 +11636,16 @@ channel = "stable"
         assert!(workflow.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(!workflow.contains("\non:\n  pull_request_target:"));
         assert!(workflow.contains("name: Policy"));
-        assert!(workflow.contains(&format!("--rev {FIXTURE_REVISION}")));
+        assert!(
+            workflow.contains(&format!("rev: {FIXTURE_REVISION}")),
+            "the embedded policy job acquires the validator at the declared pin"
+        );
         assert!(workflow.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: {FIXTURE_REVISION}")));
+        assert!(
+            !workflow.contains(&format!("--rev {FIXTURE_REVISION}")),
+            "no inline revision flag carries the pin"
+        );
+        assert!(!workflow.contains("cargo install"), "nothing compiles");
         // The wedge class: a same-repository reusable call pinned to another
         // revision stops GitHub from dispatching any job of the caller.
         assert!(!workflow.contains("uses: tailrocks/velnor/.github/workflows/"));
@@ -11389,7 +11860,7 @@ channel = "stable"
             files.get(&PathBuf::from(".github/workflows/nightly.yml")),
             "generated nightly workflow",
         );
-        let policy_pin = format!("--rev {FIXTURE_REVISION}");
+        let policy_pin = format!("rev: {FIXTURE_REVISION}");
         assert!(!pr_workflow.contains("name: Control / Policy"));
         assert!(!pr_workflow.contains("needs: [plan, policy]"));
         assert!(!pr_workflow.contains("uses: tailrocks/velnor/.github/workflows/"));
@@ -11397,6 +11868,13 @@ channel = "stable"
         assert!(policy_workflow.contains("name: Policy"));
         assert!(policy_workflow.contains("steps:"));
         assert!(policy_workflow.contains(&policy_pin));
+        assert!(
+            policy_workflow.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: {FIXTURE_REVISION}"))
+        );
+        assert!(policy_workflow.contains("Set up Velnor workflow runtime"));
+        assert!(!policy_workflow.contains("cargo install"));
+        assert!(!policy_workflow.contains("cargo build"));
+        assert!(!policy_workflow.contains(&format!("--rev {FIXTURE_REVISION}")));
         assert!(pr_workflow.contains("pull_request:"));
         assert!(!pr_workflow.contains("branches: [main]"));
         assert!(main_workflow.contains("branches: [main]"));
@@ -11691,10 +12169,15 @@ channel = "stable"
     }
 
     fn hosted_policy_job(revision: &str) -> String {
+        hosted_policy_job_for_repository(revision, regen_repository_marker())
+    }
+
+    fn hosted_policy_job_for_repository(revision: &str, repository: &str) -> String {
         policy_job(&PolicyJobSpec {
             name: "Policy",
             revision,
             runner: "ubuntu-24.04",
+            repository,
             cache_backend: "github",
             trusted_gate: None,
             default_branch: "main",
@@ -11706,6 +12189,7 @@ channel = "stable"
             name: "Policy",
             revision,
             runner,
+            repository: regen_repository_marker(),
             cache_backend: "local",
             trusted_gate: None,
             default_branch: "main",
@@ -11717,7 +12201,7 @@ channel = "stable"
         let hosted = hosted_policy_job("0".repeat(40).as_str());
         assert!(
             hosted.contains(&format!(
-                "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n      - name: Lint caller workflows\n        working-directory: policy-checkout\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+                "      - name: Set up actionlint\n        uses: {}\n        with:\n          install_args: actionlint@{ACTIONLINT_VERSION}\n          cache: false\n      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
                 ActionPin::Mise.reference()
             )),
             "{hosted}"
@@ -11725,11 +12209,41 @@ channel = "stable"
         let velnor = velnor_policy_job("0".repeat(40).as_str(), "[self-hosted]");
         assert!(
             velnor.contains(&format!(
-                "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n      - name: Lint caller workflows\n"
+                "      - name: Set up actionlint\n        run: mise --yes install actionlint@{ACTIONLINT_VERSION}\n      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n"
             )),
             "{velnor}"
         );
         assert!(!velnor.contains("jdx/mise-action"), "{velnor}");
+    }
+
+    /// The lint step runs with cwd inside the fork-controlled tree, where mise
+    /// would load the tree's `mise.toml` `[env]` (including `_.path` prepends)
+    /// before executing PATH-resolved helpers: fork RCE plus finding
+    /// suppression. `MISE_NO_CONFIG=1` on the step is what neutralizes fork
+    /// config; the explicit `actionlint@<version>` on the command line still
+    /// resolves the pinned tool without any config lookup.
+    #[test]
+    fn policy_lint_step_neutralizes_fork_mise_config() {
+        for job in [
+            hosted_policy_job("0".repeat(40).as_str()),
+            velnor_policy_job("0".repeat(40).as_str(), "[self-hosted]"),
+        ] {
+            let lint = must_some(
+                job.split_once("      - name: Lint caller workflows\n")
+                    .map(|(_, lint)| lint),
+                "the lint step renders",
+            );
+            assert!(
+                lint.starts_with(
+                    "        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n"
+                ),
+                "the lint step disables mise config loading first: {job}"
+            );
+            assert!(
+                !job.contains("mise exec --no-config"),
+                "mise exec has no such flag; the env form is the only confinement: {job}"
+            );
+        }
     }
 
     #[test]
@@ -12303,7 +12817,6 @@ channel = "stable"
                 "{job}"
             );
             assert!(job.contains("path: policy-checkout"), "{job}");
-            assert!(!job.contains("sparse-checkout"), "{job}");
             assert!(!job.contains("allow-unsafe-pr-checkout"), "{job}");
             assert!(
                 !job.contains("          repository: ${{ github.event.pull_request.head.repo"),
@@ -12332,17 +12845,82 @@ channel = "stable"
         }
     }
 
-    /// Only hosted policy jobs may build the audited tree's declared generator
-    /// and only they resolve the live ruleset; Velnor runners never build
-    /// pull-request code.
+    /// The owner policy job runs the setup action from its own checkout
+    /// (`./…`) while checking the repository out only under
+    /// `policy-checkout/`: without a root checkout the setup step's `uses:`
+    /// cannot resolve and the job dies at setup. The sparse checkout ahead of
+    /// it provisions exactly the composite action directory from the BASE
+    /// tree — never the PR head, and never resolved out of
+    /// `policy-checkout/`, either of which would execute fork-controlled
+    /// action code under `pull_request_target`. Consumers pin the published
+    /// action and the Velnor lane provisions its slot, so neither carries a
+    /// root checkout.
     #[test]
-    fn velnor_policy_job_never_builds_pull_request_code() {
+    fn owner_policy_job_checks_out_base_setup_action_before_setup() {
+        let owner = hosted_policy_job("abc123");
+        let checkout = must_some(
+            owner.find("      - name: Check out base setup action\n"),
+            "the owner policy job checks out the base setup action",
+        );
+        let setup = must_some(
+            owner.find(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n")),
+            "the owner setup step runs the local composite",
+        );
+        assert!(
+            checkout < setup,
+            "the root checkout precedes the setup step: {owner}"
+        );
+        let block = &owner[checkout..setup];
+        assert!(
+            block.contains(&format!("uses: {}\n", ActionPin::Checkout.reference())),
+            "the root checkout pins actions/checkout: {owner}"
+        );
+        assert!(
+            block.contains("ref: ${{ github.event.pull_request.base.sha || github.sha }}\n"),
+            "the root checkout pins the BASE tree: {owner}"
+        );
+        assert!(
+            !block.contains("head.sha"),
+            "the root checkout never names the PR head: {owner}"
+        );
+        assert!(
+            block.contains("sparse-checkout: .github/actions/setup-velnor-workflow\n"),
+            "the root checkout provisions exactly the composite directory: {owner}"
+        );
+        assert!(
+            block.contains("fetch-depth: 1\n"),
+            "the root checkout is shallow: {owner}"
+        );
+        assert!(
+            block.contains("persist-credentials: false\n"),
+            "the root checkout persists no credentials: {owner}"
+        );
+        assert!(
+            !owner.contains("policy-checkout/.github/actions"),
+            "the setup action never resolves out of the audited tree: {owner}"
+        );
+        for job in [
+            hosted_policy_job_for_repository("abc123", "example/consumer"),
+            velnor_policy_job("abc123", "[self-hosted, velnor]"),
+        ] {
+            assert!(
+                !job.contains("Check out base setup action"),
+                "only the owner lane needs a root checkout: {job}"
+            );
+            assert!(!job.contains("sparse-checkout"), "{job}");
+        }
+    }
+
+    /// No generated policy job passes `--pin-build`: an unprovisioned pin
+    /// fails closed in every lane. Only hosted jobs resolve the live ruleset.
+    #[test]
+    fn no_policy_job_builds_pull_request_code() {
         let velnor = velnor_policy_job("revision", "[self-hosted, velnor]");
-        assert!(velnor.contains("            --no-pin-build\n"), "{velnor}");
+        assert!(!velnor.contains("--pin-build"), "{velnor}");
         assert!(!velnor.contains("--ruleset-contexts"), "{velnor}");
         assert!(!velnor.contains("gh api"), "{velnor}");
         let hosted = hosted_policy_job("revision");
-        assert!(!hosted.contains("--no-pin-build"), "{hosted}");
+        assert!(!hosted.contains("--pin-build"), "{hosted}");
         assert!(
             hosted.contains("--ruleset-contexts \"$RULESET_CONTEXTS\""),
             "{hosted}"
@@ -12352,42 +12930,264 @@ channel = "stable"
             "{hosted}"
         );
         assert!(
-            hosted.contains("GH_TOKEN: ${{ github.token }}") && !hosted.contains("secrets."),
-            "the ruleset lookup uses the job token, never a secret: {hosted}"
+            hosted.contains("GH_TOKEN: ${{ github.token }}") && !hosted.contains("${{ secrets."),
+            "the ruleset lookup uses the job token, never a secret expression: {hosted}"
         );
     }
 
     #[test]
-    fn inline_policy_install_step_uses_exact_pinned_runtime_without_revision_cache() {
+    fn policy_job_acquires_validator_product_without_compiling() {
         let policy = hosted_policy_job("abc123");
+        assert!(!policy.contains("cargo install"), "{policy}");
+        assert!(!policy.contains("cargo build"), "{policy}");
+        assert!(!policy.contains("RUSTC_WRAPPER"), "{policy}");
+        assert!(!policy.contains("Mr. Boxington"), "{policy}");
         assert!(!policy.contains("CACHED_POLICY_RUNTIME"));
         assert!(!policy.contains("STAGED_POLICY_RUNTIME"));
-        assert!(!policy.contains("velnor-workflow-policy-"));
         assert!(!policy.contains("ln -sf"));
-        assert!(policy.contains(&format!("--git {VELNOR_WORKFLOW_INSTALL_GIT_URL}")));
-        assert!(policy.contains("--locked"));
-        assert!(policy.contains("--rev abc123"));
-        let install_offset = must_some(
-            policy.find("env -u RUSTC_WRAPPER"),
-            "install clears inherited build controls",
+        assert!(
+            policy.contains("      - name: Set up Velnor workflow runtime\n"),
+            "{policy}"
         );
-        let install_command = &policy[install_offset..];
-        assert!(install_command.starts_with(
-            "env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS"
-        ));
-        assert!(install_command.contains("cargo install"));
-        assert!(policy.contains("--root \"$VELNOR_WORKFLOW_ROOT\""));
-        assert!(policy.contains("echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\""));
-        assert!(policy.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: abc123")));
+        assert!(policy.contains("          rev: abc123\n"), "{policy}");
+        assert!(
+            policy.contains("Acquire candidate generator product"),
+            "{policy}"
+        );
+        assert!(
+            policy.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: abc123")),
+            "{policy}"
+        );
+        let consumer = hosted_policy_job_for_repository("abc123", "example/consumer");
+        assert!(!consumer.contains("cargo install"), "{consumer}");
+        assert!(!consumer.contains("cargo build"), "{consumer}");
+        assert!(
+            consumer.contains("Read declared generator pin"),
+            "{consumer}"
+        );
+        assert!(
+            consumer.contains("Set up declared generator product"),
+            "{consumer}"
+        );
+        assert!(
+            !consumer.contains("Acquire candidate generator product"),
+            "{consumer}"
+        );
+    }
+
+    #[test]
+    fn no_generated_file_passes_pin_build() {
+        // `--pin-build` is a local-development escape hatch on both CLIs; no
+        // generated file may pass it, or an unprovisioned pin would silently
+        // compile inside CI instead of failing closed.
+        for repository in [workflow_setup_action_repository(), "example/consumer"] {
+            let mut config = scanned_fixture(RunnerMode::Both);
+            config.repository = repository.to_owned();
+            let files = must(generated_files(&config), "generate");
+            assert!(!files.is_empty(), "the surface renders");
+            for (path, content) in &files {
+                assert!(
+                    !content.contains("--pin-build"),
+                    "{} renders --pin-build for {repository}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// The checked-in workflows are byte-identical to what the generator
+    /// renders for this repository: regeneration is a fixed point, so a
+    /// template change without its regen (or a hand-edit) fails here before
+    /// it fails in CI. The harness renders the repository's own surface the
+    /// way `run` renders it, which makes comparing every workflow trivial —
+    /// including the shared policy job in `ci-policy.yml` and `ci-main.yml`.
+    #[test]
+    fn checked_in_workflows_match_the_generator_byte_for_byte() {
+        let root = must(
+            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            "repository root",
+        );
+        let files = rendered_repository_files();
+        let entries = must(
+            fs::read_dir(root.join(".github/workflows")),
+            "read checked-in workflows",
+        );
+        let mut checked_in = 0;
+        for entry in entries {
+            let path = must(entry, "workflow entry").path();
+            if path.extension().is_none_or(|extension| extension != "yml") {
+                continue;
+            }
+            let name = must_some(
+                path.file_name().and_then(|name| name.to_str()),
+                "workflow file name",
+            )
+            .to_owned();
+            let disk = must(fs::read_to_string(&path), &format!("read {name}"));
+            let rendered = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(&name)),
+                &format!("the generator renders {name}"),
+            );
+            assert_eq!(rendered, &disk, "{name} drifted from the generator");
+            checked_in += 1;
+        }
+        assert!(checked_in > 0, "the repository checks in workflows");
+        for path in files.keys() {
+            if path.starts_with(".github/workflows")
+                && path.extension().is_some_and(|extension| extension == "yml")
+            {
+                assert!(
+                    root.join(path).is_file(),
+                    "{} is rendered but not checked in",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policy_candidate_step_binds_manifest_to_pin_and_exports_it() {
+        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        assert!(
+            owner.contains("\"$manifest_closure\" == \"$pin_candidate\""),
+            "the acquire step requires the manifest closure to equal the pin's candidate in full: {owner}"
+        );
+        assert!(
+            owner.contains(
+                "candidate manifest closure $manifest_closure is not the pin's candidate $pin_candidate"
+            ),
+            "a closure mismatch fails closed with both digests: {owner}"
+        );
+        assert!(
+            owner.contains(
+                "echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json\" >> \"$GITHUB_ENV\""
+            ),
+            "the acquire step exports the manifest for the validator's binding: {owner}"
+        );
+        assert!(
+            owner.contains("echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=\" >> \"$GITHUB_ENV\""),
+            "the early exit clears the manifest so no stale binding survives: {owner}"
+        );
+        assert!(
+            owner.contains(&format!(
+                "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
+            )),
+            "the Enforce step passes the manifest through the unset-safe fallback: {owner}"
+        );
+        assert!(
+            owner.contains("::error::candidate digest mismatch"),
+            "a binary whose digest disagrees with the manifest fails closed: {owner}"
+        );
+        assert!(
+            owner.contains("\"$reported\" == \"$manifest_closure\""),
+            "the self-report gate requires the binary to report the manifest closure: {owner}"
+        );
+        for clause in [
+            ".platform == $platform",
+            ".repository == $repo",
+            ".run_id == $run",
+        ] {
+            assert!(
+                owner.contains(clause),
+                "the manifest accept filter binds {clause}: {owner}"
+            );
+        }
+    }
+
+    /// The acquire step's `--closure` probe executes the candidate binary in a
+    /// step whose env carries the read-scoped job token for the artifact API
+    /// calls above it. The probe needs no auth, so the invocation prefixes
+    /// both token variables with empty values: the exec point holds no
+    /// token. The values are quoted (`VAR=""`) so shellcheck's SC1007 does
+    /// not flag the prefix assignments as suspicious spacing.
+    #[test]
+    fn policy_candidate_closure_probe_holds_no_token() {
+        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        assert!(
+            owner.contains(
+                "reported=\"$(GH_TOKEN=\"\" GITHUB_TOKEN=\"\" \"$candidate/velnor-workflow\" --closure)\""
+            ),
+            "the candidate probe strips both tokens from its own invocation: {owner}"
+        );
+    }
+
+    #[test]
+    fn policy_trust_comment_states_candidate_execution() {
+        for job in [
+            hosted_policy_job("abc123"),
+            velnor_policy_job("abc123", "[self-hosted, velnor]"),
+        ] {
+            assert!(
+                job.contains("additionally EXECUTES the PR run's prebuilt"),
+                "the comment states that PR-built code executes: {job}"
+            );
+            assert!(
+                job.contains("same-repository runs only, bound"),
+                "the comment states the same-repo confinement: {job}"
+            );
+            assert!(
+                job.contains("by manifest closure plus binary digest before"),
+                "the comment states the pre-execution binding: {job}"
+            );
+            assert!(
+                job.contains("and never compiles"),
+                "the compile claim stays: {job}"
+            );
+            assert!(
+                job.contains("with no secret references, no persisted credentials, the"),
+                "the comment states the credential absence precisely: {job}"
+            );
+            assert!(
+                job.contains("read-only github.token confined to the Acquire/Ruleset API steps,"),
+                "the comment confines the job token to the API steps: {job}"
+            );
+            assert!(
+                job.contains("and both candidate exec points tokenless."),
+                "the comment states both exec points hold no token: {job}"
+            );
+            assert!(
+                !job.contains("never by building pull-request code here"),
+                "the misleading implication that no PR code runs is gone: {job}"
+            );
+            assert!(
+                !job.contains("secretless, credentialless confinement"),
+                "the false secretless claim is gone: {job}"
+            );
+        }
     }
 
     #[test]
     fn both_runner_policy_entrypoint_stays_on_hosted_runner() {
         let policy = generated_ci_policy(&scanned_fixture(RunnerMode::Both));
         assert!(policy.contains("runs-on: ubuntu-24.04"));
-        assert!(policy.contains("backend: github"));
         assert!(policy.contains("fetch-depth: 0"));
         assert!(policy.contains("--ruleset-contexts"));
+        assert!(
+            policy.contains("      - name: Set up Velnor workflow runtime\n"),
+            "the entrypoint acquires the base validator as a product: {policy}"
+        );
+        assert!(
+            policy.contains(&format!("rev: {FIXTURE_REVISION}")),
+            "the validator install uses the declared pin: {policy}"
+        );
+        assert!(
+            policy.contains(&format!(
+                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{FIXTURE_REVISION}"
+            )),
+            "a consumer pins the setup action at the declared pin: {policy}"
+        );
+        assert!(
+            policy.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: {FIXTURE_REVISION}")),
+            "the validator runs with the declared policy revision: {policy}"
+        );
+        assert!(
+            policy.contains("Read declared generator pin"),
+            "the consumer entrypoint renders through the declared generator product: {policy}"
+        );
+        assert!(!policy.contains("cargo install"), "{policy}");
+        assert!(!policy.contains("cargo build"), "{policy}");
+        assert!(!policy.contains("Mr. Boxington"), "{policy}");
+        assert!(!policy.contains("backend: github"), "{policy}");
         assert!(!policy.contains(&format!(
             "group: {}",
             crate::estate::approved_velnor_runner_group()
@@ -15322,6 +16122,7 @@ channel = "stable"
             check: false,
             force: false,
             plain: true,
+            pin_build: false,
         };
 
         must(run(&cli), "generate into explicit output path");

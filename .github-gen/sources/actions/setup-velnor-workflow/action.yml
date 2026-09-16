@@ -1,223 +1,181 @@
-# Composite replacement for the former inline `cargo install` step. A revision
-# resolves only through a platform-qualified artifact whose manifest proves the
-# producer repository, default branch, exact revision, successful run, runner
-# platform, and binary digest. A source build is controlled bootstrap only:
-# trusted default-branch push, schedule, and workflow_dispatch events and
-# same-repository PRs may bootstrap a revision; forks and every other context
-# fail closed without a product.
+# Product-only consumer for the `velnor-workflow` CI runtime. This action
+# NEVER compiles: it resolves the immutable product for a generator revision
+# and downloads it.
 #
-# Every revision owns its directory: `~/.cache/velnor/workflow-runtime/<rev>`
-# is the cargo `--root` of a source build, the landing place of a downloaded
-# product, and the cache path — `bin/velnor-workflow` plus `manifest.json`.
-# Nothing is written to `~/.cargo/bin`: a job that sets up two revisions (the
-# pinned validator and the event runtime) must never race for one destination
-# (`cargo install` refuses to overwrite an occupied one), so PATH gains the
-# revision's own `bin/` and a caller that needs a specific revision addresses
-# `~/.cache/velnor/workflow-runtime/<rev>/bin/velnor-workflow` directly.
+# Resolution: `rev` (a generator commit) -> source-closure digest. The closure
+# is the canonical `git ls-tree` bytes of the closure inputs plus the footer
+# (see `crates/velnor-workflow/src/closure.rs`): computed from the local
+# checkout when it contains the revision, else via the repository trees API
+# over the same canonical bytes. Two commits with the same closure name the
+# same product.
+#
+# Acquisition: the immutable release `velnor-workflow-runtime-v1-<digest16>`
+# in the product repository. The tag is a locator only; every byte is proven:
+# the manifest binds closure/revision/platform, the binary SHA-256 is
+# recomputed, the binary's own `--closure` report must match, and the
+# asset and manifest attestations must verify against the pinned producer
+# workflow.
+#
+# The Actions cache is a pure acceleration: the per-closure directory is
+# re-verified on every restore, and a cold cache costs one small download,
+# never a compilation.
+#
+# A revision with no published product fails closed and names the producer
+# (the mainline runtime-product publisher). Publication belongs to the
+# producer; consumers never build.
 name: Set up Velnor workflow runtime
-description: Install the velnor-workflow binary with cache and toolchain-env isolation
+description: Acquire the prebuilt velnor-workflow product for a generator revision
 
 inputs:
   rev:
-    description: Velnor git revision to install
+    description: Generator commit whose runtime product to acquire
+    required: true
+  checkout-path:
+    description: Checkout holding generator history for closure resolution
     required: false
-    default: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
+    default: ${{ github.workspace }}
   cache:
-    description: Cache the installation with GitHub cache
+    description: Cache the product with GitHub cache
     required: false
     default: 'true'
   cache-key-prefix:
-    description: Prefix for the installation cache key
+    description: Prefix for the product cache key
     required: false
-    default: velnor-workflow-v2
+    default: velnor-workflow-v3
   github-token:
-    description: GitHub token for authenticated git access
+    description: GitHub token for API and release access
     required: false
     default: ${{ github.token }}
+
+outputs:
+  closure:
+    description: Source-closure digest the acquired product was resolved from
+    value: ${{ steps.closure.outputs.value }}
 
 runs:
   using: composite
   steps:
+    - name: Resolve source closure
+      id: closure
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INSTALL_REV: ${{ inputs.rev }}
+        CHECKOUT_PATH: ${{ inputs.checkout-path }}
+        PRODUCT_REPOSITORY: tailrocks/velnor
+      run: |
+        set -euo pipefail
+        sha256_digest() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum | awk '{print $1}'
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 | awk '{print $1}'
+          else
+            echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2
+            return 1
+          fi
+        }
+        test "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }
+        [[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }
+        listing=""
+        if git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then
+          listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+        else
+          tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }
+          [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
+          listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+        fi
+        test "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }
+        closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"
+        [[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }
+        echo "value=$closure" >> "$GITHUB_OUTPUT"
+
     - name: Restore runtime cache
       id: cache
       if: inputs.cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/velnor/workflow-runtime
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.rev }}
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.closure.outputs.value }}
 
-    - name: Download prebuilt runtime from trusted mainline
-      id: prebuilt
+    - name: Download runtime product
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         INSTALL_REV: ${{ inputs.rev }}
-        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        CLOSURE: ${{ steps.closure.outputs.value }}
+        PRODUCT_REPOSITORY: tailrocks/velnor
       run: |
         set -euo pipefail
-        sha256_digest() {
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$1" | awk '{print $1}'
-          elif command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "$1" | awk '{print $1}'
-          else
-            echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2
-            return 1
-          fi
-        }
-        copy_with_mode() {
-          local source="$1"
-          local destination="$2"
-          local mode="$3"
-          mkdir -p "$(dirname "$destination")"
-          cp "$source" "$destination"
-          chmod "$mode" "$destination"
-        }
-        test "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }
-        artifact_name="velnor-workflow-runtime-${INSTALL_REV}-${RUNNER_OS}-${RUNNER_ARCH}"
-        # Artifacts list workflow_run has id/head_sha/head_branch/repo ids, not
-        # conclusion. Filter identity here, then ask the run endpoint.
-        artifact_id="$(gh api --paginate \
-          "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=100" \
-          --jq '.artifacts[] | select(.expired == false and .workflow_run.head_branch == env.DEFAULT_BRANCH and .workflow_run.head_sha == env.INSTALL_REV and .workflow_run.head_repository_id == .workflow_run.repository_id) | .id' \
-          | sed -n '1p')"
-        if [[ -z "$artifact_id" ]]; then
-          echo 'found=false' >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        artifact_run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" --jq '.workflow_run.id')"
-        run_conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$artifact_run_id" --jq '.conclusion')"
-        if [[ "$run_conclusion" != "success" ]]; then
-          echo 'found=false' >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
+        for tool in gh jq; do
+          command -v "$tool" >/dev/null 2>&1 || { echo "::error::required tool missing: $tool" >&2; exit 1; }
+        done
+        tag="velnor-workflow-runtime-v1-${CLOSURE:0:16}"
+        asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
         temporary="$(mktemp -d)"
         trap 'rm -rf "$temporary"' EXIT
-        gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$temporary/runtime.zip"
-        unzip -q "$temporary/runtime.zip" -d "$temporary/runtime"
-        jq -e \
-          --arg repository "$GITHUB_REPOSITORY" \
-          --arg revision "$INSTALL_REV" \
-          --arg head_branch "$DEFAULT_BRANCH" \
-          --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
-          --arg run_id "$artifact_run_id" \
-          '.repository == $repository and .revision == $revision and .head_branch == $head_branch and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' \
-          "$temporary/runtime/manifest.json" >/dev/null
-        actual="$(sha256_digest "$temporary/runtime/velnor-workflow")"
-        expected="$(jq -er '.binary_sha256' "$temporary/runtime/manifest.json")"
-        [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
-        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
-        copy_with_mode \
-          "$temporary/runtime/velnor-workflow" \
-          "$runtime/bin/velnor-workflow" \
-          0755
-        copy_with_mode \
-          "$temporary/runtime/manifest.json" \
-          "$runtime/manifest.json" \
-          0644
-        echo 'found=true' >> "$GITHUB_OUTPUT"
-
-    - name: Install runtime from source
-      if: steps.cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.found != 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.github-token }}
-        INSTALL_REV: ${{ inputs.rev }}
-        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        CONTROLLED_BOOTSTRAP: ${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
-        SOURCE_REPOSITORY: https://github.com/tailrocks/velnor
-      run: |
-        set -euo pipefail
-        sha256_digest() {
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$1" | awk '{print $1}'
-          elif command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "$1" | awk '{print $1}'
-          else
-            echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2
-            return 1
-          fi
-        }
-        [[ "$CONTROLLED_BOOTSTRAP" == 'true' ]] || {
-          echo "::error::no trusted runtime product for $INSTALL_REV; source recovery is default-branch push/schedule/workflow_dispatch or same-repository-PR only" >&2
+        if ! gh release download "$tag" --repo "$PRODUCT_REPOSITORY" --pattern "$asset" --pattern manifest.json --dir "$temporary"; then
+          echo "::error::no runtime product for revision $INSTALL_REV (closure ${CLOSURE:0:16}); the mainline runtime-product publisher builds it after merge" >&2
           exit 1
-        }
-        # Authenticate git for the install below (public repo; also covers
-        # anonymous rate limits and private dependency mirrors).
-        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
-        # Unset toolchain wrappers inherited from the caller job. The sccache
-        # setup step runs later in the job, so any inherited RUSTC_WRAPPER
-        # points at a binary that does not exist yet and breaks the build.
-        # The runtime sources canonically live in tailrocks/velnor: a caller
-        # repository does not vendor the crate, so bootstrapping from the
-        # caller fails every foreign consumer while resolving identically
-        # for self builds. The pinned full SHA keeps the build
-        # content-addressed under the controlled-bootstrap gate above.
-        # Build outside the caller checkout without its flags: unit jobs
-        # export RUSTFLAGS for their own builds (the Linux mold link arg),
-        # which macOS runners cannot link, and a caller .cargo/config.toml
-        # must not shape foreign code either.
-        # Install straight into the revision's own root: the binary lands at
-        # `$runtime/bin/velnor-workflow`, never in `~/.cargo/bin`, so a second
-        # revision set up in the same job (pinned validator next to the event
-        # runtime) cannot collide with it.
-        cd "$RUNNER_TEMP"
-        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
-        mkdir -p "$runtime"
-        env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-          cargo install --locked --git "$SOURCE_REPOSITORY" \
-            --rev "$INSTALL_REV" --root "$runtime" velnor-workflow --bin velnor-workflow
-        binary_sha256="$(sha256_digest "$runtime/bin/velnor-workflow")"
-        jq -n \
-          --arg repository "$GITHUB_REPOSITORY" \
-          --arg revision "$INSTALL_REV" \
-          --arg head_branch "$DEFAULT_BRANCH" \
+        fi
+        gh attestation verify "$temporary/$asset" \
+          --owner tailrocks \
+          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+        gh attestation verify "$temporary/manifest.json" \
+          --owner tailrocks \
+          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+        jq -e \
+          --arg closure "$CLOSURE" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
-          --arg run_id "$GITHUB_RUN_ID" \
-          --arg job_id "${{ github.job }}" \
-          --arg binary_sha256 "$binary_sha256" \
-          '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' \
-          > "$runtime/manifest.json"
+          --arg asset "$asset" \
+          '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
+          "$temporary/manifest.json" >/dev/null
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
+        else
+          actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
+        fi
+        expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
+        [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+        runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
+        mkdir -p "$runtime/bin"
+        cp "$temporary/$asset" "$runtime/bin/velnor-workflow"
+        chmod 0755 "$runtime/bin/velnor-workflow"
+        cp "$temporary/manifest.json" "$runtime/manifest.json"
+        chmod 0644 "$runtime/manifest.json"
 
     - name: Verify runtime product
       shell: bash
       env:
-        INSTALL_REV: ${{ inputs.rev }}
+        CLOSURE: ${{ steps.closure.outputs.value }}
       run: |
         set -euo pipefail
-        sha256_digest() {
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$1" | awk '{print $1}'
-          elif command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "$1" | awk '{print $1}'
-          else
-            echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2
-            return 1
-          fi
-        }
-        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
+        runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         jq -e \
-          --arg repository "$GITHUB_REPOSITORY" \
-          --arg revision "$INSTALL_REV" \
+          --arg closure "$CLOSURE" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
-          '.repository == $repository and .revision == $revision and .platform == $platform and (.run_id | test("^[0-9]+$")) and .job_id != ""' \
+          '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \
           "$runtime/manifest.json" >/dev/null
-        expected="$(jq -er '.binary_sha256' "$runtime/manifest.json")"
-        actual="$(sha256_digest "$runtime/bin/velnor-workflow")"
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"
+        else
+          actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"
+        fi
+        expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"
         [[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }
 
     - name: Add runtime to PATH
       shell: bash
       env:
-        INSTALL_REV: ${{ inputs.rev }}
+        CLOSURE: ${{ steps.closure.outputs.value }}
       run: |
         set -euo pipefail
-        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
+        runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
         test -x "$runtime/bin/velnor-workflow"
         test -s "$runtime/manifest.json"
-        reported="$("$runtime/bin/velnor-workflow" --revision)"
-        [[ "$reported" == "$INSTALL_REV" ]] || { echo "::error::runtime at $runtime reports revision $reported, expected $INSTALL_REV" >&2; exit 1; }
+        reported="$("$runtime/bin/velnor-workflow" --closure)"
+        [[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }
         echo "$runtime/bin" >> "$GITHUB_PATH"
 
     - name: Save runtime cache
@@ -225,4 +183,4 @@ runs:
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/velnor/workflow-runtime
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.rev }}
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.closure.outputs.value }}

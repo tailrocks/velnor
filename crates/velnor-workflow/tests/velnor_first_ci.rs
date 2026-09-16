@@ -451,7 +451,6 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
             root.to_str().unwrap(),
             "--base-revision",
             &pin,
-            "--no-pin-build",
         ])
         .env("CARGO_NET_OFFLINE", "true")
         .output()
@@ -563,6 +562,242 @@ fn generate_twice_is_byte_identical_and_check_passes() {
         check.status.success(),
         "check after generate failed:\n{}",
         String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn git(root: &Path, arguments: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .status()
+        .expect("git present");
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+fn git_output(root: &Path, arguments: &[&str]) -> String {
+    let outcome = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .output()
+        .expect("git present");
+    assert!(outcome.status.success());
+    String::from_utf8_lossy(&outcome.stdout).trim().to_owned()
+}
+
+/// A git fixture whose `[generator] revision` names an older commit (the
+/// stale-pin case): the running binary's render matches the generated
+/// output, so `--check` reaches the D19 guard. Returns the fixture root,
+/// the declared pin, and the generated output directory.
+#[cfg(unix)]
+fn stale_pin_check_fixture(name: &str) -> (PathBuf, String, PathBuf) {
+    let root = unique_dir(name);
+    write_rust_fixture(&root, 1);
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.email", "check@test"]);
+    git(&root, &["config", "user.name", "check"]);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "fixture"]);
+    let pin = git_output(&root, &["rev-parse", "HEAD"]);
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let body = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        body.replace(
+            "[generator]\nrepository = \"example/monorepo\"\n",
+            &format!("[generator]\nrepository = \"example/monorepo\"\nrevision = \"{pin}\"\n"),
+        ),
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "declare the pin"]);
+    let generated = generate(&root);
+    (root, pin, generated.output)
+}
+
+/// A `cargo` that records any invocation in the returned sentinel file and
+/// fails: the fail-closed tests prove the build escape hatch stays shut by
+/// proving this shim never fires.
+#[cfg(unix)]
+fn write_cargo_shim(directory: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let sentinel = directory.join("cargo-shim-fired");
+    let shim = directory.join("cargo");
+    fs::write(
+        &shim,
+        "#!/bin/sh\necho \"cargo invoked: $@\" > \"$CARGO_SHIM_SENTINEL\"\nexit 99\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    sentinel
+}
+
+#[cfg(unix)]
+fn check_command(root: &Path, output: &Path, shim_dir: &Path, sentinel: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"));
+    command
+        .args([
+            "--plain",
+            "--check",
+            "--default-branch",
+            "main",
+            "--output",
+            output.to_str().unwrap(),
+            root.to_str().unwrap(),
+        ])
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", shim_dir.to_str().unwrap()),
+        )
+        .env("CARGO_SHIM_SENTINEL", sentinel)
+        .env_remove("VELNOR_WORKFLOW_PINNED_BINARY")
+        .env_remove("VELNOR_WORKFLOW_CANDIDATE_MANIFEST")
+        .env_remove("CARGO_NET_OFFLINE");
+    command
+}
+
+/// `--check` without a provisioned pin fails closed with no cargo
+/// invocation, naming `--pin-build`; with `--pin-build` the run proceeds
+/// to the build (the shim fires), proving the flag opens exactly that gate.
+#[cfg(unix)]
+#[test]
+fn check_without_a_provisioned_pin_fails_closed_without_invoking_cargo() {
+    let (root, pin, output) = stale_pin_check_fixture("check-fail-closed");
+    let shim_dir = unique_dir("check-fail-closed-shim");
+    let sentinel = write_cargo_shim(&shim_dir);
+    let closed = check_command(&root, &output, &shim_dir, &sentinel)
+        .output()
+        .expect("check");
+    assert!(
+        !closed.status.success(),
+        "an unprovisioned pin fails the check"
+    );
+    let stderr = String::from_utf8_lossy(&closed.stderr);
+    assert!(
+        stderr.contains(&pin),
+        "the failure names the declared pin: {stderr}"
+    );
+    assert!(
+        stderr.contains("--pin-build"),
+        "the failure names the escape hatch: {stderr}"
+    );
+    assert!(
+        stderr.contains("building one is forbidden here"),
+        "the failure is the fail-closed guard: {stderr}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "the guard compiles nothing: the cargo shim never fired"
+    );
+    let _ = fs::remove_file(&sentinel);
+    let opened = check_command(&root, &output, &shim_dir, &sentinel)
+        .arg("--pin-build")
+        .output()
+        .expect("check with --pin-build");
+    assert!(
+        !opened.status.success(),
+        "the shimmed build fails, proving the run reached it"
+    );
+    assert!(
+        sentinel.exists(),
+        "--pin-build opens exactly the build gate: the cargo shim fired"
+    );
+    let opened_stderr = String::from_utf8_lossy(&opened.stderr);
+    assert!(
+        opened_stderr.contains(&format!("build velnor-workflow at pin {pin}")),
+        "the run proceeded to the build: {opened_stderr}"
+    );
+}
+
+/// `CARGO_NET_OFFLINE=true` keeps the pin build forbidden even with
+/// `--pin-build`: the offline guard outranks the consent flag.
+#[cfg(unix)]
+#[test]
+fn pin_build_honors_cargo_net_offline() {
+    let (root, pin, output) = stale_pin_check_fixture("check-offline");
+    let shim_dir = unique_dir("check-offline-shim");
+    let sentinel = write_cargo_shim(&shim_dir);
+    let outcome = check_command(&root, &output, &shim_dir, &sentinel)
+        .arg("--pin-build")
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("offline check with --pin-build");
+    assert!(!outcome.status.success());
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(
+        stderr.contains("building one is forbidden here"),
+        "offline stays fail-closed: {stderr}"
+    );
+    assert!(stderr.contains(&pin), "{stderr}");
+    assert!(
+        !sentinel.exists(),
+        "offline never reaches the build: {stderr}"
+    );
+}
+
+/// The `VELNOR_WORKFLOW_CANDIDATE_MANIFEST` environment fallback binds the
+/// env-slot candidate: a provisioned pin whose render differs reaches the
+/// candidate exception, and a manifest naming another tree fails loudly.
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (root, pin, _output) = stale_pin_check_fixture("check-manifest-env");
+    // A pin the fixture history cannot contain, so resolution takes the
+    // revision fallback against the provisioned fake below.
+    let foreign_pin = "0123456789abcdef0123456789abcdef01234567";
+    let config = root.join(".github-gen/velnor-workflow.toml");
+    let body = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        body.replace(
+            &format!("revision = \"{pin}\"\n"),
+            &format!("revision = \"{foreign_pin}\"\n"),
+        ),
+    )
+    .unwrap();
+    let generated = generate(&root);
+    let output = generated.output;
+    let head = git_output(&root, &["rev-parse", "HEAD"]);
+    let shim_dir = unique_dir("check-manifest-env-shim");
+    // The fake proves the foreign pin through the revision fallback, then
+    // renders drift so the candidate exception is reached. It lives outside
+    // the fixture root so the scan never sees it.
+    let fake = shim_dir.join("fake-pin");
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {foreign_pin}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; exit 0; fi\nmkdir -p \"$3/drift\"\necho junk > \"$3/drift/file.txt\"\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let manifest = shim_dir.join("candidate-manifest.json");
+    fs::write(
+        &manifest,
+        format!(
+            "{{\"profile\":\"debug\",\"platform\":\"Linux-X64\",\"repository\":\"example/monorepo\",\"run_id\":\"1\",\"revision\":\"{head}\",\"closure\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binary_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}"
+        ),
+    )
+    .unwrap();
+    let sentinel = write_cargo_shim(&shim_dir);
+    let outcome = check_command(&root, &output, &shim_dir, &sentinel)
+        .env("VELNOR_WORKFLOW_PINNED_BINARY", &fake)
+        .env("VELNOR_WORKFLOW_CANDIDATE_MANIFEST", &manifest)
+        .output()
+        .expect("check with env manifest");
+    assert!(!outcome.status.success());
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert!(
+        stderr.contains("names closure"),
+        "the env manifest is honored and its mismatch fails loudly: {stderr}"
+    );
+    assert!(
+        stderr.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "the failure names the manifest closure: {stderr}"
     );
 }
 
@@ -751,10 +986,19 @@ fn regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only(
         "the hosted lane carries the pinned binary in the Planning runtime artifact: {hosted}"
     );
     assert!(
-        velnor.contains("cargo install --locked --git ")
-            && velnor.contains(" --rev \"$PINNED_REVISION\" --root \"$root\" velnor-workflow --bin velnor-workflow")
+        !velnor.contains("cargo install") && !velnor.contains("cargo build"),
+        "the Velnor lane never compiles the policy runtime: {velnor}"
+    );
+    assert!(
+        velnor.contains("gh release download \"$tag\" --repo ")
+            && velnor.contains("gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml")
+            && velnor.contains("gh attestation verify \"$temporary/manifest.json\"")
+            && velnor.contains("if [[ \"$existing\" != \"$expected\" ]]; then")
+            && velnor.contains("sha256sum \"$binary\"")
+            && velnor.contains("\"$binary\" --closure")
+            && velnor.contains("velnor-workflow-runtime-v1-")
             && velnor.contains("echo \"VELNOR_WORKFLOW_PINNED_BINARY=$binary\" >> \"$GITHUB_ENV\""),
-        "the Velnor lane builds the named binary once into the host store and exports it for the D19 guard: {velnor}"
+        "the Velnor lane provisions the pinned product once into the host store and exports it for the D19 guard: {velnor}"
     );
     assert!(
         unit.contains("      policy_runtime:\n        required: false\n        type: boolean\n        default: false\n"),

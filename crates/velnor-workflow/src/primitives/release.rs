@@ -1807,13 +1807,14 @@ fn render_release_unit_job(
     workflow.render_workflow_runtime_setup(output, lane);
     // The generator's own unit runs `--plain --check` with the network
     // restricted, so its D19 guard needs the pinned policy binary before the
-    // first command. Hosted release jobs already install the runtime at the
-    // pin (the guard finds it on PATH by revision); the Velnor lane runs the
-    // packaged fleet runtime and builds the pinned binary into the host's
-    // persistent executable store instead.
+    // first command. Hosted release jobs already acquire the runtime product
+    // at the pin (the guard finds it on PATH by closure); the Velnor lane
+    // runs the packaged fleet runtime and provisions the pinned product into
+    // the host's persistent executable store instead.
     if lane == crate::RunnerMode::Velnor && super::ir::unit_runs_workflow_plain_check(unit) {
         output.push_str(&crate::workflow_pinned_policy_runtime_velnor(
             &workflow.workflow_revision,
+            "${{ github.workspace }}",
         ));
     }
     workflow.render_tool_provisioning(output, lane, unit, false);
@@ -2884,16 +2885,17 @@ mod tests {
             !uses_line.contains("github.sha"),
             "GitHub Actions forbids expressions in uses: versions: {uses_line}"
         );
-        let expected_rev =
-            crate::workflow_setup_install_rev(&config.repository, &config.workflow_revision);
         assert!(
-            workflow.contains(&format!("rev: {expected_rev}")),
-            "maintenance install rev follows setup-action ownership: {workflow}"
+            workflow.contains(&format!("rev: {}", config.workflow_revision)),
+            "maintenance install rev is the declared pin for every repository: {workflow}"
         );
-        if config.repository != crate::workflow_setup_action_repository() {
+        for line in workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("rev:"))
+        {
             assert!(
-                !workflow.contains(&format!("rev: {}", github_expression("github.sha"))),
-                "foreign maintenance must not cargo-install a foreign github.sha: {workflow}"
+                !line.contains("github."),
+                "no maintenance runtime identity may derive from the event context: {line}"
             );
         }
         assert!(
@@ -2923,14 +2925,6 @@ mod tests {
             ),
             "cache retention must keep schedule and dispatch: {workflow}"
         );
-        if config.repository == crate::workflow_setup_action_repository() {
-            assert!(
-                workflow.contains("github.event_name == 'push'")
-                    && workflow.contains("github.event.repository.default_branch")
-                    && workflow.contains(config.workflow_revision.as_str()),
-                "owned maintenance must use the context-gated runtime revision: {workflow}"
-            );
-        }
     }
 
     /// Every maintenance step that calls `gh api` must carry `GH_TOKEN`: an
@@ -3234,15 +3228,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "eea4d741caae384a6f7d72b5e99be02fae899f074eae57538b510431f609da60",
+                "fe8814a303cf8bf8c542e2b7a1dfe77347ce3cf8ec36d4c38e074a03b37cbefa",
             ),
             (
                 "preview.yml",
-                "4e73bc23823140cae838c62c24b9104179cee0c646175ff0cb3756328dc30744",
+                "3164356d78ab6fe3f1bfb1a99c6309016a1d1d109ed54bc6a3ae41b5964d012e",
             ),
             (
                 "maintenance.yml",
-                "0c2ee0ba7f00b251847a57536e228078f0eecd371c84a72a0e096ed58d75b506",
+                "dec062b10a81cc0add558b5ab3da547b8d818fd8079cc895845c55dd7f945c1d",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3355,11 +3349,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "ab4fbb8d96276111a99eca433a82217011e3a30f68df45ada70b4e55c54ad683",
+                "f0e44f87fedb2a31d0934f64986b8027041ab36e60f1bde200ff4fda58798f8d",
             ),
             (
                 "preview.yml",
-                "59e2c1c10adff9a11de9be3c6ac01f8665c15484f83a4cdf3e2724eace8da3c8",
+                "b2e2a977c325312e21d22d329a5dba598053ca8ac08719b3859a640b06dc739d",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -3571,21 +3565,24 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_installs_head_when_this_repository_owns_setup() {
+    fn maintenance_installs_pin_when_this_repository_owns_setup() {
         let mut cfg = config(&["maintenance.yml"], None);
         cfg.repository = crate::workflow_setup_action_repository().to_owned();
         let workflow = super::render_maintenance(&cfg);
         assert_maintenance_is_github_hosted(&workflow, &cfg);
         assert!(
-            workflow.contains(&format!(
-                "rev: {}",
-                crate::workflow_setup_install_rev(
-                    crate::workflow_setup_action_repository(),
-                    &cfg.workflow_revision
-                )
-            )),
-            "the setup-action owner uses a context-gated HEAD fallback: {workflow}"
+            workflow.contains(&format!("rev: {}", cfg.workflow_revision)),
+            "the setup-action owner installs the declared pin like every consumer: {workflow}"
         );
+        for line in workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("rev:"))
+        {
+            assert!(
+                !line.contains("github.sha"),
+                "owned maintenance must not derive its runtime identity from github.sha: {line}"
+            );
+        }
     }
 
     #[test]
