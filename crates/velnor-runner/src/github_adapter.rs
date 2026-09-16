@@ -100,12 +100,7 @@ pub fn github_job_container_spec(
     let store_overlays = read_through_scope
         .map(crate::trust_scope::normalize_scope)
         .map(|lower_scope| {
-            crate::storage::StoreOverlay::cargo_layers(
-                &name,
-                &paths.temp_host,
-                &store_trust_scope,
-                lower_scope,
-            )
+            crate::storage::StoreOverlay::cargo_layers(&name, &paths.temp_host, lower_scope)
         })
         .unwrap_or_default();
     Ok(JobContainerSpec {

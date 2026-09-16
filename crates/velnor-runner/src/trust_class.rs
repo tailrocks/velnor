@@ -169,10 +169,11 @@ impl TrustClass {
 pub struct AdmittedTrust {
     class: TrustClass,
     effective_scope: String,
-    /// When set, persistent stores mount a read-through overlay with this
-    /// scope as the lower (trusted) layer and [`effective_scope`] as the upper
-    /// (write) layer. Same-repo PR jobs on trusted pools use `pr` over
-    /// `trusted` so PR writes never reach trusted stores (D18).
+    /// When set, the daemon-shared Cargo stores mount a read-through overlay
+    /// with this scope as the lower (trusted) layer and a job-scoped scratch
+    /// upper that is discarded at job end; every other store uses
+    /// [`effective_scope`]. Same-repo PR jobs on trusted pools read `trusted`
+    /// this way so PR writes never reach trusted stores (D18).
     read_through_scope: Option<String>,
     /// Set when the class and pool asked for a read-through layer but the
     /// execution backend cannot mount one: the reason the job runs on its
@@ -333,7 +334,7 @@ impl StoreReadThrough {
             Self::None => None,
             Self::Layered { lower_scope } => {
                 lines.push(format!(
-                    "Read-through: '{lower_scope}' (daemon-mounted overlay; writes stay in '{write_scope}')"
+                    "Read-through: '{lower_scope}' (daemon-mounted overlay; Cargo writes land in job-scoped scratch volumes discarded at job end, never in '{lower_scope}')"
                 ));
                 None
             }

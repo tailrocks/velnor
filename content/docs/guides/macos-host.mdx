@@ -169,42 +169,44 @@ Set `VELNOR_STORAGE_ROOT` explicitly to relocate everything.
 ## Stores and the read-through layer
 
 Persistent stores are partitioned by trust scope. On a trusted host, a
-same-repository pull-request job writes to the `pr` scope and is meant to read
-the `trusted` scope beneath it (D18): PR writes never reach trusted stores, but
-a PR build starts warm from them.
+same-repository pull-request job writes to the `pr` scope and reads the
+`trusted` scope's Cargo stores beneath a job-scoped layer (D18): PR writes
+never reach trusted stores, and a PR build starts warm from them.
 
 That layer is a daemon-mounted overlay volume (`docker volume create --driver
 local --opt type=overlay`), so the runner needs no mount privileges of its own
-and the overlay is mounted by the kernel that runs the job. Whether the daemon
-can back a *writable* overlay upper on the shared store filesystem is a probed
-capability, checked once per daemon generation and reported by
-`velnor-runner preflight` and `velnorctl docker report`
-(`Read-through store overlay (D18): …`, `capabilities.readThroughStoreOverlay`
-in JSON).
+and the overlay is mounted by the kernel that runs the job. Only the overlay's
+*lower* is the host store. Its `upperdir` and `workdir` are two job-labelled
+Docker named volumes with no host bind — on OrbStack and Docker Desktop they
+live on the VM's own disk, on Linux under the Docker root — and they are
+removed with the rest of the job's Docker resources at teardown. A PR job's
+Cargo writes are therefore job scratch: they are discarded at job end and
+persist nowhere.
 
-On OrbStack and Docker Desktop the store filesystem reaches the VM over
-virtiofs, and the VM kernel's overlayfs mounts such an upper read-only. The
-probe observes exactly that and reports `unsupported`. The consequence is
-explicit, never silent:
+Whether the daemon can mount such a layer is a probed capability, checked once
+per daemon generation and reported by `velnor-runner preflight` and
+`velnorctl docker report` (`Read-through store overlay (D18): …`,
+`capabilities.readThroughStoreOverlay` in JSON). On OrbStack the verdict is
+`supported`: overlayfs reads the store over virtiofs as a lower and writes to
+the VM-local upper. (An upper on the virtiofs bind is what the VM kernel
+mounts read-only; the layer no longer puts one there.)
 
-- Trusted-pool PR jobs are admitted on the `pr` store alone. Their **Set up
-  job** log gets a `Persistent stores` group with a `##[warning]` line naming
-  the reason, and the job summary carries the warning annotation.
-- Push jobs and untrusted hosts are unaffected: they never asked for a layer.
-- The host still starts and still claims `velnor-host-docker` when trusted.
-  Refusing the whole host for a caching layer would contradict the purpose of
-  a recovery host; making the degradation visible in every affected job does
-  not.
-- On a native Linux daemon the probe passes and the layer is mounted; if a
-  layer the probe approved then fails to mount, the job fails — there is no
-  fallback path.
+Each admission says what its stores read. A trusted-pool PR job's **Set up
+job** log gets a `Persistent stores` group with a `Read-through:` line naming
+the lower scope and stating that Cargo writes land in job-scoped scratch. If
+a daemon cannot mount the layer, the same group carries a `##[warning]` line
+naming the probe's reason, the job summary carries the warning annotation, and
+the job runs on its write scope alone; push jobs and untrusted hosts never ask
+for a layer. If a layer the probe approved then fails to mount, the job fails
+— there is no fallback path.
 
 ## Cleanup
 
 - Stop the host (`host stop`, or Ctrl-C the foreground process).
-- Job containers, per-job networks, and overlay volumes carry the
-  `velnor.job-id` label and are reclaimed at job teardown; a crashed host's
-  leftovers are reclaimed on the next start.
+- Job containers, per-job networks, overlay volumes and their scratch
+  volumes carry the `velnor.job-id` label and are reclaimed at job teardown;
+  a crashed host's leftovers — including volumes whose job container is
+  already gone — are reclaimed on the next start.
 - Remove the storage root to discard everything the host persisted:
   `rm -rf ~/.velnor-store` (or your `VELNOR_STORAGE_ROOT`). Stores are caches;
   nothing in them is authoritative.

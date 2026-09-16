@@ -1279,6 +1279,42 @@ pub(crate) fn daemon_owned_buildkit_volume_names(
     names
 }
 
+/// Names of the volumes this daemon labelled for jobs with no live container
+/// (`docker_lease::list_daemon_owned_volume_format_args` rows). A row without
+/// both ownership labels, or owned by another daemon, is never touched; the
+/// BuildKit-named ones belong to the BuildKit reclaim.
+pub(crate) fn daemon_orphan_volume_names(
+    formatted: &str,
+    daemon_id: &str,
+    live_jobs: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut names = formatted
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() != 3 {
+                return None;
+            }
+            let name = fields[0].trim();
+            let job_id = fields[1].trim();
+            let owner = fields[2].trim();
+            if name.is_empty()
+                || job_id.is_empty()
+                || name.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX)
+                || crate::buildkit::is_persistent_builder_object(name)
+                || !daemon_owns_label(owner, daemon_id)
+                || live_jobs.contains(job_id)
+            {
+                return None;
+            }
+            Some(name.to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 // ---------------------------------------------------------------------------
 // In-flight `rm` claims
 // ---------------------------------------------------------------------------

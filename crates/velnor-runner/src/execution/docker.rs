@@ -33,14 +33,16 @@ static VM_RESOURCE_CONTROLS: Fact<()> =
     Fact::new("docker-vm-resource-controls", FactLifetime::Daemon);
 
 /// Whether this daemon can mount a D18 read-through store layer: an overlay
-/// volume whose upper directory lives on the shared Velnor store filesystem.
+/// volume whose lower is the shared Velnor store filesystem and whose upper
+/// and work directories are job-labelled named volumes on the daemon's own
+/// storage.
 ///
-/// A daemon-generation fact: it is decided by the VM kernel's overlayfs and
-/// the filesystem the daemon sees the store through (native ext4/xfs on
+/// A daemon-generation fact: it is decided by the daemon kernel's overlayfs
+/// and the filesystem the daemon sees the store through (native ext4/xfs on
 /// Linux; virtiofs or gRPC-FUSE under Docker Desktop/OrbStack, which
-/// overlayfs accepts as an upper only read-only, if at all). It is probed by
-/// mounting one and writing through it — a mount that succeeds and then
-/// refuses writes is exactly the failure mode the probe exists to catch.
+/// overlayfs must accept as a lower). It is probed by mounting one and
+/// writing through it — a mount that succeeds and then refuses writes is
+/// exactly the failure mode the probe exists to catch.
 static STORE_OVERLAY: Fact<StoreOverlaySupport> =
     Fact::new("docker-store-overlay", FactLifetime::Daemon);
 
@@ -87,11 +89,11 @@ impl HostPlatform {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreOverlaySupport {
     /// The daemon mounted an overlay over the store filesystem and a write
-    /// through it landed in the upper layer.
+    /// through it landed in the job-scoped upper, not in the store.
     Supported,
-    /// The daemon cannot back a writable overlay upper on the store
-    /// filesystem. The reason is the probe's own observation, suitable for
-    /// preflight output and the job log.
+    /// The daemon cannot mount a writable overlay over the store filesystem.
+    /// The reason is the probe's own observation, suitable for preflight
+    /// output and the job log.
     Unsupported { reason: String },
 }
 
@@ -164,14 +166,12 @@ fn probe_store_overlay(
     let overlay = crate::storage::StoreOverlay {
         volume: name.clone(),
         lower: probe_root.join("lower"),
-        upper: probe_root.join("upper"),
-        work: probe_root.join("work"),
+        upper_volume: format!("{name}-upper"),
+        work_volume: format!("{name}-work"),
         target: "/__store".to_owned(),
     };
     let prepared = (|| -> std::io::Result<()> {
-        for dir in [&overlay.lower, &overlay.upper, &overlay.work] {
-            std::fs::create_dir_all(dir)?;
-        }
+        std::fs::create_dir_all(&overlay.lower)?;
         std::fs::write(
             overlay.lower.join(STORE_OVERLAY_PROBE_LOWER_MARKER),
             "velnor\n",
@@ -180,7 +180,7 @@ fn probe_store_overlay(
     if let Err(error) = prepared {
         let _ = std::fs::remove_dir_all(&probe_root);
         return Err(ExecutionError::DockerPreflight(format!(
-            "store overlay probe could not prepare its layers under {}: {error}",
+            "store overlay probe could not prepare its lower under {}: {error}",
             probe_root.display()
         )));
     }
@@ -193,17 +193,17 @@ fn probe_store_overlay(
         docker_host_work_dir,
     );
     // Cleanup runs on every path; a failed cleanup is an error even when the
-    // verdict was reached, since a leaked volume would pin the probe layers.
-    let removed = runner.run(
-        "docker",
-        &[
-            "volume".to_owned(),
-            "rm".to_owned(),
-            "--force".to_owned(),
-            "--".to_owned(),
-            name.clone(),
-        ],
-    );
+    // verdict was reached, since a leaked overlay volume would pin the probe
+    // lower and leaked scratch volumes would hold daemon storage.
+    let mut remove_args = vec![
+        "volume".to_owned(),
+        "rm".to_owned(),
+        "--force".to_owned(),
+        "--".to_owned(),
+        name.clone(),
+    ];
+    remove_args.extend(overlay.scratch_volumes().map(str::to_owned));
+    let removed = runner.run("docker", &remove_args);
     let _ = std::fs::remove_dir_all(&probe_root);
     let removed = removed.map_err(|error| {
         ExecutionError::DockerPreflight(format!(
@@ -231,8 +231,52 @@ fn run_store_overlay_probe(
     let (label_key, label_value) = STORE_OVERLAY_PROBE_LABEL
         .split_once('=')
         .unwrap_or((STORE_OVERLAY_PROBE_LABEL, ""));
+    let labels = [(label_key, label_value)];
+    let scratch_volumes = overlay.scratch_volumes().map(str::to_owned);
+    for volume in &scratch_volumes {
+        let created = runner
+            .run(
+                "docker",
+                &crate::storage::StoreOverlay::create_scratch_volume_args(volume, &labels),
+            )
+            .map_err(|error| {
+                ExecutionError::DockerPreflight(format!(
+                    "store overlay probe could not create scratch volume {volume}: {error}"
+                ))
+            })?;
+        if created.code != 0 {
+            return Err(ExecutionError::DockerPreflight(format!(
+                "store overlay probe could not create scratch volume {volume}: exited {}: {}",
+                created.code,
+                created.stderr.trim()
+            )));
+        }
+    }
+    let inspected = runner
+        .run(
+            "docker",
+            &crate::storage::StoreOverlay::inspect_mountpoints_args(&scratch_volumes),
+        )
+        .map_err(|error| {
+            ExecutionError::DockerPreflight(format!(
+                "store overlay probe could not inspect its scratch volumes: {error}"
+            ))
+        })?;
+    if inspected.code != 0 {
+        return Err(ExecutionError::DockerPreflight(format!(
+            "store overlay probe could not inspect its scratch volumes: exited {}: {}",
+            inspected.code,
+            inspected.stderr.trim()
+        )));
+    }
+    let scratch = crate::storage::ScratchMountpoints::parse(&scratch_volumes, &inspected.stdout)
+        .map_err(|error| {
+            ExecutionError::DockerPreflight(format!(
+                "store overlay probe could not locate its scratch volumes: {error}"
+            ))
+        })?;
     let create_args = overlay
-        .create_volume_args(&[(label_key, label_value)], |path, label| {
+        .create_volume_args(&labels, &scratch, |path, label| {
             probe_daemon_path(path, label, work_dir, docker_host_work_dir)
         })
         .map_err(|error| {
@@ -252,6 +296,9 @@ fn run_store_overlay_probe(
             created.stderr.trim()
         )));
     }
+    // The upper is daemon-side, so the container is the only witness that
+    // the write landed in the merged tree; the host sees the lower, so a
+    // write that reached the store is observed there.
     let run_args = vec![
         "run".to_owned(),
         "--rm".to_owned(),
@@ -279,30 +326,28 @@ fn run_store_overlay_probe(
     if ran.code != 0 {
         return Ok(StoreOverlaySupport::Unsupported {
             reason: format!(
-                "the daemon could not mount a writable overlay with its upper on the store filesystem (probe container exited {}: {})",
+                "the daemon could not mount a writable overlay over the store filesystem (probe container exited {}: {})",
                 ran.code,
                 ran.stderr.trim()
             ),
         });
     }
     Ok(store_overlay_verdict(
-        overlay.upper.join(STORE_OVERLAY_PROBE_WRITTEN).is_file(),
         overlay.lower.join(STORE_OVERLAY_PROBE_WRITTEN).exists(),
     ))
 }
 
-/// Decide the probe verdict from where the write through the overlay landed.
-fn store_overlay_verdict(written_in_upper: bool, written_in_lower: bool) -> StoreOverlaySupport {
-    match (written_in_upper, written_in_lower) {
-        (true, false) => StoreOverlaySupport::Supported,
-        (_, true) => StoreOverlaySupport::Unsupported {
+/// Decide the probe verdict once the container wrote through the overlay
+/// and read its write back: the merged tree took the write, so the only
+/// remaining question is whether it stayed in the job-scoped upper or leaked
+/// into the store the host sees.
+fn store_overlay_verdict(written_in_lower: bool) -> StoreOverlaySupport {
+    if written_in_lower {
+        StoreOverlaySupport::Unsupported {
             reason: "a write through the overlay reached the lower (trusted) layer".to_owned(),
-        },
-        (false, false) => StoreOverlaySupport::Unsupported {
-            reason:
-                "a write through the overlay did not land in the upper layer visible to the host"
-                    .to_owned(),
-        },
+        }
+    } else {
+        StoreOverlaySupport::Supported
     }
 }
 
@@ -877,24 +922,29 @@ mod tests {
     use crate::execution::{HostFs, MemoryFs, RecordingCommands, RecordingFirecracker};
     use std::path::PathBuf;
 
-    /// A daemon double for the store overlay probe: records every call and
-    /// answers `docker run` by acting like an overlay of the given behaviour.
+    /// A daemon double for the store overlay probe: records every call,
+    /// keeps a "volume store" of its own for the scratch volumes, and answers
+    /// `docker run` by acting like an overlay of the given behaviour.
     struct OverlayDaemon {
         calls: Vec<Vec<String>>,
         behaviour: OverlayBehaviour,
+        /// The daemon's volume root: scratch volumes get a data directory
+        /// here, which `volume inspect` reports as their mountpoint.
+        volume_root: PathBuf,
         volume_options: Option<String>,
     }
 
     #[derive(Clone, Copy)]
     enum OverlayBehaviour {
-        /// A native Linux daemon: the write lands in the upper layer.
+        /// A daemon whose overlayfs takes the layers: the write lands in the
+        /// scratch upper.
         WritesToUpper,
-        /// OrbStack/Docker Desktop over virtiofs: the mount is read-only,
-        /// so the write inside the container fails.
+        /// An overlayfs that mounts the layers read-only, so the write
+        /// inside the container fails.
         ReadOnlyMount,
         /// A broken overlay that writes straight through to the lower layer.
         WritesToLower,
-        /// The daemon refuses to create the volume at all.
+        /// The daemon refuses to create the overlay volume at all.
         RefusesVolume,
     }
 
@@ -912,6 +962,19 @@ mod tests {
                 stderr: String::new(),
             };
             if args.starts_with(&["volume".to_owned(), "create".to_owned()]) {
+                let options = args.windows(2).find_map(|pair| {
+                    (pair[0] == "--opt")
+                        .then(|| pair[1].strip_prefix("o="))
+                        .flatten()
+                });
+                let Some(options) = options else {
+                    // A plain scratch volume: no host bind, a data directory
+                    // in the daemon's own storage.
+                    let name = args.last().unwrap();
+                    assert!(!args.iter().any(|arg| arg == "--opt"), "{args:?}");
+                    std::fs::create_dir_all(self.volume_root.join(name).join("_data")).unwrap();
+                    return Ok(ok);
+                };
                 if matches!(self.behaviour, OverlayBehaviour::RefusesVolume) {
                     return Ok(crate::executor::CommandResult {
                         code: 1,
@@ -919,17 +982,20 @@ mod tests {
                         stderr: "Error response from daemon: invalid option".to_owned(),
                     });
                 }
-                self.volume_options = Some(
-                    args.windows(2)
-                        .find_map(|pair| {
-                            (pair[0] == "--opt")
-                                .then(|| pair[1].strip_prefix("o="))
-                                .flatten()
-                        })
-                        .expect("overlay mount options")
-                        .to_owned(),
-                );
+                self.volume_options = Some(options.to_owned());
                 return Ok(ok);
+            }
+            if args.starts_with(&["volume".to_owned(), "inspect".to_owned()]) {
+                let names = &args[args.iter().position(|arg| arg == "--").unwrap() + 1..];
+                let stdout = names
+                    .iter()
+                    .map(|name| {
+                        let data = self.volume_root.join(name).join("_data");
+                        assert!(data.is_dir(), "inspected volume {name} was never created");
+                        format!("{}\n", data.display())
+                    })
+                    .collect();
+                return Ok(crate::executor::CommandResult { stdout, ..ok });
             }
             if args.first().is_some_and(|arg| arg == "run") {
                 let options = self.volume_options.clone().expect("volume created first");
@@ -943,6 +1009,16 @@ mod tests {
                 assert!(layer("lowerdir=")
                     .join(STORE_OVERLAY_PROBE_LOWER_MARKER)
                     .is_file());
+                // The upper and work operands are the daemon's own scratch
+                // data directories, never anything under the host store.
+                for key in ["upperdir=", "workdir="] {
+                    let dir = layer(key);
+                    assert!(
+                        dir.starts_with(&self.volume_root) && dir.is_dir(),
+                        "{key} must name a scratch volume data directory: {}",
+                        dir.display()
+                    );
+                }
                 return Ok(match self.behaviour {
                     OverlayBehaviour::WritesToUpper => {
                         std::fs::write(
@@ -970,17 +1046,43 @@ mod tests {
                     }
                 });
             }
+            if args.starts_with(&["volume".to_owned(), "rm".to_owned()]) {
+                for name in &args[args.iter().position(|arg| arg == "--").unwrap() + 1..] {
+                    let _ = std::fs::remove_dir_all(self.volume_root.join(name));
+                }
+                return Ok(ok);
+            }
             Ok(ok)
         }
     }
 
     impl OverlayDaemon {
         fn new(behaviour: OverlayBehaviour) -> Self {
+            static VOLUME_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+            let volume_root = std::env::temp_dir().join(format!(
+                "velnor-store-overlay-daemon-volumes-{}-{}",
+                std::process::id(),
+                VOLUME_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&volume_root).unwrap();
             Self {
                 calls: Vec::new(),
                 behaviour,
+                volume_root,
                 volume_options: None,
             }
+        }
+
+        /// Volumes still present in the daemon's storage: a leak if any.
+        fn volumes(&self) -> Vec<String> {
+            std::fs::read_dir(&self.volume_root)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
         }
 
         fn probe(
@@ -999,9 +1101,15 @@ mod tests {
                 std::fs::read_dir(work_dir.join("preflight"))
                     .map(|entries| entries.count() == 0)
                     .unwrap_or(true),
-                "the probe must remove its layers"
+                "the probe must remove its lower"
+            );
+            assert_eq!(
+                self.volumes(),
+                Vec::<String>::new(),
+                "the probe must remove its scratch volumes"
             );
             let _ = std::fs::remove_dir_all(&work_dir);
+            let _ = std::fs::remove_dir_all(&self.volume_root);
             verdict
         }
     }
@@ -1010,26 +1118,49 @@ mod tests {
     fn store_overlay_probe_reports_a_native_daemon_as_supported() {
         let mut daemon = OverlayDaemon::new(OverlayBehaviour::WritesToUpper);
         assert_eq!(daemon.probe(None).unwrap(), StoreOverlaySupport::Supported);
-        // create volume, run, remove volume — and nothing mounted by the host.
+        // Two scratch volumes, their mountpoints, the overlay volume, the
+        // run, one removal of all three — and nothing mounted by the host.
         let verbs: Vec<String> = daemon
             .calls
             .iter()
             .map(|call| call[..2.min(call.len())].join(" "))
             .collect();
-        assert_eq!(verbs, ["volume create", "run --rm", "volume rm"]);
-        let run = &daemon.calls[1];
+        assert_eq!(
+            verbs,
+            [
+                "volume create",
+                "volume create",
+                "volume inspect",
+                "volume create",
+                "run --rm",
+                "volume rm"
+            ]
+        );
+        let run = &daemon.calls[4];
         assert!(run.contains(&STORE_OVERLAY_PROBE_LABEL.to_owned()));
         assert!(run.iter().any(
             |arg| arg.ends_with(":/__store") && arg.starts_with("velnor-store-overlay-probe-")
         ));
+        let removed = daemon.calls.last().unwrap();
+        let names = &removed[removed.iter().position(|arg| arg == "--").unwrap() + 1..];
+        assert_eq!(names.len(), 3, "{removed:?}");
+        assert!(names[1].ends_with("-upper") && names[2].ends_with("-work"));
+        // Every disposable volume carries the probe label.
+        for call in daemon.calls.iter().filter(|call| call[1] == "create") {
+            assert!(
+                call.windows(2)
+                    .any(|pair| pair[0] == "--label" && pair[1] == STORE_OVERLAY_PROBE_LABEL),
+                "{call:?}"
+            );
+        }
     }
 
     #[test]
-    fn store_overlay_probe_reports_a_read_only_vm_mount_as_unsupported() {
-        // The OrbStack/Docker Desktop shape: overlayfs takes the virtiofs
-        // upper but mounts read-only, so the mount "succeeds" and the write
-        // fails. That is a verdict with the daemon's own words, not an
-        // error, and the volume is still removed.
+    fn store_overlay_probe_reports_a_read_only_mount_as_unsupported() {
+        // An overlayfs that takes the layers but mounts read-only: the mount
+        // "succeeds" and the write fails. That is a verdict with the
+        // daemon's own words, not an error, and every volume is still
+        // removed.
         let mut daemon = OverlayDaemon::new(OverlayBehaviour::ReadOnlyMount);
         let StoreOverlaySupport::Unsupported { reason } = daemon.probe(None).unwrap() else {
             panic!("a read-only overlay must be unsupported");
@@ -1039,6 +1170,43 @@ mod tests {
             .calls
             .last()
             .is_some_and(|call| call.starts_with(&["volume".to_owned(), "rm".to_owned()])));
+    }
+
+    #[test]
+    fn store_overlay_probe_keeps_the_upper_off_the_host_store() {
+        // The virtiofs defect: an upper on the host bind is what OrbStack's
+        // overlayfs refused. The probe's overlay names the daemon's scratch
+        // data directories as upper and work; only the lower is a host
+        // path mapped into the daemon's view.
+        let mut daemon = OverlayDaemon::new(OverlayBehaviour::WritesToUpper);
+        let work_dir = std::env::temp_dir().join(format!(
+            "velnor-store-overlay-scratch-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let verdict = probe_store_overlay(&mut daemon, "alpine:3.20", &work_dir, Some(&work_dir));
+        let _ = std::fs::remove_dir_all(&work_dir);
+        assert_eq!(verdict.unwrap(), StoreOverlaySupport::Supported);
+        let overlay_create = daemon
+            .calls
+            .iter()
+            .find(|call| call.iter().any(|arg| arg == "type=overlay"))
+            .expect("overlay volume create");
+        let options = overlay_create
+            .iter()
+            .find_map(|arg| arg.strip_prefix("o="))
+            .unwrap();
+        let layer = |key: &str| -> PathBuf {
+            options
+                .split(',')
+                .find_map(|part| part.strip_prefix(key))
+                .map(PathBuf::from)
+                .expect(key)
+        };
+        assert!(layer("lowerdir=").starts_with(&work_dir));
+        assert!(layer("upperdir=").starts_with(&daemon.volume_root));
+        assert!(layer("workdir=").starts_with(&daemon.volume_root));
+        let _ = std::fs::remove_dir_all(&daemon.volume_root);
     }
 
     #[test]
@@ -1089,14 +1257,9 @@ mod tests {
     }
 
     #[test]
-    fn store_overlay_verdict_needs_the_write_in_upper_and_not_in_lower() {
-        assert_eq!(
-            store_overlay_verdict(true, false),
-            StoreOverlaySupport::Supported
-        );
-        assert!(!store_overlay_verdict(false, false).is_supported());
-        assert!(!store_overlay_verdict(true, true).is_supported());
-        assert!(!store_overlay_verdict(false, true).is_supported());
+    fn store_overlay_verdict_needs_the_write_to_stay_out_of_the_lower() {
+        assert_eq!(store_overlay_verdict(false), StoreOverlaySupport::Supported);
+        assert!(!store_overlay_verdict(true).is_supported());
     }
 
     #[test]

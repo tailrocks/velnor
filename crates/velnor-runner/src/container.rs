@@ -281,23 +281,70 @@ impl JobContainerSpec {
             .collect()
     }
 
-    /// `docker volume create` argv for one read-through layer of this job,
-    /// labelled like every other job-owned Docker resource.
+    /// The ownership labels every job-owned Docker volume carries: the
+    /// daemon-id for startup reclaim, the job-id for per-job reclaim.
+    fn job_volume_labels(&self) -> [(&str, &str); 2] {
+        [
+            (
+                crate::docker_lease::DAEMON_ID_LABEL,
+                self.daemon_id.as_str(),
+            ),
+            (crate::docker_lease::JOB_ID_LABEL, self.name.as_str()),
+        ]
+    }
+
+    /// Every scratch volume the job's read-through layers need, in creation
+    /// order: the upper and work volumes of each layer.
+    #[must_use]
+    pub fn store_overlay_scratch_volumes(&self) -> Vec<String> {
+        self.store_overlays
+            .iter()
+            .flat_map(|overlay| overlay.scratch_volumes().map(str::to_owned))
+            .collect()
+    }
+
+    /// `docker volume create` argv for one read-through scratch volume of
+    /// this job, labelled like every other job-owned Docker resource.
+    #[must_use]
+    pub fn create_store_overlay_scratch_args(&self, volume: &str) -> Vec<String> {
+        crate::storage::StoreOverlay::create_scratch_volume_args(volume, &self.job_volume_labels())
+    }
+
+    /// `docker volume inspect` argv that reports the daemon-side data
+    /// directory of every scratch volume, for
+    /// [`Self::store_overlay_scratch_mountpoints`].
+    #[must_use]
+    pub fn inspect_store_overlay_scratch_args(&self) -> Vec<String> {
+        crate::storage::StoreOverlay::inspect_mountpoints_args(
+            &self.store_overlay_scratch_volumes(),
+        )
+    }
+
+    /// Parse the output of [`Self::inspect_store_overlay_scratch_args`].
     ///
     /// # Errors
-    /// A layer path cannot be mapped into the daemon's view of the work root.
+    /// The daemon did not answer one absolute mountpoint per scratch volume.
+    pub fn store_overlay_scratch_mountpoints(
+        &self,
+        inspected: &str,
+    ) -> io::Result<crate::storage::ScratchMountpoints> {
+        crate::storage::ScratchMountpoints::parse(&self.store_overlay_scratch_volumes(), inspected)
+    }
+
+    /// `docker volume create` argv for one read-through overlay volume of
+    /// this job, labelled like every other job-owned Docker resource.
+    ///
+    /// # Errors
+    /// The lower cannot be mapped into the daemon's view of the work root, or
+    /// a scratch mountpoint is missing from `scratch`.
     pub fn create_store_overlay_args(
         &self,
         overlay: &crate::storage::StoreOverlay,
+        scratch: &crate::storage::ScratchMountpoints,
     ) -> io::Result<Vec<String>> {
-        let daemon_id = self.daemon_id.as_str();
-        overlay.create_volume_args(
-            &[
-                ("velnor.daemon-id", daemon_id),
-                ("velnor.job-id", self.name.as_str()),
-            ],
-            |path, label| self.docker_host_path_checked(path, label),
-        )
+        overlay.create_volume_args(&self.job_volume_labels(), scratch, |path, label| {
+            self.docker_host_path_checked(path, label)
+        })
     }
 
     /// The tightest valid `--cpus` limit declared by the operator
@@ -1347,7 +1394,7 @@ impl JobContainerSpec {
             self.docker_host_path_checked(&path, label)?;
         }
         for overlay in &self.store_overlays {
-            self.create_store_overlay_args(overlay)?;
+            self.docker_host_path_checked(&overlay.lower, "store overlay lower")?;
         }
         if let Some(path) = &self.mbx_store_host {
             self.docker_host_path_checked(path, "MBX store")?;
@@ -2337,15 +2384,16 @@ mod tests {
     #[test]
     fn read_through_layers_replace_the_cargo_binds_with_overlay_volumes() {
         // A PR job on a trusted pool (D18): the three daemon-shared Cargo
-        // subtrees mount as daemon-created overlay volumes — `pr` writable
-        // over `trusted` read-only — while every other store keeps its
-        // trust-scoped bind. The host never mounts anything itself.
+        // subtrees mount as daemon-created overlay volumes — a job-scoped
+        // scratch upper over `trusted` read-only — while every other store
+        // keeps its trust-scoped bind. The host never mounts anything itself
+        // and the PR store is not a layer: PR writes are discarded with the
+        // job.
         let mut job = spec();
         job.store_trust_scope = crate::trust_scope::PR_STORE_SCOPE.to_owned();
         job.store_overlays = crate::storage::StoreOverlay::cargo_layers(
             &job.name,
             &job.temp_host,
-            crate::trust_scope::PR_STORE_SCOPE,
             crate::trust_scope::TRUSTED,
         );
         assert_eq!(job.store_overlays.len(), CARGO_STORE_LAYERS.len());
@@ -2354,15 +2402,9 @@ mod tests {
         let trusted_store = cargo_store_host(&job.temp_host, crate::trust_scope::TRUSTED);
         for ((subpath, target), overlay) in CARGO_STORE_LAYERS.iter().zip(&job.store_overlays) {
             assert_eq!(overlay.target, *target);
-            assert_eq!(overlay.upper, pr_store.join(subpath));
             assert_eq!(overlay.lower, trusted_store.join(subpath));
-            assert!(
-                overlay
-                    .work
-                    .starts_with(pr_store.join(crate::storage::OVERLAY_WORK_DIR)),
-                "work dir {} must live beside the upper, outside every mounted subtree",
-                overlay.work.display()
-            );
+            assert_eq!(overlay.upper_volume, format!("{}-upper", overlay.volume));
+            assert_eq!(overlay.work_volume, format!("{}-work", overlay.volume));
             assert!(
                 args.contains(&format!("{}:{target}", overlay.volume)),
                 "expected overlay volume mount for {target}, got {args:?}"
@@ -2372,13 +2414,48 @@ mod tests {
                 "the plain PR bind must not shadow the overlay for {target}"
             );
             assert!(!has_mount(&args, &trusted_store.join(subpath), target));
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.contains(&overlay.upper_volume)
+                        || arg.contains(&overlay.work_volume)),
+                "scratch volumes are overlay operands, never job mounts: {args:?}"
+            );
         }
-        // The volume carries the job-id label so job-owned reclaim removes
-        // it, and its layers are spelled in the daemon's view of the work
-        // root when one is configured.
+        // Every volume carries the job-id label so job-owned reclaim removes
+        // it. The scratch volumes are plain local volumes without a host
+        // bind; the overlay volume names the lower in the daemon's view of
+        // the work root and the scratch data directories as the daemon
+        // reported them.
         job.docker_host_work_dir = Some("/daemon/work".into());
+        let scratch_volumes = job.store_overlay_scratch_volumes();
+        assert_eq!(scratch_volumes.len(), 2 * CARGO_STORE_LAYERS.len());
+        for volume in &scratch_volumes {
+            let create = job.create_store_overlay_scratch_args(volume);
+            assert_eq!(&create[..4], ["volume", "create", "--driver", "local"]);
+            assert!(create
+                .windows(2)
+                .any(|pair| pair == ["--label", "velnor.job-id=velnor-job-1"]));
+            assert!(create
+                .windows(2)
+                .any(|pair| pair == ["--label", "velnor.daemon-id=test-daemon"]));
+            assert!(!create.iter().any(|arg| arg == "--opt"), "{create:?}");
+            assert_eq!(create.last(), Some(volume));
+        }
+        let inspect = job.inspect_store_overlay_scratch_args();
+        assert_eq!(
+            &inspect[..5],
+            ["volume", "inspect", "--format", "{{.Mountpoint}}", "--"]
+        );
+        assert_eq!(&inspect[5..], scratch_volumes.as_slice());
+        let inspected = scratch_volumes
+            .iter()
+            .map(|volume| format!("/var/lib/docker/volumes/{volume}/_data\n"))
+            .collect::<String>();
+        let scratch = job.store_overlay_scratch_mountpoints(&inspected).unwrap();
+        assert!(job.store_overlay_scratch_mountpoints("").is_err());
         let overlay = &job.store_overlays[0];
-        let create = job.create_store_overlay_args(overlay).unwrap();
+        let create = job.create_store_overlay_args(overlay, &scratch).unwrap();
         assert_eq!(&create[..4], ["volume", "create", "--driver", "local"]);
         assert!(create
             .windows(2)
@@ -2392,9 +2469,22 @@ mod tests {
             })
             .expect("overlay mount options");
         assert!(options.starts_with("lowerdir=/daemon/work/"), "{options}");
-        assert!(options.contains(",upperdir=/daemon/work/"), "{options}");
-        assert!(options.contains(",workdir=/daemon/work/"), "{options}");
+        assert!(
+            options.contains(&format!(
+                ",upperdir=/var/lib/docker/volumes/{}/_data",
+                overlay.upper_volume
+            )),
+            "{options}"
+        );
+        assert!(
+            options.contains(&format!(
+                ",workdir=/var/lib/docker/volumes/{}/_data",
+                overlay.work_volume
+            )),
+            "{options}"
+        );
         assert!(!options.contains(&job.temp_host.display().to_string()));
+        assert!(!options.contains(&pr_store.display().to_string()));
         assert_eq!(create.last(), Some(&overlay.volume));
         // Without a layer the same subtree is the plain trust-scoped bind.
         job.store_overlays.clear();

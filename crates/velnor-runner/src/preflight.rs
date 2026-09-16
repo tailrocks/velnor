@@ -517,6 +517,7 @@ mod tests {
                     "velnor-script-ok\n",
                 )?;
             }
+            let inspected_mountpoints;
             let stdout = if program == "docker"
                 && args
                     == [
@@ -525,6 +526,18 @@ mod tests {
                         "{{.CgroupDriver}} {{.CgroupVersion}}".to_string(),
                     ] {
                 "systemd 2\n"
+            } else if program == "docker"
+                && args.starts_with(&["volume".to_string(), "inspect".to_string()])
+            {
+                // The store overlay probe asks for its scratch volumes' data
+                // directories; answer like a daemon whose volumes live under
+                // its root.
+                inspected_mountpoints = args
+                    [args.iter().position(|arg| arg == "--").unwrap() + 1..]
+                    .iter()
+                    .map(|name| format!("/var/lib/docker/volumes/{name}/_data\n"))
+                    .collect::<String>();
+                inspected_mountpoints.as_str()
             } else if program == "getconf" && args == ["_NPROCESSORS_ONLN".to_string()] {
                 "1\n"
             } else if program == "systemctl"

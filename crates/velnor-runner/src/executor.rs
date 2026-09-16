@@ -1192,24 +1192,6 @@ fn pending_looks_like_workflow_command(pending: &[u8]) -> bool {
 /// cannot keep an otherwise finished container alive. The marker is created
 /// exclusively through a verified directory fd: a job-controlled symlink or
 /// replacement path can never redirect this write.
-/// Remove every read-through overlay work directory the job owned. Runs after
-/// the job-owned reclaim removed the volumes: the kernel holds the work
-/// directory while the overlay is mounted.
-fn remove_store_overlay_work_dirs(container: &JobContainerSpec) -> Result<()> {
-    for overlay in &container.store_overlays {
-        remove_dir_if_present(&overlay.work)?;
-    }
-    Ok(())
-}
-
-fn remove_dir_if_present(dir: &Path) -> Result<()> {
-    match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("remove {}", dir.display())),
-    }
-}
-
 fn mark_job_container_done(container: &JobContainerSpec) -> bool {
     if let Err(error) = container.prepare_job_done_mount() {
         eprintln!(
@@ -5668,16 +5650,14 @@ where
         // before reclaim. `docker rm` of Created BuildKit waits forever on
         // that lock if the lease still holds `POST /containers/{id}/start`.
         self.abort_docker_lease();
+        // The overlay volumes and their scratch volumes are job-labelled and
+        // go with the job-owned reclaim: nothing of the layer outlives it.
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        // The overlay volumes went with the job-owned reclaim above; their
-        // work directories are host state the daemon does not own.
-        let overlay_result = remove_store_overlay_work_dirs(container);
         let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
 
         let result = (|| {
             container_result?;
             owned_result?;
-            overlay_result?;
             buildkit_result?;
             service_result
         })();
@@ -5710,12 +5690,10 @@ where
         // held, so the worker's `docker rm` of Created BuildKit hung.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let overlay_result = remove_store_overlay_work_dirs(container);
 
         let result = (|| {
             container_result?;
             owned_result?;
-            overlay_result?;
             service_result
         })();
         if result.is_ok() {
@@ -6060,26 +6038,43 @@ where
     }
 
     /// Create the D18 read-through overlay volumes the container spec asks
-    /// for. overlayfs needs every layer directory to exist before the daemon
-    /// mounts the volume at container start, and a work directory left by a
-    /// crashed predecessor of the same job name is stale state, not reuse.
-    /// Admission already established that this daemon can mount such a
-    /// layer, so every failure here is the job's error.
+    /// for: first the job-labelled scratch volumes that back each layer's
+    /// `upperdir`/`workdir` on the daemon's own storage, then — with their
+    /// data directories as the daemon reports them — the overlay volumes.
+    /// overlayfs needs every layer directory to exist before the daemon
+    /// mounts the volume at container start; the lower is the host store,
+    /// the scratch directories exist from the moment their volumes do.
+    ///
+    /// The scratch volumes are what makes the layer job-scoped: they carry
+    /// `velnor.job-id`, so the same reclaim that removes the overlay volume
+    /// removes the PR job's writes with it. Admission already established
+    /// that this daemon can mount such a layer, so every failure here is the
+    /// job's error.
     fn create_store_overlays(&mut self, container: &JobContainerSpec) -> Result<()> {
+        if container.store_overlays.is_empty() {
+            return Ok(());
+        }
         for overlay in &container.store_overlays {
-            for dir in [&overlay.lower, &overlay.upper] {
-                fs::create_dir_all(dir).with_context(|| {
-                    format!("create read-through store layer {}", dir.display())
-                })?;
-            }
-            remove_dir_if_present(&overlay.work)?;
-            fs::create_dir_all(&overlay.work).with_context(|| {
+            fs::create_dir_all(&overlay.lower).with_context(|| {
                 format!(
-                    "create read-through store overlay work dir {}",
-                    overlay.work.display()
+                    "create read-through store lower {}",
+                    overlay.lower.display()
                 )
             })?;
-            let args = container.create_store_overlay_args(overlay)?;
+        }
+        for volume in container.store_overlay_scratch_volumes() {
+            let args = container.create_store_overlay_scratch_args(&volume);
+            self.with_docker_lifecycle("create-store-overlay", |executor| {
+                executor.run_docker(&args)
+            })
+            .with_context(|| format!("create read-through store scratch volume {volume}"))?;
+        }
+        let inspected = self
+            .run_docker(&container.inspect_store_overlay_scratch_args())
+            .context("inspect read-through store scratch volumes")?;
+        let scratch = container.store_overlay_scratch_mountpoints(&inspected.stdout)?;
+        for overlay in &container.store_overlays {
+            let args = container.create_store_overlay_args(overlay, &scratch)?;
             self.with_docker_lifecycle("create-store-overlay", |executor| {
                 executor.run_docker(&args)
             })
@@ -6087,7 +6082,7 @@ where
                 format!(
                     "create read-through store overlay volume {} ({} over {})",
                     overlay.volume,
-                    overlay.upper.display(),
+                    overlay.upper_volume,
                     overlay.lower.display()
                 )
             })?;
@@ -16624,6 +16619,147 @@ esac
             .iter()
             .any(|args| args
                 == &crate::docker_lease::force_remove_volume_args(&["guest-vol".into()])));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn read_through_layers_are_built_on_job_labelled_scratch_volumes_and_reclaimed_with_the_job() {
+        // A daemon double that answers `volume inspect` with a data
+        // directory in its own storage and reports every job-labelled volume
+        // it created when the job's reclaim lists them.
+        struct ScratchDaemon {
+            calls: Vec<Vec<String>>,
+            volumes: Vec<String>,
+        }
+        impl CommandRunner for ScratchDaemon {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
+                self.calls.push(args.to_vec());
+                let mut stdout = String::new();
+                if args.starts_with(&["volume".into(), "create".into()]) {
+                    assert!(
+                        args.windows(2)
+                            .any(|pair| pair == ["--label", "velnor.job-id=job"]),
+                        "every volume is job-labelled: {args:?}"
+                    );
+                    self.volumes.push(args.last().unwrap().clone());
+                } else if args.starts_with(&["volume".into(), "inspect".into()]) {
+                    let names = &args[args.iter().position(|arg| arg == "--").unwrap() + 1..];
+                    for name in names {
+                        assert!(self.volumes.contains(name), "inspect before create: {name}");
+                        stdout.push_str(&format!("/var/lib/docker/volumes/{name}/_data\n"));
+                    }
+                } else if args == crate::docker_lease::list_owned_volumes_args("job") {
+                    stdout = self.volumes.join("\n");
+                } else if args.starts_with(&["volume".into(), "rm".into()]) {
+                    let names = &args[3..];
+                    self.volumes.retain(|volume| !names.contains(volume));
+                }
+                Ok(CommandResult {
+                    code: 0,
+                    stdout,
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.store_trust_scope = crate::trust_scope::PR_STORE_SCOPE.to_owned();
+        spec.store_overlays = crate::storage::StoreOverlay::cargo_layers(
+            &spec.name,
+            &spec.temp_host,
+            crate::trust_scope::TRUSTED,
+        );
+        let mut executor = DockerJobEngine::inert(ScratchDaemon {
+            calls: Vec::new(),
+            volumes: Vec::new(),
+        });
+        executor.start_job_environment_once(&spec).unwrap();
+        {
+            let daemon = executor.runner();
+            // Six scratch volumes, one inspect of all of them, three overlay
+            // volumes whose upper/work operands are the inspected data
+            // directories — all before the job container starts.
+            let volume_calls = daemon
+                .calls
+                .iter()
+                .filter(|args| args.first().is_some_and(|arg| arg == "volume"))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(volume_calls.len(), 6 + 1 + 3, "{volume_calls:?}");
+            assert!(volume_calls[..6]
+                .iter()
+                .all(|args| args[1] == "create" && !args.iter().any(|arg| arg == "--opt")));
+            assert_eq!(volume_calls[6], spec.inspect_store_overlay_scratch_args());
+            for (args, overlay) in volume_calls[7..].iter().zip(&spec.store_overlays) {
+                let options = args
+                    .iter()
+                    .find_map(|arg| arg.strip_prefix("o="))
+                    .expect("overlay options");
+                assert!(options.contains(&format!(
+                    "upperdir=/var/lib/docker/volumes/{}/_data",
+                    overlay.upper_volume
+                )));
+                assert!(options.contains(&format!(
+                    "workdir=/var/lib/docker/volumes/{}/_data",
+                    overlay.work_volume
+                )));
+                let host_root = temp.display().to_string();
+                for part in options.split(',') {
+                    assert_eq!(
+                        part.contains(&host_root),
+                        part.starts_with("lowerdir="),
+                        "only the lower is a host path: {options}"
+                    );
+                }
+                assert_eq!(args.last(), Some(&overlay.volume));
+            }
+            let run_index = daemon
+                .calls
+                .iter()
+                .position(|args| args.first().is_some_and(|arg| arg == "run"))
+                .expect("job container start");
+            assert!(daemon
+                .calls
+                .iter()
+                .rposition(|args| args.first().is_some_and(|arg| arg == "volume"))
+                .is_some_and(|last_volume| last_volume < run_index));
+            assert_eq!(daemon.volumes.len(), 9);
+            // Nothing of the layer is on the host: no upper or work directory
+            // was created beside the stores.
+            fn overlay_dirs(root: &Path, found: &mut Vec<PathBuf>) {
+                for entry in fs::read_dir(root).into_iter().flatten().flatten() {
+                    let path = entry.path();
+                    if path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().contains("overlay"))
+                    {
+                        found.push(path.clone());
+                    }
+                    if path.is_dir() {
+                        overlay_dirs(&path, found);
+                    }
+                }
+            }
+            let mut found = Vec::new();
+            overlay_dirs(&temp, &mut found);
+            assert_eq!(found, Vec::<PathBuf>::new());
+        }
+
+        // Job-owned reclaim removes every one of them — the overlay volumes
+        // and the scratch that held the PR job's writes — with no separate
+        // host-side step.
+        executor.cleanup(&spec).unwrap();
+        let daemon = executor.runner();
+        assert_eq!(daemon.volumes, Vec::<String>::new());
+        let removed = daemon
+            .calls
+            .iter()
+            .find(|args| args.starts_with(&["volume".into(), "rm".into(), "--force".into()]))
+            .expect("volume rm --force");
+        assert_eq!(removed.len() - 3, 9, "{removed:?}");
         fs::remove_dir_all(temp).unwrap();
     }
 
