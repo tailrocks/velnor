@@ -672,6 +672,14 @@ mod tests {
                 && candidate.contains("build_rev=\"$CANDIDATE_MERGE_SHA\""),
             "the fast path records the merge tree as the build revision: {candidate}"
         );
+        assert!(
+            candidate.contains("use_unit_binary=false")
+                && candidate.contains(
+                    "if [[ \"$(target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
+                )
+                && candidate.contains("if [[ \"$use_unit_binary\" == true ]]; then"),
+            "the fast path reuses the checks' binary only when it already reports the head closure (the checks may build wider features): {candidate}"
+        );
         assert_eq!(
             candidate.matches("cargo build").count(),
             1,
@@ -1548,8 +1556,18 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           fi
           merge_closure="$(velnor-workflow closure --rev="$CANDIDATE_MERGE_SHA" --candidate)"
           worktree=""
+          use_unit_binary=false
           if [[ "$merge_closure" == "$head_closure" ]]; then
             test -x target/debug/velnor-workflow || {{ echo "::error::candidate packaging needs the unit's own target/debug/velnor-workflow; the checks must build the generator binary" >&2; exit 1; }}
+            # The checks may build with different features than the candidate
+            # profile stamps, so only reuse their binary when it already
+            # reports the head closure; otherwise fall through to a clean
+            # default-features build below.
+            if [[ "$(target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
+              use_unit_binary=true
+            fi
+          fi
+          if [[ "$use_unit_binary" == true ]]; then
             binary="target/debug/velnor-workflow"
             build_rev="$CANDIDATE_MERGE_SHA"
           else

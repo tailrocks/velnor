@@ -61,7 +61,8 @@ pub(crate) const CLOSURE_VERSION: u8 = 1;
 
 /// Cargo profile of Stage-0 release products.
 pub(crate) const PROFILE_RELEASE: &str = "release";
-/// Cargo profile of candidate products (reused from the unit job's test build).
+/// Cargo profile of candidate products (verified against the unit job's test
+/// build before any reuse).
 pub(crate) const PROFILE_DEBUG: &str = "debug";
 
 /// Feature set CI products are built with: none (`--no-default-features`).
@@ -69,8 +70,9 @@ pub(crate) const PROFILE_DEBUG: &str = "debug";
 /// with a CI product.
 pub(crate) const CI_FEATURES: &str = "";
 
-/// Feature set the Rust unit job builds with (default features): the
-/// candidate product. Pinned by test against the crate manifest.
+/// Feature set the candidate build stamps (default features): the
+/// candidate product. Pinned by test against the crate manifest. Unit jobs
+/// may build with wider features, so reuse is verified, never assumed.
 pub(crate) const DEV_FEATURES: &str = "tui";
 
 /// Release tag prefix for runtime products.
@@ -260,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn dev_features_pin_the_unit_job_build() {
+    fn dev_features_pin_the_candidate_build() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let content = must(
             std::fs::read_to_string(&manifest),
@@ -268,7 +270,7 @@ mod tests {
         );
         assert!(
             content.contains("default = [\"tui\"]"),
-            "DEV_FEATURES names the default feature set the unit job builds: {DEV_FEATURES}"
+            "DEV_FEATURES names the default feature set the candidate build stamps: {DEV_FEATURES}"
         );
         assert_eq!(DEV_FEATURES, "tui");
         assert_ne!(

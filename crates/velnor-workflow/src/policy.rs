@@ -1039,9 +1039,9 @@ fn binary_report(binary: &Path, flag: &str) -> Result<String, String> {
 }
 
 /// Closures a renderer for `pin` (a commit of `repo`) must report: the lean
-/// release and debug CI products, plus the unit job's default-feature debug
-/// candidate. The candidate's TUI is TTY-gated and policy always renders
-/// through pipes, so the reached code is identical in all three.
+/// release and debug CI products, plus the default-feature debug candidate.
+/// The candidate's TUI is TTY-gated and policy always renders through pipes,
+/// so the reached code is identical in all three.
 pub(crate) fn expected_closures(repo: &Path, pin: &str) -> Result<Vec<String>, GeneratorError> {
     Ok(vec![
         closure_identity::closure_of_tree(
