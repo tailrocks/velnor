@@ -25,6 +25,18 @@
 //! The sweep's probe is the only thing besides a claimant that ever locks a
 //! claim file, and it does so only when no claimant is inside the acquire
 //! section, so a probe cannot make a real claimant see a spurious duplicate.
+//!
+//! Neither removal is serialized against a claimant's `open(O_CREAT)` of the
+//! same name, and that is deliberate: the holder's unlink runs outside the
+//! sweep lock. Native Linux filesystems make lookup-or-create atomic against
+//! unlink under the parent's inode lock, but the run root is not guaranteed
+//! to be one — a virtiofs/FUSE-backed directory (a bind mount shared from a
+//! macOS host) answers the race with `ENOENT` about a third of the time
+//! (measured on OrbStack: 12968 of 42717 opens). So `ENOENT` from the claim
+//! open is the same event as the orphan inode — the previous owner released
+//! between our lookup and our create — and is retried the same way, and the
+//! sweep treats a claim that vanished between `readdir` and `open` as gone,
+//! not as held.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -60,7 +72,18 @@ impl JobClaim {
         let path = claims.join(claim_file_name(plan_id, job_id));
         loop {
             let _acquiring = SweepLock::shared(&claims)?;
-            let file = open_claim(&path)?;
+            let file = match open_claim(&path) {
+                Ok(file) => file,
+                // The previous owner unlinked its claim between our lookup
+                // and our create (a filesystem whose lookup-or-create is not
+                // atomic against unlink). Same event as the orphan inode
+                // below: the path is free now, try again on it.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("open host job claim {}", path.display()));
+                }
+            };
             match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
                 Ok(()) => {}
                 Err(rustix::io::Errno::WOULDBLOCK) => return Ok(None),
@@ -122,10 +145,16 @@ pub fn held_job_claim_ids(run_root: &Path) -> Result<BTreeSet<String>> {
         // Exclusive: no claimant is between its open and its lock while we
         // decide whether this file is unheld and remove it.
         let _sweeping = SweepLock::exclusive(&claims)?;
-        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
-            // Unreadable claim: assume held rather than delete its workspace.
-            held.extend(job_uuids_in(&name));
-            continue;
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            // Its owner released and unlinked it after `readdir` listed it:
+            // nothing holds a claim that no longer exists.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                // Unreadable claim: assume held rather than delete its workspace.
+                held.extend(job_uuids_in(&name));
+                continue;
+            }
         };
         match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => {
@@ -158,14 +187,13 @@ fn claim_file_name(plan_id: &str, job_id: &str) -> String {
     crate::container::sanitize_store_key(&format!("{plan_id}-{job_id}"))
 }
 
-fn open_claim(path: &Path) -> Result<File> {
+fn open_claim(path: &Path) -> std::io::Result<File> {
     OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)
-        .with_context(|| format!("open host job claim {}", path.display()))
 }
 
 /// Whether `path` currently names the inode behind `file`.
