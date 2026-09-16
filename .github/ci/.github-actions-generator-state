@@ -3,10 +3,10 @@ schema = 2
 [inputs]
 config	65db3892f5b25b63
 scan	1605038ddd6c5029
-generator	46
+generator	47
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
-.github/actions/report-velnor-ci-outcomes/action.yml	5fc0e415658c5fb4
+.github/actions/report-velnor-ci-outcomes/action.yml	92697cbac51ebddd
 .github/actions/setup-velnor-workflow/action.yml	bacc7bd02e2aaeae
 .github/ci/project.toml	bc84aa93ac482a60
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
@@ -19,7 +19,7 @@ generator	46
 .github/workflows/ci-unit-docs.yml	c64a8e11298b4707
 .github/workflows/ci-unit-opentofu.yml	382dff0d1c89d24f
 .github/workflows/ci-unit-rust.yml	c8658e4d1199babf
-.github/workflows/maintenance.yml	4908ebd397bebcf6
+.github/workflows/maintenance.yml	9a75c8a4c55da46e
 .github/workflows/nightly.yml	2057397bf0480d73
 .github/workflows/preview.yml	8fe349d9b1f8db76
 .github/workflows/release.yml	c62769f4a6451e2b

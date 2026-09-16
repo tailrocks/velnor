@@ -20,6 +20,21 @@ runs:
         # runner-owned VELNOR_* timing env instead; keep this name distinct so
         # an empty hosted expression cannot overwrite it.
         VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}
+        # Composite steps do not inherit caller step env; forward explicitly.
+        VELNOR_CI_LANE: ${{ env.VELNOR_CI_LANE }}
+        VELNOR_HOST_WARM_LAYERS: ${{ env.VELNOR_HOST_WARM_LAYERS }}
+        VELNOR_RUN_STARTED_AT: ${{ env.VELNOR_RUN_STARTED_AT }}
+        VELNOR_JOB_QUEUED_AT: ${{ env.VELNOR_JOB_QUEUED_AT }}
+        VELNOR_CACHE_RUSTUP_PRIMARY: ${{ env.VELNOR_CACHE_RUSTUP_PRIMARY }}
+        VELNOR_CACHE_RUSTUP_MATCHED: ${{ env.VELNOR_CACHE_RUSTUP_MATCHED }}
+        VELNOR_CACHE_MOLD_PRIMARY: ${{ env.VELNOR_CACHE_MOLD_PRIMARY }}
+        VELNOR_CACHE_MOLD_MATCHED: ${{ env.VELNOR_CACHE_MOLD_MATCHED }}
+        VELNOR_CACHE_CARGO_PRIMARY: ${{ env.VELNOR_CACHE_CARGO_PRIMARY }}
+        VELNOR_CACHE_CARGO_MATCHED: ${{ env.VELNOR_CACHE_CARGO_MATCHED }}
+        VELNOR_CACHE_MBX_HIT: ${{ env.VELNOR_CACHE_MBX_HIT }}
+        VELNOR_CACHE_MBX_PRIMARY: ${{ env.VELNOR_CACHE_MBX_PRIMARY }}
+        VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ env.VELNOR_CACHE_DOCKER_SEED_PRIMARY }}
+        VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ env.VELNOR_CACHE_DOCKER_SEED_MATCHED }}
       run: |
         set -uo pipefail
         max_telemetry_seconds=$((7 * 24 * 60 * 60))
