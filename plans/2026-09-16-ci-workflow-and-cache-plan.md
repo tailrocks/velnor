@@ -1,6 +1,6 @@
 # CI workflow restoration and dual-lane cache plan
 
-Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `3e5afa74` (pin `75707ac4`; PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup green @ run [35047497124](https://github.com/tailrocks/velnor/actions/runs/35047497124); prior green @ 35039991442; Policy `FAIL` expected pre-merge bootstrap; §16 post-merge + fleet ops gates open).  
+Status: **in progress** — branch `plan/ci-workflow-and-cache` @ `1e552afe` (pin `75707ac4`; PR [#872](https://github.com/tailrocks/velnor/pull/872) **3× green** `ci-required` @ runs [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442), [35047497124](https://github.com/tailrocks/velnor/actions/runs/35047497124), [35048456675](https://github.com/tailrocks/velnor/actions/runs/35048456675); Policy `FAIL` expected pre-merge bootstrap; merge blocked on squash-only + §16 post-merge/fleet ops gates).  
 Date: 2026-09-16 (rev 14: pin-decoupled policy validator + config-only trust-gated emission + `velnor-host-docker` online; rev 13: DCO sign-off restored; rev 12: first full green `ci-required` PR rollup @ `8cc755fd` run 35039991442; rev 11: input-parameterized O(1) kind reusables + template-memory ceiling + actionlint in Policy + revision-proven D19 guard (`--revision`) + local `setup-velnor-workflow` for the owner + runner manifest self-pin removed, pin `17b441c1` @ `8f41f2dd`; rev 10: trust-gated aggregate skip @ `81104ba8`; rev 9: Velnor prepare-cargo prefetch + clippy @ `28b528d8` (superseded by rev 11); rev 8: prefetch package name @ `284f1091`; rev 7: docker collapsed skip @ `8e1ae640`; rev 6: kind file sharding @ `6c51eceb` (superseded by rev 11); rev 5 collapsed verify runtime + pin `8decfeeb` @ `9c1211d7`; rev 4 D19 install fix @ `ad76f4a`; rev 3 `c273707d`).  
 Repository: `tailrocks/velnor`.  
 Purpose: Single source for `/goal` — workflow structure + **separate GitHub and Velnor cache policies**.
@@ -337,7 +337,7 @@ Live observation: on 2026-09-15 the scheduled runs fired at 08:40 (nightly) and 
 - [ ] `velnorctl cache --work-dir <dir> du` + `velnorctl storage status` in runbook (`storage du/gc/history/…` return "unavailable" today, `lib.rs:610-619`)
 - [ ] Alert when host available < 5 GiB
 - [ ] Do **not** enable `VELNOR_ACTIONS_CACHE_URL` unless non-persistent paths need it — and after WP-V1 none should
-- [ ] Bring a `velnor-host-docker` runner online or remove the label requirement (P0-6)
+- [x] Bring a `velnor-host-docker` runner online or remove the label requirement (P0-6) — **VERIFIED @ rev 14:** 5 online `velnor-dogfood-slot-*` carry `velnor-host-docker`; `Docker · Docker / Velnor` **success** on run [35048456675](https://github.com/tailrocks/velnor/actions/runs/35048456675); `velnor_trusted_runner_available = true` in `.github-gen/velnor-workflow.toml:40`
 
 ---
 
@@ -513,7 +513,7 @@ Pre-req: Phase 0 green.
 
 - [x] `cargo check -p velnor-runner` and `cargo test -p velnor-workflow` compile and pass on `main`
 - [ ] 3 consecutive `ci-main` runs conclude `success`; `Control / Planning` and `Policy` green
-- [x] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup` — **VERIFIED @ `8cc755fd`:** PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup `ci-required` + `Control / Required` SUCCESS (run [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442)); DCO restored @ `5554e5d`/`066221a7` (rev 13)
+- [x] Ruleset `required_status_checks` context present in a PR's `statusCheckRollup` — **VERIFIED:** PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup `ci-required` + `Control / Required` SUCCESS on runs [35039991442](https://github.com/tailrocks/velnor/actions/runs/35039991442), [35047497124](https://github.com/tailrocks/velnor/actions/runs/35047497124), [35048456675](https://github.com/tailrocks/velnor/actions/runs/35048456675); DCO SUCCESS
 - [ ] Nightly completes in < 2 h (no 24 h queue)
 - [ ] `actions/cache/usage` ≤ 8 GiB after one maintenance run
 
@@ -629,7 +629,7 @@ rt:     velnor-workflow-v1-${{ runner.os }}-${{ runner.arch }}-{rev}            
 | Unique reusable files | 6 (5 kind + signer) | 6 |
 | GitHub GHA budget | 8 GiB (live 10.54 GB) | 8 GiB |
 | Velnor host budget | 50 GiB caches class; mbx 20+30 GiB per slot | same, gc scheduled |
-| Online Velnor runners | 5 dogfood (no docker label) | ≥ 1 with `velnor-host-docker` |
+| Online Velnor runners | 5 dogfood with `velnor-host-docker` (rev 14) | ≥ 1 with `velnor-host-docker` |
 
 ### Risks
 
@@ -991,6 +991,17 @@ Root cause of the required `Velnor workflow policy` check failing on every gener
 | Run 35046368486 @ `4f0bca6f` | P | `Rust · velnor-client / Velnor` + `Rust · velnor-render / Velnor` `Run unit checks` failure; `ci-required` failed on `velnor-rust-velnor-client`; fleet flake — not generator/policy regression |
 | Full PR CI rollup green @ `3e5afa74` | V | run [35047497124](https://github.com/tailrocks/velnor/actions/runs/35047497124): `conclusion: success`; `ci-required` + `Control / Required` SUCCESS; PR [#872](https://github.com/tailrocks/velnor/pull/872) rollup matches; second stable green after 35039991442 |
 | Policy pre-merge bootstrap | V | `Policy` FAILURE on PR (base validator `4790f7cc` cannot pass new tree per rev 14 bootstrap row); local `velnor-workflow policy` 11/11 PASS @ `3e5afa74` |
+
+#### Rev 15 delta @ `1e552afe` (2026-09-16)
+
+| Claim | Verdict | Evidence |
+| --- | --- | --- |
+| Third stable green `ci-required` rollup | V | run [35048456675](https://github.com/tailrocks/velnor/actions/runs/35048456675) @ `1e552afe`: `conclusion: success`; `ci-required` + `Control / Required` + DCO SUCCESS |
+| P0-6 `velnor-host-docker` online | V | `gh api …/actions/runners`: 5 online dogfood slots with `velnor-host-docker`; `Docker · Docker / Velnor` success on 35048456675 (rev 14 real job, not collapsed skip) |
+| GHA org cache usage (live) | C | `gh api orgs/tailrocks/actions/cache/usage` @ 2026-09-16: **52,933,777,242 B / 702 entries** — exceeds 8 GiB retention target |
+| Maintenance run budget snapshot | P | run [34949370819](https://github.com/tailrocks/velnor/actions/runs/34949370819) artifact `summary.json`: `total_bytes: 8271522364` (≤ 8589934592), `headroom_bytes: 318412228`, `cache_count: 5` at capture — but org total regrew to 49 GiB before merge; §16 Phase 4 7× consecutive gate still open |
+| §16 Phase 1 live cache evidence | U | green runs show `Cold cache layer(s): mbx` annotations on Velnor jobs; `host_warm` / exact-hit log lines not yet extracted from step summaries |
+| Merge readiness | P | PR MERGEABLE; requires **merge commit** (not squash) per rev 14 `pin-reachable`; Policy bypass once on bootstrap merge |
 | Tests / lints | V | `cargo test -p velnor-workflow` 398 lib + 51 integration (2+6+5+9+29); `velnor-workflow-contract` 6 (`cargo test` in the crate; it is not a workspace member); `cargo clippy -p velnor-workflow --profile test --all-targets --all-features -- -D warnings` clean; `cargo fmt --all --check` clean; `actionlint` 1.7.12 on `.github/workflows/*.yml` exit 0; `--plain --check` `Generated files are current`; release golden digests updated (fixture pin `FIXTURE_REVISION`, no longer tied to the build's HEAD) |
 | Removed | V | `TRUSTED_POLICY_REVISION_ENV`, `POLICY_REVISION`, `CHECKOUT_SHA`, `POLICY_JOB_NAMES`, both `inline_policy_job*` (one `policy_job(PolicyJobSpec)`), the literal `inline policy job must match` / `pull_request_target is forbidden` comparisons, the runtime.rs policy branch (moved to `policy.rs`) |
 | Generator determinism: trust-gated emission decided by config only | V | `runners.rs` consulted a generation-time `gh api repos/…/actions/runners` probe (and `VELNOR_WORKFLOW_TRUSTED_RUNNER_AVAILABLE`) whenever `[workflow] velnor_trusted_runner_available` was unset, so the rendered `Docker / Velnor` shape depended on which runners were online — `--check` and `generated-tree` were not reproducible. Deleted: `probe_online_runner_label`, `TRUSTED_RUNNER_AVAILABLE_ENV`, `parse_boolish`, the `gh` spawn. The key is mandatory when any unit `requires_trusted`: `RepoGenerationConfig::validate` and `runners::validate_trusted_runner_availability` (called from the scan entry and `generated_files_with_surface`) refuse with `… [workflow] velnor_trusted_runner_available is not declared; set it to true when an online runner claims velnor_trusted_label, false to render the trust-gated jobs as skips` (tests `unit_requiring_trust_without_a_label_is_a_usage_error`, `trusted_runner_availability_is_declared_never_probed`). Set `true` at the source `.github-gen/velnor-workflow.toml` (`project.toml` is rendered from it): dogfood slots 1–5 online with `velnor-host-docker` (`gh api …/actions/runners`, 2026-09-16). Result: `ci-unit-docker.yml:348-351` `verify-velnor-trusted` `name: Velnor`, `runs-on: [self-hosted, velnor-target-mvp, velnor-host-docker]`, gate without `&& false`; `ci-pr.yml`/`ci-main.yml`/`nightly.yml` `ci-required` now demand `success` for `velnor-docker` on same-repo PRs (skip accepted only for fork PRs); `release.yml` `Velnor / Docker / docker` is a real job; `trusted-runners` PASS on the gated job |
