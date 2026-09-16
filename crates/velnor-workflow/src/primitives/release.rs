@@ -584,17 +584,6 @@ fn render_guest_seed_assemble(
         if: steps.guest-seed-reuse.outputs.restored != 'true'
         run: |
           set -euo pipefail
-          # Hosted mold setup replaces /usr/bin/ld. Linux kconfig then fails
-          # closed with "ld: unknown linker" / "this linker is not supported".
-          if [ -x /usr/bin/ld.bfd ]; then
-            if [ "$(id -u)" -eq 0 ]; then
-              ln -sf /usr/bin/ld.bfd /usr/bin/ld
-            else
-              sudo ln -sf /usr/bin/ld.bfd /usr/bin/ld
-            fi
-          fi
-          ld --version | grep -Eiq 'GNU (ld|gold)|bfd' \
-            || {{ echo "::error::kernel build needs GNU ld; mold must not own /usr/bin/ld" >&2; exit 1; }}
           mkdir -p dist/microvm
           agent="target/$TARGET/release/{agent_bin}"
           {cargo_cmd} run --locked --release --package {package} --bin {image_bin} -- \
@@ -4515,8 +4504,12 @@ mod tests {
                 "aarch64 guest payload must install the cross sysroot: {preview}"
             );
             assert!(
-                preview.contains("ln -sf /usr/bin/ld.bfd /usr/bin/ld"),
-                "kernel build must restore GNU ld after mold: {preview}"
+                !preview.contains("ln -sf /usr/local/bin/mold"),
+                "mold must not replace the system linker: {preview}"
+            );
+            assert!(
+                !preview.contains("ln -sf /usr/bin/ld.bfd /usr/bin/ld"),
+                "guest kernel build must not need a linker restore shim: {preview}"
             );
             assert!(!preview.contains("velnor-guest-"), "{preview}");
             assert!(
