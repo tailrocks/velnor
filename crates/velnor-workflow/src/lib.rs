@@ -821,6 +821,9 @@ pub struct ProjectConfig {
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
     /// must expose as job display names.
     pub(crate) ruleset_required_status_checks: Vec<String>,
+    /// Status-check contexts the repository ruleset gates on that GitHub Apps
+    /// report rather than workflows.
+    pub(crate) ruleset_external_status_checks: Vec<String>,
     /// Per-owner-block update channel grants from the repo-owned generation
     /// config, or `None` while the repository has not adopted a config.
     pub(crate) package_update_channels: Option<BTreeMap<String, Vec<String>>>,
@@ -1741,6 +1744,10 @@ fn apply_generation_config(
     if !generation.ruleset_required_status_checks().is_empty() {
         config.ruleset_required_status_checks =
             generation.ruleset_required_status_checks().to_vec();
+    }
+    if !generation.ruleset_external_status_checks().is_empty() {
+        config.ruleset_external_status_checks =
+            generation.ruleset_external_status_checks().to_vec();
     }
     if let Some(null) = generation.actionlint_config_variables_null() {
         config.actionlint_config_variables_null = null;
@@ -3547,6 +3554,9 @@ pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) trusted_gate: Option<&'a str>,
     /// The branch whose rulesets are the required status-check contexts.
     pub(crate) default_branch: &'a str,
+    /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
+    /// rulesets API answers 403 on private repositories.
+    pub(crate) declared_ruleset_contexts: &'a str,
 }
 
 /// The policy job body. It is deliberately a `steps` job, not a
@@ -3570,12 +3580,13 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         cache_backend,
         trusted_gate,
         default_branch,
+        declared_ruleset_contexts,
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
     let ruleset_step = if hosted {
         format!(
-            "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n        run: |\n          set -euo pipefail\n          contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
+            "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DECLARED_RULESET_CONTEXTS: {declared_ruleset_contexts}\n        run: |\n          set -euo pipefail\n          stderr=\"$(mktemp)\"\n          trap 'rm -f \"$stderr\"' EXIT\n          if contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" 2>\"$stderr\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"; then\n            :\n          elif grep -qE '(HTTP 403|Upgrade to GitHub Team)' \"$stderr\"; then\n            echo \"::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]\"\n            contexts=\"$DECLARED_RULESET_CONTEXTS\"\n          else\n            cat \"$stderr\" >&2\n            exit 1\n          fi\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
         )
     } else {
         String::new()
@@ -3669,6 +3680,7 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
     } else {
         yaml_scalar(&config.github_runner)
     };
+    let declared_ruleset_contexts = declared_ruleset_contexts_literal(config);
     let policy_job = policy_job(&PolicyJobSpec {
         name: "Policy",
         revision: &config.workflow_revision,
@@ -3676,6 +3688,7 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
         cache_backend: if velnor { "local" } else { "github" },
         trusted_gate: gate.as_deref(),
         default_branch: &config.default_branch,
+        declared_ruleset_contexts: &declared_ruleset_contexts,
     });
     let concurrency = policy_concurrency_block(config);
     // `workflow_dispatch` lets a maintainer prove the validator the base
@@ -3823,6 +3836,22 @@ fn ruleset_required_status_check_contexts(config: &ProjectConfig) -> Vec<String>
         return vec!["ci-required".to_owned()];
     }
     Vec::new()
+}
+
+/// Comma-separated ruleset contexts from `[policy]` for hosted policy jobs
+/// when the GitHub rulesets API is unavailable (private repos without Team).
+pub(crate) fn declared_ruleset_contexts_literal(config: &ProjectConfig) -> String {
+    let mut contexts: BTreeSet<String> = ruleset_required_status_check_contexts(config)
+        .into_iter()
+        .collect();
+    contexts.extend(
+        config
+            .ruleset_external_status_checks
+            .iter()
+            .cloned(),
+    );
+    contexts.insert("Policy".to_owned());
+    contexts.into_iter().collect::<Vec<_>>().join(",")
 }
 
 /// Fail closed when a repository ruleset context is absent from `ci-pr.yml`.
@@ -7240,6 +7269,7 @@ mod tests {
             actionlint_config_variables_null: false,
             ci_required: true,
             ruleset_required_status_checks: Vec::new(),
+            ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
             velnor_runner_group: None,
             velnor_trusted_label: None,
@@ -11698,6 +11728,7 @@ channel = "stable"
             cache_backend: "github",
             trusted_gate: None,
             default_branch: "main",
+            declared_ruleset_contexts: "ci-required,DCO,Policy",
         })
     }
 
@@ -11709,6 +11740,7 @@ channel = "stable"
             cache_backend: "local",
             trusted_gate: None,
             default_branch: "main",
+            declared_ruleset_contexts: "ci-required,DCO,Policy",
         })
     }
 
@@ -12145,6 +12177,7 @@ channel = "stable"
             actionlint_config_variables_null: false,
             ci_required: true,
             ruleset_required_status_checks: Vec::new(),
+            ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
             velnor_runner_group: None,
             velnor_trusted_label: None,
@@ -12354,6 +12387,14 @@ channel = "stable"
         assert!(
             hosted.contains("GH_TOKEN: ${{ github.token }}") && !hosted.contains("secrets."),
             "the ruleset lookup uses the job token, never a secret: {hosted}"
+        );
+        assert!(
+            hosted.contains("DECLARED_RULESET_CONTEXTS: ci-required,DCO,Policy"),
+            "{hosted}"
+        );
+        assert!(
+            hosted.contains("falling back to declared contexts"),
+            "{hosted}"
         );
     }
 

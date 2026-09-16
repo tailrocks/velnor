@@ -1501,6 +1501,8 @@ pub(crate) struct WorkflowIr {
     pub(crate) repository: String,
     /// The D19 generator pin (`ProjectConfig::workflow_revision`).
     pub(crate) workflow_revision: String,
+    /// Declared `[policy]` contexts for ruleset API 403 fallback.
+    pub(crate) declared_ruleset_contexts: String,
     pub(crate) default_dispatch_runner: String,
     pub(crate) runners: RunnerMode,
     pub(crate) automatic: RunnerMode,
@@ -2194,6 +2196,7 @@ impl WorkflowIr {
             },
             repository: config.repository.clone(),
             workflow_revision: config.workflow_revision.clone(),
+            declared_ruleset_contexts: crate::declared_ruleset_contexts_literal(config),
             default_dispatch_runner: config.default_dispatch_runner.clone(),
             runners: config.runners,
             automatic: config.automatic,
@@ -4053,6 +4056,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             cache_backend: if velnor { "local" } else { "github" },
             trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
+            declared_ruleset_contexts: &self.declared_ruleset_contexts,
         }));
     }
 

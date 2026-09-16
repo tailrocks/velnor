@@ -551,6 +551,7 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
         cache_backend: "local",
         trusted_gate: Some(&crate::control_plane_trusted_gate("main")),
         default_branch: "main",
+        declared_ruleset_contexts: "ci-required,Policy",
     });
     assert!(job.contains("--no-pin-build"), "{job}");
     assert!(job.contains("    if: ${{ github.event_name == 'pull_request_target' ||"));
