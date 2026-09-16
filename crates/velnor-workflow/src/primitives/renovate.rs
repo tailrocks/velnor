@@ -392,6 +392,7 @@ mod tests {
             actionlint_config_variables_null: false,
             ci_required: true,
             ruleset_required_status_checks: Vec::new(),
+            ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
             velnor_runner_group: None,
             velnor_trusted_label: Some("example-trusted".to_owned()),
