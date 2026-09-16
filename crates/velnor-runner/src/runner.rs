@@ -2943,7 +2943,72 @@ fn start_drain_listener(config_base: PathBuf) {
     });
 }
 
+/// Why a daemon process is ending, in one line.
+///
+/// Every return from [`daemon`] — early or after a full lifetime, `Ok` or
+/// `Err` — is a `DaemonExit` reported by [`report_daemon_exit`]. The
+/// Sentry restart storm was a daemon that inherited a leftover journal drain
+/// marker and returned `Ok(())` before `READY=1` with no line of its own:
+/// systemd logged only `Failed with result 'protocol'` 7 700 times. There is
+/// no exit path here that can be silent again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonExit {
+    reason: String,
+}
+
+impl DaemonExit {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Log one error-level line naming the exit, hand the same line to systemd
+/// as `STATUS=` (visible in `systemctl status` next to `Result: protocol`),
+/// and keep it in the daemon forensic log.
+fn report_daemon_exit(config_base: Option<&Path>, reason: &str) -> String {
+    let line = format!("daemon exiting: {}", reason.replace('\n', " "));
+    tracing::error!(target: "velnor::daemon", pid = std::process::id(), "{line}");
+    crate::sd_notify::status(&line);
+    if let Some(config_base) = config_base {
+        daemon_forensic_log(config_base, &line);
+    }
+    line
+}
+
+/// The drain source a startup-time exit saw, so the line says whether this
+/// process was signalled or is honoring a marker left in the journal.
+fn drain_exit_reason(journal_path: Option<&Path>, when: &str) -> String {
+    let source = if draining() {
+        "SIGTERM/SIGINT received by this process".to_owned()
+    } else {
+        match journal_path {
+            Some(path) => format!("drain marker latched in journal {}", path.display()),
+            None => "drain latch set".to_owned(),
+        }
+    };
+    format!("drain active {when}: {source}; no slot registered and READY=1 was not sent")
+}
+
 pub async fn daemon(args: DaemonArgs) -> Result<()> {
+    let config_base = daemon_config_dir(&args).ok();
+    match daemon_lifetime(args).await {
+        Ok(exit) => {
+            report_daemon_exit(config_base.as_deref(), &exit.reason);
+            Ok(())
+        }
+        Err(error) => {
+            report_daemon_exit(
+                config_base.as_deref(),
+                &format!("failed: {}", sanitized_retry_error(&error)),
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
     let slots = validate_daemon_slots(args.slots)?;
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
@@ -2970,7 +3035,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // accept a job. This runs once per daemon process, outside pass retries.
     reap_checkout_credentials_at_startup(supervised).await?;
     if effective_draining(drain_journal.as_deref()) {
-        return Ok(());
+        return Ok(DaemonExit::new(drain_exit_reason(
+            drain_journal.as_deref(),
+            "before startup",
+        )));
     }
 
     // Operator-facing fail-fast: a token that is structurally impossible
@@ -3010,7 +3078,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 
     if !supervised {
-        return daemon_pass(&args, slots).await;
+        daemon_pass(&args, slots).await?;
+        return Ok(DaemonExit::new(
+            "one-shot daemon pass completed (not supervised: no --url, --once, or --dry-run-registration)",
+        ));
     }
 
     // Retention belongs to the daemon lifetime, not an individual retryable
@@ -3021,13 +3092,17 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     loop {
         if effective_draining(drain_journal.as_deref()) {
             stop_retention_lifecycle(&mut retention_lifecycle).await;
-            println!("drain complete during registration retry: exiting");
-            return Ok(());
+            return Ok(DaemonExit::new(drain_exit_reason(
+                drain_journal.as_deref(),
+                "during registration retry",
+            )));
         }
         match daemon_pass(&args, slots).await {
             Ok(()) => {
                 stop_retention_lifecycle(&mut retention_lifecycle).await;
-                return Ok(());
+                return Ok(DaemonExit::new(
+                    "supervised daemon pass completed: every slot deregistered or finished draining",
+                ));
             }
             Err(error) => {
                 attempt += 1;
@@ -3053,8 +3128,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                 for _ in 0..delay.as_secs().max(1) {
                     if effective_draining(drain_journal.as_deref()) {
                         stop_retention_lifecycle(&mut retention_lifecycle).await;
-                        println!("drain complete during registration backoff: exiting");
-                        return Ok(());
+                        return Ok(DaemonExit::new(drain_exit_reason(
+                            drain_journal.as_deref(),
+                            &format!("during registration backoff (attempt {attempt})"),
+                        )));
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
@@ -16438,6 +16515,229 @@ mod tests {
         DRAINING.store(previous_draining, Ordering::SeqCst);
         reset_drain_hint_cache_for_tests();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every `tracing` ERROR event's message, for asserting on the one line a
+    /// daemon exit must produce.
+    #[derive(Clone, Default)]
+    struct ErrorLineCapture(Arc<Mutex<Vec<String>>>);
+
+    impl ErrorLineCapture {
+        fn lines(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for ErrorLineCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            if *event.metadata().level() == tracing::Level::ERROR {
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(message.0);
+            }
+        }
+    }
+
+    /// A systemd stand-in: a datagram socket in `$NOTIFY_SOCKET` collecting
+    /// every `sd_notify` state the process sends while the guard lives.
+    struct NotifySocket {
+        socket: std::os::unix::net::UnixDatagram,
+        previous: Option<std::ffi::OsString>,
+        dir: PathBuf,
+    }
+
+    impl NotifySocket {
+        fn bind(label: &str) -> Self {
+            // `/tmp`, not the platform temp dir: macOS's is longer than the
+            // 104-byte Unix socket path limit.
+            let dir = PathBuf::from(format!(
+                "/tmp/velnor-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("n.sock");
+            let socket = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let previous = env::var_os("NOTIFY_SOCKET");
+            // SAFETY: callers hold the trust-scope serialization lock, which
+            // is the process-wide lock every environment-mutating test takes.
+            unsafe { env::set_var("NOTIFY_SOCKET", &path) };
+            Self {
+                socket,
+                previous,
+                dir,
+            }
+        }
+
+        fn states(&self) -> Vec<String> {
+            let mut states = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            self.socket.set_nonblocking(true).unwrap();
+            while let Ok(read) = self.socket.recv(&mut buffer) {
+                states.push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+            }
+            states
+        }
+    }
+
+    impl Drop for NotifySocket {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: see `bind`.
+                Some(value) => unsafe { env::set_var("NOTIFY_SOCKET", value) },
+                None => unsafe { env::remove_var("NOTIFY_SOCKET") },
+            }
+            fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    /// The Sentry storm: a daemon that honors a leftover journal drain
+    /// marker returns before `READY=1`. That exit must now leave exactly one
+    /// error-level line naming the marker and the journal, hand the same line
+    /// to systemd as `STATUS=`, and record it in the daemon forensic log —
+    /// so `systemctl status` and `journalctl` say why instead of only
+    /// `Failed with result 'protocol'`.
+    #[tokio::test]
+    async fn daemon_exit_on_leftover_drain_marker_is_logged_and_reported_to_systemd() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = crate::trust_scope::test_support::serialized();
+        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        let config_dir = unique_temp_dir("daemon-exit-drain");
+        fs::create_dir_all(&config_dir).unwrap();
+        let journal_path = config_dir.join("journal.db");
+        let mut journal = velnor_control::journal::Journal::open(&journal_path).unwrap();
+        assert!(journal.set_drain(14).unwrap());
+        drop(journal);
+        reset_drain_hint_cache_for_tests();
+
+        let capture = ErrorLineCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let notify = NotifySocket::bind("daemon-exit-notify");
+
+        // Not supervised (no --url): the leftover marker is honored, as the
+        // v0.1.158 supervised daemon honored it, and the daemon returns Ok.
+        let mut args = daemon_args(1);
+        args.config_dir = Some(config_dir.clone());
+        daemon(args).await.unwrap();
+
+        let lines = capture.lines();
+        let exit_lines: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("daemon exiting:"))
+            .collect();
+        assert_eq!(exit_lines.len(), 1, "exactly one exit line: {lines:?}");
+        let line = exit_lines[0];
+        assert!(line.contains("drain active before startup"), "{line}");
+        assert!(
+            line.contains(&format!(
+                "drain marker latched in journal {}",
+                journal_path.display()
+            )),
+            "{line}"
+        );
+        assert!(line.contains("READY=1 was not sent"), "{line}");
+        assert!(!line.contains('\n'), "single line: {line:?}");
+
+        let states = notify.states();
+        assert!(
+            states.iter().any(
+                |state| state.starts_with("STATUS=daemon exiting: drain active before startup")
+            ),
+            "systemd STATUS must carry the exit reason: {states:?}"
+        );
+        let forensic =
+            fs::read_to_string(config_dir.join("logs").join(slot_log::DAEMON_LOG)).unwrap();
+        assert!(
+            forensic.contains("daemon exiting: drain active before startup"),
+            "{forensic}"
+        );
+
+        drop(notify);
+        DRAINING.store(previous_draining, Ordering::SeqCst);
+        reset_drain_hint_cache_for_tests();
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    /// A failed startup (here: an invalid slot count) is an exit too, and is
+    /// reported through the same single line before the error propagates.
+    #[tokio::test]
+    async fn daemon_startup_failure_is_reported_as_an_exit_line() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = crate::trust_scope::test_support::serialized();
+        let capture = ErrorLineCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let notify = NotifySocket::bind("daemon-exit-failed");
+
+        let config_dir = unique_temp_dir("daemon-exit-invalid-slots");
+        fs::create_dir_all(&config_dir).unwrap();
+        let mut args = daemon_args(0);
+        args.config_dir = Some(config_dir.clone());
+        let error = daemon(args).await.unwrap_err();
+
+        let lines = capture.lines();
+        let exit_lines: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("daemon exiting: failed:"))
+            .collect();
+        assert_eq!(exit_lines.len(), 1, "{lines:?}");
+        assert!(
+            exit_lines[0].contains(&sanitized_retry_error(&error)),
+            "{} vs {error:#}",
+            exit_lines[0]
+        );
+        assert!(notify
+            .states()
+            .iter()
+            .any(|state| state.starts_with("STATUS=daemon exiting: failed:")));
+        drop(notify);
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn drain_exit_reason_names_the_signal_or_the_journal() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
+        let journal = Path::new("/var/lib/velnor-x/runner/daemons/velnor-x/journal.db");
+        let reason = drain_exit_reason(Some(journal), "before startup");
+        assert!(reason.contains("drain marker latched in journal /var/lib/velnor-x/runner/daemons/velnor-x/journal.db"), "{reason}");
+        assert!(drain_exit_reason(None, "before startup").contains("drain latch set"));
+        DRAINING.store(true, Ordering::SeqCst);
+        assert!(
+            drain_exit_reason(Some(journal), "during registration retry")
+                .contains("SIGTERM/SIGINT received by this process")
+        );
+        DRAINING.store(previous_draining, Ordering::SeqCst);
     }
 
     #[test]
