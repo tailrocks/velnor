@@ -73,6 +73,13 @@ const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
 /// consumer would accept never reaches a release.
 const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
 
+/// The isolated Cargo home the producer steps build under, as a rendered
+/// step-level `env:` value. The `runner` context is unavailable in job-level
+/// `env:` (GitHub rejects the workflow at compile time), so each step that
+/// needs isolation carries this as step-level `env:`, which does provide
+/// `runner`.
+const PRODUCER_CARGO_HOME_VALUE: &str = "${{ runner.temp }}/velnor-producer-cargo-home";
+
 /// One natively built consumer platform: the `RUNNER_OS`-`RUNNER_ARCH` pair
 /// the setup action resolves its asset name from, and the runner that builds
 /// it. Linux X64 serves the `github_runner` lane and the Velnor hosts, Linux
@@ -173,6 +180,16 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
             "{} && steps.rustup-toolchain.outputs.cache-hit != 'true'",
             super::default_branch_push_cache_save_expression(&config.default_branch)
         )),
+    );
+    // Step-level isolation for the provision step only: restore/save touch
+    // `~/.rustup` alone, while `rustup toolchain install` must not read an
+    // ambient cargo config. The shared renderer stays untouched so no other
+    // family gains this env.
+    toolchain_steps = toolchain_steps.replace(
+        "      - name: Provision Rust toolchain\n        shell: bash\n",
+        &format!(
+            "      - name: Provision Rust toolchain\n        shell: bash\n        env:\n          CARGO_HOME: {PRODUCER_CARGO_HOME_VALUE}\n"
+        ),
     );
     let platforms = platforms(config);
     let mut matrix = String::new();
@@ -317,8 +334,9 @@ jobs:
     # The producer builds with an isolated Cargo home: no ambient registry,
     # git checkouts, or cargo config from the runner image can enter the
     # build. The toolchain steps cache `~/.rustup` only, which rustup owns.
-    env:
-      CARGO_HOME: ${{{{ runner.temp }}}}/velnor-producer-cargo-home
+    # Each step that needs the isolated home (provision, hermetic proof,
+    # build, product proof) carries it as step-level `env:`: the `runner`
+    # context is unavailable in job-level `env:`.
     steps:
       - name: Checkout
         uses: {checkout}
@@ -326,6 +344,8 @@ jobs:
           persist-credentials: false
 {toolchain_steps}      - name: Prove a hermetic build environment
         shell: bash
+        env:
+          CARGO_HOME: {cargo_home}
         run: |
           set -euo pipefail
           test -z "$(git status --porcelain)" || {{ echo "::error::the producer checkout is not clean" >&2; exit 1; }}
@@ -335,12 +355,15 @@ jobs:
           [[ "${{CARGO_HOME:-}}" == "${{RUNNER_TEMP:?}}/"* ]] || {{ echo "::error::CARGO_HOME is not the isolated producer home: ${{CARGO_HOME:-<unset>}}" >&2; exit 1; }}
       - name: Build release runtime
         shell: bash
+        env:
+          CARGO_HOME: {cargo_home}
         run: cargo build --locked --no-default-features --release --package velnor-workflow --bin velnor-workflow
       - name: Prove the product closure
         id: prove
         shell: bash
         env:
           CLOSURE: ${{{{ needs.closure.outputs.closure }}}}
+          CARGO_HOME: {cargo_home}
         run: |
           set -euo pipefail
           binary=target/release/velnor-workflow
@@ -487,6 +510,7 @@ jobs:
         platform_list = platform_list,
         release_assets = release_assets,
         accept_filter = MANIFEST_ACCEPT_FILTER,
+        cargo_home = PRODUCER_CARGO_HOME_VALUE,
     ))
 }
 
@@ -902,6 +926,40 @@ mod tests {
             !content.contains("sccache"),
             "no compiler cache wrapper may enter the producer build: {content}"
         );
+        // The `runner` context is unavailable in job-level `env:` (GitHub
+        // rejects the workflow at compile time), so the build job carries no
+        // job-level `env:` and exactly the four steps that need isolation
+        // carry step-level `CARGO_HOME`.
+        let build = must_some(content.split("  build:\n").nth(1), "the build job");
+        let build = must_some(build.split("\n  publish:\n").next(), "the build job body");
+        assert!(
+            !build.contains("\n    env:"),
+            "the build job has no job-level env (runner is unavailable there): {build}"
+        );
+        assert_eq!(
+            build
+                .matches("          CARGO_HOME: ${{ runner.temp }}/velnor-producer-cargo-home")
+                .count(),
+            4,
+            "exactly four step-level CARGO_HOME entries: {build}"
+        );
+        let steps: Vec<&str> = build.split("      - name: ").skip(1).collect();
+        assert_eq!(steps.len(), 9, "the build job has nine steps: {build}");
+        for step in &steps {
+            let name = must_some(step.split('\n').next(), "the step name");
+            let has_cargo_home = step.contains(PRODUCER_CARGO_HOME_VALUE);
+            let needs_isolation = [
+                "Provision Rust toolchain",
+                "Prove a hermetic build environment",
+                "Build release runtime",
+                "Prove the product closure",
+            ]
+            .contains(&name);
+            assert_eq!(
+                has_cargo_home, needs_isolation,
+                "step `{name}` carries step-level CARGO_HOME iff it needs isolation: {step}"
+            );
+        }
     }
 
     #[test]
@@ -1280,7 +1338,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "78dadf79ccf8821c965d564afcb9bdd8a8349d357550e5d7ee83ab6e14d526bc";
+        const PINNED: &str = "4552f9595d34d6ed9e2985cfbfc0b6594ee1b2e500989cf981c3eb0005e58059";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

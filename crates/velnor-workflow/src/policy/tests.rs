@@ -837,6 +837,72 @@ fn a_second_pull_request_target_workflow_is_refused() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Job-level `env:` allows the documented contexts (`github, needs, strategy,
+/// matrix, vars, secrets, inputs`), and step-level `env:` allows `runner` and
+/// `steps`. A workflow using only those passes `workflow-structure`.
+#[test]
+fn job_level_env_with_allowed_contexts_passes() {
+    let root = velnor_tree("semantic-job-env-allowed", &gated_trusted_job());
+    write(
+        &root.join(".github/workflows/allowed.yml"),
+        "name: Allowed\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        target: [a, b]\n    env:\n      TARGET: ${{ matrix.target }}\n      PARALLEL: ${{ strategy.job-index }}\n      VERSION: ${{ needs.identity.outputs.version }}\n      REPO: ${{ github.repository }}\n      SECRET: ${{ secrets.MY_SECRET }}\n      CONFIG: ${{ vars.MY_VAR }}\n      INPUT: ${{ inputs.my_input }}\n      SELECTOR: ${{ github.event.inputs.runner }}\n    steps:\n      - id: first\n        run: echo ok\n      - run: echo ok\n        env:\n          TMP: ${{ runner.temp }}\n          PREV: ${{ steps.first.outputs.value }}\n",
+    );
+    let audit = must(audit_workflows(&root), "audit tree with allowed job env");
+    assert!(audit.structure.is_empty(), "{:?}", audit.structure);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The `runner` context is unavailable in job-level `env:` (GitHub rejects the
+/// workflow at compile time with `Unrecognized named-value: 'runner'`). Both
+/// property and index syntax fail with a finding naming file, job, and
+/// expression.
+#[test]
+fn job_level_env_with_runner_context_fails() {
+    let root = velnor_tree("semantic-job-env-runner", &gated_trusted_job());
+    write(
+        &root.join(".github/workflows/bad-runner.yml"),
+        "name: Bad\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    env:\n      CARGO_HOME: ${{ runner.temp }}/velnor-producer-cargo-home\n      INDEXED: ${{ runner['temp'] }}/x\n    steps:\n      - run: echo ok\n",
+    );
+    let audit = must(audit_workflows(&root), "audit tree with runner in job env");
+    assert_eq!(audit.structure.len(), 2, "{:?}", audit.structure);
+    for (key, expression) in [("CARGO_HOME", "runner.temp"), ("INDEXED", "runner['temp']")] {
+        assert!(
+            audit.structure.iter().any(|finding| {
+                finding.contains("bad-runner.yml")
+                    && finding.contains("job build")
+                    && finding.contains(key)
+                    && finding.contains("runner")
+                    && finding.contains(expression)
+            }),
+            "missing finding for {key} ({expression}): {:?}",
+            audit.structure
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The `steps` context is available only from steps, never in job-level `env:`.
+#[test]
+fn job_level_env_with_steps_context_fails() {
+    let root = velnor_tree("semantic-job-env-steps", &gated_trusted_job());
+    write(
+        &root.join(".github/workflows/bad-steps.yml"),
+        "name: Bad\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    env:\n      PREV: ${{ steps.first.outputs.value }}\n    steps:\n      - id: first\n        run: echo ok\n",
+    );
+    let audit = must(audit_workflows(&root), "audit tree with steps in job env");
+    assert_eq!(audit.structure.len(), 1, "{:?}", audit.structure);
+    assert!(
+        audit.structure[0].contains("bad-steps.yml")
+            && audit.structure[0].contains("job build")
+            && audit.structure[0].contains("PREV")
+            && audit.structure[0].contains("steps")
+            && audit.structure[0].contains("steps.first.outputs.value"),
+        "{:?}",
+        audit.structure
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 fn must_some<T>(value: Option<T>, context: &str) -> T {
     match value {
         Some(value) => value,
