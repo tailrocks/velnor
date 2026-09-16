@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use super::{Args, Primitive, RenderCtx, Rendered, trusted_cache_save_expression};
+use super::{trusted_cache_save_expression, Args, Primitive, RenderCtx, Rendered};
 use crate::{
     velnor_runner, velnor_runner_group, yaml_scalar, ActionPin, GeneratorError, ProjectConfig,
     RenovateSpec, GENERATED_HEADER,
@@ -47,7 +47,12 @@ pub(crate) fn renovate_validate_content(config: &ProjectConfig) -> Option<String
         .renovate
         .as_ref()
         .filter(|spec| spec.validate)
-        .map(|spec| format!("{GENERATED_HEADER}{}", render_renovate_validate(config, spec)))
+        .map(|spec| {
+            format!(
+                "{GENERATED_HEADER}{}",
+                render_renovate_validate(config, spec)
+            )
+        })
 }
 
 /// The declared `renovate.yml` writer workflow.
@@ -89,8 +94,10 @@ impl Primitive for RenovateValidate {
                 ctx.family
             )));
         }
-        let content =
-            format!("{GENERATED_HEADER}{}", render_renovate_validate(ctx.config, &spec));
+        let content = format!(
+            "{GENERATED_HEADER}{}",
+            render_renovate_validate(ctx.config, &spec)
+        );
         render_file(ctx, "renovate-validate.yml", content)
     }
 }
@@ -325,7 +332,10 @@ jobs:
 }
 
 fn shell_escape(value: &str) -> String {
-    if value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')) {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
+    {
         value.to_owned()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
@@ -408,7 +418,9 @@ mod tests {
         assert!(workflow.contains("workflow_dispatch"));
         assert!(workflow.contains("0 6 * * *"));
         assert!(!workflow.contains("pull_request"));
-        assert!(workflow.contains("/tmp/renovate/cache/${{ github.repository }}/renovate/repository"));
+        assert!(
+            workflow.contains("/tmp/renovate/cache/${{ github.repository }}/renovate/repository")
+        );
         assert!(workflow.contains("velnor-renovate-${{ github.repository }}-"));
     }
 

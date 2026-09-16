@@ -2178,9 +2178,7 @@ impl WorkflowIr {
             .iter()
             .any(|item| item == "mise-present");
         let mise_surface_needed = config.units.iter().any(|unit| {
-            unit.kind == UnitKind::Rust
-                || !unit.mise_tools.is_empty()
-                || commands_invoke_mise(unit)
+            unit.kind == UnitKind::Rust || !unit.mise_tools.is_empty() || commands_invoke_mise(unit)
         });
         let mise_present = mise_detected && mise_surface_needed;
         if mise_present {

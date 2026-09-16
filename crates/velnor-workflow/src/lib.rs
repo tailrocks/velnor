@@ -1781,7 +1781,6 @@ fn validate_velnor_pull_request_contract(config: &ProjectConfig) -> Result<(), G
     Ok(())
 }
 
-
 fn discover_renovate_config(root: &Path, explicit: Option<&str>) -> Result<String, GeneratorError> {
     if let Some(path) = explicit {
         let full = root.join(path);
@@ -1823,8 +1822,16 @@ fn apply_renovate(
         return Ok(());
     }
     let config_path = discover_renovate_config(root, renovate.config())?;
-    if !config.analysis.detected.iter().any(|tag| tag == "renovate-configuration") {
-        config.analysis.detected.push("renovate-configuration".to_owned());
+    if !config
+        .analysis
+        .detected
+        .iter()
+        .any(|tag| tag == "renovate-configuration")
+    {
+        config
+            .analysis
+            .detected
+            .push("renovate-configuration".to_owned());
     }
     config.analysis.limitations.retain(|limitation| {
         !limitation.starts_with("Renovate credentials, runner placement, and write permissions")
@@ -15761,7 +15768,6 @@ channel = "stable"
         );
     }
 
-
     const RENOVATE_GENERATION_CONFIG: &str = "schema = 1\n\n\
          [generator]\n\
          repository = \"example/fixture\"\n\n\
@@ -15801,7 +15807,11 @@ channel = "stable"
             scan_target(&root, RunnerMode::Github, "main"),
             "scan repository without renovate contract",
         );
-        assert!(scanned.config.analysis.detected.contains(&"renovate-configuration".to_owned()));
+        assert!(scanned
+            .config
+            .analysis
+            .detected
+            .contains(&"renovate-configuration".to_owned()));
         assert!(scanned.config.renovate.is_none());
         let files = must(
             generated_files(&scanned.config),
