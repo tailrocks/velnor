@@ -19,7 +19,7 @@ generator	49
 .github/workflows/ci-unit-docker.yml	d6dfda010fc757ec
 .github/workflows/ci-unit-docs.yml	30957c38ec642c95
 .github/workflows/ci-unit-opentofu.yml	0441ebae09a2e8cb
-.github/workflows/ci-unit-rust.yml	5d13f26f7fc07759
+.github/workflows/ci-unit-rust.yml	08e6917b52fff0c7
 .github/workflows/maintenance.yml	ed26161d56d3a631
 .github/workflows/nightly.yml	89ca7a50f4a4403b
 .github/workflows/preview.yml	beec6104f4df045a

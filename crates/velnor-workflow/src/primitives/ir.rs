@@ -494,6 +494,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn github_lane_fetches_pin_history_for_check_running_units() {
+        let owner = workflow_setup_action_repository().to_owned();
+        let mut checker = rust_unit("rust-generator-crate", "crates/velnor-workflow");
+        checker
+            .pr_commands
+            .push("mbx run --locked -- --plain --check ../..".to_owned());
+        let ir = owner_test_ir(
+            &owner,
+            vec![checker, rust_unit("rust-sibling-crate", "crates/sibling")],
+        );
+        let content = must_render_kind(&ir);
+        let (hosted, velnor) = must_some(
+            content.split_once("\n  verify-velnor:\n"),
+            "both lane jobs render",
+        );
+        assert!(
+            !velnor.contains("Fetch D19 pin history"),
+            "the Velnor lane provisions the pin through its pinned-renderer step: {velnor}"
+        );
+        let fetch = must_some(
+            hosted.find("      - name: Fetch D19 pin history"),
+            "fetch step renders on the GitHub lane: {hosted}",
+        );
+        let checks = must_some(hosted.find("- name: Run unit checks"), "checks render");
+        assert!(
+            fetch < checks,
+            "the pin is present before verification runs: {hosted}"
+        );
+        let step = &hosted[fetch..checks];
+        assert!(
+            step.contains("'rust-generator-crate') : ;;"),
+            "the check-running member proceeds to the fetch: {step}"
+        );
+        assert!(
+            step.contains("'rust-sibling-crate') exit 0 ;;"),
+            "other members skip the fetch: {step}"
+        );
+        assert!(
+            step.contains("git fetch --no-tags --depth 1"),
+            "a shallow checkout gains the pin commit: {step}"
+        );
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one consumer contract pinned clause by clause"
@@ -4241,6 +4285,38 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 render_cargo_source_preparation_from_input(output, gate.as_deref(), skip_when_warm);
             }
             render_ci_cargo_fetch_end_marker(output);
+        }
+
+        // The generator's self-check (`--plain --check`) resolves the D19 pin's
+        // closures from local history, but unit checkouts are shallow. Fetch
+        // the pin commit for check-running members before verification. The
+        // Velnor lane provisions the pin through its pinned-renderer step, so
+        // only the GitHub lane needs this fetch.
+        let check_members: Vec<&&Unit> = members
+            .iter()
+            .filter(|unit| unit_runs_workflow_plain_check(unit))
+            .collect();
+        if github_lane && !check_members.is_empty() {
+            let mut cases = String::new();
+            for member in members {
+                if check_members.iter().any(|check| check.id == member.id) {
+                    let _ = writeln!(
+                        cases,
+                        "            {}) : ;;",
+                        crate::shell_quote(&member.id)
+                    );
+                } else {
+                    let _ = writeln!(
+                        cases,
+                        "            {}) exit 0 ;;",
+                        crate::shell_quote(&member.id)
+                    );
+                }
+            }
+            let _ = writeln!(
+                output,
+                "      - name: Fetch D19 pin history\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for pin fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          pin=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' .github-gen/velnor-workflow.toml | head -n 1)\"\n          test \"$pin\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          if ! git cat-file -e \"$pin^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\"\n          fi",
+            );
         }
 
         // Verification.

@@ -450,6 +450,32 @@ jobs:
               chmod 0444 "$marker" 2>/dev/null || true
             fi
           fi
+      - name: Fetch D19 pin history
+        env:
+          CI_UNIT_ID: ${{ inputs.unit }}
+        run: |
+          set -euo pipefail
+          case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
+            'rust-unit-collector') exit 0 ;;
+            'rust-velnor-bench') exit 0 ;;
+            'rust-velnor-client') exit 0 ;;
+            'rust-velnor-control') exit 0 ;;
+            'rust-velnor-model') exit 0 ;;
+            'rust-velnor-render') exit 0 ;;
+            'rust-velnor-runner') exit 0 ;;
+            'rust-velnor-tools') exit 0 ;;
+            'rust-velnor-workflow') : ;;
+            'rust-velnor-workflow-contract') exit 0 ;;
+            'rust-velnorctl') exit 0 ;;
+            'rust-production-topology') exit 0 ;;
+            *) echo "unknown unit for pin fetch: $CI_UNIT_ID" >&2; exit 1 ;;
+          esac
+          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
+          test "$pin" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }
+          if ! git cat-file -e "$pin^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$pin"
+          fi
       - name: Run unit checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
