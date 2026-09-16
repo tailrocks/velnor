@@ -124,24 +124,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-<<<<<<< HEAD
-          name: velnor-workflow-runtime-643f33123abe01adee09662a366cb9a5d2b3c3bf-${{ runner.os }}-${{ runner.arch }}
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-          name: velnor-workflow-runtime-f3fc75ad2c566f38c6f469aec2261d552331b3b7-${{ runner.os }}-${{ runner.arch }}
-=======
-          name: velnor-workflow-runtime-69f94748c331920b9411bbc227694988afebc78c-${{ runner.os }}-${{ runner.arch }}
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          name: velnor-workflow-runtime-17b441c1211cf305d19486c33587882aca1c60c3-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-<<<<<<< HEAD
-          EXPECTED_REVISION: 643f33123abe01adee09662a366cb9a5d2b3c3bf
-||||||| parent of 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
-          EXPECTED_REVISION: f3fc75ad2c566f38c6f469aec2261d552331b3b7
-=======
-          EXPECTED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
->>>>>>> 0381c4e8 (fix(ci): parameterize kind reusables by workflow_call inputs)
+          EXPECTED_REVISION: 17b441c1211cf305d19486c33587882aca1c60c3
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -155,7 +143,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 69f94748c331920b9411bbc227694988afebc78c
+          EXPECTED_REVISION: 17b441c1211cf305d19486c33587882aca1c60c3
         run: |
           set -euo pipefail
           install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"

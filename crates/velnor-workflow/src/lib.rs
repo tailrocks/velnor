@@ -97,7 +97,7 @@ pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINA
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-pub(crate) const VELNOR_POLICY_WORKFLOW_REV: &str = "643f33123abe01adee09662a366cb9a5d2b3c3bf";
+pub(crate) const VELNOR_POLICY_WORKFLOW_REV: &str = "17b441c1211cf305d19486c33587882aca1c60c3";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
@@ -107,7 +107,7 @@ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // PRs; anything older fails dispatch/schedule planning or poisons macOS
 // builds with the Linux mold link arg. Bump after publishing a Velnor commit
 // that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "643f33123abe01adee09662a366cb9a5d2b3c3bf";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "17b441c1211cf305d19486c33587882aca1c60c3";
 const MR_BOXINGTON_VERSION: &str = "1.11.1";
 /// The actionlint release the policy job lints generated workflows with,
 /// installed through mise (`aqua:rhysd/actionlint`). A root `mise.lock` that
