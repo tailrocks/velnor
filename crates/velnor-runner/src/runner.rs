@@ -11474,11 +11474,15 @@ fn execute_script_job_inner(
         log
     });
     // Adopt the pre-create thread's guards so the in-container docker socket
-    // stays proxied and the job network stays owned until THIS executor's
-    // job cleanup reclaims them.
+    // stays proxied for the whole step loop. The job network is the teardown
+    // owner's from `record_teardown_owner` above — it removes the network on
+    // every exit path, after the container — so this executor holds no
+    // network guard: one would fire at its drop, at the end of the steps,
+    // against the still-attached container.
     let mut executor = DockerJobEngine::inert(command_runner)
         .with_job_environment_started(environment_started)
         .with_job_environment_guards(environment_guards)
+        .with_job_network_owned_by_teardown()
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
@@ -17026,7 +17030,10 @@ mod tests {
         DRAINING.store(false, Ordering::SeqCst);
         let armed = tokio::spawn(until_draining());
         tokio::task::yield_now().await;
-        assert!(!armed.is_finished(), "no drain: the waiter must stay pending");
+        assert!(
+            !armed.is_finished(),
+            "no drain: the waiter must stay pending"
+        );
         latch_draining();
         tokio::time::timeout(Duration::from_secs(1), armed)
             .await

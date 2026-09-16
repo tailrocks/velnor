@@ -2078,6 +2078,14 @@ pub(crate) struct DockerJobEngine<R> {
     /// removed it. Drop then removes the network, so no executor exit path can
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
+    /// False when another owner runs the job's terminal cleanup — the slot's
+    /// teardown handle, recorded before this executor exists and run on
+    /// every exit path until it succeeds. This executor then never holds a
+    /// network guard: one it armed or adopted would fire at its drop, which
+    /// comes at the end of the steps while the container it protects is
+    /// still attached (the teardown removes both later), so the guard failed
+    /// with "has active endpoints" on every job and guarded nothing.
+    arm_job_network_guard: bool,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
     /// The running job's cancellation. Required, not optional: a job that could
     /// not be cancelled is the defect this field exists to remove, so there is
@@ -2120,6 +2128,7 @@ where
             job_environment_started: false,
             docker_lease: None,
             job_network_guard: None,
+            arm_job_network_guard: true,
             lifecycle_telemetry: None,
             cancellation,
             deprecated_command_scope: DeprecatedCommandScope::default(),
@@ -2178,6 +2187,15 @@ where
 
     pub fn with_job_environment_started(mut self, started: bool) -> Self {
         self.job_environment_started = started;
+        self
+    }
+
+    /// The job network's terminal cleanup belongs to a teardown owner that
+    /// outlives this executor (see `arm_job_network_guard`): drop any guard
+    /// already adopted and arm none on a lazy environment start.
+    pub(crate) fn with_job_network_owned_by_teardown(mut self) -> Self {
+        self.arm_job_network_guard = false;
+        self.defuse_job_network_guard();
         self
     }
 
@@ -6023,10 +6041,12 @@ where
         // executor on any error path now removes it instead of leaking it.
         // Defuse only after cleanup reclaimed it; Docker refuses to remove a
         // network with active endpoints, so a late guard fire cannot break a
-        // live job.
-        self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
-            container.network.clone(),
-        ));
+        // live job. Not armed when a teardown owner holds that cleanup.
+        if self.arm_job_network_guard {
+            self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
+                container.network.clone(),
+            ));
+        }
         for service in &container.services {
             // Service environment holds workflow credentials; start_args keeps
             // it in a mode-0600 env file instead of the world-readable argv.
@@ -17147,6 +17167,40 @@ esac
             buildx_driver_options(&memory_only, &static_options).unwrap(),
             ["cpu-period=100000", "cpu-quota=250000", "memory=1024"]
         );
+    }
+
+    /// Under a teardown owner the executor must hold no network guard: not
+    /// the one handed over from the pre-create thread, and none from a lazy
+    /// start. Either would fire at executor drop, before the teardown removes
+    /// the still-attached container, as every pre-0.1.x job log showed
+    /// (`job network drop-guard removal failed … has active endpoints`).
+    #[test]
+    fn teardown_owned_network_leaves_the_executor_without_a_guard() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut precreate = DockerJobEngine::inert(RecordingRunner::default());
+        precreate.start_job_environment(&spec).unwrap();
+        let guards = precreate.take_job_environment_guards();
+        assert!(guards.job_network.is_some());
+
+        let adopted = DockerJobEngine::inert(RecordingRunner::default())
+            .with_job_environment_started(true)
+            .with_job_environment_guards(guards)
+            .with_job_network_owned_by_teardown();
+        assert!(
+            adopted.job_network_guard.is_none(),
+            "an adopted guard is defused when the teardown owns the network"
+        );
+
+        let mut lazy =
+            DockerJobEngine::inert(RecordingRunner::default()).with_job_network_owned_by_teardown();
+        lazy.start_job_environment(&spec).unwrap();
+        assert!(
+            lazy.job_network_guard.is_none(),
+            "a lazy start under a teardown owner arms no guard"
+        );
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
