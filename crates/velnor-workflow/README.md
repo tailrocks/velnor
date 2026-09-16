@@ -49,7 +49,7 @@ config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
 
-### `[renovate]` — self-hosted dependency updates
+## `[renovate]` — self-hosted dependency updates
 
 Scan evidence alone (`renovate.json`, `renovate.json5`, or `.github/renovate.json*`)
 records `renovate-configuration` but does not emit workflows. A repository opts
