@@ -7482,6 +7482,15 @@ async fn handle_job_request(
     // before the job is accepted. When it cannot, fail this job closed
     // explicitly as infrastructure rejection instead of executing
     // unrecorded work.
+    //
+    // The job's secret masks live in the sink exactly as long as this scope:
+    // it is created before the admission write and dropped on every exit of
+    // this function — after the terminal transition, the rejection
+    // completion, or the executor's last event. A slot worker runs one job
+    // per cycle for its whole life; scoping the masks to the job is what
+    // keeps admission from failing closed once enough unique per-job tokens
+    // have accumulated (Sentry dogfood slot-3, cycles 41..52).
+    let _job_mask_scope = crate::ops::global().map(|sink| sink.job_mask_scope(&job.job_id));
     let telemetry_admission = if let Some(sink) = crate::ops::global() {
         let admission = crate::ops::JobAdmission {
             instance_slug: sink.instance_slug().to_owned(),
@@ -7541,10 +7550,13 @@ async fn handle_job_request(
                 AdmissionPersistenceOutcome::DeadlineExceeded => DEADLINE_REASON,
                 _ => WORKER_FAILURE_REASON,
             };
-            // No admission row exists on either failure path. Writing a
-            // JobRejected event would amplify an over-budget store or recurse
-            // into an unavailable store. Completion below is the truthful
-            // run-service diagnostic and is always attempted.
+            // No admission row exists on any of these failure paths. The
+            // completion below records the terminal `job.rejected` edge only
+            // through the store's own existence check: without a row the
+            // store refuses it as `store.job.missing`, which is reported as
+            // a forensic line and never changes the run-service outcome.
+            // Completion is the truthful run-service diagnostic and is
+            // always attempted.
             let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
