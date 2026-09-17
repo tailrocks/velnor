@@ -44,6 +44,7 @@ jobs:
       base_sha: ${{ steps.plan.outputs.base_sha }}
       head_sha: ${{ steps.plan.outputs.head_sha }}
       units: ${{ steps.plan.outputs.units }}
+      unit_ids: ${{ steps.plan.outputs.unit_ids }}
       full_units: ${{ steps.plan.outputs.full_units }}
       plan_digest: ${{ steps.plan.outputs.plan_digest }}
       excluded: ${{ steps.plan.outputs.excluded }}
@@ -62,9 +63,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          rev: 40206d9fe60a8e0693046d1695762c62883a0578
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=52739e176c1cba3ddeeff1ca21eda2edadb52b17" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=40206d9fe60a8e0693046d1695762c62883a0578" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -82,7 +83,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          EXPECTED_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -101,7 +102,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-52739e176c1cba3ddeeff1ca21eda2edadb52b17-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-40206d9fe60a8e0693046d1695762c62883a0578-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -150,7 +151,7 @@ jobs:
       - name: Set up Velnor workflow runtime
         uses: ./policy-setup-action/.github/actions/setup-velnor-workflow
         with:
-          rev: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          rev: 40206d9fe60a8e0693046d1695762c62883a0578
           checkout-path: ${{ github.workspace }}/policy-checkout
       - name: Acquire candidate generator product
         working-directory: policy-checkout
@@ -158,7 +159,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          BASE_PIN: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          BASE_PIN: 40206d9fe60a8e0693046d1695762c62883a0578
         run: |
           set -euo pipefail
           pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
@@ -260,7 +261,7 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          VELNOR_WORKFLOW_POLICY_REVISION: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          VELNOR_WORKFLOW_POLICY_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
         run: |
           set -euo pipefail
           velnor-workflow policy \
@@ -289,6 +290,7 @@ jobs:
       unit: bun-velnor
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -310,6 +312,7 @@ jobs:
       unit: bun-velnor
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -328,6 +331,7 @@ jobs:
       unit: docker
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -356,6 +360,7 @@ jobs:
       unit: docker
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -374,6 +379,7 @@ jobs:
       unit: docs
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -395,6 +401,7 @@ jobs:
       unit: docs
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -413,6 +420,7 @@ jobs:
       unit: opentofu
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -432,6 +440,7 @@ jobs:
       unit: opentofu
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -450,6 +459,7 @@ jobs:
       unit: rust-policy
       provider: control
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -464,6 +474,7 @@ jobs:
       unit: rust-policy
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -501,6 +512,7 @@ jobs:
       unit: rust-policy
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -520,6 +532,7 @@ jobs:
       unit: rust-unit-collector
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -564,6 +577,7 @@ jobs:
       unit: rust-unit-collector
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -584,6 +598,7 @@ jobs:
       unit: rust-velnor-bench
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -681,6 +696,7 @@ jobs:
       unit: rust-velnor-bench
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -702,6 +718,7 @@ jobs:
       unit: rust-velnor-client
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -751,6 +768,7 @@ jobs:
       unit: rust-velnor-client
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -772,6 +790,7 @@ jobs:
       unit: rust-velnor-control
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -821,6 +840,7 @@ jobs:
       unit: rust-velnor-control
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -842,6 +862,7 @@ jobs:
       unit: rust-velnor-model
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -885,6 +906,7 @@ jobs:
       unit: rust-velnor-model
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -905,6 +927,7 @@ jobs:
       unit: rust-velnor-render
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -954,6 +977,7 @@ jobs:
       unit: rust-velnor-render
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -975,6 +999,7 @@ jobs:
       unit: rust-velnor-runner
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1067,6 +1092,7 @@ jobs:
       unit: rust-velnor-runner
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1088,6 +1114,7 @@ jobs:
       unit: rust-velnor-tools
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1144,6 +1171,7 @@ jobs:
       unit: rust-velnor-tools
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1165,6 +1193,7 @@ jobs:
       unit: rust-velnor-workflow
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1271,6 +1300,7 @@ jobs:
       unit: rust-velnor-workflow
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1293,6 +1323,7 @@ jobs:
       unit: rust-velnor-workflow-contract
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1335,6 +1366,7 @@ jobs:
       unit: rust-velnor-workflow-contract
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1355,6 +1387,7 @@ jobs:
       unit: rust-velnorctl
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1463,6 +1496,7 @@ jobs:
       unit: rust-velnorctl
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1484,6 +1518,7 @@ jobs:
       unit: rust-production-topology
       provider: github-hosted
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
@@ -1522,6 +1557,7 @@ jobs:
       unit: rust-production-topology
       provider: velnor
       selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
       scope: ${{ needs.plan.outputs.scope }}
       full_units: ${{ needs.plan.outputs.full_units }}
       plan_digest: ${{ needs.plan.outputs.plan_digest }}

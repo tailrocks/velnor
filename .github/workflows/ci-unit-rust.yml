@@ -9,6 +9,9 @@ on:
       selected_units:
         required: true
         type: string
+      selected_unit_ids:
+        required: true
+        type: string
       scope:
         required: true
         type: string
@@ -138,7 +141,7 @@ jobs:
           SELECTION_BASE_SHA: ${{ inputs.base_sha }}
           SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
           SELECTION_SCOPE: ${{ inputs.scope }}
-          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_UNITS: ${{ inputs.selected_unit_ids }}
           SELECTION_FULL_UNITS: ${{ inputs.full_units }}
           SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
         run: |
@@ -217,12 +220,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-52739e176c1cba3ddeeff1ca21eda2edadb52b17-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-40206d9fe60a8e0693046d1695762c62883a0578-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          EXPECTED_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -236,7 +239,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          EXPECTED_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
@@ -265,7 +268,7 @@ jobs:
           SELECTION_BASE_SHA: ${{ inputs.base_sha }}
           SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
           SELECTION_SCOPE: ${{ inputs.scope }}
-          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_UNITS: ${{ inputs.selected_unit_ids }}
           SELECTION_FULL_UNITS: ${{ inputs.full_units }}
           SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
         run: |
@@ -723,7 +726,7 @@ jobs:
           SELECTION_BASE_SHA: ${{ inputs.base_sha }}
           SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
           SELECTION_SCOPE: ${{ inputs.scope }}
-          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_UNITS: ${{ inputs.selected_unit_ids }}
           SELECTION_FULL_UNITS: ${{ inputs.full_units }}
           SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
         run: |
@@ -755,7 +758,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PINNED_REVISION: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+          PINNED_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
           CHECKOUT_PATH: ${{ github.workspace }}
         run: |
           set -euo pipefail
