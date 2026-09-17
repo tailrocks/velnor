@@ -1,10 +1,9 @@
 //! Shared-allocator conformance: the scale-set lane and the native lane
 //! spend from the ONE host-wide `max_jobs=N` ledger.
 //!
-//! The native lane is a mock driving [`PermitLane::Native`] acquisitions
-//! directly against the ledger file (the C2 native wiring merges
-//! separately; the mock exercises the same ledger authority the real
-//! guard will). Races run on threads with a barrier start so grants
+//! Both lanes drive their REAL guards here — [`ScaleSetAllocator`] and the
+//! native [`NativePermitGuard`] (with its demand lockstep) — against one
+//! ledger file. Races run on threads with a barrier start so grants
 //! genuinely contend inside immediate transactions.
 
 #![allow(
@@ -22,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
 
-use velnor_control::permit_ledger::{AcquireOutcome, PermitLane, PermitLedger, PermitState};
+use velnor_runner::permit_guard::{native_permit_holder, NativePermitGuard};
 use velnor_runner::scaleset::allocator::{startup_reconcile, ScaleSetAllocator};
 use velnor_runner::scaleset::permit_holder;
 
@@ -40,46 +39,11 @@ fn temp_ledger(name: &str) -> PathBuf {
 }
 
 fn configure(path: &Path, max_jobs: u32) {
+    use velnor_control::permit_ledger::PermitLedger;
     let mut ledger = PermitLedger::open(path).unwrap();
     ledger.set_max_jobs(max_jobs).unwrap();
     ledger.begin_epoch().unwrap();
     ledger.reconcile(&[]).unwrap();
-}
-
-/// Native-lane mock: the C2 guard's ledger footprint (Native lane,
-/// pid-attributed rows) without the C2 wiring.
-struct NativeMock {
-    ledger_path: PathBuf,
-}
-
-impl NativeMock {
-    fn acquire(&self, holder: &str) -> AcquireOutcome {
-        let mut ledger = PermitLedger::open(&self.ledger_path).unwrap();
-        for _ in 0..3 {
-            let generation = ledger.generation().unwrap();
-            match ledger
-                .acquire(
-                    holder,
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    generation,
-                    Some(std::process::id()),
-                )
-                .unwrap()
-            {
-                AcquireOutcome::StaleGeneration => continue,
-                other => return other,
-            }
-        }
-        AcquireOutcome::StaleGeneration
-    }
-
-    fn release(&self, holder: &str) -> bool {
-        PermitLedger::open(&self.ledger_path)
-            .unwrap()
-            .release(holder)
-            .unwrap()
-    }
 }
 
 #[test]
@@ -87,11 +51,9 @@ fn thundering_herd_grants_exactly_one_per_permit() {
     let path = temp_ledger("herd");
     configure(&path, 2);
     let allocator = Arc::new(ScaleSetAllocator::open(&path));
-    let native = Arc::new(NativeMock {
-        ledger_path: path.clone(),
-    });
+    let ledger_path = Arc::new(path.clone());
 
-    // 16 racers (8 scale-set + 8 native mock) on N=2: exactly 2 win.
+    // 16 racers (8 scale-set + 8 native guards) on N=2: exactly 2 win.
     // The second barrier holds every winner past every loser's attempt,
     // so no release can precede a grant — the count is exact, not racy.
     let start = Arc::new(Barrier::new(16));
@@ -117,31 +79,30 @@ fn thundering_herd_grants_exactly_one_per_permit() {
         }));
     }
     for index in 0..8 {
-        let (native, start, attempted, wins) = (
-            Arc::clone(&native),
+        let (ledger_path, start, attempted, wins) = (
+            Arc::clone(&ledger_path),
             Arc::clone(&start),
             Arc::clone(&attempted),
             Arc::clone(&wins),
         );
         threads.push(std::thread::spawn(move || {
             start.wait();
-            let holder = format!("native/herd-{index}");
-            let won = native.acquire(&holder) == AcquireOutcome::Acquired;
-            if won {
+            let holder = native_permit_holder(&format!("herd-{index}"));
+            let guard = NativePermitGuard::acquire(&ledger_path, holder, "scope-test").unwrap();
+            if guard.is_some() {
                 wins.fetch_add(1, Ordering::SeqCst);
             }
             attempted.wait();
-            if won {
-                native.release(&holder);
-            }
+            // Winners drop here (release-on-drop); losers hold nothing.
+            drop(guard);
         }));
     }
     for thread in threads {
         thread.join().unwrap();
     }
     assert_eq!(wins.load(Ordering::SeqCst), 2);
-    // Scale-set winners' guards dropped on thread exit (release-on-drop);
-    // native winners released explicitly: the ledger is empty again.
+    // Every winner's guard dropped on thread exit (release-on-drop runs
+    // for both lanes): the ledger is empty again.
     assert_eq!(allocator.occupied().unwrap(), 0);
 }
 
@@ -150,17 +111,15 @@ fn occupancy_never_exceeds_n_under_churn() {
     let path = temp_ledger("churn");
     configure(&path, 4);
     let allocator = Arc::new(ScaleSetAllocator::open(&path));
-    let native = Arc::new(NativeMock {
-        ledger_path: path.clone(),
-    });
+    let ledger_path = Arc::new(path.clone());
     let barrier = Arc::new(Barrier::new(8));
     let violations = Arc::new(AtomicU32::new(0));
 
     let mut threads = Vec::new();
     for lane in 0..8 {
-        let (allocator, native, barrier, violations) = (
+        let (allocator, ledger_path, barrier, violations) = (
             Arc::clone(&allocator),
-            Arc::clone(&native),
+            Arc::clone(&ledger_path),
             Arc::clone(&barrier),
             Arc::clone(&violations),
         );
@@ -177,12 +136,15 @@ fn occupancy_never_exceeds_n_under_churn() {
                         drop(guard);
                     }
                 } else {
-                    let holder = format!("native/churn-{lane}-{round}");
-                    if native.acquire(&holder) == AcquireOutcome::Acquired {
+                    let holder = native_permit_holder(&format!("churn-{lane}-{round}"));
+                    if let Some(guard) =
+                        NativePermitGuard::acquire(&ledger_path, holder, "scope-test").unwrap()
+                    {
                         if allocator.occupied().unwrap() > 4 {
                             violations.fetch_add(1, Ordering::SeqCst);
                         }
-                        native.release(&holder);
+                        guard.transition_running();
+                        drop(guard);
                     }
                 }
             }
@@ -200,29 +162,40 @@ fn native_occupancy_denies_scaleset_and_vice_versa() {
     let path = temp_ledger("shared");
     configure(&path, 2);
     let allocator = ScaleSetAllocator::open(&path);
-    let native = NativeMock {
-        ledger_path: path.clone(),
-    };
 
     // Native fills N: scale-set is refused (no per-lane reserve).
-    assert_eq!(native.acquire("native/a"), AcquireOutcome::Acquired);
-    assert_eq!(native.acquire("native/b"), AcquireOutcome::Acquired);
+    let native_a = NativePermitGuard::acquire(&path, native_permit_holder("a"), "scope-a")
+        .unwrap()
+        .expect("native grant a");
+    let native_b = NativePermitGuard::acquire(&path, native_permit_holder("b"), "scope-b")
+        .unwrap()
+        .expect("native grant b across scopes");
     assert!(allocator.acquire(&permit_holder(7, 1)).unwrap().is_none());
 
     // One native release frees exactly one scale-set grant.
-    assert!(native.release("native/a"));
+    drop(native_a);
     let guard = allocator
         .acquire(&permit_holder(7, 1))
         .unwrap()
         .expect("shared N frees one grant");
     // And the scale-set hold now denies native.
-    assert_eq!(native.acquire("native/c"), AcquireOutcome::Full);
+    assert!(
+        NativePermitGuard::acquire(&path, native_permit_holder("c"), "scope-a")
+            .unwrap()
+            .is_none()
+    );
     guard.release();
-    assert_eq!(native.acquire("native/c"), AcquireOutcome::Acquired);
+    let native_c = NativePermitGuard::acquire(&path, native_permit_holder("c"), "scope-a")
+        .unwrap()
+        .expect("native grant c after scale-set release");
+    drop(native_b);
+    drop(native_c);
+    assert_eq!(allocator.occupied().unwrap(), 0);
 }
 
 #[test]
 fn stale_generation_grants_nothing() {
+    use velnor_control::permit_ledger::{AcquireOutcome, PermitLane, PermitLedger, PermitState};
     let path = temp_ledger("fence");
     configure(&path, 2);
     let allocator = ScaleSetAllocator::open(&path);
@@ -251,6 +224,7 @@ fn stale_generation_grants_nothing() {
 
 #[test]
 fn reconcile_before_advertise_marks_epoch_once() {
+    use velnor_control::permit_ledger::{PermitLane, PermitLedger, PermitState};
     let path = temp_ledger("adv");
     let mut ledger = PermitLedger::open(&path).unwrap();
     ledger.set_max_jobs(3).unwrap();
@@ -290,12 +264,10 @@ fn reconcile_before_advertise_marks_epoch_once() {
 
 #[test]
 fn sweep_never_frees_scaleset_rows() {
+    use velnor_control::permit_ledger::{PermitLedger, PermitState};
     let path = temp_ledger("sweep");
     configure(&path, 4);
     let allocator = ScaleSetAllocator::open(&path);
-    let native = NativeMock {
-        ledger_path: path.clone(),
-    };
 
     // One uncertain scale-set row (cleanup failure), one uncertain native
     // row with a dead pid, both unprotected.
@@ -304,12 +276,13 @@ fn sweep_never_frees_scaleset_rows() {
         .unwrap()
         .expect("grants");
     guard.mark_uncertain_and_disarm();
-    assert_eq!(native.acquire("native/dead"), AcquireOutcome::Acquired);
-    let mut ledger = PermitLedger::open(&path).unwrap();
-    let generation = ledger.generation().unwrap();
-    ledger
-        .transition("native/dead", PermitState::Uncertain, generation)
-        .unwrap();
+    let native = NativePermitGuard::acquire(&path, native_permit_holder("dead"), "scope-a")
+        .unwrap()
+        .expect("native grants");
+    // Drop without release would free the row; disarm via the uncertain
+    // path instead so the sweep has an uncertain row to converge. The
+    // sweep's pid probe is stubbed dead below, as in production crashes.
+    native.mark_uncertain_and_disarm();
 
     // Every pid reads dead; nothing is protected.
     let (_, swept) = startup_reconcile(&path, &[], &[], &|_| false).unwrap();
