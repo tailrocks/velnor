@@ -14844,7 +14844,7 @@ mod tests {
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
 
         let steps = vec![ExecutableStep::Native {
             step_id: "mise".to_owned(),
@@ -14925,7 +14925,7 @@ mod tests {
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
 
         let action = |adapter, cache_kind, inputs: &[(&str, &str)]| NativeActionInvocation {
             git_ref: "cache-action".to_owned(),
@@ -17205,7 +17205,7 @@ esac
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
         let step = ScriptStep {
             id: "tests".into(),
             display_name: "Tests".into(),
@@ -17292,7 +17292,7 @@ esac
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
         let step = ScriptStep {
             id: "compile".into(),
             display_name: "Compile".into(),
@@ -27683,7 +27683,7 @@ fi"#
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
             display_name: String::new(),
