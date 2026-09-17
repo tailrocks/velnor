@@ -22,10 +22,15 @@
 //! the source closure of `HEAD` and checks whether its tag already exists
 //! (unchanged closure, no rebuild); a `build` matrix compiles natively on one
 //! runner per consumer platform, proves each binary reports the tag closure,
-//! attests it, and uploads it; a `publish` job proves transport integrity,
-//! assembles the manifest, attests it, smoke-tests the exact consumer flow
-//! against those same bytes, and only then creates the release without ever
-//! overwriting — no consumer can see a product whose verification failed.
+//! attests it, and uploads it; a `publish` job first proves it still owns its
+//! tag (a fresher same-closure run publishes instead), then proves transport
+//! integrity, assembles the manifest, attests it, smoke-tests the exact
+//! consumer flow against those same bytes, and only then creates the release
+//! without ever overwriting — no consumer can see a product whose
+//! verification failed. Publishes serialize on the tag across refs, the
+//! create carries no `--target` (a stale target would demand the workflows
+//! scope `GITHUB_TOKEN` can never hold), and a conflicting create converges
+//! instead of failing: this workflow is the sole writer of product tags.
 
 use std::fmt::Write as _;
 
@@ -268,7 +273,13 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
 # product no consumer would accept never reaches a release.
 #
 # The workflow never overwrites: when the tag already exists the run skips,
-# and the publish job re-checks immediately before creating the release.
+# the publish job yields to a fresher same-closure run, serializes on the
+# tag across refs, re-checks immediately before creating, and converges when
+# a conflicting create loses instead of failing. The create carries no
+# target: the tag names the closure, never the commit, so the API tags the
+# default-branch tip when the tag is missing and never moves a tag. This
+# workflow is the sole writer of product tags — no pre-tagging, no second
+# path.
 name: Velnor workflow runtime products
 run-name: Runtime products · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}
 
@@ -278,7 +289,9 @@ on:
   workflow_dispatch:
 
 # Same-ref runs serialize so two pushes can never race on one release; a
-# publish in flight is never cancelled.
+# publish in flight is never cancelled. Same-closure runs across refs (a main
+# push and a dispatch name the same tag) serialize again on the tag in the
+# publish job, which owns the shared resource.
 concurrency:
   group: runtime-products-${{{{ github.ref }}}}
   cancel-in-progress: false
@@ -426,11 +439,50 @@ jobs:
     if: needs.closure.outputs.exists != 'true'
     runs-on: {publish_runner}
     timeout-minutes: 20
+    # The true shared resource is the closure tag, not the ref: back-to-back
+    # pushes with an unchanged closure — and a main push beside a dispatch —
+    # name the same tag, so publishes serialize on it across refs. A publish
+    # in flight is never cancelled.
+    concurrency:
+      group: runtime-products-tag-${{{{ needs.closure.outputs.tag }}}}
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
+      - name: Checkout default-branch tip
+        uses: {checkout}
+        with:
+          ref: {default_branch}
+          persist-credentials: false
+      - name: Prove publish freshness
+        shell: bash
+        env:
+          CLOSURE: ${{{{ needs.closure.outputs.closure }}}}
+          HEAD_SHA: ${{{{ needs.closure.outputs.head-sha }}}}
+          TAG: ${{{{ needs.closure.outputs.tag }}}}
+        run: |
+          set -euo pipefail
+          # The closure job resolved CLOSURE at HEAD_SHA, but the build took
+          # minutes and the default branch may have moved since. Re-resolve at
+          # the tip: when the closure is unchanged the fresher run owns this
+          # tag and this run yields. A resolve-time check cannot see this —
+          # staleness is born mid-build.
+          command -v sha256sum >/dev/null 2>&1 || {{ echo "::error::sha256sum is required on the publish runner" >&2; exit 1; }}
+          tip="$(git rev-parse HEAD)"
+          [[ "$tip" =~ ^[0-9a-f]{{40}}$ ]] || {{ echo "::error::HEAD is not a commit SHA: $tip" >&2; exit 1; }}
+          if [[ "$tip" == "$HEAD_SHA" ]]; then
+            exit 0
+          fi
+          listing="$(git ls-tree -r HEAD -- {closure_paths})"
+          test "$listing" != '' || {{ echo "::error::HEAD has no closure inputs" >&2; exit 1; }}
+          tip_closure="$(printf '%s\n{closure_footer}' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{{print $1}}')"
+          [[ "$tip_closure" =~ ^[0-9a-f]{{64}}$ ]] || {{ echo "::error::closure resolution failed" >&2; exit 1; }}
+          if [[ "$tip_closure" == "$CLOSURE" ]]; then
+            echo "::notice::the default branch moved to $tip with unchanged closure; the fresher run owns $TAG"
+            exit 0
+          fi
       - name: Download runtime assets
         uses: {download}
         with:
@@ -525,9 +577,36 @@ jobs:
             echo "::notice::release $TAG already exists; leaving it untouched"
             exit 0
           fi
-          gh release create "$TAG" --repo {repository} --target "$HEAD_SHA" --title "$TAG" \
+          # No target: the tag names the closure, never the commit, so the
+          # API tags the default-branch tip when the tag is missing and there
+          # is exactly one tag path — create-if-missing, never move. A stale
+          # target would diff target..HEAD and demand the workflows scope
+          # GITHUB_TOKEN can never hold whenever the range carries workflow
+          # files (cli/cli#9514).
+          if gh release create "$TAG" --repo {repository} --title "$TAG" \
             --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
-            {release_assets} dist/manifest.json
+            {release_assets} dist/manifest.json; then
+            exit 0
+          fi
+          # Conflict converges, never fails: a concurrent run may have
+          # published between the re-check and the create. Re-view with
+          # backoff; the winner carries this same tag, hence this same
+          # closure, so its appearance is success. Fail only if nothing
+          # materializes.
+          converged=false
+          for delay in 5 10 15 30; do
+            sleep "$delay"
+            if gh release view "$TAG" --repo {repository} >/dev/null 2>&1; then
+              converged=true
+              break
+            fi
+          done
+          if [[ "$converged" == true ]]; then
+            echo "::notice::release $TAG appeared after a conflicting create; converging"
+            exit 0
+          fi
+          echo "::error::release $TAG was not created and did not appear" >&2
+          exit 1
 "#,
         header = GENERATED_HEADER,
         example_tag = example_tag(),
@@ -1312,7 +1391,7 @@ mod tests {
             pinned += 1;
         }
         assert_eq!(
-            pinned, 8,
+            pinned, 9,
             "every step the producer needs, pinned: {content}"
         );
         assert!(
@@ -1594,6 +1673,141 @@ mod tests {
         );
     }
 
+    #[test]
+    fn create_carries_no_target() {
+        // cli/cli#9514: an explicit --target makes the API diff
+        // target..HEAD, and a range carrying workflow files demands the
+        // workflows scope GITHUB_TOKEN can never hold → 403. The tag names
+        // the closure, never the commit, so the create passes no target and
+        // the API tags the default-branch tip when the tag is missing.
+        let content = owner_content(&[]);
+        for usage in ["--target ", "--target="] {
+            assert!(
+                !content.contains(usage),
+                "no target flag usage ({usage:?}): {content}"
+            );
+        }
+        let publish = must_some(content.split("\n  publish:\n").nth(1), "the publish job");
+        assert_eq!(
+            publish.matches("gh release create").count(),
+            1,
+            "exactly one creation: {publish}"
+        );
+        assert!(
+            publish.contains("gh release create \"$TAG\" --repo"),
+            "the create names the tag and the repository: {publish}"
+        );
+    }
+
+    #[test]
+    fn conflicting_create_converges_instead_of_failing() {
+        let content = owner_content(&[]);
+        let publish = must_some(content.split("\n  publish:\n").nth(1), "the publish job");
+        let create = must_some(publish.find("gh release create"), "the release creation");
+        let tail = &publish[create..];
+        for marker in [
+            "converged=false",
+            "for delay in 5 10 15 30; do",
+            "appeared after a conflicting create; converging",
+            "was not created and did not appear",
+        ] {
+            assert!(
+                tail.contains(marker),
+                "the converge loop carries {marker:?}: {tail}"
+            );
+        }
+        assert_eq!(
+            tail.matches("gh release view").count(),
+            1,
+            "the loop re-views the same tag the create attempted: {tail}"
+        );
+    }
+
+    #[test]
+    fn publish_serializes_on_the_tag_across_refs() {
+        let content = owner_content(&[]);
+        let publish = must_some(content.split("\n  publish:\n").nth(1), "the publish job");
+        assert!(
+            publish.contains("group: runtime-products-tag-${{ needs.closure.outputs.tag }}"),
+            "publishes serialize on the closure tag, whatever ref named it: {publish}"
+        );
+        assert!(
+            publish.contains("cancel-in-progress: false"),
+            "a publish in flight is never cancelled: {publish}"
+        );
+        assert!(
+            content.contains("group: runtime-products-${{ github.ref }}"),
+            "the same-ref run gate stays: {content}"
+        );
+    }
+
+    #[test]
+    fn publish_yields_to_a_fresher_same_closure_run() {
+        let content = owner_content(&[]);
+        let publish = must_some(content.split("\n  publish:\n").nth(1), "the publish job");
+        let checkout = must_some(
+            publish.find("Checkout default-branch tip"),
+            "the tip checkout",
+        );
+        let freshness = must_some(
+            publish.find("Prove publish freshness"),
+            "the freshness proof",
+        );
+        let download = must_some(
+            publish.find("Download runtime assets"),
+            "the asset download",
+        );
+        assert!(
+            checkout < freshness && freshness < download,
+            "the tip checkout and freshness proof gate the publish work: {publish}"
+        );
+        assert!(
+            publish.contains("ref: main"),
+            "the checkout reads the default-branch tip: {publish}"
+        );
+        let pathspec = CLOSURE_PATHS.join(" ");
+        assert!(
+            publish.contains(&format!("git ls-tree -r HEAD -- {pathspec}")),
+            "the freshness proof re-resolves the canonical closure: {publish}"
+        );
+        let footer = format!(
+            "closure-version:{CLOSURE_VERSION}\\nfeatures:{CI_FEATURES}\\nprofile:{PROFILE_RELEASE}\\n"
+        );
+        assert!(
+            publish.contains(&footer),
+            "the freshness proof hashes the canonical footer: {publish}"
+        );
+        assert!(
+            publish.contains("the fresher run owns $TAG"),
+            "a stale same-closure run yields its tag: {publish}"
+        );
+        let mut config = owner_config(&[]);
+        config.default_branch = "trunk".to_owned();
+        let content = must_some(
+            runtime_products_content(&config),
+            "the owner renders the producer",
+        );
+        let publish = must_some(content.split("\n  publish:\n").nth(1), "the publish job");
+        assert!(
+            publish.contains("ref: trunk"),
+            "the tip checkout follows the configured default branch: {publish}"
+        );
+    }
+
+    #[test]
+    fn workflow_is_the_sole_tag_writer() {
+        let content = owner_content(&[]);
+        assert_eq!(
+            content.matches("gh release create").count(),
+            1,
+            "one creation is the only tag path: {content}"
+        );
+        assert!(
+            !content.contains("git push"),
+            "no explicit tag push beside the create: {content}"
+        );
+    }
+
     /// Every `run: |` shell body in the rendered producer, keyed by step
     /// name and de-indented. The template is string-built, so these bodies
     /// are what actually executes in CI: parsing and running them here
@@ -1634,6 +1848,7 @@ mod tests {
             "Check for an existing product",
             "Prove a hermetic build environment",
             "Prove the product closure",
+            "Prove publish freshness",
             "Assemble and verify the release",
             "Smoke-test the release",
             "Create the release",
@@ -1707,6 +1922,422 @@ mod tests {
         }
     }
 
+    /// Run a rendered shell body under `bash` with `cwd` as its working
+    /// directory, `envs` exported, and `path_prefix` first on `PATH` when
+    /// the body needs stubbed tools.
+    #[cfg(unix)]
+    fn run_shell_body(
+        script: &std::path::Path,
+        cwd: &std::path::Path,
+        path_prefix: Option<&std::path::Path>,
+        envs: &[(&str, &str)],
+    ) -> std::process::Output {
+        let mut command = std::process::Command::new("bash");
+        command.arg(script).current_dir(cwd);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        if let Some(prefix) = path_prefix {
+            let mut path = prefix.as_os_str().to_owned();
+            path.push(":");
+            path.push(std::env::var_os("PATH").unwrap_or_default());
+            command.env("PATH", path);
+        }
+        must(command.output(), "run the shell body")
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = must(fs::metadata(path), "stat the stub").permissions();
+        permissions.set_mode(0o755);
+        must(
+            fs::set_permissions(path, permissions),
+            "make the stub executable",
+        );
+    }
+
+    /// A scratch git repository carrying every closure input path, committed
+    /// once. The freshness proof under test runs with this as its cwd.
+    #[cfg(unix)]
+    fn closure_repo(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-publish-freshness-{name}-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(root.join("crates/velnor-workflow")),
+            "create the fixture crate",
+        );
+        must(
+            fs::create_dir_all(root.join(".cargo")),
+            "create the fixture cargo dir",
+        );
+        for file in [
+            "crates/velnor-workflow/lib.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "rust-toolchain",
+            ".cargo/config.toml",
+        ] {
+            must(
+                fs::write(root.join(file), "fixture\n"),
+                "write a fixture input",
+            );
+        }
+        let git = |args: &[&str]| {
+            let status = must(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .status(),
+                "run git",
+            );
+            assert!(status.success(), "git {args:?} succeeds");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.email=velnor@example.test",
+            "-c",
+            "user.name=velnor",
+            "commit",
+            "-qm",
+            "fixture",
+        ]);
+        root
+    }
+
+    /// A `PATH` prefix carrying `sha256sum` when the test host ships only
+    /// `shasum`: both print the `<digest>  <file>` shape the proof parses,
+    /// so the oracle stays the digest algorithm, not the tool name.
+    #[cfg(unix)]
+    fn sha256sum_prefix() -> Option<PathBuf> {
+        let present = std::process::Command::new("sha256sum")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if present {
+            return None;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-workflow-sha256sum-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::create_dir_all(&dir), "create the shim dir");
+        let shim = dir.join("sha256sum");
+        must(
+            fs::write(&shim, "#!/bin/sh\nexec shasum -a 256 \"$@\"\n"),
+            "write the sha256sum shim",
+        );
+        make_executable(&shim);
+        Some(dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn freshness_proof_yields_only_on_unchanged_closure() {
+        let content = owner_content(&[]);
+        let bodies = step_bodies(&content);
+        let proof = must_some(
+            bodies
+                .iter()
+                .find_map(|(name, body)| (name == "Prove publish freshness").then_some(body)),
+            "the rendered freshness body",
+        );
+        let script = std::env::temp_dir().join(format!(
+            "velnor-workflow-freshness-proof-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::write(&script, proof), "write the proof body");
+        let repo = closure_repo("tip");
+        let tip = must(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output(),
+            "read the fixture tip",
+        );
+        assert!(tip.status.success(), "rev-parse succeeds");
+        let tip = String::from_utf8_lossy(&tip.stdout).trim().to_owned();
+        // The oracle is the generator's own canonical digest over the same
+        // tree: Rust-side computation against rendered-shell computation.
+        let closure = must(
+            crate::closure::closure_of_tree(&repo, "HEAD", CI_FEATURES, PROFILE_RELEASE),
+            "resolve the fixture closure",
+        );
+        assert_eq!(closure.len(), 64, "the oracle resolves a full closure");
+        let prefix = sha256sum_prefix();
+        let stale = "0".repeat(40);
+        let zeroes = "0".repeat(64);
+        let changed = "f".repeat(64);
+
+        // At the tip the proof passes silently, whatever the closure claims.
+        let output = run_shell_body(
+            &script,
+            &repo,
+            prefix.as_deref(),
+            &[
+                ("CLOSURE", zeroes.as_str()),
+                ("HEAD_SHA", tip.as_str()),
+                ("TAG", "tag"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "the tip run proceeds: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the tip run stays silent: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        // Past the tip with an unchanged closure the proof yields the tag.
+        let output = run_shell_body(
+            &script,
+            &repo,
+            prefix.as_deref(),
+            &[
+                ("CLOSURE", closure.as_str()),
+                ("HEAD_SHA", stale.as_str()),
+                ("TAG", "tag"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "the stale run yields: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("the fresher run owns"),
+            "the stale run names the yield: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        // Past the tip with a changed closure the proof falls through: the
+        // tag is this run's own, so the publish proceeds.
+        let output = run_shell_body(
+            &script,
+            &repo,
+            prefix.as_deref(),
+            &[
+                ("CLOSURE", changed.as_str()),
+                ("HEAD_SHA", stale.as_str()),
+                ("TAG", "tag"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "the diverged run proceeds: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the diverged run stays silent: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let _ = fs::remove_file(&script);
+        let _ = fs::remove_dir_all(&repo);
+        if let Some(prefix) = prefix {
+            let _ = fs::remove_dir_all(&prefix);
+        }
+    }
+
+    /// A stub toolbelt for the create body: a stateful `gh` plus a `sleep`
+    /// that records its delays instead of waiting. `STUB_STATE` carries the
+    /// per-scenario directory; `VIEW_SUCCEED_FROM` names the view call that
+    /// first succeeds; `GH_CREATE_OK` decides the create.
+    #[cfg(unix)]
+    fn stub_toolbelt(name: &str) -> PathBuf {
+        let bin = std::env::temp_dir().join(format!(
+            "velnor-workflow-create-stubs-{name}-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::create_dir_all(&bin), "create the stub dir");
+        must(
+            fs::write(
+                bin.join("gh"),
+                r#"#!/bin/bash
+state="${STUB_STATE:?}"
+if [[ "$1" == "release" && "$2" == "view" ]]; then
+  count=0
+  [[ -f "$state/views" ]] && count="$(cat "$state/views")"
+  count=$((count + 1))
+  printf '%s' "$count" > "$state/views"
+  (( count >= ${VIEW_SUCCEED_FROM:?} )) && exit 0 || exit 1
+fi
+if [[ "$1" == "release" && "$2" == "create" ]]; then
+  [[ "${GH_CREATE_OK:-false}" == "true" ]] && exit 0 || exit 1
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 1
+"#,
+            ),
+            "write the gh stub",
+        );
+        must(
+            fs::write(
+                bin.join("sleep"),
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${STUB_STATE:?}/sleeps\"\n",
+            ),
+            "write the sleep stub",
+        );
+        make_executable(&bin.join("gh"));
+        make_executable(&bin.join("sleep"));
+        bin
+    }
+
+    /// One run of the create body against the stub toolbelt: its state
+    /// directory (view counts, sleep log) and its captured output.
+    #[cfg(unix)]
+    struct CreateScenario {
+        state: PathBuf,
+        output: std::process::Output,
+    }
+
+    /// Run the create body for one stub scenario: `view_succeed_from` names
+    /// the view call that first succeeds, `create_ok` decides the create.
+    #[cfg(unix)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one scenario run threads its six inputs explicitly"
+    )]
+    fn run_create_scenario(
+        script: &std::path::Path,
+        scratch: &std::path::Path,
+        bin: &std::path::Path,
+        name: &str,
+        closure: &str,
+        head: &str,
+        view_succeed_from: &str,
+        create_ok: &str,
+    ) -> CreateScenario {
+        let state = scratch.join(name);
+        must(fs::create_dir_all(&state), "create the scenario state");
+        let output = run_shell_body(
+            script,
+            scratch,
+            Some(bin),
+            &[
+                ("TAG", "tag"),
+                ("CLOSURE", closure),
+                ("HEAD_SHA", head),
+                (
+                    "STUB_STATE",
+                    must_some(state.to_str(), "the scenario state"),
+                ),
+                ("VIEW_SUCCEED_FROM", view_succeed_from),
+                ("GH_CREATE_OK", create_ok),
+            ],
+        );
+        CreateScenario { state, output }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conflicting_create_converges_when_the_release_appears() {
+        let content = owner_content(&[]);
+        let bodies = step_bodies(&content);
+        let create = must_some(
+            bodies
+                .iter()
+                .find_map(|(name, body)| (name == "Create the release").then_some(body)),
+            "the rendered create body",
+        );
+        let script = std::env::temp_dir().join(format!(
+            "velnor-workflow-create-body-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::write(&script, create), "write the create body");
+        let bin = stub_toolbelt("converge");
+        let scratch = std::env::temp_dir().join(format!(
+            "velnor-workflow-create-scratch-{}",
+            crate::unique_suffix()
+        ));
+        must(fs::create_dir_all(&scratch), "create the scratch dir");
+        let closure = "0".repeat(64);
+        let head = "0".repeat(40);
+
+        // A clean create succeeds without ever sleeping.
+        let scenario = run_create_scenario(
+            &script, &scratch, &bin, "clean", &closure, &head, "99", "true",
+        );
+        assert!(
+            scenario.output.status.success(),
+            "the clean create succeeds: {}",
+            String::from_utf8_lossy(&scenario.output.stderr)
+        );
+        assert!(
+            !scenario.state.join("sleeps").exists(),
+            "the clean create never sleeps"
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(scenario.state.join("views")),
+                "read the view count"
+            ),
+            "1",
+            "the clean create views once"
+        );
+
+        // A conflicting create converges when the release appears: one
+        // sleep, then the winner's row.
+        let scenario = run_create_scenario(
+            &script, &scratch, &bin, "conflict", &closure, &head, "2", "false",
+        );
+        assert!(
+            scenario.output.status.success(),
+            "the conflicting create converges: {}",
+            String::from_utf8_lossy(&scenario.output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&scenario.output.stdout).contains("converging"),
+            "the conflicting create names the converge: {}",
+            String::from_utf8_lossy(&scenario.output.stdout)
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(scenario.state.join("sleeps")),
+                "read the sleep log"
+            ),
+            "5\n",
+            "the converge waits one backoff step"
+        );
+
+        // When nothing materializes the run fails after the full backoff.
+        let scenario = run_create_scenario(
+            &script, &scratch, &bin, "absent", &closure, &head, "99", "false",
+        );
+        assert!(
+            !scenario.output.status.success(),
+            "the absent release fails the run"
+        );
+        assert!(
+            String::from_utf8_lossy(&scenario.output.stderr)
+                .contains("was not created and did not appear"),
+            "the failure names the missing release: {}",
+            String::from_utf8_lossy(&scenario.output.stderr)
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(scenario.state.join("sleeps")),
+                "read the sleep log"
+            ),
+            "5\n10\n15\n30\n",
+            "the failure exhausts the backoff"
+        );
+
+        let _ = fs::remove_file(&script);
+        let _ = fs::remove_dir_all(&scratch);
+        let _ = fs::remove_dir_all(&bin);
+    }
+
     /// The rendered bytes, pinned to the digest of the reviewed render. The
     /// digest is the expectation, not a second call into the same code, so a
     /// renderer change shows up here and has to be carried into the pin
@@ -1714,7 +2345,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "dc9c5d95a00c193a7c2332e348398ccd15f05df64252c863fa14558197b2843b";
+        const PINNED: &str = "f2e3a31f2196fc8244dd48042b9a5a796e051ab38a6c92448470ccbecb9ced44";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
