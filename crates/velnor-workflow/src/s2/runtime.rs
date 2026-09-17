@@ -1641,11 +1641,16 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .append(true)
             .open(&output_path)
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
+        // `units` is plan JSON for the callers' `contains()` needles and the
+        // required check's jq; `unit_ids` is the same affected set as CSV for
+        // the selection file, whose `units=` field the runner parses as CSV.
+        // The two channels carry one format each — never JSON into `units=`.
         for (name, value) in [
             ("scope", scope_name(scope).to_owned()),
             ("base_sha", base.clone()),
             ("head_sha", head.clone()),
             ("units", units_json.clone()),
+            ("unit_ids", unit_ids.clone()),
             ("full_units", full_units.clone()),
             ("plan_digest", digest.clone()),
             ("excluded", excluded_json.clone()),
@@ -1657,6 +1662,7 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
     }
     println!("scope={}", scope_name(scope));
     println!("units={units_json}");
+    println!("unit_ids={unit_ids}");
     println!("full_units={full_units}");
     println!("plan_digest={digest}");
     println!("excluded={excluded_json}");

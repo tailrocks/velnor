@@ -4998,7 +4998,9 @@ fn workflow_runtime_artifact_upload(revision: &str) -> String {
 
 /// Selection-file field sources for one materialize step: already-rendered
 /// GitHub expressions such as `${{ inputs.base_sha }}` or
-/// `${{ needs.plan.outputs.units }}`.
+/// `${{ needs.plan.outputs.unit_ids }}`. The `units` source must be the
+/// plan's CSV `unit_ids` output — never the JSON `units` output, which the
+/// runner's CSV-only selection parser rejects.
 pub(crate) struct SelectionFieldSources<'a> {
     pub(crate) base_sha: &'a str,
     pub(crate) head_sha: &'a str,
@@ -14344,6 +14346,68 @@ lockfile = true
         assert!(crate_workflow.contains("github.event.inputs.providers"));
         assert!(crate_workflow.contains("',velnor,')"));
         assert!(crate_workflow.contains("',github-hosted,')"));
+    }
+
+    #[test]
+    fn selection_file_consumes_the_csv_unit_ids_channel_not_plan_json() {
+        // Flip bug #2: plan `units` is JSON for `contains()` needles, but the
+        // reusable once fed it raw into the selection file's CSV-only `units=`
+        // field, so `run` failed closed in every executed leg. The plan now
+        // emits the same affected set as CSV `unit_ids`, and the emitter
+        // threads it through `selected_unit_ids` into `units=` — one format
+        // per channel end to end.
+        let config = scanned_fixture(all_providers());
+        let files = must(generated_files(&config), "generate");
+        let root = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
+            "root workflow",
+        );
+        let rust_unit = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "Rust fixture unit",
+        );
+        assert!(
+            root.contains("      unit_ids: ${{ steps.plan.outputs.unit_ids }}"),
+            "plan must expose the CSV unit_ids output:\n{root}"
+        );
+        let json_feeds = root
+            .matches("selected_units: ${{ needs.plan.outputs.units }}")
+            .count();
+        let csv_feeds = root
+            .matches("selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}")
+            .count();
+        assert!(
+            csv_feeds > 0 && csv_feeds == json_feeds,
+            "every caller passing the JSON channel must pass the CSV channel too ({csv_feeds} vs {json_feeds}):\n{root}"
+        );
+        let crate_workflow = must_some(
+            files
+                .iter()
+                .find(|(path, _)| {
+                    path.as_path()
+                        == PathBuf::from(".github/workflows")
+                            .join(nested_unit_workflow_file(rust_unit))
+                            .as_path()
+                })
+                .map(|(_, content)| content),
+            "Rust crate workflow",
+        );
+        assert!(
+            crate_workflow.contains("selected_unit_ids:\n        required: true"),
+            "the reusable must declare the CSV input:\n{crate_workflow}"
+        );
+        assert!(
+            crate_workflow.contains("SELECTION_UNITS: ${{ inputs.selected_unit_ids }}"),
+            "the selection file must materialize units= from the CSV input:\n{crate_workflow}"
+        );
+        assert!(
+            !crate_workflow.contains("SELECTION_UNITS: ${{ inputs.selected_units }}"),
+            "plan JSON must never feed the CSV-only units= field:\n{crate_workflow}"
+        );
+        assert!(
+            crate_workflow.contains("contains(inputs.selected_units"),
+            "callee gates still match the JSON channel:\n{crate_workflow}"
+        );
     }
 
     #[test]

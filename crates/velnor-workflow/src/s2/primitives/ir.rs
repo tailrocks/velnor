@@ -3624,7 +3624,7 @@ impl WorkflowIr {
         ));
         let _ = writeln!(
             output,
-            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      provider: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
+            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      provider: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      selected_unit_ids: ${{{{ needs.plan.outputs.unit_ids }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
             caller.job_id,
             crate::s2::control_job_name("Prepare Cargo"),
             conditions.join(" && "),
@@ -3682,7 +3682,7 @@ impl WorkflowIr {
         ));
         let _ = writeln!(
             output,
-            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      provider: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}{}",
+            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      provider: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      selected_unit_ids: ${{{{ needs.plan.outputs.unit_ids }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}{}",
             caller.job_id,
             yaml_scalar(&caller.name),
             conditions.join(" && "),
@@ -3933,7 +3933,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n      plan_digest:\n        required: true\n        type: string\n      provider:\n        required: true\n        type: string",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      selected_units:\n        required: true\n        type: string\n      selected_unit_ids:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n      plan_digest:\n        required: true\n        type: string\n      provider:\n        required: true\n        type: string",
             yaml_scalar(unit_group(kind))
         );
         for name in provider_input::ALL {
@@ -4179,7 +4179,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 base_sha: "${{ inputs.base_sha }}",
                 head_sha: "${{ inputs.head_sha }}",
                 scope: "${{ inputs.scope }}",
-                units: "${{ inputs.selected_units }}",
+                units: "${{ inputs.selected_unit_ids }}",
                 full_units: "${{ inputs.full_units }}",
                 plan_digest: "${{ inputs.plan_digest }}",
             },
@@ -4804,7 +4804,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     base_sha: "${{ inputs.base_sha }}",
                     head_sha: "${{ inputs.head_sha }}",
                     scope: "${{ inputs.scope }}",
-                    units: "${{ inputs.selected_units }}",
+                    units: "${{ inputs.selected_unit_ids }}",
                     full_units: "${{ inputs.full_units }}",
                     plan_digest: "${{ inputs.plan_digest }}",
                 },
@@ -4956,6 +4956,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      base_sha: ${{ steps.plan.outputs.base_sha }}".to_owned(),
             "      head_sha: ${{ steps.plan.outputs.head_sha }}".to_owned(),
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
+            "      unit_ids: ${{ steps.plan.outputs.unit_ids }}".to_owned(),
             "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
             "      plan_digest: ${{ steps.plan.outputs.plan_digest }}".to_owned(),
             "      excluded: ${{ steps.plan.outputs.excluded }}".to_owned(),
