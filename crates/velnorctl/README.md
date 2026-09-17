@@ -22,7 +22,7 @@ Focused development branch: `velnor-macos-host` (from PR #814).
 `host bootstrap-image` compiles linux `velnor-workflow` in `rust:1.98.1-bookworm`
 and builds `docker/job-ubuntu.Dockerfile` on the current daemon. It does not
 pull GHCR or copy Sentry caches. Export `GITHUB_TOKEN` for the Dockerfile
-`mise_github_token` secret; never pass the token as a flag.
+`github_token` secret; never pass the token as a flag.
 
 `host start` is the on-demand entry point. It registers repository-scoped
 runners only and refuses organization URLs so recovery cannot join

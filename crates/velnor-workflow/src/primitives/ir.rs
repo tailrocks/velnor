@@ -17,6 +17,7 @@ use super::{
     CacheBackend, GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
     MUTABLE_MOUNT_HOST_DIR,
 };
+use crate::reuse::REQUIRED_CHECK;
 use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
@@ -72,8 +73,9 @@ mod tests {
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
-        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode, Pins,
-        RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
+        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
+        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
+        WorkflowIr, WorkflowKind,
     };
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -173,6 +175,12 @@ mod tests {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::portable(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
         }
     }
 
@@ -204,6 +212,122 @@ mod tests {
             mise_lock_keys: BTreeSet::new(),
             declared_ruleset_contexts: String::new(),
         }
+    }
+
+    #[test]
+    fn tool_provisioning_renders_declared_prepared_tools() {
+        let mut unit = rust_unit("rust", ".");
+        unit.prepared_tools = vec![crate::primitives::prepared_tools::PreparedToolNeed {
+            tool_id: "test-runner".to_owned(),
+            authorized_producers: BTreeSet::from(["producer-job".to_owned()]),
+            inputs_digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+        }];
+        let ir = owner_test_ir("example/provisioning", vec![unit.clone()]);
+        let mut output = String::new();
+        ir.render_tool_provisioning(&mut output, RunnerMode::Github, &unit, true);
+        assert!(
+            output.contains("Restore prepared tool test-runner"),
+            "provisioning restores the declared tool"
+        );
+        assert!(
+            output.contains("prepared-tool-v1-test-runner-"),
+            "the restore key names the prepared-tool namespace"
+        );
+        assert!(
+            output.contains(Pins::resolved().cache_restore),
+            "the restore rides the reviewed pin table"
+        );
+        // Undeclared units render no prepared-tool steps on either lane.
+        for lane in [RunnerMode::Github, RunnerMode::Velnor] {
+            let bare = rust_unit("rust", ".");
+            let mut output = String::new();
+            ir.render_tool_provisioning(&mut output, lane, &bare, true);
+            assert!(
+                !output.contains("prepared-tool"),
+                "undeclared provisioning on {lane:?} mentions no prepared tool"
+            );
+        }
+    }
+
+    fn prepared_need(
+        tool: &str,
+        digest: &str,
+    ) -> crate::primitives::prepared_tools::PreparedToolNeed {
+        crate::primitives::prepared_tools::PreparedToolNeed {
+            tool_id: tool.to_owned(),
+            authorized_producers: BTreeSet::from(["producer-job".to_owned()]),
+            inputs_digest: digest.to_owned(),
+        }
+    }
+
+    #[test]
+    fn kind_reusable_unions_prepared_tool_needs_behind_member_gates() {
+        const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut alpha = rust_unit("rust-alpha", "crates/alpha");
+        alpha.prepared_tools = vec![prepared_need("test-runner", DIGEST_A)];
+        let mut beta = rust_unit("rust-beta", "crates/beta");
+        beta.prepared_tools = vec![prepared_need("test-runner", DIGEST_B)];
+        let ir = owner_test_ir("example/kind-tools", vec![alpha.clone(), beta.clone()]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        // The header declares the input, and each distinct need renders one
+        // gated block: the caller's records decide which block runs.
+        assert!(
+            kind.contains("prepared_tools:"),
+            "the kind header declares the prepared-tools input"
+        );
+        assert_eq!(
+            kind.matches("Restore prepared tool test-runner").count(),
+            4,
+            "each distinct need renders one block per lane"
+        );
+        assert!(
+            kind.contains("contains(format(',{0},', inputs.prepared_tools)"),
+            "partial member records render behind membership gates"
+        );
+        // The callers pass their own records through the shared input.
+        for (unit, digest) in [(&alpha, DIGEST_A), (&beta, DIGEST_B)] {
+            let facts = ir.unit_lane_facts(
+                unit,
+                &ir.default_unit_contract(unit, true),
+                RunnerMode::Github,
+            );
+            let values = facts.input_values();
+            let passed = values
+                .iter()
+                .find(|(name, _)| *name == lane_input::PREPARED_TOOLS);
+            assert_eq!(
+                passed.map(|(_, value)| value.as_str()),
+                Some(format!("test-runner:{digest}:producer-job").as_str()),
+                "the caller passes its own need record"
+            );
+        }
+        // Members that agree share one ungated block.
+        let mut gamma = rust_unit("rust-gamma", "crates/gamma");
+        gamma.prepared_tools = vec![prepared_need("test-runner", DIGEST_A)];
+        let ir = owner_test_ir("example/kind-tools", vec![alpha, gamma]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert_eq!(
+            kind.matches("Restore prepared tool test-runner").count(),
+            2,
+            "identical needs share one block per lane"
+        );
+        assert!(
+            !kind.contains("inputs.prepared_tools"),
+            "a unanimous need needs no gate"
+        );
+    }
+
+    #[test]
+    fn kind_reusable_without_needs_declares_no_prepared_tools_input() {
+        let unit = rust_unit("rust", ".");
+        let ir = owner_test_ir("example/kind-tools", vec![unit]);
+        let kind = ir.render_kind_units(UnitKind::Rust, None);
+        assert!(
+            !kind.contains("prepared_tool"),
+            "an undeclared kind mentions no prepared tools"
+        );
     }
 
     fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
@@ -250,6 +374,45 @@ mod tests {
             "rust kind reusable renders",
         );
         must_some(rendered, "rust kind has members").1
+    }
+
+    #[test]
+    fn collapsed_swift_kind_lands_on_macos_while_rust_stays_on_linux() {
+        let mut swift = rust_unit("swift-package-native", "native");
+        swift.kind = UnitKind::Swift;
+        swift.label = "Swift package (native)".to_owned();
+        // Apple-bound: Xcode SDK need, so the collapsed job must land on macOS.
+        swift.platform = crate::platform::PlatformRequirement::apple_xcode();
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![swift, rust_unit("rust-widget", "crates/widget")],
+        );
+        let swift_rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            "swift kind reusable renders",
+        );
+        let swift_workflow = must_some(swift_rendered, "swift kind has members").1;
+        assert!(
+            swift_workflow.contains("runs-on: macos-15"),
+            "{swift_workflow}"
+        );
+        assert!(
+            !swift_workflow.contains("runs-on: ubuntu-24.04"),
+            "{swift_workflow}"
+        );
+        let rust_rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            "rust kind reusable renders",
+        );
+        let rust_workflow = must_some(rust_rendered, "rust kind has members").1;
+        assert!(
+            rust_workflow.contains("runs-on: ubuntu-24.04"),
+            "{rust_workflow}"
+        );
+        assert!(
+            !rust_workflow.contains("runs-on: macos-15"),
+            "{rust_workflow}"
+        );
     }
 
     #[test]
@@ -457,6 +620,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lane_facts_carry_dependency_closure_and_admission() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let mut trusted = rust_unit("rust-trusted-leaf", "crates/trusted");
+        trusted.requires_trusted = true;
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![
+                rust_unit("rust-root", "crates/root"),
+                leaf.clone(),
+                trusted.clone(),
+            ],
+        );
+        for (unit, lane, admission) in [
+            (&leaf, RunnerMode::Github, LaneAdmission::Github),
+            (&leaf, RunnerMode::Velnor, LaneAdmission::Velnor),
+            (&trusted, RunnerMode::Velnor, LaneAdmission::VelnorTrusted),
+        ] {
+            let facts = ir.unit_lane_facts(unit, &ir.default_unit_contract(unit, true), lane);
+            assert_eq!(facts.unit_dependencies, unit.depends_on, "{lane:?}");
+            assert_eq!(facts.unit_admission, admission, "{lane:?}");
+            let values = facts.input_values();
+            assert!(
+                values
+                    .iter()
+                    .any(|(name, value)| *name == lane_input::UNIT_ADMISSION
+                        && value == admission.info_id()),
+                "every caller passes its admission: {values:?}"
+            );
+        }
+        let contract = ir.default_unit_contract(&leaf, true);
+        let facts = ir.unit_lane_facts(&leaf, &contract, RunnerMode::Github);
+        assert!(
+            facts.input_values().iter().any(|(name, value)| {
+                *name == lane_input::UNIT_DEPENDENCIES && value == "rust-root"
+            }),
+            "a unit with dependencies passes them: {:?}",
+            facts.input_values()
+        );
+        let root = &ir.units[0];
+        let facts = ir.unit_lane_facts(
+            root,
+            &ir.default_unit_contract(root, true),
+            RunnerMode::Github,
+        );
+        assert!(
+            facts
+                .input_values()
+                .iter()
+                .all(|(name, _)| *name != lane_input::UNIT_DEPENDENCIES),
+            "a unit without dependencies passes no closure: {:?}",
+            facts.input_values()
+        );
+    }
+
+    #[test]
+    fn collapsed_callee_records_dependencies_from_inputs() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![rust_unit("rust-root", "crates/root"), leaf],
+        );
+        let callee = must_render_kind(&ir);
+        for declaration in [
+            "      unit_dependencies:\n        required: false\n        type: string\n        default: \"\"\n",
+            "      unit_admission:\n        required: false\n        type: string\n        default: \"\"\n",
+        ] {
+            assert!(callee.contains(declaration), "{callee}");
+        }
+        assert!(
+            callee.contains("- name: Record unit dependencies\n"),
+            "{callee}"
+        );
+        assert!(
+            callee.contains("UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}"),
+            "{callee}"
+        );
+        assert!(
+            callee.contains("UNIT_ADMISSION: ${{ inputs.unit_admission }}"),
+            "{callee}"
+        );
+        assert!(
+            !callee.contains("rust-root"),
+            "the callee reads the closure through inputs, never as a literal: {callee}"
+        );
     }
 
     #[test]
@@ -2438,9 +2690,10 @@ fn dispatch_lane_expression(lane: RunnerMode, include_omitted: bool) -> String {
 /// trusted runner are all just values of that predicate, never special cases
 /// of the gate. [`crate::validate_lane_admission_single_source`] checks the
 /// rendered tree for drift between the three surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LaneAdmission {
     /// The GitHub-hosted lane.
+    #[default]
     Github,
     /// The Velnor lane on the base runner labels.
     Velnor,
@@ -2474,6 +2727,16 @@ impl LaneAdmission {
             Self::Github => "LANE_ADMITTED_GITHUB",
             Self::Velnor => "LANE_ADMITTED_VELNOR",
             Self::VelnorTrusted => "LANE_ADMITTED_VELNOR_TRUSTED",
+        }
+    }
+
+    /// The dependency-info input value naming this class: what the nested
+    /// job records beside the unit's dependency closure.
+    pub(crate) fn info_id(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Velnor => "velnor",
+            Self::VelnorTrusted => "velnor-trust-gated",
         }
     }
 }
@@ -2726,6 +2989,18 @@ pub(crate) mod lane_input {
     /// policy run consumes. Only the generator crate's owning Rust unit sets
     /// it, on the hosted lane, in the owner repository, on pull requests.
     pub(crate) const CANDIDATE_PUBLISH: &str = "candidate_publish";
+    /// `true` when the unit needs the Apple executor: a kind whose members
+    /// split across the default and Apple executors renders one collapsed
+    /// job per executor, and each job admits only its own callers.
+    pub(crate) const APPLE_EXECUTOR: &str = "apple_executor";
+    /// Comma-separated `depends_on` ids the nested job records; empty when
+    /// the unit depends on nothing.
+    pub(crate) const UNIT_DEPENDENCIES: &str = "unit_dependencies";
+    /// The lane admission class id the nested job records.
+    pub(crate) const UNIT_ADMISSION: &str = "unit_admission";
+    /// Comma-separated prepared-tool need records (`tool:digest:producers`)
+    /// the lane restores for the unit; empty when it needs none.
+    pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -2748,6 +3023,10 @@ pub(crate) mod lane_input {
         HOST_WARM_LAYERS,
         POLICY_RUNTIME,
         CANDIDATE_PUBLISH,
+        APPLE_EXECUTOR,
+        UNIT_DEPENDENCIES,
+        UNIT_ADMISSION,
+        PREPARED_TOOLS,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -2762,6 +3041,7 @@ pub(crate) mod lane_input {
                 | CARGO_NET_OFFLINE
                 | POLICY_RUNTIME
                 | CANDIDATE_PUBLISH
+                | APPLE_EXECUTOR
         )
     }
 
@@ -2793,6 +3073,13 @@ pub(crate) mod lane_input {
         } else {
             format!("inputs.{name} != ''")
         }
+    }
+
+    /// The step gate for one need record only some units of the kind carry:
+    /// the caller's comma-wrapped records contain the comma-wrapped record.
+    /// Records never contain commas, so the match cannot be partial.
+    pub(crate) fn contains_gate(name: &str, value: &str) -> String {
+        format!("contains(format(',{{0}},', inputs.{name}), ',{value},')")
     }
 }
 
@@ -2832,6 +3119,11 @@ pub(crate) struct LaneStepFacts {
     pub(crate) host_warm_layers: Vec<&'static str>,
     pub(crate) policy_runtime: bool,
     pub(crate) candidate_publish: bool,
+    pub(crate) apple_executor: bool,
+    pub(crate) unit_dependencies: Vec<String>,
+    pub(crate) unit_admission: LaneAdmission,
+    /// Prepared-tool need records the lane restores for the unit.
+    pub(crate) prepared_tools: Vec<String>,
 }
 
 impl LaneStepFacts {
@@ -2897,6 +3189,22 @@ impl LaneStepFacts {
         }
         if self.candidate_publish {
             values.push((lane_input::CANDIDATE_PUBLISH, "true".to_owned()));
+        }
+        if self.apple_executor {
+            values.push((lane_input::APPLE_EXECUTOR, "true".to_owned()));
+        }
+        if !self.unit_dependencies.is_empty() {
+            values.push((
+                lane_input::UNIT_DEPENDENCIES,
+                self.unit_dependencies.join(","),
+            ));
+        }
+        values.push((
+            lane_input::UNIT_ADMISSION,
+            self.unit_admission.info_id().to_owned(),
+        ));
+        if !self.prepared_tools.is_empty() {
+            values.push((lane_input::PREPARED_TOOLS, self.prepared_tools.join(",")));
         }
         values
     }
@@ -3020,7 +3328,10 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
         let mut tools = BTreeSet::new();
-        let mr_boxington = config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
+        let mr_boxington = config
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Rust && unit.uses_mbx());
         if config
             .units
             .iter()
@@ -3280,7 +3591,7 @@ impl WorkflowIr {
                 contracts,
                 &mut output,
                 kind != WorkflowKind::PullRequest,
-                "ci-required",
+                REQUIRED_CHECK,
                 false,
             );
         }
@@ -3635,7 +3946,7 @@ impl WorkflowIr {
         }
         needs.extend(callers.iter().map(|caller| caller.job_id.clone()));
         let display_name = match check_name {
-            "ci-required" => yaml_scalar("ci-required"),
+            REQUIRED_CHECK => yaml_scalar(REQUIRED_CHECK),
             "nightly-required" => crate::control_job_name("Nightly aggregate"),
             other => yaml_scalar(other),
         };
@@ -3682,7 +3993,7 @@ impl WorkflowIr {
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         render_required_caller_verdicts(output, &callers);
-        if check_name == "ci-required" {
+        if check_name == REQUIRED_CHECK {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
                 format!("always() && ({})", self.velnor_control_plane_expression())
             } else {
@@ -3828,7 +4139,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// in full for every kind, so a caller can pass a unit's facts without
     /// knowing which of them the callee's collapsed block resolved to a
     /// literal: GitHub rejects a `with:` key the callee does not declare.
-    fn render_kind_units_header(kind: UnitKind) -> String {
+    /// `env` is the members' agreed job environment, rendered once at the
+    /// top level so every collapsed lane job of the kind exports it.
+    fn render_kind_units_header(
+        kind: UnitKind,
+        members: &[&Unit],
+        env: &BTreeMap<String, String>,
+    ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
@@ -3836,7 +4153,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             yaml_scalar(unit_group(kind))
         );
         for name in lane_input::ALL {
+            // The prepared-tools input is declared only when a member needs
+            // it: an unconditional declaration would rewrite every kind
+            // header for a feature most repositories never declare.
+            if *name == lane_input::PREPARED_TOOLS
+                && !members.iter().any(|unit| !unit.prepared_tools.is_empty())
+            {
+                continue;
+            }
             let _ = writeln!(output, "{}", lane_input::declaration(name));
+        }
+        if !env.is_empty() {
+            output.push_str("\nenv:\n");
+            for (name, value) in env {
+                let _ = writeln!(output, "  {name}: {}", yaml_scalar(value));
+            }
         }
         output.push_str("\njobs:\n");
         output
@@ -3866,7 +4197,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if members.is_empty() {
             return Ok(None);
         }
-        let mut output = Self::render_kind_units_header(kind);
+        let env = crate::platform::agreed_env(&members, kind)?;
+        let mut output = Self::render_kind_units_header(kind, &members, &env);
         self.append_lane_cargo_prep_jobs(&mut output, &members, contracts);
         self.render_collapsed_kind_verify_job(&mut output, &members, contracts)?;
         Ok(Some((kind_unit_workflow_file(kind), output)))
@@ -3886,13 +4218,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// The job gate of a collapsed lane job: the lane the caller selected, the
     /// unit's membership in the plan's selection, and the lane's admission
     /// predicate. Membership is a single `contains` over `inputs.unit`, never
-    /// an enumeration of the kind's units.
-    fn collapsed_lane_gate(&self, admission: LaneAdmission) -> String {
-        format!(
+    /// an enumeration of the kind's units. A kind split across executors adds
+    /// the `apple_executor` clause, so each partition admits only its own
+    /// callers; an unsplit kind carries no clause.
+    fn collapsed_lane_gate(&self, admission: LaneAdmission, apple: Option<bool>) -> String {
+        let mut gate = format!(
             "inputs.lane == '{}' && contains(format(',{{0}},', inputs.selected_units), format(',{{0}},', inputs.unit)) && ({})",
             admission.lane().as_str(),
             self.lane_admission_expression(admission)
-        )
+        );
+        match apple {
+            None => {}
+            Some(true) => gate.push_str(" && inputs.apple_executor"),
+            Some(false) => gate.push_str(" && inputs.apple_executor != true"),
+        }
+        gate
     }
 
     fn collapsed_timeout_minutes(
@@ -3946,16 +4286,52 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         let github_members =
             self.collapsed_lane_members(members, contracts, RunnerMode::Github, None);
-        if !github_members.is_empty() {
-            let runs_on = self.runner_for(RunnerMode::Github);
+        // A kind split across executors (portable SwiftPM units beside Xcode
+        // scheme units) renders one collapsed job per executor: a single
+        // `runs-on` cannot serve both. An unsplit kind keeps the one job it
+        // has always rendered. Each side samples its first member instead of
+        // the lane default so platform-bound members land on an eligible
+        // executor (a lane-blind default silently scheduled Apple work on
+        // Linux).
+        let (github_apple, github_default): (Vec<_>, Vec<_>) = github_members
+            .into_iter()
+            .partition(|unit| unit.platform.requires_apple());
+        let split = !github_apple.is_empty() && !github_default.is_empty();
+        if !github_default.is_empty() {
+            let runs_on = self.runner_for_unit(RunnerMode::Github, github_default[0]);
             self.render_collapsed_lane_verify_job(
                 output,
-                &github_members,
+                &github_default,
                 contracts,
                 RunnerMode::Github,
                 "verify-github",
                 RunnerMode::Github.display_name(),
                 &runs_on,
+                split.then_some(false),
+            )?;
+        }
+        if !github_apple.is_empty() {
+            let runs_on = self.runner_for_unit(RunnerMode::Github, github_apple[0]);
+            let (job_id, display_name) = if split {
+                (
+                    "verify-github-apple",
+                    format!("{} · Apple", RunnerMode::Github.display_name()),
+                )
+            } else {
+                (
+                    "verify-github",
+                    RunnerMode::Github.display_name().to_owned(),
+                )
+            };
+            self.render_collapsed_lane_verify_job(
+                output,
+                &github_apple,
+                contracts,
+                RunnerMode::Github,
+                job_id,
+                &display_name,
+                &runs_on,
+                split.then_some(true),
             )?;
         }
         let velnor_plain =
@@ -3963,7 +4339,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let velnor_trusted =
             self.collapsed_lane_members(members, contracts, RunnerMode::Velnor, Some(true));
         if !velnor_plain.is_empty() {
-            let runs_on = self.runner_for(RunnerMode::Velnor);
+            let runs_on = self.runner_for_unit(RunnerMode::Velnor, velnor_plain[0]);
             self.render_collapsed_lane_verify_job(
                 output,
                 &velnor_plain,
@@ -3972,6 +4348,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "verify-velnor",
                 RunnerMode::Velnor.display_name(),
                 &runs_on,
+                None,
             )?;
         }
         if !velnor_trusted.is_empty() {
@@ -3985,6 +4362,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "verify-velnor-trusted",
                 RunnerMode::Velnor.display_name(),
                 &runs_on,
+                None,
             )?;
         }
         Ok(())
@@ -3995,7 +4373,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// caller's inputs.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the job identity (lane, id, display name, runner) is passed explicitly per lane job"
+        reason = "the job identity (lane, id, display name, runner, executor partition) is passed explicitly per lane job"
     )]
     fn render_collapsed_lane_verify_job(
         &self,
@@ -4006,11 +4384,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         job_id: &str,
         display_name: &str,
         runs_on: &str,
+        apple: Option<bool>,
     ) -> Result<(), GeneratorError> {
         // Every member of a collapsed job shares one admission class
         // (`collapsed_lane_members` splits the Velnor lane by trust), so the
         // first member's class is the job's.
-        let gate = self.collapsed_lane_gate(LaneAdmission::for_unit(lane, members[0]));
+        let gate = self.collapsed_lane_gate(LaneAdmission::for_unit(lane, members[0]), apple);
         let mut display_name = display_name.to_owned();
         // P0-6: a trust-gated Velnor lane with no online trusted runner fails
         // closed (the admission predicate carries `&& false`) and says so in
@@ -4038,6 +4417,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
             self.pins.checkout
         );
+        render_unit_dependency_info_step(output);
         if lane == RunnerMode::Velnor {
             render_velnor_runner_identity_step(output);
         }
@@ -4158,6 +4538,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && !self.repository.is_empty()
                 && self.repository == crate::workflow_setup_action_repository()
                 && unit_owns_workflow_crate(unit),
+            apple_executor: github_lane && unit.platform.requires_apple(),
+            unit_dependencies: unit.depends_on.clone(),
+            unit_admission: LaneAdmission::for_unit(lane, unit),
+            prepared_tools: unit
+                .prepared_tools
+                .iter()
+                .map(super::prepared_tools::need_record)
+                .collect(),
         }
     }
 
@@ -4168,6 +4556,57 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         !(cargo_network_is_restricted(unit)
             && lane == RunnerMode::Velnor
             && self.runners == RunnerMode::Both)
+    }
+
+    /// The union of prepared-tool consumer steps across the collapsed lane's
+    /// members: one restore+install block per distinct need record, with the
+    /// requested and resolved keys rendered as literals from the union.
+    /// Members that agree share one ungated block; a record only some
+    /// members carry renders behind a membership gate over the caller's
+    /// records, and members with no needs pass an empty input and run none
+    /// of the blocks. Blocks scale with distinct needs — one tool bound to
+    /// one inputs digest renders once whatever the member count — never
+    /// with units.
+    fn render_collapsed_prepared_tool_steps(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+        facts: &[LaneStepFacts],
+    ) {
+        let member_records: Vec<BTreeSet<String>> = facts
+            .iter()
+            .map(|facts| facts.prepared_tools.iter().cloned().collect())
+            .collect();
+        if member_records.iter().all(BTreeSet::is_empty) {
+            return;
+        }
+        let mut union: BTreeMap<String, &Unit> = BTreeMap::new();
+        for (unit, records) in members.iter().zip(&member_records) {
+            for record in records {
+                union.entry(record.clone()).or_insert(unit);
+            }
+        }
+        for (record, unit) in &union {
+            let Some(need) = unit
+                .prepared_tools
+                .iter()
+                .find(|need| super::prepared_tools::need_record(need) == *record)
+            else {
+                continue;
+            };
+            let shared = member_records
+                .iter()
+                .all(|records| records.contains(record));
+            let gate =
+                (!shared).then(|| lane_input::contains_gate(lane_input::PREPARED_TOOLS, record));
+            let mut block = String::new();
+            super::prepared_tools::render_consumer_steps(
+                &mut block,
+                self.pins.cache_restore,
+                std::slice::from_ref(need),
+            );
+            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+        }
     }
 
     /// The single step block of a collapsed lane job. Every unit-specific
@@ -4376,6 +4815,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
             output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS));
         }
+        self.render_collapsed_prepared_tool_steps(output, members, &facts);
         self.render_kind_level_tool_steps(output, lane, &kind_tools, cache_save);
         render_ci_tool_bootstrap_end_marker(output);
 
@@ -4651,24 +5091,38 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
         let mold = self.mise_present && unit.kind != UnitKind::Swift;
-        let mut entries = Vec::new();
+        let mut entries: Vec<String> = Vec::new();
+        // Declared env shadows the generator defaults key by key, so a
+        // repository-owned build flag always wins and no key renders twice.
+        let shadowed = |key: &str| unit.env.contains_key(key);
         if tools.contains(&ToolRequirement::Sccache) {
-            entries.push("  CARGO_INCREMENTAL: \"0\"");
-            entries.push("  RUSTC_WRAPPER: sccache");
-            entries.push("  SCCACHE_GHA_ENABLED: \"true\"");
+            if !shadowed("CARGO_INCREMENTAL") {
+                entries.push("  CARGO_INCREMENTAL: \"0\"".to_owned());
+            }
+            if !shadowed("RUSTC_WRAPPER") {
+                entries.push("  RUSTC_WRAPPER: sccache".to_owned());
+            }
+            if !shadowed("SCCACHE_GHA_ENABLED") {
+                entries.push("  SCCACHE_GHA_ENABLED: \"true\"".to_owned());
+            }
         }
-        if mold {
-            entries.push("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"");
+        if mold && !shadowed("RUSTFLAGS") {
+            entries.push("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"".to_owned());
         }
-        if tools.contains(&ToolRequirement::OpenTofu) {
-            entries.push("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache");
+        if tools.contains(&ToolRequirement::OpenTofu) && !shadowed("TF_PLUGIN_CACHE_DIR") {
+            entries.push("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache".to_owned());
+        }
+        let mut declared = unit.env.iter().collect::<Vec<_>>();
+        declared.sort();
+        for (name, value) in declared {
+            entries.push(format!("  {name}: {}", yaml_scalar(value)));
         }
         if entries.is_empty() {
             return;
         }
         output.push_str("\nenv:\n");
         for entry in entries {
-            output.push_str(entry);
+            output.push_str(&entry);
             output.push('\n');
         }
     }
@@ -4882,16 +5336,28 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             })
             .flatten();
         let mut entries = Vec::<String>::new();
+        let shadowed = |key: &str| unit.env.contains_key(key);
         if tools.contains(&ToolRequirement::Sccache) {
-            entries.push("      CARGO_INCREMENTAL: \"0\"".to_owned());
-            entries.push("      RUSTC_WRAPPER: sccache".to_owned());
-            entries.push("      SCCACHE_GHA_ENABLED: \"true\"".to_owned());
+            if !shadowed("CARGO_INCREMENTAL") {
+                entries.push("      CARGO_INCREMENTAL: \"0\"".to_owned());
+            }
+            if !shadowed("RUSTC_WRAPPER") {
+                entries.push("      RUSTC_WRAPPER: sccache".to_owned());
+            }
+            if !shadowed("SCCACHE_GHA_ENABLED") {
+                entries.push("      SCCACHE_GHA_ENABLED: \"true\"".to_owned());
+            }
         }
-        if mold {
+        if mold && !shadowed("RUSTFLAGS") {
             entries.push("      RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"".to_owned());
         }
-        if tools.contains(&ToolRequirement::OpenTofu) {
+        if tools.contains(&ToolRequirement::OpenTofu) && !shadowed("TF_PLUGIN_CACHE_DIR") {
             entries.push("      TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache".to_owned());
+        }
+        let mut declared = unit.env.iter().collect::<Vec<_>>();
+        declared.sort();
+        for (name, value) in declared {
+            entries.push(format!("      {name}: {}", yaml_scalar(value)));
         }
         if lane == RunnerMode::Velnor
             && let Some(service) = postgres
@@ -4973,9 +5439,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
         // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
         // cannot consume a Linux-built plan artifact even when Planning is hosted.
+        // Portable SwiftPM jobs can: they run on the default executor.
         if self.control_plane_lane() != RunnerMode::Github
             || self.runners == RunnerMode::Velnor
-            || unit.kind == UnitKind::Swift
+            || unit.platform.requires_apple()
         {
             self.render_workflow_runtime_setup(output, lane);
         } else {
@@ -5497,8 +5964,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn runner_for_unit(&self, lane: RunnerMode, unit: &Unit) -> String {
-        if unit.kind == UnitKind::Swift && lane == RunnerMode::Github {
-            return yaml_scalar(&self.macos_runner);
+        if lane == RunnerMode::Github {
+            return yaml_scalar(crate::platform::github_runner_for_unit(
+                &self.github_runner,
+                &self.macos_runner,
+                unit,
+            ));
         }
         if lane == RunnerMode::Velnor && unit.requires_trusted {
             // Generation validates the label is declared before rendering;
@@ -5513,7 +5984,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn uses_mr_boxington(&self, unit: &Unit) -> bool {
-        self.mr_boxington && unit.kind == UnitKind::Rust
+        self.mr_boxington && unit.kind == UnitKind::Rust && unit.uses_mbx()
     }
 
     pub(crate) fn tools_for_unit(
@@ -5542,7 +6013,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 if mise_present {
                     tools.insert(ToolRequirement::Mise);
                 }
-                if mr_boxington {
+                if mr_boxington && unit.uses_mbx() {
                     tools.insert(ToolRequirement::MrBoxington);
                 } else {
                     tools.insert(ToolRequirement::Sccache);
@@ -5751,6 +6222,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if github_lane && !install_action_tools.is_empty() {
             self.render_cargo_bin_tool_steps(output, &install_action_tools.join(","), cache_save);
         }
+        if !unit.prepared_tools.is_empty() {
+            // Declared prepared tools restore after every lane-local
+            // provisioning step: the consumer needs the runtime on `PATH`
+            // (rendered before provisioning) and must not disturb the
+            // toolchain state the steps above established.
+            super::prepared_tools::render_consumer_steps(
+                output,
+                self.pins.cache_restore,
+                &unit.prepared_tools,
+            );
+        }
         self.render_kind_level_tool_steps(output, lane, &tools, cache_save);
     }
 
@@ -5855,7 +6337,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         _stable: bool,
         include_policy: bool,
     ) {
-        let display_name = yaml_scalar("ci-required");
+        let display_name = yaml_scalar(REQUIRED_CHECK);
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
@@ -5944,6 +6426,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.runner_for(self.control_plane_lane()),
         );
     }
+}
+
+/// The nested job's dependency record: the caller's unit, its dependency
+/// closure, and its lane admission class, as the caller passed them through
+/// `workflow_call` inputs. The step reads inputs only, so the callee stays
+/// O(1) in the kind's units, and it carries no gate: the record is emitted
+/// on every run of the job.
+pub(crate) fn render_unit_dependency_info_step(output: &mut String) {
+    output.push_str(
+        "      - name: Record unit dependencies\n        env:\n          UNIT_ID: ${{ inputs.unit }}\n          UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}\n          UNIT_ADMISSION: ${{ inputs.unit_admission }}\n          UNIT_LANE: ${{ inputs.lane }}\n        run: |\n          {\n            echo '## Unit dependencies'\n            echo\n            echo \"- Unit: $UNIT_ID\"\n            echo \"- Lane: $UNIT_LANE\"\n            echo \"- Admission: $UNIT_ADMISSION\"\n            if [[ -z \"$UNIT_DEPENDENCIES\" ]]; then\n              echo '- Dependencies: none'\n            else\n              echo \"- Dependencies: $UNIT_DEPENDENCIES\"\n            fi\n          } >> \"$GITHUB_STEP_SUMMARY\"\n",
+    );
 }
 
 pub(crate) fn render_velnor_runner_identity_step(output: &mut String) {
