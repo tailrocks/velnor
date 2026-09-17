@@ -2114,6 +2114,34 @@ fn docker_hosted_pull_request_command(command: &str, unit_id: &str) -> String {
     cmd
 }
 
+/// The hosted full build runs the same image build as the pull-request lane,
+/// minus the `ci` target: buildx with the unit's GHA layer-cache scope, so a
+/// main run reuses (and refreshes) the generation pull requests read instead
+/// of cold-rebuilding the image on every merge.
+fn docker_hosted_full_command(command: &str, unit_id: &str) -> String {
+    let seed = format!(
+        "--build-context {}='{}/seed'",
+        primitives::MUTABLE_MOUNT_SEED_CONTEXT,
+        primitives::MUTABLE_MOUNT_HOST_DIR
+    );
+    let cache_from = format!("--cache-from type=gha,scope={unit_id},mode=max");
+    let cache_to = format!("--cache-to type=gha,scope={unit_id},mode=max");
+    let mut cmd = command.replace("docker build ", "docker buildx build --load ");
+    if !cmd.contains(&seed) {
+        cmd.push(' ');
+        cmd.push_str(&seed);
+    }
+    if !cmd.contains("--cache-from type=gha") {
+        cmd.push(' ');
+        cmd.push_str(&cache_from);
+    }
+    if !cmd.contains("--cache-to type=gha") {
+        cmd.push(' ');
+        cmd.push_str(&cache_to);
+    }
+    cmd
+}
+
 /// Fill unit commands from typed capabilities. Generation config cannot supply
 /// shell command arrays; this is the only writer of the runtime command lists.
 fn materialize_capability_commands(
@@ -2183,9 +2211,8 @@ fn materialize_capability_commands(
                     unit.full_commands.clone()
                 };
                 for command in &mut github_full {
-                    if command.contains("docker") && !command.contains(&seed) {
-                        command.push(' ');
-                        command.push_str(&seed);
+                    if command.contains("docker") {
+                        *command = docker_hosted_full_command(command, scope);
                     }
                 }
                 github_full.push(format!(
@@ -2195,7 +2222,6 @@ fn materialize_capability_commands(
                 ));
                 unit.github_full_commands = Some(github_full);
             }
-            let _ = (scope, file, ctx);
         }
         for command in unit.pr_commands.iter().chain(unit.full_commands.iter()) {
             if let Some(task) = command.strip_prefix("mise run ")
@@ -12112,6 +12138,66 @@ channel = "stable"
             .collect::<Vec<_>>();
         assert_eq!(docker_units.len(), 1);
         assert_eq!(docker_units[0].pr_commands.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The hosted full Docker build reuses the pull-request GHA layer cache:
+    /// buildx with the unit's cache scope on the image build, while the
+    /// cache-export build stays a plain local export.
+    #[test]
+    fn hosted_docker_full_build_reuses_the_pull_request_gha_layer_cache() {
+        let root = temporary_repository("docker-full-gha-cache");
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write Dockerfile",
+        );
+        let directory = root.join(".github-gen");
+        must(fs::create_dir_all(&directory), "create config directory");
+        must(
+            fs::write(
+                directory.join("velnor-workflow.toml"),
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"docker\"\n\n[units.cache]\nkey_files = [\"Dockerfile\"]\npaths = [\".velnor-docker-cache\"]\nmutable_mount_seed = true\n",
+            ),
+            "write generation config",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan Docker repository",
+        );
+        let unit = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Docker),
+            "scanned Docker unit",
+        );
+        let full = must_some(unit.github_full_commands.as_ref(), "hosted full commands");
+        assert_eq!(full.len(), 2, "{full:?}");
+        assert!(
+            full[0].starts_with("docker buildx build --load "),
+            "first full command must run through buildx: {full:?}"
+        );
+        assert!(
+            full[0].contains("--cache-from type=gha,scope=docker,mode=max"),
+            "first full command must reuse the unit GHA cache: {full:?}"
+        );
+        assert!(
+            full[0].contains("--cache-to type=gha,scope=docker,mode=max"),
+            "first full command must refresh the unit GHA cache: {full:?}"
+        );
+        assert!(
+            !full[0].contains("--target ci"),
+            "the full build keeps the default target: {full:?}"
+        );
+        assert!(
+            full[1].contains("velnor-cache-export"),
+            "second full command stays the cache export: {full:?}"
+        );
+        assert!(
+            !full[1].contains("--cache-from") && !full[1].contains("--cache-to"),
+            "the cache export takes no GHA cache flags: {full:?}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
