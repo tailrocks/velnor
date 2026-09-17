@@ -310,7 +310,7 @@ fn docker_backend_does_not_boot_firecracker() {
 
 #[test]
 #[cfg(target_os = "linux")]
-fn docker_backend_rejects_unbounded_cgroup_driver() {
+fn docker_backend_rejects_wrong_cgroup_driver() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     for driver in ["cgroupfs 2", "systemd 1"] {
         let mut fs = MemoryFs::default();
@@ -351,59 +351,59 @@ fn docker_backend_rejects_unbounded_cgroup_driver() {
 
 #[test]
 #[cfg(target_os = "linux")]
-fn docker_backend_rejects_missing_effective_cpu_quota() {
+fn docker_backend_accepts_an_unbounded_job_slice() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
     let docker = socket_for(ExecutionBackendKind::Docker);
     fs.write(&docker, b"socket").unwrap();
-    let mut runner = RecordingCommands {
-        docker_cgroup_quota: Some(CommandResult {
-            code: 0,
-            stdout: "infinity".into(),
-            stderr: String::new(),
-        }),
-        ..RecordingCommands::default()
-    };
+    let mut runner = RecordingCommands::default();
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
     let artifacts = PathBuf::from("/microvm");
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
 
-    let error = preflight_selected(&file, &mut world).unwrap_err();
-    assert!(error.to_string().contains("CPUQuotaPerSecUSec"));
+    preflight_selected(&file, &mut world).expect("loaded slice with no ceilings must pass");
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn docker_backend_accepts_fractional_effective_cpu_quota() {
-    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
-    let mut fs = MemoryFs::default();
-    let docker = socket_for(ExecutionBackendKind::Docker);
-    fs.write(&docker, b"socket").unwrap();
-    let mut runner = RecordingCommands {
-        docker_cgroup_cpu_count: Some(CommandResult {
-            code: 0,
-            stdout: "2".into(),
-            stderr: String::new(),
-        }),
-        docker_cgroup_quota: Some(CommandResult {
-            code: 0,
-            stdout: "1.900000s".into(),
-            stderr: String::new(),
-        }),
-        docker_cgroup_unit: Some(CommandResult {
-            code: 0,
-            stdout: "[Slice]\nCPUQuota=190%\n".into(),
-            stderr: String::new(),
-        }),
-        ..RecordingCommands::default()
-    };
-    let mut api = RecordingFirecracker::default();
-    let kvm = PathBuf::from("/dev/kvm");
-    let artifacts = PathBuf::from("/microvm");
-    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+fn docker_backend_rejects_any_surviving_slice_ceiling() {
+    for (property, value) in [
+        ("CPUQuotaPerSecUSec", "950ms"),
+        ("MemoryMax", "17179869184"),
+        ("MemoryHigh", "16106127360"),
+    ] {
+        let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+        let mut fs = MemoryFs::default();
+        let docker = socket_for(ExecutionBackendKind::Docker);
+        fs.write(&docker, b"socket").unwrap();
+        let mut state =
+            "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryMax=infinity\nMemoryHigh=infinity\n"
+                .to_string();
+        state = state.replace(
+            &format!("{property}=infinity"),
+            &format!("{property}={value}"),
+        );
+        let mut runner = RecordingCommands {
+            docker_slice_state: Some(CommandResult {
+                code: 0,
+                stdout: state,
+                stderr: String::new(),
+            }),
+            ..RecordingCommands::default()
+        };
+        let mut api = RecordingFirecracker::default();
+        let kvm = PathBuf::from("/dev/kvm");
+        let artifacts = PathBuf::from("/microvm");
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
 
-    preflight_selected(&file, &mut world).expect("fractional systemd quota must parse exactly");
+        let error = preflight_selected(&file, &mut world).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("no CPU/RAM ceiling") && message.contains(property),
+            "a surviving {property} ceiling must fail closed: {message}"
+        );
+    }
 }
 
 #[test]

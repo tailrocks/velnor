@@ -154,10 +154,10 @@ internal 20 GiB cache, 30 GiB target, and 50 GiB combined GC limits remain
 subject to Velnor's host disk accounting. Cargo registry and Git source caches
 are independent and must be inspected separately.
 
-`VELNOR_JOB_BUDGET` in a job's environment names the derived host budget, its
-sources, the slot count, the share this job received, and any workflow-set
-resource variable the daemon overrode. Read it before diagnosing a build that
-looks under-parallelized:
+Jobs run unbounded: no per-job CPU/RAM ceiling is imposed anywhere, and
+host capacity is governed only by the `max_jobs=N` permit ledger. A build
+that looks under-parallelized is not being throttled by the daemon —
+check the tool's own parallelism settings and the host's actual load:
 [Storage and resource budgets](/operations/storage-and-resources).
 
 ## Daily inspection

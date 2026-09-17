@@ -19,9 +19,9 @@ use serde_json::Value;
 use velnor_model::{ExecutionBackendKind, ExecutionFile, ExitClass};
 use velnor_runner::docker::{resolve_docker_endpoint, DockerEndpoint};
 use velnor_runner::execution::{
-    validate_docker_isolation, validate_docker_resource_projection, DockerIsolationMode,
-    DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
-    DOCKER_RESOURCE_BOUNDARY_CHECK, MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
+    validate_docker_isolation, validate_unbounded_resource_projection, DockerIsolationMode,
+    HostPlatform, DOCKER_JOB_CGROUP_PARENT, DOCKER_RESOURCE_BOUNDARY_CHECK,
+    MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
 };
 
 use crate::{commands, runtime, CommandError, GlobalArgs};
@@ -1263,12 +1263,7 @@ fn docker_resource_boundary_check(
     let driver = driver.unwrap_or("unknown");
     let version = version.unwrap_or("unknown");
     let detail = cgroup_detail(cgroup_mode, Some(driver), Some(version));
-    match validate_docker_isolation(
-        HostPlatform::MacOs,
-        driver,
-        version,
-        DockerResourceCapabilities::all(),
-    ) {
+    match validate_docker_isolation(HostPlatform::MacOs, driver, version) {
         Ok(DockerIsolationMode::DockerVmCgroupV2) => {
             check_docker_vm_resource_controls(target, image, provider)
         }
@@ -1293,16 +1288,14 @@ fn check_docker_vm_resource_controls(
     provider: &str,
 ) -> Check {
     let name = probe_name("resource-boundary");
+    // Placement only: the probe carries no --cpus/--memory, and the
+    // projection must show it unbounded under the job parent.
     let create_args = [
         "create",
         "--name",
         name.as_str(),
         "--cgroup-parent",
         DOCKER_JOB_CGROUP_PARENT,
-        "--cpus",
-        "0.5",
-        "--memory",
-        "67108864",
         image,
     ];
     let created = run_docker_process(target, &create_args, CONTAINER_TIMEOUT);
@@ -1361,7 +1354,7 @@ fn check_docker_vm_resource_controls(
             Some(cgroup_remediation(provider)),
         );
     };
-    if let Err(error) = validate_docker_resource_projection(parent, cpus, memory) {
+    if let Err(error) = validate_unbounded_resource_projection(parent, cpus, memory) {
         return Check::fail(
             DOCKER_RESOURCE_BOUNDARY_CHECK,
             format!("macOS Docker VM resource-isolation probe failed: {error}"),
@@ -1371,7 +1364,7 @@ fn check_docker_vm_resource_controls(
     Check::pass(
         DOCKER_RESOURCE_BOUNDARY_CHECK,
         format!(
-            "macOS Docker VM preserves Velnor per-container resources: CgroupParent={parent}, NanoCpus={cpus}, Memory={memory}"
+            "macOS Docker VM preserves Velnor per-container placement unbounded: CgroupParent={parent}, NanoCpus={cpus}, Memory={memory}"
         ),
     )
 }
@@ -1503,7 +1496,7 @@ fn detect_provider(
 
 fn cgroup_detail(mode: &str, driver: Option<&str>, version: Option<&str>) -> String {
     format!(
-        "Docker server reports cgroup mode {mode} (driver={}, version={}); {DOCKER_RESOURCE_BOUNDARY_CHECK} verifies Velnor per-container CPU/memory controls under parent {DOCKER_JOB_CGROUP_PARENT}",
+        "Docker server reports cgroup mode {mode} (driver={}, version={}); {DOCKER_RESOURCE_BOUNDARY_CHECK} verifies Velnor per-container placement under parent {DOCKER_JOB_CGROUP_PARENT} with no CPU/memory ceiling",
         driver.unwrap_or("unknown"),
         version.unwrap_or("unknown")
     )
@@ -1527,12 +1520,12 @@ fn socket_remediation(provider: &str) -> String {
 fn cgroup_remediation(provider: &str) -> String {
     if provider == "orbstack" {
         format!(
-            "OrbStack must expose cgroup v2 and preserve Velnor's --cpus=0.5, --memory=67108864, and --cgroup-parent={DOCKER_JOB_CGROUP_PARENT} controls; rerun the disposable {DOCKER_RESOURCE_BOUNDARY_CHECK} probe."
+            "OrbStack must expose cgroup v2 and preserve Velnor's --cgroup-parent={DOCKER_JOB_CGROUP_PARENT} placement with no CPU/memory ceiling; rerun the disposable {DOCKER_RESOURCE_BOUNDARY_CHECK} probe."
         )
             .to_owned()
     } else {
         format!(
-            "Use a Docker VM with cgroup v2 that preserves Velnor's --cpus=0.5, --memory=67108864, and --cgroup-parent={DOCKER_JOB_CGROUP_PARENT} controls; rerun the disposable {DOCKER_RESOURCE_BOUNDARY_CHECK} probe."
+            "Use a Docker VM with cgroup v2 that preserves Velnor's --cgroup-parent={DOCKER_JOB_CGROUP_PARENT} placement with no CPU/memory ceiling; rerun the disposable {DOCKER_RESOURCE_BOUNDARY_CHECK} probe."
         )
             .to_owned()
     }
