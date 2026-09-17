@@ -360,6 +360,8 @@ jobs:
     if: ${{{{ {gate} }}}}
     runs-on: {runner}
     timeout-minutes: 120
+    env:
+      RENOVATE_HAS_TOKEN: ${{{{ {token_secret} != '' }}}}
     steps:
       - name: Checkout repository
         uses: {checkout}
@@ -371,7 +373,7 @@ jobs:
           install -d -m 0755 /tmp/renovate /tmp/renovate/cache /tmp/renovate/repos
           install -d -m 0755 "/tmp/renovate/cache/${{{{ github.repository }}}}/renovate/repository"
 {cache_steps}      - name: Run Renovate
-        if: ${{{{ {token_secret} }} != '' }}
+        if: env.RENOVATE_HAS_TOKEN == 'true'
         uses: {renovate_action}
         with:
           token: ${{{{ {token_secret} }}}}
@@ -381,9 +383,9 @@ jobs:
           RENOVATE_BASE_DIR: /tmp/renovate
           RENOVATE_ONBOARDING: "false"
 {config_env}{target_env}{host_rules_env}{author_env}{signoff_env}{allowed_commands_env}      - name: Skip Renovate without token
-        if: ${{{{ {token_secret} }} == '' }}
+        if: env.RENOVATE_HAS_TOKEN != 'true'
         run: |
-          echo "::notice::Renovate skipped because `{token}` is not configured for this repository" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::Renovate skipped because '{token}' is not configured for this repository" >> "$GITHUB_STEP_SUMMARY"
 {cache_save_step}"#,
         dispatch_inputs = dispatch_inputs,
         version = yaml_scalar(RENOVATE_OSS_VERSION),
@@ -567,6 +569,41 @@ mod tests {
             workflow.contains("/tmp/renovate/cache/${{ github.repository }}/renovate/repository")
         );
         assert!(workflow.contains("velnor-renovate-${{ github.repository }}-"));
+    }
+
+    #[test]
+    fn renovate_writer_gates_token_via_job_env_without_secrets_in_if() {
+        let config = renovate_config();
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
+        let workflow = render_renovate(&config, spec);
+        // actionlint rejects the secrets context in `if:` in every
+        // spelling, so the gate reads a job-level flag instead.
+        assert!(
+            workflow.contains("RENOVATE_HAS_TOKEN: ${{ secrets.GH_RENOVATE_TOKEN != '' }}"),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("if: env.RENOVATE_HAS_TOKEN == 'true'"),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("if: env.RENOVATE_HAS_TOKEN != 'true'"),
+            "{workflow}"
+        );
+        for line in workflow.lines() {
+            let trimmed = line.trim_start();
+            assert!(
+                !(trimmed.starts_with("if:") && line.contains("secrets.")),
+                "no step gate may read secrets directly: {line}"
+            );
+        }
+        assert!(
+            !workflow.contains('`'),
+            "run blocks must not use legacy backticks (command substitution): {workflow}"
+        );
     }
 
     #[test]
