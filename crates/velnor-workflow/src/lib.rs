@@ -19,6 +19,7 @@ use clap::{Parser, ValueEnum};
 use serde::Serialize;
 use serde_yaml::Value;
 
+mod apt;
 mod closure;
 mod config;
 #[cfg(all(test, unix))]
@@ -798,6 +799,25 @@ struct ReleaseSpec {
     /// `release-manifest.json`. A consumer-contract value the repository
     /// declares; the generic renderer never invents one.
     pub(crate) manifest_schema: String,
+    /// The typed APT architecture set. Empty selects both arches; any
+    /// explicit set must equal exactly both arches.
+    pub(crate) apt_arches: Vec<String>,
+    /// The pinned APT publisher signing-key fingerprint (full 40-hex).
+    pub(crate) signer_fingerprint: String,
+    /// The environment secret holding the APT signing passphrase (name only).
+    pub(crate) passphrase_secret: String,
+    /// The repository-local APT keyring path. Empty derives `<package>.gpg`.
+    pub(crate) keyring_path: String,
+    /// The APT `Origin`/`Label`. Empty derives the package name.
+    pub(crate) apt_origin: String,
+    /// The packaged-identity directory inside the deb. Empty derives the
+    /// source repository name.
+    pub(crate) apt_identity_dir: String,
+    /// The served feed base URL for prior-pair recovery and the no-rollback
+    /// deploy guard.
+    pub(crate) apt_feed_url: String,
+    /// The retained rollback count. Zero means unset and selects one.
+    pub(crate) retention: u32,
 }
 
 /// Evidence produced by the read-only repository analysis pass.
@@ -1796,7 +1816,7 @@ fn apply_generation_config(
     if let Some(null) = generation.actionlint_config_variables_null() {
         config.actionlint_config_variables_null = null;
     }
-    apply_release(config, generation.release());
+    apply_release(config, generation.release())?;
     apply_renovate(config, generation.renovate(), root)?;
     apply_unit_rows(config, generation.units());
     materialize_capability_commands(config, root)?;
@@ -1909,7 +1929,10 @@ fn apply_renovate(
 
 /// The release contract a repository declares. `enabled` and `reason` are the
 /// recorded decision; the rest is the contract the publisher renders from.
-fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
+fn apply_release(
+    config: &mut ProjectConfig,
+    release: &config::ReleaseSection,
+) -> Result<(), GeneratorError> {
     if let Some(enabled) = release.enabled() {
         config.release_enabled = enabled;
     }
@@ -1926,9 +1949,17 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
         || release.consumer_repository().is_some()
         || release.artifact_path().is_some()
         || release.description().is_some()
-        || release.manifest_schema().is_some();
+        || release.manifest_schema().is_some()
+        || !release.apt_arches().is_empty()
+        || release.signer_fingerprint().is_some()
+        || release.passphrase_secret().is_some()
+        || release.keyring_path().is_some()
+        || release.apt_origin().is_some()
+        || release.apt_identity_dir().is_some()
+        || release.apt_feed_url().is_some()
+        || release.retention().is_some();
     if !declared {
-        return;
+        return Ok(());
     }
     let mut spec = config.release.clone().unwrap_or_default();
     if let Some(kind) = release.kind() {
@@ -1964,7 +1995,41 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
     if let Some(schema) = release.manifest_schema() {
         schema.clone_into(&mut spec.manifest_schema);
     }
+    if !release.apt_arches().is_empty() {
+        spec.apt_arches = release.apt_arches().to_vec();
+    }
+    if let Some(signer) = release.signer_fingerprint() {
+        signer.clone_into(&mut spec.signer_fingerprint);
+    }
+    if let Some(secret) = release.passphrase_secret() {
+        secret.clone_into(&mut spec.passphrase_secret);
+    }
+    if let Some(keyring) = release.keyring_path() {
+        keyring.clone_into(&mut spec.keyring_path);
+    }
+    if let Some(origin) = release.apt_origin() {
+        origin.clone_into(&mut spec.apt_origin);
+    }
+    if let Some(identity) = release.apt_identity_dir() {
+        identity.clone_into(&mut spec.apt_identity_dir);
+    }
+    if let Some(feed) = release.apt_feed_url() {
+        feed.clone_into(&mut spec.apt_feed_url);
+    }
+    if let Some(retention) = release.retention() {
+        spec.retention = u32::try_from(retention).map_err(|_| {
+            GeneratorError::usage(format!(
+                "[release] retention must be a non-negative count, found `{retention}`"
+            ))
+        })?;
+    }
+    // A declared apt contract is validated now, not at render time: malformed
+    // values fail generation loudly instead of rendering a broken feed.
+    if spec.kind == "apt" && primitives::release::release_contract_complete(&spec) {
+        apt::AptContract::resolve(&spec)?;
+    }
     config.release = Some(spec);
+    Ok(())
 }
 
 /// Apply the `[[unit]]` rows a repository declares: a row whose `id` the scan
@@ -8872,6 +8937,64 @@ mod tests {
             runtime::read_config_for_test(&path),
             "emitted project.toml must parse through the runtime parser",
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_release_contract_parses_and_validates_through_config() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nkind = \"apt\"\npackage = \"example\"\nbinary = \"example\"\nsource_repository = \"example/app\"\nconsumer_repository = \"example/feed\"\nmanifest_schema = \"example.test/apt-manifest-v1\"\nsigner_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"\npassphrase_secret = \"APT_PASSPHRASE\"\nkeyring_path = \"keys/feed.gpg\"\napt_origin = \"Example\"\napt_identity_dir = \"app\"\napt_feed_url = \"https://feed.example.test\"\napt_arches = [\"amd64\", \"arm64\"]\nretention = 1\n";
+        let root = configured_repository("apt-release-config", Some(config));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan configured repository",
+        );
+        let release = must_some(scanned.config.release.as_ref(), "release contract");
+        assert_eq!(release.kind, "apt");
+        assert_eq!(
+            release.signer_fingerprint,
+            "0123456789ABCDEF0123456789ABCDEF01234567"
+        );
+        assert_eq!(release.passphrase_secret, "APT_PASSPHRASE");
+        assert_eq!(release.keyring_path, "keys/feed.gpg");
+        assert_eq!(release.apt_origin, "Example");
+        assert_eq!(release.apt_identity_dir, "app");
+        assert_eq!(release.apt_feed_url, "https://feed.example.test");
+        assert_eq!(
+            release.apt_arches,
+            vec!["amd64".to_owned(), "arm64".to_owned()]
+        );
+        assert_eq!(release.retention, 1);
+        // The new fields are generation-time only, like `manifest_schema`:
+        // pinned runtimes reject them as unknown fields. The match is on
+        // TOML field form: emitted commands legitimately mention
+        // `retention-days`.
+        let emitted = scanned.config.toml();
+        for field in [
+            "signer_fingerprint",
+            "passphrase_secret",
+            "keyring_path",
+            "apt_origin",
+            "apt_identity_dir",
+            "apt_feed_url",
+            "apt_arches",
+            "retention",
+        ] {
+            assert!(
+                !emitted.contains(&format!("\n{field} =")),
+                "pinned runtimes reject unknown field {field}: {emitted}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+
+        // A malformed apt value fails the scan loudly, never rendering a
+        // feed around it.
+        let bad = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nkind = \"apt\"\npackage = \"example\"\nbinary = \"example\"\nsource_repository = \"example/app\"\nconsumer_repository = \"example/feed\"\nmanifest_schema = \"example.test/apt-manifest-v1\"\nsigner_fingerprint = \"short\"\npassphrase_secret = \"APT_PASSPHRASE\"\napt_feed_url = \"https://feed.example.test\"\n";
+        let root = configured_repository("apt-release-config-bad", Some(bad));
+        let error = must_fail(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "a malformed apt contract must fail the scan",
+        );
+        assert!(error.to_string().contains("signer_fingerprint"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
 
