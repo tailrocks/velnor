@@ -2378,7 +2378,7 @@ jobs:
             exit 1
           fi
           gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
-          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
+          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
           expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
           existing=""
           if [[ -x "$binary" ]]; then
@@ -3332,7 +3332,12 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: guest-payload-${{ matrix.arch }}
-          path: dist/microvm/*
+          path: |
+            dist/microvm/vmlinux
+            dist/microvm/rootfs.ext4
+            dist/microvm/rootfs.sha256
+            dist/microvm/velnor-guest-agent
+            dist/microvm/guest-agent.sha256
           if-no-files-found: error
 
   debian:

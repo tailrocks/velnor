@@ -1252,7 +1252,7 @@ fn render_guest_payload_job(
         ("", "")
     };
     Some(format!(
-        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n{needs}    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm/*\n          if-no-files-found: error\n",
+        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n{needs}    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: |\n            dist/microvm/vmlinux\n            dist/microvm/rootfs.ext4\n            dist/microvm/rootfs.sha256\n            dist/microvm/{agent_bin}\n            dist/microvm/guest-agent.sha256\n          if-no-files-found: error\n",
     ))
 }
 
@@ -7035,6 +7035,23 @@ mod tests {
             assert!(release.contains(".tarballs[$a].url"), "{release}");
             assert!(release.contains("--guest dist/microvm"), "{release}");
             assert!(!release.contains("velnor-guest-"), "{release}");
+            // The upload must name the exact 5-file consumer contract: a
+            // `dist/microvm/*` wildcard once walked build scratch into a
+            // symlink escape onto a root-only host path (EACCES scandir).
+            let upload = format!(
+                "          path: |\n            dist/microvm/vmlinux\n            dist/microvm/rootfs.ext4\n            dist/microvm/rootfs.sha256\n            dist/microvm/{agent}\n            dist/microvm/guest-agent.sha256\n"
+            );
+            for workflow in [&preview, &release] {
+                let payload = yaml_job(workflow, "guest-payload");
+                assert!(
+                    payload.contains(&upload),
+                    "guest payload upload must list the exact consumer files: {payload}"
+                );
+                assert!(
+                    !workflow.contains("dist/microvm/*"),
+                    "guest payload upload must not use a wildcard: {workflow}"
+                );
+            }
             let _ = fs::remove_dir_all(root);
         }
     }
