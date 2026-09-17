@@ -1,11 +1,13 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/check-profiles-fixture"
 
 [workflow]
-runners = "both"
-velnor_labels = ["self-hosted", "example-lane"]
+providers = ["github-hosted", "velnor"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
 
 [[check_profile]]
 id = "smoke"

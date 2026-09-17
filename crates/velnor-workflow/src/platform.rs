@@ -1,254 +1,19 @@
-//! Execution platform requirements, prerequisite products, and placement.
+//! Prerequisite products: named build outputs and consumer edges.
 //!
-//! Providers are deployment detail: a unit never names a runner label. It
-//! declares what it needs — an operating system, an architecture, and a set of
-//! SDK capabilities — and generation maps each need onto an eligible executor
-//! of the lane that runs it. A need no enabled lane can serve is a generation
-//! error that names the unit, the need, and the remedy, never a silently
-//! skipped job.
-//!
-//! The same module carries the prerequisite contract: a unit produces named
-//! products through named tasks, and a consumer declares which producer
-//! products it needs. Generation compiles each edge into the selection graph
-//! (`depends_on`, so producer changes select the consumer transitively) and
-//! into prepare commands (so the consumer rebuilds the product locally before
-//! its own checks), with environment flowing from task inputs to job outputs.
+//! A unit produces named products through named tasks, and a consumer declares
+//! which producer products it needs. Generation compiles each edge into the
+//! selection graph (`depends_on`, so producer changes select the consumer
+//! transitively) and into prepare commands (so the consumer rebuilds the
+//! product locally before its own checks), with environment flowing from task
+//! inputs to job outputs. Platform, trust, and capability needs live in
+//! [`crate::provider`], which gates provider admission; this module never
+//! decides where a unit runs.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::{GeneratorError, ProjectConfig, RunnerMode, Unit, UnitKind};
-
-/// The SDK capability an Xcode scheme build needs. Only a macOS executor
-/// offers it, so ordinary `SwiftPM` units must never declare it: they verify
-/// anywhere their toolchain provisions.
-pub(crate) const CAP_XCODE: &str = "xcode";
-/// The SDK capability a unit that assembles or consumes an `XCFramework`
-/// needs. Like [`CAP_XCODE`], it resolves to a macOS executor.
-pub(crate) const CAP_XCFRAMEWORK: &str = "xcframework";
-
-/// The operating system a unit needs. `Any` is portable: the unit verifies on
-/// whatever the lane offers.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Os {
-    #[default]
-    Any,
-    Linux,
-    Macos,
-}
-
-/// The architecture a unit needs. `Any` runs on either executor word size.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-pub(crate) enum Arch {
-    #[default]
-    Any,
-    #[serde(rename = "x86_64")]
-    X86_64,
-    #[serde(rename = "aarch64")]
-    Aarch64,
-}
-
-/// What a unit needs from its executor: an OS, an architecture, and a set of
-/// SDK capabilities. Provider-independent by construction: no runner label,
-/// pool name, or backend appears here.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub(crate) struct PlatformRequirement {
-    pub(crate) os: Os,
-    pub(crate) arch: Arch,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub(crate) capabilities: BTreeSet<String>,
-}
-
-impl PlatformRequirement {
-    /// A unit with no needs: it verifies on any executor of any lane.
-    pub(crate) fn portable() -> Self {
-        Self::default()
-    }
-
-    /// A `SwiftPM` package: portable, with no Apple-only need. It must resolve
-    /// to the lane's default executor, never to macOS by kind alone.
-    pub(crate) fn swift_package() -> Self {
-        Self::default()
-    }
-
-    /// An Xcode scheme build: macOS with the Xcode SDK capability.
-    pub(crate) fn apple_xcode() -> Self {
-        Self {
-            os: Os::Macos,
-            arch: Arch::Any,
-            capabilities: BTreeSet::from([CAP_XCODE.to_owned()]),
-        }
-    }
-
-    /// A `SwiftPM` package consuming an `XCFramework` binary target: macOS with
-    /// the `XCFramework` capability. The bundle only resolves where the Apple
-    /// SDK exists, so the unit is Apple-bound even without an Xcode project.
-    pub(crate) fn apple_xcframework() -> Self {
-        Self {
-            os: Os::Macos,
-            arch: Arch::Any,
-            capabilities: BTreeSet::from([CAP_XCFRAMEWORK.to_owned()]),
-        }
-    }
-
-    /// Whether the requirement can only be served by a macOS executor: an
-    /// explicit macOS need or an Apple-only SDK capability.
-    pub(crate) fn requires_apple(&self) -> bool {
-        self.os == Os::Macos
-            || self
-                .capabilities
-                .iter()
-                .any(|capability| capability == CAP_XCODE || capability == CAP_XCFRAMEWORK)
-    }
-
-    /// Parse a `[[units]]` `os` value.
-    ///
-    /// # Errors
-    /// Returns a usage error for anything but `any`, `linux`, or `macos`.
-    pub(crate) fn parse_os(value: &str) -> Result<Os, GeneratorError> {
-        match value {
-            "any" => Ok(Os::Any),
-            "linux" => Ok(Os::Linux),
-            "macos" => Ok(Os::Macos),
-            other => Err(GeneratorError::usage(format!(
-                "unit `os` must be one of: any, linux, macos; found `{other}`"
-            ))),
-        }
-    }
-
-    /// Parse a `[[units]]` `arch` value.
-    ///
-    /// # Errors
-    /// Returns a usage error for anything but `any`, `x86_64`, or `aarch64`.
-    pub(crate) fn parse_arch(value: &str) -> Result<Arch, GeneratorError> {
-        match value {
-            "any" => Ok(Arch::Any),
-            "x86_64" => Ok(Arch::X86_64),
-            "aarch64" => Ok(Arch::Aarch64),
-            other => Err(GeneratorError::usage(format!(
-                "unit `arch` must be one of: any, x86_64, aarch64; found `{other}`"
-            ))),
-        }
-    }
-
-    /// A capability name: lowercase, short, and free of shell metacharacters,
-    /// so it survives rendering into keys, labels, and diagnostics verbatim.
-    pub(crate) fn valid_capability(value: &str) -> bool {
-        valid_product_name(value)
-    }
-}
-
-/// One class of executor a lane offers, described in the same vocabulary as
-/// the requirement it serves. The id names the lane plus the OS family — the
-/// generator's own routing vocabulary — never a provider's pool or label.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Executor {
-    pub(crate) id: &'static str,
-    pub(crate) lane: RunnerMode,
-    pub(crate) os: Os,
-    pub(crate) arch: Arch,
-    pub(crate) capabilities: BTreeSet<String>,
-}
-
-impl Executor {
-    fn github_linux() -> Self {
-        Self {
-            id: "github-linux",
-            lane: RunnerMode::Github,
-            os: Os::Linux,
-            arch: Arch::Any,
-            capabilities: BTreeSet::new(),
-        }
-    }
-
-    fn github_macos() -> Self {
-        Self {
-            id: "github-macos",
-            lane: RunnerMode::Github,
-            os: Os::Macos,
-            arch: Arch::Any,
-            capabilities: BTreeSet::from([CAP_XCODE.to_owned(), CAP_XCFRAMEWORK.to_owned()]),
-        }
-    }
-
-    fn velnor() -> Self {
-        Self {
-            id: "velnor",
-            lane: RunnerMode::Velnor,
-            os: Os::Linux,
-            arch: Arch::Any,
-            capabilities: BTreeSet::new(),
-        }
-    }
-
-    /// Whether this executor serves `requirement`: the OS and architecture
-    /// agree (either side may be `Any`) and every needed capability is
-    /// offered.
-    pub(crate) fn satisfies(&self, requirement: &PlatformRequirement) -> bool {
-        os_satisfies(self.os, requirement.os)
-            && arch_satisfies(self.arch, requirement.arch)
-            && requirement
-                .capabilities
-                .iter()
-                .all(|capability| self.capabilities.contains(capability))
-    }
-}
-
-fn os_satisfies(executor: Os, requirement: Os) -> bool {
-    matches!(
-        (executor, requirement),
-        (Os::Any, _) | (_, Os::Any) | (Os::Linux, Os::Linux) | (Os::Macos, Os::Macos)
-    )
-}
-
-fn arch_satisfies(executor: Arch, requirement: Arch) -> bool {
-    matches!(
-        (executor, requirement),
-        (Arch::Any, _)
-            | (_, Arch::Any)
-            | (Arch::X86_64, Arch::X86_64)
-            | (Arch::Aarch64, Arch::Aarch64)
-    )
-}
-
-/// Every executor the enabled lanes offer, in preference order: the lane's
-/// default executor first, the Apple executor where the lane has one.
-pub(crate) fn executors_for(runners: RunnerMode) -> Vec<Executor> {
-    match runners {
-        RunnerMode::Github => vec![Executor::github_linux(), Executor::github_macos()],
-        RunnerMode::Velnor => vec![Executor::velnor()],
-        RunnerMode::Both => vec![
-            Executor::github_linux(),
-            Executor::github_macos(),
-            Executor::velnor(),
-        ],
-    }
-}
-
-/// Whether `lane` offers an executor for `requirement`.
-pub(crate) fn lane_supports_platform(lane: RunnerMode, requirement: &PlatformRequirement) -> bool {
-    executors_for(RunnerMode::Both)
-        .iter()
-        .filter(|executor| lane == RunnerMode::Both || executor.lane == lane)
-        .any(|executor| executor.satisfies(requirement))
-}
-
-/// The GitHub-hosted runner label for `unit`: the Apple executor's label when
-/// the unit needs macOS, the default executor's label otherwise. Ordinary
-/// `SwiftPM` support carries no Apple need, so it stays on Linux.
-pub(crate) fn github_runner_for_unit<'a>(
-    github_runner: &'a str,
-    macos_runner: &'a str,
-    unit: &Unit,
-) -> &'a str {
-    if unit.platform.requires_apple() {
-        macos_runner
-    } else {
-        github_runner
-    }
-}
+use crate::{GeneratorError, ProjectConfig, Unit, UnitKind};
 
 /// A named build product one unit produces for others: an `XCFramework`
 /// bundle, a generated header set, a packed archive. `task` is the repository
@@ -285,7 +50,7 @@ impl Prerequisite {
     }
 }
 
-/// A product or capability name: lowercase, short, shell-safe.
+/// A product name: lowercase, short, shell-safe.
 pub(crate) fn valid_product_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
@@ -386,7 +151,6 @@ pub(crate) fn prepare_command(task: &str, env: &BTreeMap<String, String>) -> Str
 pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     validate_mbx_toggles(config)?;
     materialize_prerequisites(config)?;
-    validate_placement(config)?;
     Ok(())
 }
 
@@ -418,7 +182,7 @@ fn find_product<'a>(
 /// Compile prerequisite edges into `depends_on` (so producer changes select
 /// the consumer through the existing transitive closure), prepare commands
 /// (so the consumer rebuilds each product before its own checks on every
-/// lane), and consumer env (so product outputs reach the checks).
+/// provider), and consumer env (so product outputs reach the checks).
 fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
     for unit in &config.units {
         for prerequisite in &unit.prerequisites {
@@ -515,7 +279,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
 }
 
 /// Prepend prepare commands ahead of every command vector the unit runs, so
-/// the product rebuilds before the unit's own checks on every lane and in
+/// the product rebuilds before the unit's own checks on every provider and in
 /// local runs, which read the same serialized vectors.
 fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
     let mut pr_commands = commands.to_vec();
@@ -524,74 +288,8 @@ fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
     let mut full_commands = commands.to_vec();
     full_commands.extend(unit.full_commands.iter().cloned());
     unit.full_commands = full_commands;
-    for commands_for_lane in [
-        &mut unit.github_pr_commands,
-        &mut unit.github_full_commands,
-        &mut unit.velnor_pr_commands,
-        &mut unit.velnor_full_commands,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let mut prefixed = commands.to_vec();
-        prefixed.extend(commands_for_lane.iter().cloned());
-        *commands_for_lane = prefixed;
-    }
     unit.watch.sort();
     unit.watch.dedup();
-}
-
-/// Describe a requirement for a placement diagnostic: the OS, the
-/// architecture, and the capabilities, naming only what the unit constrains.
-fn describe_requirement(requirement: &PlatformRequirement) -> String {
-    let mut parts = Vec::new();
-    match requirement.os {
-        Os::Any => {}
-        Os::Linux => parts.push("Linux".to_owned()),
-        Os::Macos => parts.push("macOS".to_owned()),
-    }
-    match requirement.arch {
-        Arch::Any => {}
-        Arch::X86_64 => parts.push("x86_64".to_owned()),
-        Arch::Aarch64 => parts.push("aarch64".to_owned()),
-    }
-    let mut capabilities = requirement.capabilities.iter().cloned().collect::<Vec<_>>();
-    capabilities.sort();
-    for capability in capabilities {
-        parts.push(format!("capability `{capability}`"));
-    }
-    if parts.is_empty() {
-        return "a portable unit".to_owned();
-    }
-    parts.join(" + ")
-}
-
-/// Fail closed when an enabled lane cannot execute a unit: every unit must be
-/// servable by at least one enabled lane, so a repository that enables only
-/// the self-hosted lane learns at generation time that its Apple work has
-/// nowhere to run.
-fn validate_placement(config: &ProjectConfig) -> Result<(), GeneratorError> {
-    let lanes = match config.runners {
-        RunnerMode::Github => vec![RunnerMode::Github],
-        RunnerMode::Velnor => vec![RunnerMode::Velnor],
-        RunnerMode::Both => vec![RunnerMode::Github, RunnerMode::Velnor],
-    };
-    for unit in &config.units {
-        if lanes
-            .iter()
-            .any(|lane| lane_supports_platform(*lane, &unit.platform))
-        {
-            continue;
-        }
-        let lane = lanes[0];
-        return Err(GeneratorError::usage(format!(
-            "unit `{}` requires {} but the {} lane offers no matching executor; enable the github lane or drop the requirement",
-            unit.id,
-            describe_requirement(&unit.platform),
-            lane.as_str(),
-        )));
-    }
-    Ok(())
 }
 
 /// The job-level env a collapsed kind workflow agrees on: every member's env
@@ -627,12 +325,10 @@ pub(crate) fn agreed_env(
 #[cfg(test)]
 mod tests {
     use super::{
-        agreed_env, describe_requirement, executors_for, is_ffi_crate_type, lane_supports_platform,
-        prepare_command, valid_env_name, valid_env_value, valid_product_name, valid_task_name,
-        Arch, Executor, NamedProduct, Os, PlatformRequirement, Prerequisite, CAP_XCFRAMEWORK,
-        CAP_XCODE,
+        agreed_env, is_ffi_crate_type, prepare_command, valid_env_name, valid_env_value,
+        valid_product_name, valid_task_name, NamedProduct, Prerequisite,
     };
-    use crate::{RunnerMode, Unit, UnitKind};
+    use crate::{Unit, UnitKind};
 
     #[expect(
         clippy::panic,
@@ -666,82 +362,22 @@ mod tests {
             watch: Vec::new(),
             pr_commands: Vec::new(),
             full_commands: Vec::new(),
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::default(),
+            platform: crate::provider::Platform::LinuxX64,
+            capabilities: crate::provider::Capabilities::default(),
             workspace_check: false,
-            platform: PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
         }
-    }
-
-    #[test]
-    fn portable_units_match_every_executor() {
-        let requirement = PlatformRequirement::swift_package();
-        assert!(!requirement.requires_apple());
-        for executor in executors_for(RunnerMode::Both) {
-            assert!(
-                executor.satisfies(&requirement),
-                "{} must serve a portable unit",
-                executor.id
-            );
-        }
-    }
-
-    #[test]
-    fn apple_work_matches_only_the_apple_executor() {
-        for requirement in [
-            PlatformRequirement::apple_xcode(),
-            PlatformRequirement::apple_xcframework(),
-        ] {
-            assert!(requirement.requires_apple());
-            for executor in executors_for(RunnerMode::Both) {
-                assert_eq!(
-                    executor.satisfies(&requirement),
-                    executor.id == "github-macos",
-                    "{}",
-                    executor.id
-                );
-            }
-        }
-        let xcframework = PlatformRequirement {
-            os: Os::Any,
-            arch: Arch::Any,
-            capabilities: std::collections::BTreeSet::from([CAP_XCFRAMEWORK.to_owned()]),
-        };
-        assert!(xcframework.requires_apple());
-        assert!(!lane_supports_platform(RunnerMode::Velnor, &xcframework));
-        assert!(lane_supports_platform(RunnerMode::Github, &xcframework));
-    }
-
-    #[test]
-    fn arch_constrains_placement() {
-        let requirement = PlatformRequirement {
-            os: Os::Any,
-            arch: Arch::Aarch64,
-            capabilities: std::collections::BTreeSet::new(),
-        };
-        let x86 = Executor {
-            id: "x86-only",
-            lane: RunnerMode::Github,
-            os: Os::Any,
-            arch: Arch::X86_64,
-            capabilities: std::collections::BTreeSet::new(),
-        };
-        assert!(!x86.satisfies(&requirement));
-        assert!(Executor::github_linux().satisfies(&requirement));
     }
 
     #[test]
@@ -831,23 +467,5 @@ mod tests {
             "agreeing env merges",
         );
         assert_eq!(agreed.get("KEY").map(String::as_str), Some("one"));
-    }
-
-    #[test]
-    fn requirement_description_names_only_constraints() {
-        assert_eq!(
-            describe_requirement(&PlatformRequirement::portable()),
-            "a portable unit"
-        );
-        assert_eq!(
-            describe_requirement(&PlatformRequirement::apple_xcode()),
-            "macOS + capability `xcode`"
-        );
-        assert!(describe_requirement(&PlatformRequirement {
-            os: Os::Linux,
-            arch: Arch::Aarch64,
-            capabilities: std::collections::BTreeSet::from([CAP_XCODE.to_owned()]),
-        })
-        .contains("aarch64"));
     }
 }

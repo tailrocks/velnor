@@ -1949,12 +1949,12 @@ fn audit_entrypoint_privileges(
             match mapping_value(job, "runs-on") {
                 Some(runs_on) => {
                     let mut resolving = BTreeSet::new();
-                    let analysis = analyze_runner(runs_on, None, &mut resolving);
+                    let analysis = analyze_runner(runs_on, None, &mut resolving, velnor_policy);
                     if analysis.dynamic || analysis.invalid {
                         audit.privileges.push(finding(&format!(
                             "job {job_id} runs-on must be static labels"
                         )));
-                    } else if analysis.self_hosted {
+                    } else if analysis.local_provider {
                         let gated = mapping_value(job, "if")
                             .and_then(Value::as_str)
                             .is_some_and(|condition| {
@@ -1962,16 +1962,13 @@ fn audit_entrypoint_privileges(
                             });
                         if !gated {
                             audit.privileges.push(finding(&format!(
-                                "job {job_id} runs self-hosted without a trusted-event gate"
+                                "job {job_id} runs on a local provider without a trusted-event gate"
                             )));
                         }
-                        if velnor_policy.requires_approved_runner()
-                            && !is_approved_velnor_runner(runs_on, velnor_policy)
-                        {
-                            audit.privileges.push(finding(&format!(
-                                "job {job_id} must use the approved Velnor runner labels"
-                            )));
-                        }
+                    } else if analysis.foreign {
+                        audit.privileges.push(finding(&format!(
+                            "job {job_id} runs-on does not match any declared provider selector"
+                        )));
                     }
                 }
                 None => audit
@@ -2142,17 +2139,38 @@ fn inspect_workflow(
     }
 }
 
-fn is_static_self_hosted_runner(job: &Mapping, velnor_policy: &VelnorPolicyContract) -> bool {
-    let Some(runs_on) = mapping_value(job, "runs-on") else {
-        return false;
+/// The local provider a static `runs-on` resolves to, if any. Labels are
+/// compared as sets against the declared selectors; anything that matches
+/// no selector is not a local job (it is a finding elsewhere).
+fn static_local_provider(job: &Mapping, velnor_policy: &VelnorPolicyContract) -> Option<String> {
+    let runs_on = mapping_value(job, "runs-on")?;
+    let labels = match runs_on {
+        Value::String(label) => vec![label.as_str()],
+        Value::Sequence(sequence) => sequence
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()?,
+        Value::Mapping(mapping) => mapping_value(mapping, "labels")?
+            .as_sequence()?
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()?,
+        _ => return None,
     };
-    let mut resolving = BTreeSet::new();
-    let analysis = analyze_runner(runs_on, None, &mut resolving);
-    analysis.self_hosted
-        && !analysis.dynamic
-        && !analysis.invalid
-        && (!velnor_policy.requires_approved_runner()
-            || is_approved_velnor_runner(runs_on, velnor_policy))
+    if labels.iter().any(|label| label.contains("${{")) {
+        return None;
+    }
+    let provider = velnor_policy.provider_for_labels(&labels)?;
+    velnor_policy
+        .is_local_provider(provider)
+        .then(|| provider.to_owned())
+}
+
+/// A GitHub-owned execution label: inherently hosted, never a trust fact.
+/// Selectors for local capacity are caller-managed and never carry these
+/// prefixes.
+fn is_github_owned_label(label: &str) -> bool {
+    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
 }
 
 fn has_safe_runner_gate(
@@ -2163,15 +2181,16 @@ fn has_safe_runner_gate(
     if has_trusted_runner_gate(condition) {
         return true;
     }
-    // Dual-lane automatic Velnor jobs admit same-repository pull_request plus
-    // the default-branch push/schedule (and merge_group when emitted) plus a
-    // lane-selecting dispatch on any ref: dispatch needs write access on a
-    // ref of this repository, the authorship the runner already trusts
-    // (`TrustClass::derive`, `velnor_dispatch_selection_expression`).
-    // That generated shape is trusted even when the advisory checkout lacks
-    // `.github/ci/project.toml` and only carries `.github-gen`.
-    is_generated_velnor_pr_gate(condition, &velnor_policy.default_branch)
-        && is_static_self_hosted_runner(job, velnor_policy)
+    // Generated provider jobs admit a provider-selecting dispatch on any ref
+    // (dispatch needs write access on a ref of this repository) plus the
+    // automatic events, with the trusted-event conjunct for local providers
+    // and trusted-only units. That generated shape is trusted even when the
+    // advisory checkout lacks `.github/ci/project.toml` and only carries
+    // `.github-gen`.
+    let Some(provider) = static_local_provider(job, velnor_policy) else {
+        return false;
+    };
+    is_generated_provider_gate(condition, &provider)
 }
 
 fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorError> {
@@ -2220,61 +2239,41 @@ fn toml_string_array(
         .collect()
 }
 
-fn toml_string(value: Option<&toml::Value>, field: &str) -> Result<Option<String>, GeneratorError> {
-    value
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| GeneratorError::usage(format!("{field} must be a string")))
-        })
-        .transpose()
-}
-
-fn toml_bool(value: Option<&toml::Value>, field: &str) -> Result<Option<bool>, GeneratorError> {
-    value
-        .map(|value| {
-            value
-                .as_bool()
-                .ok_or_else(|| GeneratorError::usage(format!("{field} must be a boolean")))
-        })
-        .transpose()
-}
-
-/// The Velnor lane facts the audit needs from the tree's configuration.
+/// The provider facts the audit needs from the tree's configuration: the
+/// provider universe, the automatic set, and the per-provider selectors.
+/// Labels carry no authority here; they only name which declared selector a
+/// job's `runs-on` resolves to.
 #[derive(Clone, Debug, Default)]
 struct VelnorPolicyContract {
-    runners: String,
+    providers: Vec<String>,
+    automatic_providers: Vec<String>,
+    selectors: BTreeMap<String, Vec<String>>,
     default_branch: String,
-    velnor_labels: Vec<String>,
-    velnor_runner_group: Option<String>,
-    velnor_trusted_label: Option<String>,
-    pull_request_on_velnor: bool,
 }
 
 impl VelnorPolicyContract {
-    fn requires_approved_runner(&self) -> bool {
-        self.pull_request_on_velnor
+    /// The provider whose declared selector `labels` equals, if any. Labels
+    /// are compared as sets: order is not a routing fact.
+    fn provider_for_labels(&self, labels: &[&str]) -> Option<&str> {
+        let mut sorted = labels.to_vec();
+        sorted.sort_unstable();
+        self.selectors.iter().find_map(|(provider, selector)| {
+            let mut expected = selector.iter().map(String::as_str).collect::<Vec<_>>();
+            expected.sort_unstable();
+            (expected == sorted).then(|| provider.as_str())
+        })
     }
 
-    fn approved_runner_configured(&self) -> bool {
-        let labels = self
-            .velnor_labels
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        super::estate::approved_velnor_runner_contract_matches(
-            &labels,
-            self.velnor_runner_group.as_deref(),
-        )
+    fn is_local_provider(&self, provider: &str) -> bool {
+        matches!(provider, "github-self-hosted" | "velnor")
     }
 }
 
 fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
     let path = root.join(RUNTIME_CONFIG);
     // Advisory sparse-checkout omits `.github/ci`. Do not default the
-    // contract on a missing project.toml: generation toml still carries
-    // runners, labels, and the PR-gate opt-in.
+    // contract on a missing project.toml: the generation config still
+    // carries providers and selectors.
     let runtime = match fs::read_to_string(&path) {
         Ok(content) => Some(toml::from_str::<toml::Value>(&content).map_err(|error| {
             GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
@@ -2289,45 +2288,47 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
             ..VelnorPolicyContract::default()
         });
     }
-    let runtime_workflow = runtime
-        .as_ref()
-        .and_then(|value| value.get("workflow"))
-        .and_then(toml::Value::as_table);
     let generation_workflow = generation.as_ref().and_then(toml::Value::as_table);
-    let mut labels = toml_string_array(
-        runtime_workflow.and_then(|workflow| workflow.get("velnor_labels")),
-        "[workflow] velnor_labels",
-    )?;
-    if labels.is_empty() {
-        labels = toml_string_array(
-            generation_workflow.and_then(|workflow| workflow.get("velnor_labels")),
-            "[workflow] velnor_labels",
+    let mut providers = runtime
+        .as_ref()
+        .and_then(|value| value.get("providers"))
+        .map(|value| toml_string_array(Some(value), "providers"))
+        .transpose()?
+        .unwrap_or_default();
+    if providers.is_empty() {
+        providers = toml_string_array(
+            generation_workflow.and_then(|workflow| workflow.get("providers")),
+            "[workflow] providers",
         )?;
     }
-    let group = toml_string(
-        generation_workflow.and_then(|workflow| workflow.get("velnor_runner_group")),
-        "[workflow] velnor_runner_group",
-    )?;
-    let pull_request_on_velnor = toml_bool(
-        generation_workflow.and_then(|workflow| workflow.get("pull_request_on_velnor")),
-        "[workflow] pull_request_on_velnor",
-    )?
-    .unwrap_or(false);
-    let velnor_trusted_label = toml_string(
-        generation_workflow.and_then(|workflow| workflow.get("velnor_trusted_label")),
-        "[workflow] velnor_trusted_label",
-    )?;
-    let runners = runtime
+    let automatic_providers = runtime
         .as_ref()
-        .and_then(|value| value.get("runners"))
-        .and_then(toml::Value::as_str)
-        .or_else(|| {
-            generation_workflow
-                .and_then(|workflow| workflow.get("runners"))
-                .and_then(toml::Value::as_str)
-        })
-        .unwrap_or_default()
-        .to_owned();
+        .and_then(|value| value.get("automatic_providers"))
+        .map(|value| toml_string_array(Some(value), "automatic_providers"))
+        .transpose()?
+        .unwrap_or_default();
+    // Selectors are generation-time only: the runtime contract never carries
+    // them. Generation overlays declared selectors on the scan defaults, so
+    // the audit starts from the same defaults; otherwise a default-routed
+    // job reads as foreign.
+    let mut selectors: BTreeMap<String, Vec<String>> = super::scan::default_selectors()
+        .into_iter()
+        .map(|(provider, selector)| (provider.as_str().to_owned(), selector.runs_on))
+        .collect();
+    if let Some(tables) = generation_workflow
+        .and_then(|workflow| workflow.get("selectors"))
+        .and_then(toml::Value::as_table)
+    {
+        for (provider, table) in tables {
+            let runs_on = toml_string_array(
+                table.get("runs_on"),
+                &format!("[workflow.selectors.{provider}] runs_on"),
+            )?;
+            if !runs_on.is_empty() {
+                selectors.insert(provider.clone(), runs_on);
+            }
+        }
+    }
     let default_branch = runtime
         .as_ref()
         .and_then(|value| value.get("default_branch"))
@@ -2340,29 +2341,49 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         .unwrap_or("main")
         .to_owned();
     let policy = VelnorPolicyContract {
-        runners,
+        providers,
+        automatic_providers,
+        selectors,
         default_branch,
-        velnor_labels: labels,
-        velnor_runner_group: group,
-        velnor_trusted_label,
-        pull_request_on_velnor,
     };
-    if policy.pull_request_on_velnor
-        && (!matches!(policy.runners.as_str(), "velnor" | "both")
-            || !policy.approved_runner_configured())
-    {
-        return Err(GeneratorError::usage(
-            "workflow policy rejected pull_request_on_velnor: config must declare the approved Velnor runner labels, optionally with the approved runner group, and include the Velnor lane",
-        ));
-    }
+    policy.validate()?;
     Ok(policy)
 }
 
+impl VelnorPolicyContract {
+    /// The audit trusts the configuration's provider facts, so it validates
+    /// them first: canonical ids only, the automatic set inside the universe,
+    /// and a selector for every provider in the universe.
+    fn validate(&self) -> Result<(), GeneratorError> {
+        for provider in self.providers.iter().chain(&self.automatic_providers) {
+            if !matches!(
+                provider.as_str(),
+                "github-hosted" | "github-self-hosted" | "velnor"
+            ) {
+                return Err(GeneratorError::usage(format!(
+                    "workflow policy found unknown provider `{provider}` in the configured provider sets"
+                )));
+            }
+        }
+        for provider in &self.automatic_providers {
+            if !self.providers.iter().any(|known| known == provider) {
+                return Err(GeneratorError::usage(format!(
+                    "workflow policy found automatic provider `{provider}` outside the configured provider universe"
+                )));
+            }
+        }
+        for (provider, selector) in &self.selectors {
+            if selector.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "workflow policy found provider `{provider}` with an empty selector"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn normalize_gate_expression(value: &str) -> String {
-    // Both-mode aggregates name the manual lane selector `lanes` while
-    // single-lane modes name it `runner`; the gate shape the policy matchers
-    // below recognize is identical, so canonicalize the spelling first.
-    let value = value.replace("github.event.inputs.lanes", "github.event.inputs.runner");
     let value = value.trim();
     let value = value
         .strip_prefix("${{")
@@ -2382,51 +2403,33 @@ fn normalize_gate_expression(value: &str) -> String {
     }
 }
 
-fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
+/// The normalized trusted-event conjunct every local-provider admission
+/// carries: fork and bot pull requests are untrusted, everything else is
+/// trusted.
+fn trusted_event_conjunct() -> &'static str {
+    "!(github.event_name=='pull_request'&&(github.event.pull_request.head.repo.fork||github.event.pull_request.user.type=='Bot'))"
+}
+
+/// Whether `value` is the generated admission for `provider`: a
+/// provider-selecting dispatch (`inputs.providers` comma-boundary match) or
+/// the automatic events, with the trusted-event conjunct. The reusable
+/// provider/unit selector prefix is stripped first; the remaining
+/// expression must be exactly the admission the generator renders.
+fn is_generated_provider_gate(value: &str, provider: &str) -> bool {
     let normalized = normalize_gate_expression(value);
     let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
-    if !runtime::valid_branch(default_branch) {
-        return false;
-    }
-    let automatic = format!(
-        "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
+    let dispatch = format!(
+        "github.event_name=='workflow_dispatch'&&contains(format(',{{0}},',github.event.inputs.providers),',{provider},')"
     );
-    let automatic_merge_group = format!(
-        "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||github.event_name=='merge_group'||(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
-    );
-    let explicit_dispatch = format!(
-        "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
-    );
-    let default_dispatch = format!(
-        "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
-    );
-    // The lane admission predicate admits a lane-selecting dispatch on any
-    // ref: GitHub only accepts a dispatch from a write-authorized actor onto
-    // a ref of this repository — the same authorship a same-repository
-    // pull-request head carries — and the runner classifies both as
-    // `TrustClass::Trusted` without consulting the ref
-    // (`velnor_dispatch_selection_expression` states the argument). The
-    // ref-gated shapes above stay accepted for older rendered trees.
-    let explicit_dispatch_any_ref =
-        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
-    let default_dispatch_any_ref =
-        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner==''))";
-    [automatic.as_str(), automatic_merge_group.as_str()]
-        .into_iter()
-        .any(|automatic| {
-            for dispatch in [
-                explicit_dispatch.as_str(),
-                default_dispatch.as_str(),
-                explicit_dispatch_any_ref,
-                default_dispatch_any_ref,
-            ] {
-                let combined = format!("{automatic}||{dispatch}");
-                if value == combined || value == format!("({combined})") {
-                    return true;
-                }
-            }
-            false
-        })
+    let trusted = trusted_event_conjunct();
+    // The generator renders `((dispatch) || (automatic)) && (trusted)` for
+    // local providers: the automatic side is the event predicate when the
+    // provider is in the automatic set, `false` otherwise.
+    let automatic_shapes = ["github.event_name!='workflow_dispatch'", "false"];
+    automatic_shapes.into_iter().any(|automatic| {
+        let event = format!("({dispatch})||({automatic})");
+        value == format!("({event})&&({trusted})") || value == format!("{event}&&({trusted})")
+    })
 }
 
 fn inspect_jobs(
@@ -2528,7 +2531,7 @@ fn github_expressions(text: &str) -> Vec<String> {
 
 /// The root context of a `${{ ... }}` inner expression: the leading identifier
 /// (`runner` in `runner.temp`, `steps` in `steps.prove.outputs.asset`,
-/// `github` in `github.event.inputs.runner`). Function names (`toJson`), string
+/// `github` in `github.event.inputs.providers`). Function names (`toJson`), string
 /// literals, and non-identifiers yield their leading token or `None`; callers
 /// match against the forbidden list, so only a forbidden root flags.
 fn expression_root_context(expression: &str) -> Option<String> {
@@ -2718,14 +2721,19 @@ fn is_approved_fleet_reusable(value: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct RunnerAnalysis {
-    self_hosted: bool,
+    /// Resolves to a local provider's declared selector.
+    local_provider: bool,
+    /// Static labels that match no declared selector and no GitHub-owned
+    /// image: the job routes nowhere the config declares.
+    foreign: bool,
     dynamic: bool,
     invalid: bool,
 }
 
 impl RunnerAnalysis {
     fn merge(&mut self, other: Self) {
-        self.self_hosted |= other.self_hosted;
+        self.local_provider |= other.local_provider;
+        self.foreign |= other.foreign;
         self.dynamic |= other.dynamic;
         self.invalid |= other.invalid;
     }
@@ -2740,7 +2748,7 @@ fn inspect_runner(
     failures: &mut PolicyFindings,
 ) {
     let mut resolving = BTreeSet::new();
-    let analysis = analyze_runner(value, matrix, &mut resolving);
+    let analysis = analyze_runner(value, matrix, &mut resolving, velnor_policy);
     if analysis.invalid {
         failures.record(
             Rule::TrustedRunners,
@@ -2755,69 +2763,20 @@ fn inspect_runner(
             "runs-on contains an unresolved or dynamic runner label",
         );
     }
-    if analysis.self_hosted && !trusted_gate {
+    if analysis.foreign {
         failures.record(
             Rule::TrustedRunners,
             path,
-            "self-hosted jobs require a default-branch trusted-event gate",
+            "runs-on does not match any declared provider selector",
         );
     }
-    if velnor_policy.requires_approved_runner()
-        && analysis.self_hosted
-        && !is_approved_velnor_runner(value, velnor_policy)
-    {
+    if analysis.local_provider && !trusted_gate {
         failures.record(
             Rule::TrustedRunners,
             path,
-            "opt-in Velnor self-hosted jobs must use the approved Velnor runner labels, optionally with the approved runner group",
+            "local-provider jobs require a trusted-event gate",
         );
     }
-}
-
-fn is_approved_velnor_runner(value: &Value, velnor_policy: &VelnorPolicyContract) -> bool {
-    if let Some(labels) = value.as_sequence() {
-        let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
-            return false;
-        };
-        return configured_velnor_runner_labels_match(&labels, None, velnor_policy);
-    }
-    let Some(runner) = value.as_mapping() else {
-        return false;
-    };
-    let Some(group) = mapping_value(runner, "group").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(labels) = mapping_value(runner, "labels").and_then(Value::as_sequence) else {
-        return false;
-    };
-    let Some(labels) = labels.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
-        return false;
-    };
-    runner.len() == 2 && configured_velnor_runner_labels_match(&labels, Some(group), velnor_policy)
-}
-
-fn configured_velnor_runner_labels_match(
-    labels: &[&str],
-    group: Option<&str>,
-    velnor_policy: &VelnorPolicyContract,
-) -> bool {
-    let configured: Vec<&str> = velnor_policy
-        .velnor_labels
-        .iter()
-        .map(String::as_str)
-        .collect();
-    if !super::estate::approved_velnor_runner_contract_matches(&configured, group) {
-        return false;
-    }
-    if labels == configured {
-        return true;
-    }
-    let Some(trusted_label) = velnor_policy.velnor_trusted_label.as_deref() else {
-        return false;
-    };
-    labels.len() == configured.len() + 1
-        && labels[..configured.len()] == configured[..]
-        && labels[configured.len()] == trusted_label
 }
 
 fn normalize_runner_expression(value: &str) -> String {
@@ -2838,10 +2797,50 @@ fn is_approved_dynamic_runner(label: &str) -> bool {
         .any(|shape| normalized == **shape)
 }
 
+/// Classify one static label: GitHub-owned images are hosted; a label that
+/// equals a declared selector's whole set is that provider; anything else
+/// static is foreign. Label substrings are never consulted.
+fn classify_static_label(label: &str, velnor_policy: &VelnorPolicyContract) -> RunnerAnalysis {
+    if is_github_owned_label(label) {
+        return RunnerAnalysis::default();
+    }
+    match velnor_policy.provider_for_labels(&[label]) {
+        Some(provider) if velnor_policy.is_local_provider(provider) => RunnerAnalysis {
+            local_provider: true,
+            ..RunnerAnalysis::default()
+        },
+        Some(_) => RunnerAnalysis::default(),
+        None => RunnerAnalysis {
+            foreign: true,
+            ..RunnerAnalysis::default()
+        },
+    }
+}
+
+/// Classify one static label set: it must equal a declared selector as a
+/// set, or be a single GitHub-owned image.
+fn classify_static_labels(labels: &[&str], velnor_policy: &VelnorPolicyContract) -> RunnerAnalysis {
+    if labels.len() == 1 {
+        return classify_static_label(labels[0], velnor_policy);
+    }
+    match velnor_policy.provider_for_labels(labels) {
+        Some(provider) if velnor_policy.is_local_provider(provider) => RunnerAnalysis {
+            local_provider: true,
+            ..RunnerAnalysis::default()
+        },
+        Some(_) => RunnerAnalysis::default(),
+        None => RunnerAnalysis {
+            foreign: true,
+            ..RunnerAnalysis::default()
+        },
+    }
+}
+
 fn analyze_runner(
     value: &Value,
     matrix: Option<&Mapping>,
     resolving: &mut BTreeSet<String>,
+    velnor_policy: &VelnorPolicyContract,
 ) -> RunnerAnalysis {
     match value {
         Value::String(label) => {
@@ -2861,7 +2860,7 @@ fn analyze_runner(
                 };
                 let mut result = RunnerAnalysis::default();
                 for value in values {
-                    result.merge(analyze_runner(value, matrix, resolving));
+                    result.merge(analyze_runner(value, matrix, resolving, velnor_policy));
                 }
                 resolving.remove(field);
                 result
@@ -2874,21 +2873,31 @@ fn analyze_runner(
                         ..RunnerAnalysis::default()
                     }
                 }
-            } else if contains_self_hosted_label(label) {
-                RunnerAnalysis {
-                    self_hosted: true,
-                    ..RunnerAnalysis::default()
-                }
             } else {
-                RunnerAnalysis::default()
+                classify_static_label(label, velnor_policy)
             }
         }
         Value::Sequence(sequence) => {
-            let mut result = RunnerAnalysis::default();
-            for value in sequence {
-                result.merge(analyze_runner(value, matrix, resolving));
+            let Some(labels) = sequence
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()
+            else {
+                // Non-string sequence entries (nested mappings, numbers)
+                // cannot route anywhere.
+                return RunnerAnalysis {
+                    invalid: true,
+                    ..RunnerAnalysis::default()
+                };
+            };
+            if labels.iter().any(|label| label.contains("${{")) {
+                let mut result = RunnerAnalysis::default();
+                for value in sequence {
+                    result.merge(analyze_runner(value, matrix, resolving, velnor_policy));
+                }
+                return result;
             }
-            result
+            classify_static_labels(&labels, velnor_policy)
         }
         Value::Mapping(mapping) => {
             let mut result = RunnerAnalysis::default();
@@ -2906,7 +2915,9 @@ fn analyze_runner(
             for (key, value) in mapping {
                 match key.as_str() {
                     "group" => {}
-                    "labels" => result.merge(analyze_runner(value, matrix, resolving)),
+                    "labels" => {
+                        result.merge(analyze_runner(value, matrix, resolving, velnor_policy))
+                    }
                     _ => result.invalid = true,
                 }
             }
@@ -2916,7 +2927,7 @@ fn analyze_runner(
             invalid: true,
             ..RunnerAnalysis::default()
         },
-        Value::Tagged(tagged) => analyze_runner(tagged.value(), matrix, resolving),
+        Value::Tagged(tagged) => analyze_runner(tagged.value(), matrix, resolving, velnor_policy),
     }
 }
 
@@ -2972,24 +2983,14 @@ fn contains_exact_yaml_value(value: &Value, target: &str) -> bool {
     }
 }
 
-fn contains_self_hosted_label(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    value.contains("self-hosted") || value.contains("velnor")
-}
-
 fn has_trusted_runner_gate(value: &str) -> bool {
     let value = value.trim();
-    // Both-mode aggregates name the manual lane selector `lanes` while
-    // single-lane modes name it `runner`; canonicalize first, exactly like
-    // `normalize_gate_expression`, so adopted-estate `lanes` gates match the
-    // same trusted shapes.
     let value = value
         .strip_prefix("${{")
         .and_then(|value| value.strip_suffix("}}"))
         .map_or(value, str::trim)
         .split_whitespace()
-        .collect::<String>()
-        .replace("github.event.inputs.lanes", "github.event.inputs.runner");
+        .collect::<String>();
     if value.ends_with("&&false") {
         return true;
     }
@@ -3024,15 +3025,6 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let release_gate = format!(
         "(github.event_name=='push'&&(github.ref_type=='tag'||github.ref=='refs/heads/{branch}'))||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
     );
-    let velnor_lane_gate = format!(
-        "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
-    );
-    let velnor_lane_gate_with_default_runner = format!(
-        "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
-    );
-    let velnor_dispatch_only_gate = format!(
-        "github.ref=='refs/heads/{branch}'&&github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
-    );
     // The self-hosted writer gate (`trusted_renovate_gate`): scheduled runs
     // plus default-branch dispatches, and nothing else. The writer's `on:`
     // carries exactly these two triggers, so the gate admits every event the
@@ -3043,12 +3035,6 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     );
     value == ci_gate
         || value == format!("always()&&{ci_gate}")
-        || value == velnor_lane_gate
-        || value == format!("always()&&{velnor_lane_gate}")
-        || value == velnor_lane_gate_with_default_runner
-        || value == format!("always()&&{velnor_lane_gate_with_default_runner}")
-        || value == velnor_dispatch_only_gate
-        || value == format!("always()&&{velnor_dispatch_only_gate}")
         || value == writer_gate
         || value == format!("always()&&{writer_gate}")
         || value == release_gate
@@ -3067,22 +3053,25 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
-    let without_lane = strip_inputs_lane_selector(value);
-    let value = without_lane.unwrap_or(value);
+    let without_provider = strip_inputs_provider_selector(value);
+    let value = without_provider.unwrap_or(value);
     strip_inputs_unit_membership_selector(value)
         .or_else(|| strip_selected_units_selector(value))
         .or_else(|| strip_combined_selected_units_selector(value))
-        .or(without_lane)
+        .or(without_provider)
 }
 
-/// Peel `inputs.lane == 'github'|'velnor'|'control' &&` from a generated
+/// Peel `inputs.provider == '<id>'|'control' &&` from a generated
 /// reusable-job gate. The conjunct only restricts which caller intends the
 /// job; the remaining expression must still be a trusted event gate.
-fn strip_inputs_lane_selector(value: &str) -> Option<&str> {
-    let rest = value.strip_prefix("inputs.lane=='")?;
+fn strip_inputs_provider_selector(value: &str) -> Option<&str> {
+    let rest = value.strip_prefix("inputs.provider=='")?;
     let separator = rest.find("'&&")?;
-    let lane = &rest[..separator];
-    if !matches!(lane, "github" | "velnor" | "control") {
+    let provider = &rest[..separator];
+    if !matches!(
+        provider,
+        "github-hosted" | "github-self-hosted" | "velnor" | "control"
+    ) {
         return None;
     }
     Some(&rest[separator + "'&&".len()..])
@@ -3094,41 +3083,39 @@ fn strip_inputs_lane_selector(value: &str) -> Option<&str> {
 /// expression must still be a trusted event gate.
 fn strip_inputs_unit_membership_selector(value: &str) -> Option<&str> {
     const SELECTOR: &str =
-        "contains(format(',{0},',inputs.selected_units),format(',{0},',inputs.unit))&&(";
+        "contains(inputs.selected_units,format('\"unit_id\":\"{0}\"',inputs.unit))&&(";
     value.strip_prefix(SELECTOR)?.strip_suffix(')')
 }
 
 fn strip_selected_units_selector(value: &str) -> Option<&str> {
-    // contains(format(',{0},',inputs.selected_units),',unit,')&&(gate)
-    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    // contains(inputs.selected_units,'"unit_id":"unit,"')&&(gate)
+    const PREFIX: &str = "contains(inputs.selected_units,'\"unit_id\":\"";
     let rest = value.strip_prefix(PREFIX)?;
-    let rest = rest.strip_prefix(',')?;
-    let separator = rest.find(",')&&(")?;
+    let separator = rest.find("\"')&&(")?;
     let unit = &rest[..separator];
     if !runtime::is_unit_id(unit) {
         return None;
     }
-    rest[separator + ",')&&(".len()..].strip_suffix(')')
+    rest[separator + "\"')&&(".len()..].strip_suffix(')')
 }
 
 fn is_selected_units_selector(value: &str) -> bool {
-    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    const PREFIX: &str = "contains(inputs.selected_units,'\"unit_id\":\"";
     let Some(rest) = value.strip_prefix(PREFIX) else {
         return false;
     };
-    let Some(rest) = rest.strip_prefix(',') else {
-        return false;
-    };
-    let Some(separator) = rest.find(",')") else {
+    let Some(separator) = rest.find("\"')") else {
         return false;
     };
     runtime::is_unit_id(&rest[..separator])
 }
 
 fn strip_combined_selected_units_selector(value: &str) -> Option<&str> {
-    // (contains(...,unit-a,')||contains(...,unit-b,'))&&(gate)
+    // (contains(...'"unit_id":"a"')||contains(...'"unit_id":"b"'))&&(gate)
+    // The FIRST boundary ends the selectors: unit ids cannot hold `)&&(`,
+    // but the gate behind it (a provider admission) can.
     let value = value.strip_prefix('(')?;
-    let split = value.rfind(")&&(")?;
+    let split = value.find(")&&(")?;
     let selectors = &value[..split];
     let gate = value[split + 4..].strip_suffix(')')?;
     if selectors.is_empty() || gate.is_empty() {

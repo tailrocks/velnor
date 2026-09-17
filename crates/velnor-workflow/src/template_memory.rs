@@ -23,9 +23,14 @@ const MIN_OBJECT_SIZE: usize = 24;
 const STRING_BASE_OVERHEAD: usize = 26;
 
 /// The hard ceiling on one aggregate's expanded template cost. GitHub's limit
-/// is 10 MiB; the generator keeps at least two times headroom so a surface
-/// cannot creep up to the platform budget.
-pub(crate) const TEMPLATE_MEMORY_CEILING: usize = 5 * 1024 * 1024;
+/// is 10 MiB; the generator refuses surfaces past 8 MiB so a surface cannot
+/// creep up to the platform budget. The three-provider fanout (spec §2) costs
+/// roughly twice the old two-lane expansion — three callers per unit into a
+/// callee carrying three provider jobs — so the two-lane 5 MiB ceiling cannot
+/// hold the spec'd shape: the dogfood repository honestly expands to ~6.8 MiB.
+/// Growth past 8 MiB fails closed here with a per-callee account; the escape
+/// hatch then is sharding kind reusables per provider, not raising this again.
+pub(crate) const TEMPLATE_MEMORY_CEILING: usize = 8 * 1024 * 1024;
 
 /// The directory the aggregates call reusable workflows from.
 const WORKFLOWS_DIR: &str = ".github/workflows";
@@ -321,7 +326,7 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.contains("over the generator ceiling of 5.00 MiB"),
+            error.contains("over the generator ceiling of 8.00 MiB"),
             "{error}"
         );
         assert!(

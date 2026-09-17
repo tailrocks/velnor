@@ -22,9 +22,12 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::provider::{
+    Capabilities, Platform, ProviderId, ProviderSelector, ProviderSet, TrustReq,
+};
 use crate::{
     default_workflow_files, identifier_suffix, AnalysisSummary, CacheSpec, GeneratorError,
-    MaintenanceSpec, ProjectConfig, RunnerMode, Unit, UnitKind,
+    MaintenanceSpec, ProjectConfig, Unit, UnitKind,
 };
 
 /// Run the detector pipeline over `root` and return what it proved.
@@ -33,7 +36,7 @@ use crate::{
 /// Returns filesystem errors with the affected path.
 pub(crate) fn scan_shape(
     root: &Path,
-    runners: RunnerMode,
+    providers: &ProviderSet,
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
@@ -55,7 +58,7 @@ pub(crate) fn scan_shape(
             "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.".to_owned(),
         ],
         default_branch: default_branch.to_owned(),
-        runners,
+        providers: providers.clone(),
     };
     // Detector order is part of the contract: ids are sorted stably below, so
     // the first detector to claim an id keeps the un-suffixed form.
@@ -78,6 +81,9 @@ impl RepositoryShape {
     /// Canonical ordering applied once every detector has run.
     fn finalize(&mut self) {
         self.units.sort_by(|left, right| left.id.cmp(&right.id));
+        for unit in &mut self.units {
+            refresh_service_capabilities(unit);
+        }
         disambiguate_unit_ids(&mut self.units);
         self.detected.sort();
         self.detected.dedup();
@@ -129,7 +135,7 @@ pub(crate) struct RepositoryShape {
     /// What static inspection could not prove, sorted and deduplicated.
     limitations: Vec<String>,
     default_branch: String,
-    runners: RunnerMode,
+    providers: ProviderSet,
 }
 
 /// Read-only view of the walked repository that every detector receives.
@@ -152,6 +158,7 @@ pub(crate) fn unit(
     } else {
         format!("-{}", identifier_suffix(root))
     };
+    let (platform, trust, capabilities) = detection_contract(kind);
     Unit {
         id: format!("{}{}", kind.id_prefix(), suffix),
         label: if root == "." {
@@ -164,10 +171,6 @@ pub(crate) fn unit(
         watch,
         pr_commands: commands.clone(),
         full_commands: commands,
-        github_pr_commands: None,
-        github_full_commands: None,
-        velnor_pr_commands: None,
-        velnor_full_commands: None,
         depends_on: Vec::new(),
         cache,
         pinned_lockfile: false,
@@ -175,15 +178,87 @@ pub(crate) fn unit(
         mise_tools: Vec::new(),
         toolchain: None,
         services: Vec::new(),
-        requires_trusted: false,
+        trust,
+        platform,
+        capabilities,
         workspace_check: false,
-        platform: crate::platform::PlatformRequirement::portable(),
         products: Vec::new(),
         prerequisites: Vec::new(),
         env: std::collections::BTreeMap::new(),
         mbx: None,
         prepared_tools: Vec::new(),
     }
+}
+
+/// The typed platform/trust/capability contract the scan derives per kind.
+/// Detectors refine capabilities afterwards (services imply container
+/// readiness); the contract never invents a requirement the kind cannot prove.
+fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
+    let trust = TrustReq::UntrustedOk;
+    match kind {
+        // A SwiftPM package is portable: it verifies wherever its toolchain
+        // provisions. Only Xcode scheme work and XCFramework consumers carry
+        // the Apple need, which the Swift detector overlays afterwards.
+        UnitKind::Swift => (Platform::LinuxX64, trust, Capabilities::default()),
+        UnitKind::Docker => (
+            Platform::LinuxX64,
+            trust,
+            Capabilities {
+                docker: true,
+                buildx_compose: true,
+                ..Capabilities::default()
+            },
+        ),
+        UnitKind::Rust | UnitKind::Gradle | UnitKind::Node | UnitKind::Bun => (
+            Platform::LinuxX64,
+            trust,
+            Capabilities {
+                docker: true,
+                testcontainers: true,
+                ..Capabilities::default()
+            },
+        ),
+        UnitKind::OpenTofu | UnitKind::Homebrew | UnitKind::Docs => {
+            (Platform::LinuxX64, trust, Capabilities::default())
+        }
+    }
+}
+
+/// Refresh one unit's capabilities from its detected services: a unit with
+/// service containers needs container readiness on top of its kind contract.
+pub(crate) fn refresh_service_capabilities(unit: &mut Unit) {
+    if unit.services.is_empty() {
+        return;
+    }
+    unit.capabilities.docker = true;
+    unit.capabilities.services_with_readiness = true;
+}
+
+/// Scan-default `runs-on` routing per provider. A repo-owned config
+/// overrides per provider; local defaults are disjoint dedicated selectors.
+pub(crate) fn default_selectors() -> crate::provider::SelectorMap {
+    [
+        (
+            ProviderId::GithubHosted,
+            ProviderSelector {
+                runs_on: vec!["ubuntu-24.04".to_owned()],
+            },
+        ),
+        (
+            ProviderId::GithubSelfHosted,
+            ProviderSelector {
+                runs_on: vec!["bastion-scale-set".to_owned()],
+            },
+        ),
+        (
+            ProviderId::Velnor,
+            ProviderSelector {
+                runs_on: vec!["velnor-native".to_owned()],
+            },
+        ),
+    ]
+    .into_iter()
+    .collect()
 }
 
 fn disambiguate_unit_ids(units: &mut [Unit]) {
@@ -214,11 +289,10 @@ impl From<RepositoryShape> for ProjectConfig {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: shape.default_branch,
-            runners: shape.runners,
-            automatic: crate::inferred_automatic(shape.runners),
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
-            velnor_labels: Vec::new(),
+            providers: shape.providers.clone(),
+            automatic_providers: shape.providers.clone(),
+            default_dispatch_providers: shape.providers,
+            selectors: default_selectors(),
             release_enabled: false,
             release_reason: "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy.".to_owned(),
             release: None,
@@ -237,15 +311,9 @@ impl From<RepositoryShape> for ProjectConfig {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            velnor_runner_group: None,
-            velnor_trusted_label: None,
-            velnor_trusted_runner_available: None,
-            pull_request_on_velnor: false,
-            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
-            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
-            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
-            velnor_concurrency_group: None,
-            velnor_serial_stack_groups: false,
+            rust_needs: crate::RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),

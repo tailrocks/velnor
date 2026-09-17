@@ -1,15 +1,13 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/swift-ffi"
 
 [workflow]
-runners = "github"
-github_runner = "ubuntu-24.04"
-macos_runner = "macos-15"
-velnor_labels = ["self-hosted", "example-lane"]
-velnor_trusted_label = "example-trusted"
-velnor_trusted_runner_available = true
+providers = ["github-hosted", "velnor"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
 
 [[declare]]
 primitive = "renovate"
@@ -21,12 +19,11 @@ file = "renovate-validate.yml"
 
 [renovate]
 enabled = true
-reason = "fixture exercises writer lanes"
+reason = "fixture exercises the writer surface"
 schedule = "0 6 * * *"
 token = "GH_RENOVATE_TOKEN"
 config = "renovate.json"
 validate = true
-lanes = "both"
 
 # The Swift client consumes the Rust FFI crate's output; an FFI change must
 # select the Swift unit even though no Swift file changed.

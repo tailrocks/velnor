@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: policy-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  group: velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}-policy
   cancel-in-progress: true
 
 permissions:

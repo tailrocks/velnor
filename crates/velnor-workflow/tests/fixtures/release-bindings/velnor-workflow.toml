@@ -6,18 +6,20 @@
 # fixture-local; no consumer repository is named.
 #
 # The contract lives in `[release]`; the bare `[[declare]]` rows below
-# render both lanes from it with no per-row arguments. The stable
+# render every provider from it with no per-row arguments. The stable
 # publisher takes the drill modes, archive contract, and credential
-# pairing, while the rolling lane additionally binds the trusted producer.
+# pairing, while the rolling preview additionally binds the trusted producer.
 # Publication stays tag-triggered (stable) or admitted-producer-triggered
 # (rolling); `publish` is never a dispatch mode.
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/synthetic-release"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-lane"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
 
 [release]
 enabled = true

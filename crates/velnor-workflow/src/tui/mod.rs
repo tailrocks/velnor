@@ -24,10 +24,11 @@ use termrock::interaction::Outcome;
 use termrock::style::{ColorCapability, DesignSystem};
 use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
+use super::provider::ProviderSet;
 use super::{
     apply_generated_write_plan, generated_files, plan_generated_write, scan_target, Checkout, Cli,
     GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
-    RunnerMode, WriteOutcome,
+    WriteOutcome,
 };
 
 const MIN_WIDTH: u16 = 52;
@@ -505,7 +506,7 @@ impl App {
         };
         let receiver = spawn_scan(
             source,
-            self.cli.runners,
+            self.cli.providers.clone(),
             self.cli.output.clone(),
             self.cli.default_branch.clone(),
         );
@@ -811,7 +812,7 @@ fn required_dependencies(config: &ProjectConfig, selected: &[String], id: &str) 
 
 fn spawn_scan(
     source: RepositorySource,
-    runners: RunnerMode,
+    providers: Option<ProviderSet>,
     output: Option<std::path::PathBuf>,
     default_branch: Option<String>,
 ) -> Receiver<ScanResult> {
@@ -823,7 +824,7 @@ fn spawn_scan(
                 Some(branch) => super::validate_default_branch(branch)?.to_owned(),
                 None => source.default_branch(checkout.path())?,
             };
-            let scanned = scan_target(checkout.path(), runners, &default_branch)?;
+            let scanned = scan_target(checkout.path(), providers, &default_branch)?;
             let output_root = match output.as_deref() {
                 Some(path) => super::resolve_output_path(path)?,
                 None => source.output_root(checkout.path())?,
@@ -845,7 +846,7 @@ pub(super) fn run(cli: &Cli) -> Result<(), GeneratorError> {
     let source = RepositorySource::parse(&cli.target)?;
     let receiver = spawn_scan(
         source,
-        cli.runners,
+        cli.providers.clone(),
         cli.output.clone(),
         cli.default_branch.clone(),
     );
@@ -956,10 +957,6 @@ mod tests {
             watch: Vec::new(),
             pr_commands: vec!["cargo test".to_owned()],
             full_commands: vec!["cargo test --all-targets".to_owned()],
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: dependencies
                 .iter()
                 .map(|dependency| (*dependency).to_owned())
@@ -977,9 +974,10 @@ mod tests {
                 profile: None,
             }),
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::UntrustedOk,
+            platform: crate::provider::Platform::LinuxX64,
+            capabilities: crate::provider::Capabilities::default(),
             workspace_check: false,
-            platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
             env: std::collections::BTreeMap::new(),
@@ -1008,11 +1006,13 @@ mod tests {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
-            runners: crate::RunnerMode::Github,
-            automatic: crate::RunnerMode::Github,
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
-            velnor_labels: Vec::new(),
+            providers: std::collections::BTreeSet::from([
+                crate::provider::ProviderId::GithubHosted,
+            ]),
+            automatic_providers: std::collections::BTreeSet::from([
+                crate::provider::ProviderId::GithubHosted,
+            ]),
+            selectors: crate::scan::default_selectors(),
             release_enabled: true,
             release_reason: String::new(),
             release: None,
@@ -1036,15 +1036,10 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            velnor_runner_group: None,
-            velnor_trusted_label: None,
-            velnor_trusted_runner_available: None,
-            pull_request_on_velnor: false,
-            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
-            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
-            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
-            velnor_concurrency_group: None,
-            velnor_serial_stack_groups: false,
+            default_dispatch_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            rust_needs: crate::RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -1060,7 +1055,7 @@ mod tests {
                 target: ".".to_owned(),
                 default_branch: None,
                 output: None,
-                runners: crate::RunnerMode::Github,
+                providers: None,
                 dry_run: true,
                 check: false,
                 force: false,

@@ -8,8 +8,8 @@ inputs:
   job_label:
     description: Stable Actions job label included in the telemetry record
     required: true
-  ci_lane:
-    description: Lane label (`github` or `velnor`) for cache-outcome classification
+  ci_provider:
+    description: Provider id (`github-hosted`, `github-self-hosted`, or `velnor`) for cache-outcome classification
     required: false
     default: ""
   host_warm_layers:
@@ -58,7 +58,7 @@ runs:
         # runner-owned VELNOR_* timing env instead; keep this name distinct so
         # an empty hosted expression cannot overwrite it.
         VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}
-        VELNOR_CI_LANE: ${{ inputs.ci_lane }}
+        VELNOR_CI_LANE: ${{ inputs.ci_provider }}
         VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}
         VELNOR_RUN_STARTED_AT: ${{ env.VELNOR_RUN_STARTED_AT }}
         VELNOR_JOB_QUEUED_AT: ${{ env.VELNOR_JOB_QUEUED_AT }}

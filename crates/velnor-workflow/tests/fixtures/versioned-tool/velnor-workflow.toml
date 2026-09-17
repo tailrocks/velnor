@@ -4,7 +4,7 @@
 # This file is a test fixture (see `versioned_tool_renders_end_to_end`): the
 # generator must accept it and render the five-job version graph — a PR-only
 # version gate, a manifest-version resolver, a published-reuse assert, a
-# target-by-lane matrix build, and a mutexed immutable publish — into the
+# target-by-provider matrix build, and a mutexed immutable publish — into the
 # row's own file with the row's own workflow name. All names are
 # fixture-local; no consumer repository is named.
 #
@@ -12,13 +12,15 @@
 # (`check-example-tool-version`, `assert-example-tool-published`,
 # `build-example-tool`): generic code renders placement, gates, fetch depth,
 # and failure propagation only, never the product checks or the compile.
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/synthetic-release"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-lane"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
 
 [[declare]]
 primitive = "release"

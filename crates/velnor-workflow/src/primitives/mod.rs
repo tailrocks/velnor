@@ -15,10 +15,10 @@ mod cache;
 pub(crate) mod check_profiles;
 pub(crate) mod docs_site;
 mod ir;
-mod lanes;
 mod pipeline;
 mod plan;
 pub(crate) mod prepared_tools;
+mod providers;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
@@ -31,18 +31,19 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::config::RepoGenerationConfig;
+use crate::provider::ProviderId;
 use crate::scan::RepositoryShape;
 use crate::{
-    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode,
-    Unit, UnitKind,
+    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, Unit,
+    UnitKind,
 };
 
 pub(crate) use ir::{
     checks_env, config_snapshot_identity, default_branch_push_cache_save_expression,
     render_cargo_source_preparation, render_pinned_toolchain_steps,
-    render_retained_output_cache_note, render_velnor_runner_identity_step,
-    trusted_cache_save_expression, validate_nextest_tools_are_locked, LaneAdmission, WorkflowIr,
-    WorkflowKind, GITHUB_WORKFLOW_BYTE_LIMIT,
+    render_retained_output_cache_note, trusted_cache_save_expression,
+    validate_nextest_tools_are_locked, ProviderAdmission, WorkflowIr, WorkflowKind,
+    GITHUB_WORKFLOW_BYTE_LIMIT,
 };
 
 #[cfg(test)]
@@ -54,7 +55,7 @@ pub(crate) const DEFAULT_UNIT_TIMEOUT_MINUTES: u32 = 45;
 /// A primitive id the registry knows how to build.
 pub(crate) const AFFECTED_PLAN: &str = "affected-plan";
 pub(crate) const UNIT_AGGREGATION: &str = "unit-aggregation";
-pub(crate) const LANE_MATRIX: &str = "lane-matrix";
+pub(crate) const PROVIDER_MATRIX: &str = "provider-matrix";
 pub(crate) const CACHE_CONTRACT: &str = "cache-contract";
 pub(crate) const WATCH_GRAPH: &str = "watch-graph";
 pub(crate) const REGEN_GATE: &str = "regen-gate";
@@ -154,15 +155,15 @@ impl Pins {
     }
 }
 
-/// One lane job of a nested unit workflow.
+/// One provider job of a nested unit workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LaneJob {
-    pub(crate) lane: RunnerMode,
-    /// The hosted lane is the only lane allowed to save a cache entry: entries
-    /// are written from trusted events only.
+pub(crate) struct ProviderJob {
+    pub(crate) provider: ProviderId,
+    /// The hosted provider is the only one allowed to save a cache entry:
+    /// entries are written from trusted events only.
     pub(crate) cache_save: bool,
-    /// The Velnor lane carries the generated default-branch trusted-event
-    /// gate. Persistent cache writes remain restricted to trusted events.
+    /// Local providers carry the generated trusted-event gate. Persistent
+    /// cache writes remain restricted to trusted events.
     pub(crate) trusted: bool,
 }
 
@@ -311,74 +312,51 @@ pub(crate) fn validate_mutable_mount_seed(unit: &Unit) -> Result<(), GeneratorEr
     }
     let injection = format!("--build-context {MUTABLE_MOUNT_SEED_CONTEXT}=");
     let extraction = format!("--target {MUTABLE_MOUNT_EXPORT_TARGET}");
-    let github_full = lane_commands(unit.github_full_commands.as_deref(), &unit.full_commands);
-    if !github_full
+    if !unit
+        .full_commands
         .iter()
         .any(|command| command.contains(&injection))
     {
         return Err(GeneratorError::usage(format!(
-            "unit `{}` declares a mutable mount seed, but no hosted full command injects it with \
+            "unit `{}` declares a mutable mount seed, but no full command injects it with \
              `--build-context {MUTABLE_MOUNT_SEED_CONTEXT}=<dir>`; a seed the build never reads \
              is declared persistence that does not exist",
             unit.id
         )));
     }
-    if !github_full
+    if !unit
+        .full_commands
         .iter()
         .any(|command| command.contains(&extraction) && command.contains("--output type=local"))
     {
         return Err(GeneratorError::usage(format!(
-            "unit `{}` declares a mutable mount seed, but no hosted full command extracts the \
+            "unit `{}` declares a mutable mount seed, but no full command extracts the \
              updated state with `--target {MUTABLE_MOUNT_EXPORT_TARGET}` and `--output \
              type=local`; without extraction the seed can only ever go cold",
             unit.id
         )));
     }
-    for (lane, commands, allow_injection) in [
-        (
-            "hosted pull-request",
-            lane_commands(unit.github_pr_commands.as_deref(), &unit.pr_commands),
-            true,
-        ),
-        (
-            "self-hosted",
-            lane_commands(unit.velnor_full_commands.as_deref(), &unit.full_commands),
-            false,
-        ),
-        (
-            "self-hosted pull-request",
-            lane_commands(unit.velnor_pr_commands.as_deref(), &unit.pr_commands),
-            false,
-        ),
-    ] {
-        if commands.iter().any(|command| command.contains(&extraction)) {
-            return Err(GeneratorError::usage(format!(
-                "unit `{}` runs `{lane}` commands that reference the mutable mount seed export \
-                 target; extraction is restricted to trusted hosted full builds",
-                unit.id
-            )));
-        }
-        if !allow_injection && commands.iter().any(|command| command.contains(&injection)) {
-            return Err(GeneratorError::usage(format!(
-                "unit `{}` runs `{lane}` commands that reference the mutable mount seed context; \
-                 the generator restores and injects the seed on the hosted lane only",
-                unit.id
-            )));
-        }
+    // Every provider runs the same commands, so the seed lifecycle is one
+    // contract: extraction happens on trusted hosted full builds, and the
+    // pull-request commands never touch the export target.
+    if unit
+        .pr_commands
+        .iter()
+        .any(|command| command.contains(&extraction))
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` runs pull-request commands that reference the mutable mount seed export \
+             target; extraction is restricted to trusted hosted full builds",
+            unit.id
+        )));
     }
     Ok(())
-}
-
-/// The commands a lane runs: the lane-specific override when declared, the
-/// base vector otherwise.
-fn lane_commands<'a>(lane_override: Option<&'a [String]>, base: &'a [String]) -> &'a [String] {
-    lane_override.unwrap_or(base)
 }
 
 /// Everything a declared unit pipeline may tune for one unit's surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UnitContract {
-    pub(crate) lanes: Vec<LaneJob>,
+    pub(crate) providers: Vec<ProviderJob>,
     pub(crate) timeout_minutes: u32,
     pub(crate) cache: CacheBackend,
     /// Cache entries are saved on trusted events only, which is a property of
@@ -470,7 +448,7 @@ pub(crate) struct RenderCtx<'a> {
     #[expect(dead_code, reason = "primitives render pins through the lane context")]
     pub(crate) pins: &'a Pins,
     /// The resolved lane matrix and the toolchain environment behind it.
-    pub(crate) lanes: &'a lanes::ResolvedLanes,
+    pub(crate) providers: &'a providers::ResolvedProviders,
     /// The resolved cache contract.
     pub(crate) cache: &'a cache::ResolvedCache,
     /// The CI graph nodes contributed by the primitives rendered so far.
@@ -626,89 +604,6 @@ pub(crate) fn json_string(value: &str) -> String {
     out
 }
 
-/// A JSON label array for a dispatch-selected velnor leg.
-pub(crate) fn lanes_labels_json(labels: &[String]) -> String {
-    let mut out = String::from("[");
-    for (index, label) in labels.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(&json_string(label));
-    }
-    out.push(']');
-    out
-}
-
-/// The `workflow_dispatch` lanes input block for a default lane: a choice
-/// between the default leg and its alternate. There is deliberately no
-/// `both`: a dispatch runs one leg, and a both-alias would silently behave
-/// as one leg while promising two.
-pub(crate) fn lanes_dispatch_inputs(default: RunnerMode) -> &'static str {
-    match default {
-        RunnerMode::Velnor => "\n    inputs:\n      lanes:\n        description: velnor (default) | github\n        type: choice\n        default: velnor\n        options: [velnor, github]",
-        RunnerMode::Github | RunnerMode::Both => "\n    inputs:\n      lanes:\n        description: github (default) | velnor\n        type: choice\n        default: github\n        options: [github, velnor]",
-    }
-}
-
-/// The lanes input entry without its `inputs:` wrapper, for triggers that
-/// already declare inputs: the lanes entry renders first, above the
-/// family's own inputs.
-pub(crate) fn lanes_input_entry(default: RunnerMode) -> &'static str {
-    match default {
-        RunnerMode::Velnor => "      lanes:\n        description: velnor (default) | github\n        type: choice\n        default: velnor\n        options: [velnor, github]\n",
-        RunnerMode::Github | RunnerMode::Both => "      lanes:\n        description: github (default) | velnor\n        type: choice\n        default: github\n        options: [github, velnor]\n",
-    }
-}
-
-/// Admit a `lanes_input` declaration: the repository must declare both
-/// lanes, name velnor labels to select, and route them by labels alone — a
-/// dispatch must never select an undeclared lane or silently drop a
-/// declared runner group.
-pub(crate) fn admit_lanes_input(
-    config: &ProjectConfig,
-    family: &str,
-) -> Result<(), GeneratorError> {
-    if config.runners != RunnerMode::Both {
-        return Err(GeneratorError::usage(format!(
-            "`{family}` `lanes_input` needs `[workflow] runners = \"both\"`: a dispatch must never select an undeclared lane"
-        )));
-    }
-    if config.velnor_runner_group.is_some() {
-        return Err(GeneratorError::usage(format!(
-            "`{family}` `lanes_input` cannot route a declared runner group: the dispatch expression selects labels only"
-        )));
-    }
-    if config.velnor_labels.is_empty() {
-        return Err(GeneratorError::usage(format!(
-            "`{family}` `lanes_input` needs `[workflow] velnor_labels`: a dispatch to velnor needs labels to select"
-        )));
-    }
-    Ok(())
-}
-
-/// A dispatch-conditional `runs-on`: the default leg everywhere except a
-/// manual dispatch that names the other lane. Non-dispatch events keep the
-/// static default exactly, so scheduled runs and pushes never drift lanes.
-pub(crate) fn lanes_runs_on(
-    config: &ProjectConfig,
-    family: &str,
-    default: RunnerMode,
-) -> Result<String, GeneratorError> {
-    admit_lanes_input(config, family)?;
-    match default {
-        RunnerMode::Velnor => Ok(format!(
-            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && {} || fromJSON('{}') }}}}",
-            json_string(&config.github_runner),
-            lanes_labels_json(&config.velnor_labels),
-        )),
-        RunnerMode::Github | RunnerMode::Both => Ok(format!(
-            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{}') || {} }}}}",
-            lanes_labels_json(&config.velnor_labels),
-            json_string(&config.github_runner),
-        )),
-    }
-}
-
 /// The unit kinds each per-unit pipeline primitive renders, in registry order.
 pub(crate) fn pipeline_id(kind: UnitKind) -> &'static str {
     match kind {
@@ -729,7 +624,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
     vec![
         Box::new(plan::AffectedPlan),
         Box::new(aggregate::UnitAggregation),
-        Box::new(lanes::LaneMatrix),
+        Box::new(providers::ProviderMatrix),
         Box::new(cache::CacheContract),
         Box::new(watch::WatchGraph),
         Box::new(regen::RegenGate),
@@ -847,7 +742,7 @@ pub(crate) fn generate(
     // Unit contracts, in declaration order, before any file is rendered: the
     // watch graph and the regeneration gate define what a unit is for this
     // surface, and the project config records the same result.
-    let lanes = lanes::resolve(config, &rows)?;
+    let providers = providers::resolve(config, &rows)?;
     let mut units = config.units.clone();
     for row in rows.iter().filter(|row| row.unit_contract) {
         let primitive = lookup(&row.primitive)?;
@@ -871,7 +766,7 @@ pub(crate) fn generate(
                 row.file.as_deref(),
                 primitive.id(),
                 &pins,
-                &lanes,
+                &providers,
                 &cache,
                 &[],
                 &BTreeMap::new(),
@@ -882,7 +777,7 @@ pub(crate) fn generate(
     }
     let mut resolved = config.clone();
     resolved.units.clone_from(&units);
-    let lanes = lanes::resolve(&resolved, &rows)?;
+    let providers = providers::resolve(&resolved, &rows)?;
 
     // Per-unit pipelines, then the plan, then the aggregates that compose both.
     let mut files = BTreeMap::new();
@@ -904,7 +799,7 @@ pub(crate) fn generate(
                 row.file.as_deref(),
                 primitive.id(),
                 &pins,
-                &lanes,
+                &providers,
                 &cache,
                 &nodes,
                 &contracts,
@@ -1007,7 +902,7 @@ fn ctx<'a>(
     file: Option<&'a str>,
     family: &'static str,
     pins: &'a Pins,
-    lanes: &'a lanes::ResolvedLanes,
+    providers: &'a providers::ResolvedProviders,
     cache: &'a cache::ResolvedCache,
     nodes: &'a [GraphNode],
     contracts: &'a BTreeMap<String, UnitContract>,
@@ -1021,7 +916,7 @@ fn ctx<'a>(
         file,
         family,
         pins,
-        lanes,
+        providers,
         cache,
         nodes,
         contracts,
@@ -1564,7 +1459,7 @@ mod tests {
             ids.push(pipeline.to_owned());
         }
         for contract in [
-            LANE_MATRIX,
+            PROVIDER_MATRIX,
             CACHE_CONTRACT,
             AFFECTED_PLAN,
             UNIT_AGGREGATION,
@@ -1644,40 +1539,12 @@ mod tests {
         assert!(error.contains("which the scan did not produce"), "{error}");
     }
 
-    /// The lanes dispatch block offers exactly the two legs around the
-    /// default: no `both` alias that would silently behave as one leg.
-    #[test]
-    fn lanes_dispatch_inputs_offer_exactly_two_legs() {
-        for (default, name, alternate) in [
-            (RunnerMode::Github, "github", "velnor"),
-            (RunnerMode::Velnor, "velnor", "github"),
-        ] {
-            let inputs = lanes_dispatch_inputs(default);
-            assert!(
-                inputs.contains(&format!("description: {name} (default) | {alternate}"))
-                    && inputs.contains(&format!("default: {name}"))
-                    && inputs.contains("type: choice"),
-                "{inputs}"
-            );
-            assert!(!inputs.contains("both"), "{inputs}");
-            let entry = lanes_input_entry(default);
-            assert!(
-                entry.contains(&format!("description: {name} (default) | {alternate}"))
-                    && !entry.contains("both"),
-                "{entry}"
-            );
-        }
-    }
-
     /// Expression-embedded strings cannot break out of the single-quoted
     /// `fromJSON`: quotes, backslashes, and controls all escape.
     #[test]
     fn json_string_escapes_expression_breakouts() {
         assert_eq!(json_string("ubuntu-24.04"), "\"ubuntu-24.04\"");
-        assert_eq!(
-            lanes_labels_json(&["self-hosted".to_owned(), "o'brien".to_owned()]),
-            "[\"self-hosted\",\"o\\u0027brien\"]"
-        );
+        assert_eq!(json_string("o'brien"), "\"o\\u0027brien\"");
         assert_eq!(
             json_string("a\"b\\c'd"),
             "\"a\\\"b\\\\c\\u0027d\"",

@@ -13,14 +13,14 @@
 //! `workflow_dispatch`): the file then renders those triggers alongside the
 //! shared cron, and profiles in an evented file may omit `schedule` entirely
 //! for a cron-less evented file. One file carries one trigger set — scheduled
-//! and schedule-less profiles never mix in one file — and lanes stay
-//! per-profile: each job runs on its own profile's lane exactly as in a
+//! and schedule-less profiles never mix in one file — and runners stay
+//! per-profile: each job runs on its own profile's runner exactly as in a
 //! cron-only file, because triggers change when a job runs, never where.
 //!
 //! Why a file, not a CI unit: a scheduled check is a whole-repo compliance
 //! probe that needs its own required status context plus main-branch runs
 //! independent of affected-unit selection. A CI unit renders only when the
-//! scan selects it and reports under unit lanes, so folding a repo-wide gate
+//! scan selects it and reports under unit jobs, so folding a repo-wide gate
 //! into a unit would make compliance conditional on selection and lose the
 //! standalone required signal. Event triggers therefore live on the
 //! scheduled-checks file, not on a unit.
@@ -29,10 +29,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{lanes_dispatch_inputs, lanes_runs_on, Args, Primitive, RenderCtx, Rendered};
+use super::{Args, Primitive, RenderCtx, Rendered};
 use crate::{
-    velnor_runner, velnor_runner_group, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError,
-    ProjectConfig, RunnerMode, GENERATED_HEADER,
+    provider::ProviderId, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError, ProjectConfig,
+    GENERATED_HEADER, MACOS_HOSTED_RUNS_ON,
 };
 
 /// Default `timeout-minutes` for a scheduled-check job.
@@ -52,7 +52,7 @@ impl Primitive for ScheduledChecks {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &["name", "profiles", "events", "lanes_input"]
+        &["name", "profiles", "events"]
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
@@ -60,15 +60,8 @@ impl Primitive for ScheduledChecks {
         let label = if file.is_empty() { ctx.family } else { file };
         let profiles = select_profiles(&ctx.config.check_profiles, args, label)?;
         let events = select_events(args, label)?;
-        let lanes_input = args.flag("lanes_input")?;
-        let content = render_checks_file(
-            ctx.config,
-            file,
-            args.string("name")?,
-            &profiles,
-            &events,
-            lanes_input,
-        )?;
+        let content =
+            render_checks_file(ctx.config, file, args.string("name")?, &profiles, &events)?;
         render_file(ctx, content)
     }
 }
@@ -318,7 +311,6 @@ fn render_checks_file(
     name: Option<String>,
     profiles: &[&CheckProfileSpec],
     events: &[String],
-    lanes_input: bool,
 ) -> Result<String, GeneratorError> {
     let stem = file.strip_suffix(".yml").unwrap_or(file);
     let name = name.unwrap_or_else(|| stem.to_owned());
@@ -326,12 +318,6 @@ fn render_checks_file(
         .first()
         .map(|profile| profile.schedule.as_str())
         .unwrap_or_default();
-    let label = if file.is_empty() {
-        super::SCHEDULED_CHECKS
-    } else {
-        file
-    };
-    let lanes = lanes_override(config, label, profiles, lanes_input)?;
     let mut output = String::from(GENERATED_HEADER);
     let _ = writeln!(output, "name: {}", yaml_scalar(&name));
     let _ = writeln!(
@@ -348,9 +334,6 @@ fn render_checks_file(
         let _ = writeln!(output, "    - cron: {}", yaml_scalar(schedule));
     }
     output.push_str("  workflow_dispatch:");
-    if let Some((default, _)) = &lanes {
-        output.push_str(lanes_dispatch_inputs(*default));
-    }
     output.push_str("\n\npermissions:\n  contents: read\n\nconcurrency:\n");
     let _ = writeln!(
         output,
@@ -369,71 +352,9 @@ fn render_checks_file(
         );
     }
     for profile in profiles {
-        render_profile_job(
-            &mut output,
-            config,
-            profile,
-            lanes.as_ref().map(|(_, runs_on)| runs_on.as_str()),
-        )?;
+        render_profile_job(&mut output, config, profile)?;
     }
     Ok(output)
-}
-
-/// The resolved lanes override for a file: the shared dispatch default plus
-/// the conditional `runs-on` every dispatchable job renders. `None` without
-/// the flag, so the file renders exactly as before.
-fn lanes_override(
-    config: &ProjectConfig,
-    file: &str,
-    profiles: &[&CheckProfileSpec],
-    lanes_input: bool,
-) -> Result<Option<(RunnerMode, String)>, GeneratorError> {
-    if !lanes_input {
-        return Ok(None);
-    }
-    let default = lanes_default_lane(profiles, file)?;
-    let runs_on = lanes_runs_on(config, file, default)?;
-    Ok(Some((default, runs_on)))
-}
-
-/// The shared dispatch lane for a `lanes_input` file: every non-macos profile
-/// must declare the same lane, which becomes the input default and the
-/// conditional's static leg. macos profiles always render static runs-on, so
-/// they never constrain the default. Like the other coherence rules, a mixed
-/// file fails closed naming the file instead of dispatching half its jobs.
-fn lanes_default_lane(
-    profiles: &[&CheckProfileSpec],
-    file: &str,
-) -> Result<RunnerMode, GeneratorError> {
-    let mut default: Option<(RunnerMode, &str, &str)> = None;
-    for profile in profiles {
-        let lane = match profile.runner.as_str() {
-            "github" => RunnerMode::Github,
-            "velnor" => RunnerMode::Velnor,
-            "macos" => continue,
-            runner => {
-                return Err(GeneratorError::usage(format!(
-                    "check profile `{}` runs on `{runner}`, which is not a lane; use github, macos, or velnor",
-                    profile.id
-                )));
-            }
-        };
-        match default {
-            None => default = Some((lane, profile.id.as_str(), profile.runner.as_str())),
-            Some((first, _, _)) if first == lane => {}
-            Some((_, first_id, first_runner)) => {
-                return Err(GeneratorError::usage(format!(
-                    "`{file}` declares `lanes_input` but mixes dispatch lanes: `{first_id}` runs on {first_runner} while `{}` runs on {}; one file selects one lane",
-                    profile.id, profile.runner
-                )));
-            }
-        }
-    }
-    default.map(|(lane, _, _)| lane).ok_or_else(|| {
-        GeneratorError::usage(format!(
-            "`{file}` declares `lanes_input` but every profile runs on macos, which never dispatches across lanes; declare a github or velnor profile or drop `lanes_input`"
-        ))
-    })
 }
 
 /// The cron-only workflow content for one row, without file-level events.
@@ -445,29 +366,23 @@ fn render_scheduled_checks(
     name: Option<String>,
     profiles: &[&CheckProfileSpec],
 ) -> Result<String, GeneratorError> {
-    render_checks_file(config, file, name, profiles, &[], false)
+    render_checks_file(config, file, name, profiles, &[])
 }
 
-/// One profile job: the lane it runs on, the timeout it holds, the threshold
-/// environment its tasks read, and the steps that check out, provision tools,
-/// run the named tasks, and upload the declared artifacts.
+/// One profile job: the runner it runs on, the timeout it holds, the
+/// threshold environment its tasks read, and the steps that check out,
+/// provision tools, run the named tasks, and upload the declared artifacts.
 fn render_profile_job(
     output: &mut String,
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
-    dispatch_runs_on: Option<&str>,
 ) -> Result<(), GeneratorError> {
     let _ = writeln!(output, "  {}:", profile.id);
     let _ = writeln!(output, "    name: {}", yaml_scalar(&profile.name));
     if !profile.needs.is_empty() {
         let _ = writeln!(output, "    needs: [{}]", profile.needs.join(", "));
     }
-    // A dispatch selects the github/velnor lane only: macos profiles always
-    // render their static label, never the conditional.
-    let runs_on = match (dispatch_runs_on, profile.runner.as_str()) {
-        (Some(conditional), "github" | "velnor") => conditional.to_owned(),
-        _ => profile_runs_on(config, profile)?,
-    };
+    let runs_on = profile_runs_on(config, profile)?;
     let _ = writeln!(output, "    runs-on: {runs_on}");
     let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
     if profile.advisory {
@@ -494,29 +409,20 @@ fn render_profile_job(
     Ok(())
 }
 
-/// The lane selector for one profile: the hosted Linux label, the hosted
-/// Apple label, or the repository's own Velnor labels.
+/// The runner selector for one profile: the hosted selector, the fixed
+/// GitHub-owned Apple image, or the Velnor selector.
 fn profile_runs_on(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
 ) -> Result<String, GeneratorError> {
     match profile.runner.as_str() {
-        "github" => Ok(yaml_scalar(&config.github_runner)),
-        "macos" => Ok(yaml_scalar(&config.macos_runner)),
-        "velnor" => {
-            if config.velnor_labels.is_empty() {
-                return Err(GeneratorError::usage(format!(
-                    "check profile `{}` runs on velnor, but [workflow] velnor_labels names no runner labels",
-                    profile.id
-                )));
-            }
-            Ok(velnor_runner(
-                &config.velnor_labels,
-                velnor_runner_group(config),
-            ))
-        }
+        "github" => crate::provider::runs_on_for(&config.selectors, ProviderId::GithubHosted)
+            .map(crate::runs_on_labels_yaml),
+        "macos" => Ok(yaml_scalar(MACOS_HOSTED_RUNS_ON)),
+        "velnor" => crate::provider::runs_on_for(&config.selectors, ProviderId::Velnor)
+            .map(crate::runs_on_labels_yaml),
         runner => Err(GeneratorError::usage(format!(
-            "check profile `{}` runs on `{runner}`, which is not a lane; use github, macos, or velnor",
+            "check profile `{}` runs on `{runner}`, which is not a runner; use github, macos, or velnor",
             profile.id
         ))),
     }
@@ -616,6 +522,17 @@ mod tests {
         }
     }
 
+    fn velnor_test_selectors() -> crate::provider::SelectorMap {
+        let mut selectors = crate::scan::default_selectors();
+        selectors.insert(
+            crate::provider::ProviderId::Velnor,
+            crate::provider::ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned(), "example-lane".to_owned()],
+            },
+        );
+        selectors
+    }
+
     fn profile_config(profiles: Vec<CheckProfileSpec>) -> ProjectConfig {
         ProjectConfig {
             repository: String::new(),
@@ -631,11 +548,10 @@ mod tests {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
-            runners: crate::RunnerMode::Both,
-            automatic: crate::RunnerMode::Both,
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
-            velnor_labels: vec!["self-hosted".to_owned(), "example-lane".to_owned()],
+            providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            automatic_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            default_dispatch_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            selectors: velnor_test_selectors(),
             release_enabled: false,
             release_reason: String::new(),
             release: None,
@@ -655,15 +571,9 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            velnor_runner_group: None,
-            velnor_trusted_label: None,
-            velnor_trusted_runner_available: None,
-            pull_request_on_velnor: false,
-            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
-            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
-            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
-            velnor_concurrency_group: None,
-            velnor_serial_stack_groups: false,
+            rust_needs: crate::RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: true,
             mise_lock_keys: std::collections::BTreeSet::new(),
@@ -706,7 +616,7 @@ mod tests {
         );
         let mut required = String::new();
         must(
-            render_profile_job(&mut required, &config, &config.check_profiles[0], None),
+            render_profile_job(&mut required, &config, &config.check_profiles[0]),
             "render the required job",
         );
         assert!(
@@ -715,7 +625,7 @@ mod tests {
         );
         let mut advisory = String::new();
         must(
-            render_profile_job(&mut advisory, &config, &config.check_profiles[1], None),
+            render_profile_job(&mut advisory, &config, &config.check_profiles[1]),
             "render the advisory job",
         );
         assert!(
@@ -812,7 +722,7 @@ mod tests {
         assert!(workflow.contains("mise --yes install"), "{workflow}");
         let mut bare_job = String::new();
         must(
-            render_profile_job(&mut bare_job, &config, &config.check_profiles[2], None),
+            render_profile_job(&mut bare_job, &config, &config.check_profiles[2]),
             "render the tool-less Velnor job",
         );
         assert!(
@@ -905,44 +815,49 @@ mod tests {
     }
 
     #[test]
-    fn velnor_lane_needs_labels_and_renders_them() {
+    fn velnor_runner_needs_a_selector_and_renders_it() {
         let mut fleet = profile("fleet");
         fleet.runner = "velnor".to_owned();
         let config = profile_config(vec![fleet.clone()]);
         let runs_on = must(
             profile_runs_on(&config, &fleet),
-            "render the Velnor lane selector",
+            "render the Velnor selector",
         );
         assert_eq!(runs_on, "[self-hosted, example-lane]");
 
-        let mut unlabeled = profile_config(Vec::new());
-        unlabeled.velnor_labels = Vec::new();
+        let mut unrouted = profile_config(Vec::new());
+        unrouted
+            .selectors
+            .remove(&crate::provider::ProviderId::Velnor);
         let error = must_fail(
-            profile_runs_on(&unlabeled, &fleet),
-            "a Velnor profile without labels must fail",
+            profile_runs_on(&unrouted, &fleet),
+            "a Velnor profile without a selector must fail",
         );
-        assert!(error.to_string().contains("velnor_labels"), "{error}");
+        assert!(error.to_string().contains("velnor"), "{error}");
     }
 
     #[test]
-    fn runner_selection_covers_hosted_lanes_and_refuses_unknown() {
+    fn runner_selection_covers_hosted_runners_and_refuses_unknown() {
         let config = profile_config(Vec::new());
         let hosted = profile("hosted");
         assert_eq!(
-            must(profile_runs_on(&config, &hosted), "render the hosted lane"),
+            must(
+                profile_runs_on(&config, &hosted),
+                "render the hosted runner"
+            ),
             "ubuntu-24.04"
         );
         let mut apple = profile("apple");
         apple.runner = "macos".to_owned();
         assert_eq!(
-            must(profile_runs_on(&config, &apple), "render the Apple lane"),
+            must(profile_runs_on(&config, &apple), "render the Apple runner"),
             "macos-15"
         );
         let mut unknown = profile("unknown");
         unknown.runner = "planetary".to_owned();
         let error = must_fail(
             profile_runs_on(&config, &unknown),
-            "an unknown lane must fail",
+            "an unknown runner must fail",
         );
         assert!(error.to_string().contains("planetary"), "{error}");
     }
@@ -993,7 +908,7 @@ mod tests {
         events: &[String],
     ) -> String {
         must(
-            render_checks_file(config, "scheduled-daily.yml", name, profiles, events, false),
+            render_checks_file(config, "scheduled-daily.yml", name, profiles, events),
             "render scheduled checks",
         )
     }
@@ -1218,13 +1133,6 @@ mod tests {
         );
     }
 
-    fn render_with_lanes(
-        config: &ProjectConfig,
-        profiles: &[&CheckProfileSpec],
-    ) -> Result<String, GeneratorError> {
-        render_checks_file(config, "scheduled-daily.yml", None, profiles, &[], true)
-    }
-
     fn select_all<'a>(config: &'a ProjectConfig, args: &Args<'_>) -> Vec<&'a CheckProfileSpec> {
         must(
             select_profiles(&config.check_profiles, args, "scheduled-daily.yml"),
@@ -1233,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_lanes_input_renders_no_lanes_surface() {
+    fn scheduled_checks_dispatch_carries_no_provider_surface() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
         let map = args_for("");
@@ -1243,168 +1151,25 @@ mod tests {
             workflow.contains("  workflow_dispatch:\n\npermissions:"),
             "the dispatch trigger stays bare: {workflow}"
         );
-        for marker in ["lanes:", "inputs.lanes", "fromJSON"] {
+        for marker in [concat!("inputs", ".lanes"), "inputs.providers", "fromJSON"] {
             assert!(
                 !workflow.contains(marker),
-                "an undeclared lanes input renders nothing: {marker} in {workflow}"
+                "scheduled checks render no dispatch override: {marker} in {workflow}"
             );
         }
         assert!(
             workflow.contains("    runs-on: ubuntu-24.04"),
-            "the job stays on its static lane: {workflow}"
+            "the job stays on its static runner: {workflow}"
         );
     }
 
     #[test]
-    fn lanes_input_renders_homogeneous_github_dispatch_file() {
-        let smoke = profile("smoke");
-        let load = profile("load");
-        let config = profile_config(vec![smoke, load]);
-        let map = args_for("lanes_input = true");
-        let args = Args(&map);
+    fn lanes_input_argument_is_rejected() {
+        let schema = ScheduledChecks.schema();
         assert!(
-            must(args.flag("lanes_input"), "read the lanes flag"),
-            "the row declares the lanes input"
+            !schema.contains(&"lanes_input"),
+            "the provider schema accepts no lanes input: {}",
+            schema.join(", ")
         );
-        let selected = select_all(&config, &args);
-        let workflow = must(
-            render_with_lanes(&config, &selected),
-            "render the lanes file",
-        );
-        assert!(
-            workflow.contains(
-                "  workflow_dispatch:\n    inputs:\n      lanes:\n        description: github (default) | velnor\n        type: choice\n        default: github\n        options: [github, velnor]\n"
-            ),
-            "the dispatch carries the github-default lanes choice: {workflow}"
-        );
-        assert_eq!(
-            workflow.matches("inputs.lanes == 'velnor'").count(),
-            2,
-            "every job dispatches across lanes: {workflow}"
-        );
-        for job in ["  smoke:\n", "  load:\n"] {
-            assert_eq!(
-                workflow.matches(job).count(),
-                1,
-                "one conditional job per profile, never per-lane legs: {workflow}"
-            );
-        }
-        for marker in ["(Velnor)", "(GitHub)", "matrix"] {
-            assert!(
-                !workflow.contains(marker),
-                "no lane-suffixed legs or fan-out: {marker} in {workflow}"
-            );
-        }
-    }
-
-    #[test]
-    fn lanes_input_renders_velnor_default_for_velnor_files() {
-        let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
-        let mut sweep = profile("sweep");
-        sweep.runner = "velnor".to_owned();
-        let config = profile_config(vec![fleet, sweep]);
-        let map = args_for("lanes_input = true");
-        let args = Args(&map);
-        let selected = select_all(&config, &args);
-        let workflow = must(
-            render_with_lanes(&config, &selected),
-            "render the lanes file",
-        );
-        assert!(
-            workflow.contains(
-                "      lanes:\n        description: velnor (default) | github\n        type: choice\n        default: velnor\n        options: [velnor, github]\n"
-            ),
-            "the dispatch carries the velnor-default lanes choice: {workflow}"
-        );
-        assert_eq!(
-            workflow.matches("inputs.lanes == 'github'").count(),
-            2,
-            "every job dispatches across lanes: {workflow}"
-        );
-    }
-
-    #[test]
-    fn lanes_input_leaves_macos_jobs_static() {
-        let smoke = profile("smoke");
-        let mut apple = profile("apple");
-        apple.runner = "macos".to_owned();
-        let config = profile_config(vec![smoke, apple]);
-        let map = args_for("lanes_input = true");
-        let args = Args(&map);
-        let selected = select_all(&config, &args);
-        let workflow = must(
-            render_with_lanes(&config, &selected),
-            "render the lanes file",
-        );
-        assert!(
-            workflow.contains("default: github"),
-            "the dispatchable lane sets the default: {workflow}"
-        );
-        assert!(
-            workflow.contains("    runs-on: macos-15"),
-            "the macos job keeps its static label: {workflow}"
-        );
-        assert_eq!(
-            workflow.matches("inputs.lanes").count(),
-            1,
-            "only the dispatchable job threads the conditional: {workflow}"
-        );
-    }
-
-    #[test]
-    fn lanes_input_refuses_mixed_dispatch_lanes() {
-        let smoke = profile("smoke");
-        let mut fleet = profile("fleet");
-        fleet.runner = "velnor".to_owned();
-        let config = profile_config(vec![smoke, fleet]);
-        let map = args_for("lanes_input = true");
-        let args = Args(&map);
-        let selected = select_all(&config, &args);
-        let error = must_fail(
-            render_with_lanes(&config, &selected),
-            "mixed dispatch lanes must fail the file",
-        );
-        assert!(
-            error.to_string().contains("scheduled-daily.yml"),
-            "the error names the file: {error}"
-        );
-        assert!(error.to_string().contains("smoke"), "{error}");
-        assert!(error.to_string().contains("fleet"), "{error}");
-        assert!(error.to_string().contains("one lane"), "{error}");
-    }
-
-    #[test]
-    fn lanes_input_needs_a_dispatchable_profile() {
-        let mut apple = profile("apple");
-        apple.runner = "macos".to_owned();
-        let config = profile_config(vec![apple]);
-        let map = args_for("lanes_input = true");
-        let args = Args(&map);
-        let selected = select_all(&config, &args);
-        let error = must_fail(
-            render_with_lanes(&config, &selected),
-            "a macos-only file must fail the lanes input",
-        );
-        assert!(
-            error.to_string().contains("scheduled-daily.yml"),
-            "the error names the file: {error}"
-        );
-        assert!(error.to_string().contains("macos"), "{error}");
-    }
-
-    #[test]
-    fn lanes_input_needs_both_lanes() {
-        let smoke = profile("smoke");
-        let mut config = profile_config(vec![smoke]);
-        config.runners = crate::RunnerMode::Github;
-        let map = args_for("lanes_input = true");
-        let args = Args(&map);
-        let selected = select_all(&config, &args);
-        let error = must_fail(
-            render_with_lanes(&config, &selected),
-            "a single-lane repository must fail admission",
-        );
-        assert!(error.to_string().contains("both"), "{error}");
     }
 }

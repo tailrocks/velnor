@@ -62,8 +62,8 @@ fn write_docs_fixture(root: &Path, schedule: bool) {
     fs::write(
         root.join(".github-gen/velnor-workflow.toml"),
         format!(
-            "schema = 1\n\n[generator]\nrepository = \"example/docs-fixture\"\n\n\
-             [workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/docs-fixture\"\n\n\
+             [workflow]\nproviders = [\"github-hosted\"]\n\n\
              [docs]\nenabled = true\nreason = \"Example site for pipeline tests\"\n\
              site_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n{external}\
              build_commands = [\"mise run docs:build\"]\n\
@@ -88,8 +88,8 @@ fn generate(root: &Path) -> PathBuf {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "github",
+            "--providers",
+            "github-hosted",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -392,8 +392,8 @@ fn docs_schedule_without_external_check_fails_generation() {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "github",
+            "--providers",
+            "github-hosted",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),

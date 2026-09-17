@@ -25,10 +25,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::policy::GENERATION_CONFIG;
+use super::provider::ProviderSet;
 use super::{
     is_full_revision, ownership_state_content, render_tree, resolve_default_branch,
-    write_generated_with_options, GeneratorError, RunnerMode, OWNERSHIP_STATE, SOURCE_CLOSURE,
-    SOURCE_FEATURES, SOURCE_PROFILE,
+    write_generated_with_options, GeneratorError, OWNERSHIP_STATE, SOURCE_CLOSURE, SOURCE_FEATURES,
+    SOURCE_PROFILE,
 };
 
 /// Promotion intent, separated from the CLI surface for testing.
@@ -46,9 +47,9 @@ pub(crate) struct PromoteOptions {
     /// Default branch for branch gates. Defaults to the repository's own,
     /// exactly like a plain generator run.
     pub(crate) default_branch: Option<String>,
-    /// Runner lanes, defaulting to both like a plain generator run (a
-    /// repo-owned `[workflow] runners` still overrides).
-    pub(crate) runners: RunnerMode,
+    /// Provider universe override. `None` keeps the repo-owned
+    /// `[workflow] providers` default like a plain generator run.
+    pub(crate) providers: Option<ProviderSet>,
     /// Commit message override. Defaults to the `bump D19 pin` subject the
     /// repository history uses.
     pub(crate) message: Option<String>,
@@ -155,7 +156,7 @@ fn promote_rendered_tree(
     old_pin: &str,
     closure: &str,
 ) -> Result<PromoteReport, GeneratorError> {
-    let rendered = render_tree(repo, options.runners, default_branch)?;
+    let rendered = render_tree(repo, options.providers.clone(), default_branch)?;
     snapshot.extend(
         repo,
         rendered
@@ -181,7 +182,12 @@ fn promote_rendered_tree(
         true,
         false,
     )?;
-    verify_promoted_tree(repo, &rendered.files, options.runners, default_branch)?;
+    verify_promoted_tree(
+        repo,
+        &rendered.files,
+        options.providers.clone(),
+        default_branch,
+    )?;
     let expected_state = ownership_state_content(&rendered.files, &rendered.inputs);
     let state_path = repo.join(OWNERSHIP_STATE);
     let state_disk = std::fs::read_to_string(&state_path)
@@ -273,10 +279,10 @@ fn verify_render_stamp_binding(generator_repo: &Path, rev: &str) -> Result<Strin
 fn verify_promoted_tree(
     repo: &Path,
     rendered: &std::collections::BTreeMap<PathBuf, String>,
-    runners: RunnerMode,
+    providers: Option<ProviderSet>,
     default_branch: &str,
 ) -> Result<(), GeneratorError> {
-    let again = render_tree(repo, runners, default_branch)?.files;
+    let again = render_tree(repo, providers, default_branch)?.files;
     if again != *rendered {
         let divergent: Vec<String> = rendered
             .keys()
@@ -638,7 +644,7 @@ mod tests {
     #[test]
     fn stamp_replaces_the_generator_revision_and_nothing_else() {
         let content = format!(
-            "schema = 1\n\n[generator]\nrepository = \"example/consumer\"\n# D19 pin: bump in a single pin commit.\nrevision = \"{OLD}\"  # trailing comment\n\n[workflow]\nrunners = \"both\"\n"
+            "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n# D19 pin: bump in a single pin commit.\nrevision = \"{OLD}\"  # trailing comment\n\n[workflow]\nproviders = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n"
         );
         let (stamped, old) = must(stamp_pin(&content, NEW), "stamp");
         assert_eq!(old, OLD);
@@ -652,7 +658,7 @@ mod tests {
     #[test]
     fn stamp_ignores_revision_keys_outside_the_generator_section() {
         let content = format!(
-            "schema = 1\n\n[workflow]\nrevision = \"{OLD}\"\n\n[generator]\nrepository = \"example/consumer\"\nrevision = \"{OLD}\"\n"
+            "schema = 2\n\n[workflow]\nrevision = \"{OLD}\"\n\n[generator]\nrepository = \"example/consumer\"\nrevision = \"{OLD}\"\n"
         );
         let (stamped, _) = must(stamp_pin(&content, NEW), "stamp");
         assert_eq!(
@@ -668,20 +674,20 @@ mod tests {
 
     #[test]
     fn stamp_fails_closed_on_missing_malformed_or_ambiguous_pins() {
-        let missing = "schema = 1\n\n[generator]\nrepository = \"example/consumer\"\n";
+        let missing = "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n";
         assert!(
             must_fail(stamp_pin(missing, NEW), "a missing pin fails")
                 .contains("no [generator] revision"),
             "a missing pin names the defect"
         );
-        let malformed = "schema = 1\n\n[generator]\nrevision = \"short\"\n".to_owned();
+        let malformed = "schema = 2\n\n[generator]\nrevision = \"short\"\n".to_owned();
         assert!(
             must_fail(stamp_pin(&malformed, NEW), "a malformed pin fails")
                 .contains("not a full 40-character commit SHA"),
             "a malformed pin names the defect"
         );
         let ambiguous =
-            format!("schema = 1\n\n[generator]\nrevision = \"{OLD}\"\nrevision = \"{OLD}\"\n");
+            format!("schema = 2\n\n[generator]\nrevision = \"{OLD}\"\nrevision = \"{OLD}\"\n");
         assert!(
             must_fail(stamp_pin(&ambiguous, NEW), "an ambiguous pin fails").contains("twice"),
             "a doubled pin refuses the ambiguous stamp"

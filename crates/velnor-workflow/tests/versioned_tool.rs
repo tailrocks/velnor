@@ -109,8 +109,8 @@ fn generate(root: &Path) -> Generated {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -132,8 +132,8 @@ fn generate_failure(root: &Path, out: &Path) -> String {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             out.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -157,7 +157,7 @@ fn versioned_tool_renders_end_to_end() {
     let files = generated.workflow_files();
     assert!(
         files.contains(&"example-tool.yml".to_owned()),
-        "the declared lane must add its file: {files:?}"
+        "the declared row must add its file: {files:?}"
     );
     assert!(
         !files.contains(&"release.yml".to_owned()),
@@ -168,7 +168,7 @@ fn versioned_tool_renders_end_to_end() {
         workflow.contains("name: example-tool\n")
             && workflow.contains("  push:\n    branches: [main]\n")
             && workflow.contains("  pull_request:\n")
-            && workflow.contains("      lanes:\n")
+            && workflow.contains("      providers:\n")
             && workflow.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
         "the row must render its own name, triggers, and concurrency: {workflow}"
     );
@@ -301,30 +301,28 @@ fn declared_release_row_suppresses_the_default_row() {
     );
 }
 
-/// Only the writer lane attests and uploads: the matrix fans out per lane
-/// but the tarball name is per target, so an ungated upload would publish
-/// the same name twice in `both` mode.
+/// Only the elected writer attests and uploads: the matrix fans out per
+/// provider but the tarball name is per target, so an ungated upload would
+/// publish the same name twice when several providers build.
 #[test]
-fn versioned_tool_build_uploads_only_from_the_writer_lane() {
+fn versioned_tool_build_uploads_only_from_the_elected_writer() {
     let workspace = tempfile();
     let root = copy_release_fixture(&workspace.join("fixture"));
     write_config(&root, &fixture_config());
     let generated = generate(&root);
     let workflow = generated.workflow("example-tool.yml");
     assert_eq!(
-        workflow.matches("if: ${{ matrix.config.writer }}").count(),
+        workflow
+            .matches("if: ${{ matrix.config.provider == needs.version.outputs.writer }}")
+            .count(),
         2,
-        "attest and upload must gate on the writer lane: {workflow}"
+        "attest and upload must gate on the elected writer: {workflow}"
     );
     assert!(
-        workflow.contains("- name: Attest tool artifact\n        if: ${{ matrix.config.writer }}")
-            && workflow
-                .contains("- name: Upload tool artifact\n        if: ${{ matrix.config.writer }}"),
+        workflow.contains("- name: Attest tool artifact\n        if: ${{ matrix.config.provider == needs.version.outputs.writer }}")
+            && workflow.contains(
+                "- name: Upload tool artifact\n        if: ${{ matrix.config.provider == needs.version.outputs.writer }}"
+            ),
         "the writer gates must sit on the attest and upload steps: {workflow}"
-    );
-    assert_eq!(
-        workflow.matches("\"writer\":false").count(),
-        1,
-        "only the both-mode github arm must be a non-writer: {workflow}"
     );
 }

@@ -4,14 +4,14 @@
 //! differently from `synthetic-workspace`: a Rust workspace under
 //! `packages/` (not `crates/`), a standalone nested crate, a Swift package
 //! under `clients/apple/` (not `native/`), no Dockerfile, no docs surface,
-//! and a `[renovate]` declaration with writer lanes. It pins the behaviors
-//! the migration depends on: Swift units land on macOS while Rust stays on
-//! Linux, a declared cross-kind `depends_on` selects the Swift consumer when
-//! only FFI files change, Renovate renders on a github-runners repository,
-//! generation is byte-stable, and no consumer name leaks into output. The
-//! deny probe declares the release, preview, docs, scheduled, and
-//! maintenance surfaces on its own temp copy, so every rendered family is
-//! scanned, not just the default file set.
+//! and a `[renovate]` declaration with a Velnor writer. It pins the behaviors
+//! the migration depends on: Apple-bound Swift units land on macOS while Rust
+//! stays on Linux, a declared cross-kind `depends_on` selects the Swift
+//! consumer when only FFI files change, the Renovate writer stays on the
+//! Velnor selector, generation is byte-stable, and no consumer name leaks
+//! into output. The deny probe declares the release, preview, docs,
+//! scheduled, and maintenance surfaces on its own temp copy, so every
+//! rendered family is scanned, not just the default file set.
 
 #![expect(
     clippy::unwrap_used,
@@ -208,22 +208,18 @@ fn swift_kind_renders_macos_while_rust_stays_linux() {
 }
 
 #[test]
-fn renovate_lanes_render_on_a_github_runners_repository() {
+fn renovate_writer_runs_on_the_velnor_selector() {
     let repo = fixture_root("reno-lanes");
     let output = generate(&repo, "reno-lanes");
 
     let writer = workflow(&output, "renovate.yml");
     assert!(
-        writer.contains("options: [velnor, github]"),
-        "writer must offer the declared lane choice:\n{writer}"
+        writer.contains("runs-on: [self-hosted, example-lane]"),
+        "writer must stay on the declared Velnor selector:\n{writer}"
     );
     assert!(
-        writer.contains("inputs.lanes == 'github'"),
-        "writer must route manual dispatch by lane choice:\n{writer}"
-    );
-    assert!(
-        writer.contains("fromJSON('[\"self-hosted\",\"example-lane\",\"example-trusted\"]')"),
-        "scheduled runs must stay on the declared Velnor labels:\n{writer}"
+        !writer.contains(concat!("inputs", ".lanes")),
+        "the writer carries no lane dispatch surface:\n{writer}"
     );
 
     let validate = workflow(&output, "renovate-validate.yml");
@@ -311,7 +307,7 @@ fn ffi_change_selects_the_swift_consumer() {
         .env("BASE_SHA", &base)
         .env("HEAD_SHA", &head)
         .env("EVENT_NAME", "pull_request")
-        .env("VELNOR_LANES", "github")
+        .env("VELNOR_PROVIDERS", "github-hosted")
         .env("GITHUB_OUTPUT", &github_output)
         // The CI unit job exports a repo-relative VELNOR_SELECTION_FILE;
         // an inheriting child would try to write it under the fixture

@@ -398,27 +398,30 @@ fn reuse_decision_scores_evidence_against_a_request() -> Result<(), Box<dyn Erro
 }
 
 const CONFIG: &str = r#"
-schema = 2
+schema = 3
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
 
 [[unit]]
 id = "rust-alpha"
 label = "alpha"
 kind = "rust"
 root = "crates/alpha"
+platform = "linux-x64"
+trust = "untrusted-ok"
 watch = ["crates/alpha/**"]
-github_pr_commands = ["cargo test --locked"]
-github_full_commands = ["cargo test --locked"]
-velnor_pr_commands = ["cargo test --locked"]
-velnor_full_commands = ["cargo test --locked"]
+pr_commands = ["cargo test --locked"]
+full_commands = ["cargo test --locked"]
 
 [[unit]]
 id = "rust-beta"
 label = "beta"
 kind = "rust"
 root = "crates/beta"
+platform = "linux-x64"
+trust = "untrusted-ok"
 watch = ["crates/beta/**"]
-github_pr_commands = ["cargo test --locked"]
-github_full_commands = ["cargo test --locked"]
-velnor_pr_commands = ["cargo test --locked"]
-velnor_full_commands = ["cargo test --locked"]
+pr_commands = ["cargo test --locked"]
+full_commands = ["cargo test --locked"]
 "#;

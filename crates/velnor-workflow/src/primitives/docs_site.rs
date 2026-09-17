@@ -15,9 +15,9 @@
 
 use std::fmt::Write as _;
 
-use super::{lanes_dispatch_inputs, lanes_runs_on, Args, Primitive, RenderCtx, Rendered};
+use super::{Args, Primitive, RenderCtx, Rendered};
 use crate::{
-    velnor_runner, yaml_scalar, ActionPin, DocsSpec, GeneratorError, ProjectConfig, RunnerMode,
+    provider::ProviderId, yaml_scalar, ActionPin, DocsSpec, GeneratorError, ProjectConfig,
     GENERATED_HEADER,
 };
 
@@ -49,7 +49,7 @@ pub(crate) fn docs_site_content(config: &ProjectConfig) -> Option<String> {
     let runner = docs_runner(config).ok()?;
     Some(format!(
         "{GENERATED_HEADER}{}",
-        render_docs_site(config, spec, &runner, false)
+        render_docs_site(config, spec, &runner)
     ))
 }
 
@@ -62,28 +62,22 @@ impl Primitive for DocsSite {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &["lanes_input"]
+        &[]
     }
 
-    fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
+    fn render(&self, ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let spec = ctx.config.docs.clone().ok_or_else(|| {
             GeneratorError::usage(format!(
                 "`{}` renders only for a repository with `[docs] enabled = true` and a complete contract",
                 ctx.family
             ))
         })?;
-        let lanes_input = args.flag("lanes_input")?;
-        // Every job takes the one substituted runner, so the lanes override
-        // has a single substitution point. Both maps to the github default,
-        // exactly like the static path, so the default lane never moves.
-        let runner = if lanes_input {
-            lanes_runs_on(ctx.config, ctx.family, RunnerMode::Github)?
-        } else {
-            docs_runner(ctx.config)?
-        };
+        // Every job takes the one substituted runner, so the provider routing
+        // has a single substitution point.
+        let runner = docs_runner(ctx.config)?;
         let content = format!(
             "{GENERATED_HEADER}{}",
-            render_docs_site(ctx.config, &spec, &runner, lanes_input)
+            render_docs_site(ctx.config, &spec, &runner)
         );
         render_file(ctx, DOCS_SITE_FILE, content)
     }
@@ -114,24 +108,22 @@ fn render_file(
     })
 }
 
-/// The lane the pipeline runs on: the repository's own lane selection. Pages
-/// deployment and artifact reuse are GitHub-platform operations, so a
-/// Velnor-only repository runs them on its declared self-hosted labels.
+/// The provider the pipeline runs on: the hosted provider when the universe
+/// declares it, else the first declared provider. Pages deployment and
+/// artifact reuse are GitHub-platform operations, so the hosted provider is
+/// preferred; a repository without it runs them on its own selector.
 fn docs_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
-    match config.runners {
-        RunnerMode::Github | RunnerMode::Both => Ok(yaml_scalar(&config.github_runner)),
-        RunnerMode::Velnor => {
-            if config.velnor_labels.is_empty() {
-                return Err(GeneratorError::usage(
-                    "`docs-site` renders a Velnor-lane pipeline but [workflow] velnor_labels is empty; declare the self-hosted labels",
-                ));
-            }
-            Ok(velnor_runner(
-                &config.velnor_labels,
-                config.velnor_runner_group.as_deref(),
-            ))
-        }
-    }
+    let provider = if config.providers.contains(&ProviderId::GithubHosted) {
+        ProviderId::GithubHosted
+    } else {
+        config
+            .providers
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(ProviderId::GithubHosted)
+    };
+    crate::provider::runs_on_for(&config.selectors, provider).map(crate::runs_on_labels_yaml)
 }
 
 /// The reuse-recipe contract version. It feeds the recipe fingerprint and the
@@ -287,15 +279,8 @@ fn local_check_jobs(spec: &DocsSpec) -> Vec<(&'static str, &[String], &'static s
     jobs
 }
 
-fn render_triggers(config: &ProjectConfig, spec: &DocsSpec, lanes_input: bool) -> String {
-    let dispatch = if lanes_input {
-        format!(
-            "  workflow_dispatch:{}\n",
-            lanes_dispatch_inputs(RunnerMode::Github)
-        )
-    } else {
-        "  workflow_dispatch:\n".to_owned()
-    };
+fn render_triggers(config: &ProjectConfig, spec: &DocsSpec) -> String {
+    let dispatch = "  workflow_dispatch:\n".to_owned();
     let mut triggers = format!(
         "on:\n  push:\n    branches: [{}]\n  pull_request:\n{dispatch}",
         yaml_scalar(&config.default_branch)
@@ -787,15 +772,10 @@ fn render_required_job(config: &ProjectConfig, runner: &str, spec: &DocsSpec) ->
     )
 }
 
-fn render_docs_site(
-    config: &ProjectConfig,
-    spec: &DocsSpec,
-    runner: &str,
-    lanes_input: bool,
-) -> String {
+fn render_docs_site(config: &ProjectConfig, spec: &DocsSpec, runner: &str) -> String {
     let mut output = format!(
         "name: Docs\nrun-name: Docs \u{b7} ${{{{ github.event_name }}}}\n\n{}\npermissions:\n  contents: read\n\nconcurrency:\n  group: docs-${{{{ github.repository }}}}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n\nenv:\n  DOCS_SITE_URL: {}\n\njobs:\n",
-        render_triggers(config, spec, lanes_input),
+        render_triggers(config, spec),
         yaml_scalar(&spec.site_url),
     );
     output.push_str(&render_gate_job(config, runner, spec));
@@ -891,11 +871,10 @@ mod tests {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
-            runners: crate::RunnerMode::Github,
-            automatic: crate::RunnerMode::Github,
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
-            velnor_labels: Vec::new(),
+            providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            automatic_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            default_dispatch_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            selectors: crate::scan::default_selectors(),
             release_enabled: false,
             release_reason: String::new(),
             release: None,
@@ -915,15 +894,9 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            velnor_runner_group: None,
-            velnor_trusted_label: None,
-            velnor_trusted_runner_available: None,
-            pull_request_on_velnor: false,
-            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
-            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
-            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
-            velnor_concurrency_group: None,
-            velnor_serial_stack_groups: false,
+            rust_needs: crate::RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -935,22 +908,7 @@ mod tests {
     fn render(spec: &DocsSpec) -> String {
         let config = docs_config(spec.clone());
         let runner = must_ok(docs_runner(&config), "docs test runner resolves");
-        render_docs_site(&config, spec, &runner, false)
-    }
-
-    fn render_with_lanes(config: &ProjectConfig, spec: &DocsSpec) -> String {
-        let runner = must_ok(
-            lanes_runs_on(config, "docs-site", crate::RunnerMode::Github),
-            "the lanes runner resolves for a Both repository",
-        );
-        render_docs_site(config, spec, &runner, true)
-    }
-
-    fn lanes_config(spec: DocsSpec) -> ProjectConfig {
-        let mut config = docs_config(spec);
-        config.runners = crate::RunnerMode::Both;
-        config.velnor_labels = vec!["self-hosted".to_owned(), "example-lane".to_owned()];
-        config
+        render_docs_site(&config, spec, &runner)
     }
 
     #[test]
@@ -1329,14 +1287,17 @@ mod tests {
     }
 
     #[test]
-    fn velnor_lane_without_labels_fails_closed() {
+    fn velnor_universe_without_selector_fails_closed() {
         let mut config = docs_config(docs_spec());
-        config.runners = crate::RunnerMode::Velnor;
+        config.providers = [crate::provider::ProviderId::Velnor].into_iter().collect();
+        config
+            .selectors
+            .remove(&crate::provider::ProviderId::Velnor);
         let error = must_fail(
             docs_runner(&config),
-            "a Velnor lane without labels is a usage error",
+            "a Velnor universe without a selector is a usage error",
         );
-        assert!(error.to_string().contains("velnor_labels"), "{error}");
+        assert!(error.to_string().contains("velnor"), "{error}");
     }
 
     #[test]
@@ -1366,7 +1327,7 @@ mod tests {
             workflow.contains("  workflow_dispatch:\n"),
             "the dispatch trigger stays bare: {workflow}"
         );
-        for marker in ["lanes:", "inputs.lanes", "fromJSON", "CI_LANE"] {
+        for marker in ["lanes:", concat!("inputs", ".lanes"), "fromJSON", "CI_LANE"] {
             assert!(
                 !workflow.contains(marker),
                 "an undeclared lanes input renders nothing: {marker} in {workflow}"
@@ -1381,75 +1342,8 @@ mod tests {
             assert_eq!(
                 line.trim(),
                 "runs-on: ubuntu-24.04",
-                "every job stays on the static lane: {workflow}"
+                "every job stays on the static runner: {workflow}"
             );
         }
-    }
-
-    #[test]
-    fn lanes_input_renders_github_default_dispatch_and_conditional_runners() {
-        let spec = docs_spec();
-        let config = lanes_config(spec.clone());
-        let workflow = render_with_lanes(&config, &spec);
-        assert!(
-            workflow.contains(
-                "  workflow_dispatch:\n    inputs:\n      lanes:\n        description: github (default) | velnor\n        type: choice\n        default: github\n        options: [github, velnor]\n"
-            ),
-            "the dispatch carries the github-default lanes choice: {workflow}"
-        );
-        let triggers = must_some(
-            workflow.split("permissions:").next(),
-            "the trigger block renders",
-        );
-        assert!(
-            !triggers.contains("both"),
-            "there is no both option to alias one leg: {triggers}"
-        );
-        let runs_on: Vec<&str> = workflow
-            .lines()
-            .filter(|line| line.trim_start().starts_with("runs-on:"))
-            .collect();
-        assert_eq!(runs_on.len(), 8, "one conditional job per job: {workflow}");
-        for line in &runs_on {
-            assert!(
-                line.contains("inputs.lanes == 'velnor'"),
-                "every job dispatches across lanes: {line}"
-            );
-        }
-        assert!(
-            !workflow.contains("runs-on: ubuntu-24.04"),
-            "no static leg remains: {workflow}"
-        );
-        assert!(
-            !workflow.contains("CI_LANE"),
-            "the lanes override adds no lane environment: {workflow}"
-        );
-    }
-
-    #[test]
-    fn lanes_input_needs_both_lanes_and_label_routing() {
-        let spec = docs_spec();
-        let single = docs_config(spec.clone());
-        let error = must_fail(
-            lanes_runs_on(&single, "docs-site", crate::RunnerMode::Github),
-            "a single-lane repository must fail admission",
-        );
-        assert!(error.to_string().contains("both"), "{error}");
-
-        let mut grouped = lanes_config(spec.clone());
-        grouped.velnor_runner_group = Some("example-group".to_owned());
-        let error = must_fail(
-            lanes_runs_on(&grouped, "docs-site", crate::RunnerMode::Github),
-            "a declared runner group must fail admission",
-        );
-        assert!(error.to_string().contains("runner group"), "{error}");
-
-        let mut unlabeled = lanes_config(spec);
-        unlabeled.velnor_labels = Vec::new();
-        let error = must_fail(
-            lanes_runs_on(&unlabeled, "docs-site", crate::RunnerMode::Github),
-            "missing velnor labels must fail admission",
-        );
-        assert!(error.to_string().contains("velnor_labels"), "{error}");
     }
 }

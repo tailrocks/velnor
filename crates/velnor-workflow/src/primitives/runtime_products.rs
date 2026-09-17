@@ -72,8 +72,8 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// in generator source — a closure-covered path — not lane configuration: a
 /// mapping change is a generator source change, so it alters the closure and
 /// mints a new product tag instead of reusing the stale tag's binaries. Owner
-/// lane labels (`github_runner`, `macos_runner`) move freely without
-/// affecting the builders, and can never silently reselect them.
+/// selector labels move freely without affecting the builders, and can never
+/// silently reselect them.
 const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
 const MACOS_ARM64_RUNNER: &str = "macos-15";
@@ -172,10 +172,13 @@ fn example_tag() -> String {
     clippy::too_many_lines,
     reason = "one workflow family renders its three jobs in one template"
 )]
-pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String> {
+pub(crate) fn runtime_products_content(
+    config: &ProjectConfig,
+) -> Result<Option<String>, GeneratorError> {
     if config.repository != workflow_setup_action_repository() {
-        return None;
+        return Ok(None);
     }
+    let hosted_runs_on = crate::hosted_runs_on(config)?;
     let repository = workflow_setup_action_repository();
     let owner = product_owner(repository);
     // The toolchain install is file-driven: the checkout's own
@@ -259,7 +262,7 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
     let closure_footer = format!(
         "closure-version:{CLOSURE_VERSION}\\nfeatures:{CI_FEATURES}\\nprofile:{PROFILE_RELEASE}\\n"
     );
-    Some(format!(
+    Ok(Some(format!(
         r#"{header}# Stage-0 runtime products: the immutable `velnor-workflow` binaries every
 # consumer lane installs through the setup action instead of compiling.
 #
@@ -614,8 +617,8 @@ jobs:
         example_tag = example_tag(),
         default_branch = yaml_scalar(&config.default_branch),
         branch_ref = format!("refs/heads/{}", config.default_branch),
-        closure_runner = yaml_scalar(&config.github_runner),
-        publish_runner = yaml_scalar(&config.github_runner),
+        closure_runner = hosted_runs_on,
+        publish_runner = hosted_runs_on,
         checkout = ActionPin::Checkout.reference(),
         attest = ActionPin::Attest.reference(),
         upload = ActionPin::UploadArtifact.reference(),
@@ -634,7 +637,7 @@ jobs:
         release_assets = release_assets,
         accept_filter = MANIFEST_ACCEPT_FILTER,
         cargo_home = PRODUCER_CARGO_HOME_VALUE,
-    ))
+    )))
 }
 
 /// The `jq` variable holding a platform's digest while the manifest assembles:
@@ -672,7 +675,7 @@ impl Primitive for RuntimeProducts {
                 ))
             })?
             .to_owned();
-        let Some(content) = runtime_products_content(ctx.config) else {
+        let Some(content) = runtime_products_content(ctx.config)? else {
             return Err(GeneratorError::usage(format!(
                 "`{}` renders `{RUNTIME_PRODUCTS_FILE}` only for the repository that ships the setup action",
                 ctx.family
@@ -704,7 +707,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::{RunnerMode, UnitKind};
+    use crate::UnitKind;
 
     const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -746,10 +749,6 @@ mod tests {
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo check".to_owned()],
             full_commands: vec!["cargo check".to_owned()],
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -761,9 +760,10 @@ mod tests {
                 profile: None,
             }),
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::UntrustedOk,
+            platform: crate::provider::Platform::LinuxX64,
+            capabilities: crate::provider::Capabilities::default(),
             workspace_check: false,
-            platform: crate::platform::PlatformRequirement::portable(),
             products: Vec::new(),
             prerequisites: Vec::new(),
             env: std::collections::BTreeMap::new(),
@@ -790,11 +790,10 @@ mod tests {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
-            runners: RunnerMode::Both,
-            automatic: RunnerMode::Both,
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
-            velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+            providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            automatic_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            default_dispatch_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            selectors: crate::scan::default_selectors(),
             release_enabled: false,
             release_reason: String::new(),
             release: None,
@@ -814,15 +813,9 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            velnor_runner_group: None,
-            velnor_trusted_label: None,
-            velnor_trusted_runner_available: None,
-            pull_request_on_velnor: false,
-            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
-            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
-            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
-            velnor_concurrency_group: None,
-            velnor_serial_stack_groups: false,
+            rust_needs: crate::RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -839,7 +832,10 @@ mod tests {
 
     fn owner_content(workflow_files: &[&str]) -> String {
         must_some(
-            runtime_products_content(&owner_config(workflow_files)),
+            must(
+                runtime_products_content(&owner_config(workflow_files)),
+                "the owner renders the producer",
+            ),
             "the owner renders the producer",
         )
     }
@@ -872,8 +868,10 @@ mod tests {
         config: &ProjectConfig,
         rows: &str,
     ) -> Result<super::super::Surface, GeneratorError> {
+        let providers: crate::provider::ProviderSet =
+            crate::provider::ProviderId::ALL.into_iter().collect();
         let shape = must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
+            crate::scan::scan_shape(root, &providers, "main", &[]),
             "scan fixture",
         );
         let directory = root.join(crate::config::GENERATION_CONFIG_PATH);
@@ -884,7 +882,7 @@ mod tests {
         must(
             fs::write(
                 &directory,
-                format!("schema = 1\n\n[generator]\nrepository = \"example/declared\"\n\n{rows}"),
+                format!("schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n{rows}"),
             ),
             "write declared config",
         );
@@ -902,13 +900,13 @@ mod tests {
     #[test]
     fn non_owner_repositories_render_no_producer() {
         assert!(
-            runtime_products_content(&config(&[])).is_none(),
+            must(runtime_products_content(&config(&[])), "render producer").is_none(),
             "a repository without identity renders no producer"
         );
         let mut consumer = config(&[]);
         consumer.repository = "example/consumer".to_owned();
         assert!(
-            runtime_products_content(&consumer).is_none(),
+            must(runtime_products_content(&consumer), "render producer").is_none(),
             "a consumer repository renders no producer"
         );
     }
@@ -918,7 +916,10 @@ mod tests {
         let mut config = owner_config(&[]);
         config.default_branch = "trunk".to_owned();
         let content = must_some(
-            runtime_products_content(&config),
+            must(
+                runtime_products_content(&config),
+                "the owner renders the producer",
+            ),
             "the owner renders the producer",
         );
         assert!(content.starts_with(GENERATED_HEADER), "{content}");
@@ -1194,7 +1195,7 @@ mod tests {
         );
         // The Velnor policy provisioner is the second consumer: it must accept
         // the same manifest and the same attestation the setup action does.
-        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
+        let velnor = crate::workflow_pinned_policy_runtime_local("checkout");
         assert!(
             velnor.contains(MANIFEST_ACCEPT_FILTER),
             "the Velnor consumer evaluates the same filter"
@@ -1262,7 +1263,7 @@ mod tests {
         }
         // Subject-level: both consumers verify the manifest as well as the
         // asset, against the same pinned producer workflow.
-        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
+        let velnor = crate::workflow_pinned_policy_runtime_local("checkout");
         for (name, consumer) in [
             ("setup action", action.as_str()),
             ("velnor", velnor.as_str()),
@@ -1291,7 +1292,7 @@ mod tests {
             2,
             "the setup action pins the ref on the asset and the manifest"
         );
-        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
+        let velnor = crate::workflow_pinned_policy_runtime_local("checkout");
         assert_eq!(
             velnor.matches("--source-ref refs/heads/main").count(),
             2,
@@ -1312,10 +1313,14 @@ mod tests {
         // reuse a stale tag's binaries, and a mapping change is a generator
         // source change that mints a new closure and a new tag.
         let mut config = owner_config(&[]);
-        config.github_runner = "self-hosted-spoof-x64".to_owned();
-        config.macos_runner = "self-hosted-spoof-macos".to_owned();
+        for selector in config.selectors.values_mut() {
+            selector.runs_on = vec!["self-hosted-spoof".to_owned()];
+        }
         let content = must_some(
-            runtime_products_content(&config),
+            must(
+                runtime_products_content(&config),
+                "the owner renders the producer",
+            ),
             "the owner renders the producer",
         );
         let matrix = must_some(
@@ -1496,7 +1501,11 @@ mod tests {
         let path = PathBuf::from(".github/workflows").join(RUNTIME_PRODUCTS_FILE);
         assert_eq!(
             surface.files.get(&path).map(String::as_str),
-            runtime_products_content(&owner_config(&["maintenance.yml"])).as_deref(),
+            must(
+                runtime_products_content(&owner_config(&["maintenance.yml"])),
+                "render producer",
+            )
+            .as_deref(),
             "declared and legacy paths render identical bytes"
         );
         assert!(
@@ -1577,7 +1586,10 @@ mod tests {
         let mut config = owner_config(&[]);
         config.units[0].toolchain = None;
         let content = must_some(
-            runtime_products_content(&config),
+            must(
+                runtime_products_content(&config),
+                "the owner renders without a scanned toolchain",
+            ),
             "the owner renders without a scanned toolchain",
         );
         assert!(
@@ -1647,7 +1659,10 @@ mod tests {
         let mut config = owner_config(&[]);
         config.default_branch = "trunk".to_owned();
         let content = must_some(
-            runtime_products_content(&config),
+            must(
+                runtime_products_content(&config),
+                "the owner renders the producer",
+            ),
             "the owner renders the producer",
         );
         assert!(
@@ -1715,7 +1730,10 @@ mod tests {
         let mut config = owner_config(&[]);
         config.default_branch = "trunk".to_owned();
         let content = must_some(
-            runtime_products_content(&config),
+            must(
+                runtime_products_content(&config),
+                "the owner renders the producer",
+            ),
             "the owner renders the producer",
         );
         assert_eq!(
@@ -1836,7 +1854,10 @@ mod tests {
         let mut config = owner_config(&[]);
         config.default_branch = "trunk".to_owned();
         let content = must_some(
-            runtime_products_content(&config),
+            must(
+                runtime_products_content(&config),
+                "the owner renders the producer",
+            ),
             "the owner renders the producer",
         );
         let publish = must_some(content.split("\n  publish:\n").nth(1), "the publish job");

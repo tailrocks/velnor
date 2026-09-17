@@ -62,6 +62,14 @@ pub(crate) struct CompatibilityFacts {
     pub(crate) toolchain: Option<RustToolchain>,
     /// The hosted runner image: the host OS and its native toolchain.
     pub(crate) host_image: String,
+    /// The provider the snapshot was saved from: cross-provider restores are
+    /// never compatible.
+    pub(crate) provider: String,
+    /// The execution platform the snapshot was saved from.
+    pub(crate) platform: String,
+    /// The trust tier the snapshot was saved from: cross-tier restores are
+    /// never compatible.
+    pub(crate) trust: String,
     /// The native linker recipe the lane arranges. The linker's own version is
     /// deliberately not a fact: a snapshot's objects are linker-independent
     /// (rustc links only final artifacts), and a linker change rides the
@@ -91,9 +99,12 @@ impl CompatibilityFacts {
             ("linker", vec![self.linker.clone()]),
             ("mbx_version", vec![self.mbx_version.clone()]),
             ("payload", vec![self.payload.to_owned()]),
+            ("platform", vec![self.platform.clone()]),
+            ("provider", vec![self.provider.clone()]),
             ("recipe", sorted_strings(&self.recipe)),
             ("rustflags", vec![self.rustflags.clone()]),
             ("schema", vec![self.schema.to_owned()]),
+            ("trust", vec![self.trust.clone()]),
         ] {
             write_field(&mut canonical, key, &value);
         }
@@ -170,31 +181,53 @@ pub(crate) fn snapshot_class_prefix(namespace: &str, compatibility: &str) -> Str
 pub(crate) const RUNTIME_SEGMENTS: &str = "${{ runner.os }}-${{ runner.arch }}";
 
 /// A rendered snapshot key: compatibility class, runtime segments, the
-/// dependency inputs GitHub hashes at restore time, and the freshness segment
-/// that lets a state-advancing run save.
+/// provider/platform/trust segments that make cross-tier and cross-provider
+/// hits impossible, the dependency inputs GitHub hashes at restore time, and
+/// the freshness segment that lets a state-advancing run save.
 pub(crate) fn snapshot_key(
     class_prefix: &str,
     variant: &str,
     dependency_inputs: &str,
     freshness: &str,
+    segments: &KeySegments,
 ) -> String {
-    format!("{class_prefix}-{RUNTIME_SEGMENTS}-{variant}-{dependency_inputs}-{freshness}")
+    format!(
+        "{class_prefix}-{RUNTIME_SEGMENTS}-{}-{}-{}-{variant}-{dependency_inputs}-{freshness}",
+        segments.provider, segments.platform, segments.trust
+    )
 }
 
 /// The restore prefixes of a snapshot key, newest-compatible-first. Only
 /// prefixes are listed — never a complete earlier key — because the cache
 /// service returns the most recently created entry matching any of them, and
 /// an exact old generation on the list could shadow a newer compatible
-/// fallback.
+/// fallback. Every prefix carries the provider/platform/trust segments, so a
+/// restore can never cross providers, platforms, or trust tiers.
 pub(crate) fn snapshot_restore_keys(
     class_prefix: &str,
     variant: &str,
     dependency_inputs: &str,
+    segments: &KeySegments,
 ) -> String {
     format!(
-        "{class_prefix}-{RUNTIME_SEGMENTS}-{variant}-{dependency_inputs}-\n            \
-         {class_prefix}-{RUNTIME_SEGMENTS}-{variant}-"
+        "{class_prefix}-{RUNTIME_SEGMENTS}-{}-{}-{}-{variant}-{dependency_inputs}-\n            \
+         {class_prefix}-{RUNTIME_SEGMENTS}-{}-{}-{}-{variant}-",
+        segments.provider,
+        segments.platform,
+        segments.trust,
+        segments.provider,
+        segments.platform,
+        segments.trust,
     )
+}
+
+/// The provider/platform/trust segments of a snapshot key: literals where the
+/// generator knows them, `${{ inputs.* }}` expressions in collapsed jobs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct KeySegments {
+    pub(crate) provider: String,
+    pub(crate) platform: String,
+    pub(crate) trust: String,
 }
 
 /// The `hashFiles(...)` expression that carries a class's source inputs into
@@ -1379,6 +1412,9 @@ mod tests {
                 profile: None,
             }),
             host_image: "ubuntu-24.04".to_owned(),
+            provider: "velnor".to_owned(),
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
             linker: "mold".to_owned(),
             rustflags: rustflags.to_owned(),
             cargo_inputs: vec![".cargo/**".to_owned()],
@@ -1417,24 +1453,32 @@ mod tests {
         );
     }
 
+    fn segments() -> KeySegments {
+        KeySegments {
+            provider: "velnor".to_owned(),
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+        }
+    }
+
     #[test]
     fn snapshot_keys_carry_compatibility_and_freshness_as_distinct_segments() {
         let prefix = snapshot_class_prefix("velnor-mbx", "1a2b3c4d5e6f");
         assert_eq!(prefix, "velnor-mbx-v3-1a2b3c4d5e6f");
         let dependency = "${{ hashFiles('Cargo.lock') }}";
         let freshness = "${{ hashFiles('crates/example/**/*.rs') }}";
-        let key = snapshot_key(&prefix, "rust-example", dependency, freshness);
+        let key = snapshot_key(&prefix, "rust-example", dependency, freshness, &segments());
         assert!(is_snapshot_key(&key), "{key}");
         assert_eq!(
             key,
-            "velnor-mbx-v3-1a2b3c4d5e6f-${{ runner.os }}-${{ runner.arch }}-rust-example-\
+            "velnor-mbx-v3-1a2b3c4d5e6f-${{ runner.os }}-${{ runner.arch }}-velnor-linux-x64-untrusted-ok-rust-example-\
              ${{ hashFiles('Cargo.lock') }}-${{ hashFiles('crates/example/**/*.rs') }}"
         );
         assert_eq!(
-            snapshot_restore_keys(&prefix, "rust-example", dependency),
-            "velnor-mbx-v3-1a2b3c4d5e6f-${{ runner.os }}-${{ runner.arch }}-rust-example-\
+            snapshot_restore_keys(&prefix, "rust-example", dependency, &segments()),
+            "velnor-mbx-v3-1a2b3c4d5e6f-${{ runner.os }}-${{ runner.arch }}-velnor-linux-x64-untrusted-ok-rust-example-\
              ${{ hashFiles('Cargo.lock') }}-\n            \
-             velnor-mbx-v3-1a2b3c4d5e6f-${{ runner.os }}-${{ runner.arch }}-rust-example-"
+             velnor-mbx-v3-1a2b3c4d5e6f-${{ runner.os }}-${{ runner.arch }}-velnor-linux-x64-untrusted-ok-rust-example-"
         );
     }
 
@@ -1450,8 +1494,9 @@ mod tests {
             "metadata",
             dependency,
             "${{ hashFiles('crates/example/**/*.rs') }}",
+            &segments(),
         );
-        let restore = snapshot_restore_keys(&prefix, "metadata", dependency);
+        let restore = snapshot_restore_keys(&prefix, "metadata", dependency, &segments());
         for line in restore.lines() {
             assert!(
                 line.ends_with('-'),
@@ -1500,6 +1545,7 @@ mod tests {
             "rust-example",
             dependency,
             &freshness_expression(&["crates/example/**/*.rs".to_owned()]),
+            &segments(),
         );
         // Same compatibility, same state: the exact-hit run writes nothing.
         assert_eq!(
@@ -1508,6 +1554,7 @@ mod tests {
                 "rust-example",
                 dependency,
                 &freshness_expression(&["crates/example/**/*.rs".to_owned()]),
+                &segments(),
             ),
             saved
         );
@@ -1517,6 +1564,7 @@ mod tests {
             "rust-example",
             dependency,
             &freshness_expression(&["crates/example/src/lib.rs".to_owned()]),
+            &segments(),
         );
         assert_ne!(advanced, saved);
         assert_ne!(

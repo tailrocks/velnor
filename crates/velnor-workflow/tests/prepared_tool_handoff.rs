@@ -64,8 +64,8 @@ fn generate(root: &Path) -> PathBuf {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -101,7 +101,7 @@ fn generated_text(output: &Path) -> String {
     text
 }
 
-const PREPARED_TOOL_CONFIG: &str = "schema = 1\n\n[generator]\nrepository = \"example/synthetic\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\n[[declare]]\nprimitive = \"prepared-tool\"\nunits = [\"rust-alpha\"]\n\n[declare.args.tools]\ntest-runner = [\"producer-job\"]\n\n[declare.args.recipes]\ntest-runner = [\"cargo build --locked\"]\n";
+const PREPARED_TOOL_CONFIG: &str = "schema = 2\n\n[generator]\nrepository = \"example/synthetic\"\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-lane\"]\n\n[[declare]]\nprimitive = \"prepared-tool\"\nunits = [\"rust-alpha\"]\n\n[declare.args.tools]\ntest-runner = [\"producer-job\"]\n\n[declare.args.recipes]\ntest-runner = [\"cargo build --locked\"]\n";
 
 #[test]
 fn declared_prepared_tool_renders_consumer_steps() {

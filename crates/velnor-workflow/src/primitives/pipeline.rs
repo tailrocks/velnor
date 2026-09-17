@@ -20,13 +20,13 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
             ctx.family
         ))
     })?;
-    super::validate_cache_transports_for_unit(ctx.lanes.ir(), unit)?;
+    super::validate_cache_transports_for_unit(ctx.providers.ir(), unit)?;
     super::validate_mutable_mount_seed(unit)?;
     let contract = UnitContract {
-        lanes: declared_lanes(ctx, args)?,
+        providers: declared_providers(ctx, args)?,
         timeout_minutes: declared_timeout(ctx, args)?,
         cache: declared_cache(ctx, args)?,
-        // The hosted lane's save step is still guarded by the generated
+        // The hosted provider's save step is still guarded by the generated
         // trusted-event expression; the contract only records that the
         // pipeline permits the save lifecycle.
         cache_save: true,
@@ -60,42 +60,41 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
     })
 }
 
-/// The lane jobs the declared unit emits, over the resolved lane matrix.
-fn declared_lanes(
+/// The provider jobs the declared unit emits, over the resolved provider matrix.
+fn declared_providers(
     ctx: &RenderCtx<'_>,
     args: &Args<'_>,
-) -> Result<Vec<super::LaneJob>, GeneratorError> {
+) -> Result<Vec<super::ProviderJob>, GeneratorError> {
     let Some(names) = args.strings("jobs")? else {
-        return Ok(ctx.lanes.jobs().to_vec());
+        return Ok(ctx.providers.jobs().to_vec());
     };
-    let supported = ctx.lanes.jobs();
-    let mut lanes = Vec::new();
+    let supported = ctx.providers.jobs();
+    let mut jobs = Vec::new();
     for name in &names {
         let job = supported
             .iter()
-            .find(|job| job.lane.as_str() == name.as_str())
+            .find(|job| job.provider.as_str() == name.as_str())
             .copied()
             .ok_or_else(|| {
                 GeneratorError::usage(format!(
-                    "`{}` lane `{name}` is not supported by the `{}` runner mode; supported lanes: {}",
+                    "`{}` job `{name}` is not supported by the provider universe; supported jobs: {}",
                     ctx.family,
-                    ctx.config.runners.as_str(),
                     supported
                         .iter()
-                        .map(|job| job.lane.as_str().to_owned())
+                        .map(|job| job.provider.as_str().to_owned())
                         .collect::<Vec<_>>()
                         .join(", ")
                 ))
             })?;
-        lanes.push(job);
+        jobs.push(job);
     }
-    if lanes.is_empty() {
+    if jobs.is_empty() {
         return Err(GeneratorError::usage(format!(
-            "`{}` must emit at least one lane job",
+            "`{}` must emit at least one provider job",
             ctx.family
         )));
     }
-    Ok(lanes)
+    Ok(jobs)
 }
 
 fn declared_timeout(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<u32, GeneratorError> {

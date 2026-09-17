@@ -91,8 +91,8 @@ fn generate(root: &Path) -> Generated {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,github-self-hosted,velnor",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -214,13 +214,14 @@ fn adding_a_crate_reuses_the_kind_reusable_and_adds_a_unit() {
         .collect::<Vec<_>>();
     assert_eq!(added, Vec::<String>::new());
     assert_eq!(after.unit_ids().len(), before_units.len() + 1);
-    // Kind reusable already exists; adding a crate adds one caller per lane.
+    // Kind reusable already exists; adding a crate adds one caller per
+    // provider in the universe.
     let growth = after
         .workflow("ci-pr.yml")
         .matches("uses: ./.github/workflows/")
         .count()
         - before_callers;
-    assert_eq!(growth, 2);
+    assert_eq!(growth, 3);
 
     // Removing a crate removes exactly what adding it added.
     fs::remove_dir_all(root.join("crates/delta")).unwrap();
@@ -263,13 +264,23 @@ fn the_repository_name_never_reaches_the_renderer() {
     }
 }
 
-const FULL_CONFIG: &str = r#"schema = 1
+const FULL_CONFIG: &str = r#"schema = 2
 
 [generator]
 repository = "example/synthetic"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-lane"]
+providers = ["github-hosted", "github-self-hosted", "velnor"]
+automatic_providers = ["github-hosted", "github-self-hosted", "velnor"]
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[workflow.selectors.github-self-hosted]
+runs_on = ["bastion-scale-set"]
+
+[workflow.selectors.velnor]
+runs_on = ["velnor-native"]
 
 [[declare]]
 primitive = "bun-package-pipeline"
@@ -296,7 +307,7 @@ primitive = "rust-crate-pipeline"
 units = ["rust-gamma"]
 
 [[declare]]
-primitive = "lane-matrix"
+primitive = "provider-matrix"
 
 [[declare]]
 primitive = "cache-contract"
@@ -431,13 +442,23 @@ fn copy_release_fixture(destination: &Path) -> PathBuf {
     destination.to_path_buf()
 }
 
-const RELEASE_CONFIG: &str = r#"schema = 1
+const RELEASE_CONFIG: &str = r#"schema = 2
 
 [generator]
 repository = "example/synthetic-release"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-lane"]
+providers = ["github-hosted", "github-self-hosted", "velnor"]
+automatic_providers = ["github-hosted", "github-self-hosted", "velnor"]
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[workflow.selectors.github-self-hosted]
+runs_on = ["bastion-scale-set"]
+
+[workflow.selectors.velnor]
+runs_on = ["velnor-native"]
 
 [[declare]]
 primitive = "release"

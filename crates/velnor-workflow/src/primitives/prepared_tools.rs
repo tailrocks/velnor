@@ -2662,7 +2662,7 @@ mod tests {
             std::fs::write(
                 root.join(crate::config::GENERATION_CONFIG_PATH),
                 format!(
-                    "schema = 1\n\n[generator]\nrepository = \"example/prepared-tool-fixture\"\n{declare}"
+                    "schema = 2\n\n[generator]\nrepository = \"example/prepared-tool-fixture\"\n{declare}"
                 ),
             ),
             "write generation config",
@@ -2671,8 +2671,10 @@ mod tests {
     }
 
     fn generated_surface(root: &std::path::Path) -> crate::primitives::Surface {
+        let providers: crate::provider::ProviderSet =
+            crate::provider::ProviderId::ALL.into_iter().collect();
         let shape = must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
+            crate::scan::scan_shape(root, &providers, "main", &[]),
             "scan fixture repository",
         );
         let config = crate::ProjectConfig::from(shape.clone());

@@ -48,10 +48,9 @@ fn swift_package_unit(package_root: &str) -> Unit {
     } else {
         format!("Swift package ({package_root})")
     };
-    // A SwiftPM package is portable: it verifies wherever its toolchain
-    // provisions, on the lane's default executor. Only Xcode scheme work
-    // below carries an Apple need.
-    result.platform = crate::platform::PlatformRequirement::swift_package();
+    // A SwiftPM package keeps the portable contract: it verifies wherever
+    // its toolchain provisions. Only Xcode scheme work below and XCFramework
+    // consumers carry an Apple need.
     result
 }
 
@@ -150,10 +149,6 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             ],
             pr_commands: commands.clone(),
             full_commands: commands,
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: Vec::new(),
             pinned_lockfile: false,
             cache: Some(CacheSpec {
@@ -167,9 +162,13 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::UntrustedOk,
+            platform: crate::provider::Platform::MacosArm64,
+            capabilities: crate::provider::Capabilities {
+                native_macos_arm64: true,
+                ..crate::provider::Capabilities::default()
+            },
             workspace_check: false,
-            platform: crate::platform::PlatformRequirement::apple_xcode(),
             products: Vec::new(),
             prerequisites: Vec::new(),
             env: std::collections::BTreeMap::new(),
@@ -198,7 +197,8 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
         shape.detected.push(format!("swift-package:{package_root}"));
         let mut unit = swift_package_unit(&package_root);
         if package_manifest_needs_xcframework(context.root, &package_root) {
-            unit.platform = crate::platform::PlatformRequirement::apple_xcframework();
+            unit.platform = crate::provider::Platform::MacosArm64;
+            unit.capabilities.native_macos_arm64 = true;
         }
         shape.units.push(unit);
     }
