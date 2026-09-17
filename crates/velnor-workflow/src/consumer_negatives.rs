@@ -31,9 +31,10 @@
 //!   <dst>` form the Velnor provisioner uses (macOS `install` lacks `-D`);
 //!   its log proves whether the slow-path install ran.
 //! * The network is unreachable by construction: the pin resolves from
-//!   fixture history (or a local-path fetch remote for the lookup-confusion
-//!   cases), and the default `GITHUB_SERVER_URL` points at a nonexistent
-//!   local path, so an unexpected fetch fails fast instead of dialing out.
+//!   fixture history (or the stubbed product-repo trees API for the
+//!   remote-resolution cases), and the default `GITHUB_SERVER_URL` points
+//!   at a nonexistent local path, so an unexpected outbound call fails
+//!   fast instead of dialing out.
 //!
 //! The candidate-acquire case executes the verification tail of
 //! `policy_candidate_step` (artifact download through manifest binding) with
@@ -174,6 +175,24 @@ if [[ "$command" == "run" && "$subcommand" == "download" ]]; then
     cp "$GH_STUB_DIR/$file" "$dir/$file"
   done
   exit 0
+fi
+if [[ "$command" == "api" ]]; then
+  endpoint="${2:-}"
+  log "api endpoint=$endpoint"
+  case "$endpoint" in
+    repos/*/git/trees/*)
+      if [[ ! -f "$GH_STUB_DIR/trees.json" ]]; then
+        echo "stub serves no trees response for $endpoint" >&2
+        exit 1
+      fi
+      cat "$GH_STUB_DIR/trees.json"
+      exit 0
+      ;;
+    *)
+      echo "unstubbed gh api endpoint: $endpoint" >&2
+      exit 1
+      ;;
+  esac
 fi
 echo "unstubbed gh invocation: gh $*" >&2
 exit 1
@@ -319,8 +338,8 @@ fn init_closure_checkout(root: &Path) -> (PathBuf, String) {
     (checkout, revision)
 }
 
-/// A repository whose history never contains the pin: the unrelated checkout
-/// and fetch-remote side of the lookup-confusion cases.
+/// A repository whose history never contains the pin: the remote-resolution
+/// side of the lookup-confusion cases.
 fn init_unrelated_checkout(root: &Path, name: &str) -> PathBuf {
     let checkout = root.join(name);
     must(fs::create_dir_all(&checkout), "create unrelated checkout");
@@ -666,6 +685,46 @@ impl ConsumerFixture {
         );
     }
 
+    /// Serve the product-repo trees API response for the fixture revision:
+    /// the committed tree converted entry-for-entry, so API resolution
+    /// yields the same listing — and closure — as a local `ls-tree`.
+    fn serve_trees(&self) {
+        let output = must(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.checkout)
+                .args(["ls-tree", "-r", "-t", &self.revision])
+                .output(),
+            "ls-tree fixture revision",
+        );
+        assert!(output.status.success(), "ls-tree fixture revision");
+        let mut tree = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let (meta, path) = must_some(line.split_once('\t'), "fixture ls-tree shape");
+            let mut fields = meta.split(' ');
+            let mode = must_some(fields.next(), "entry mode");
+            let kind = must_some(fields.next(), "entry type");
+            let sha = must_some(fields.next(), "entry sha");
+            tree.push(serde_json::json!({
+                "mode": mode,
+                "type": kind,
+                "sha": sha,
+                "path": path,
+            }));
+        }
+        assert!(!tree.is_empty(), "the fixture revision has a tree");
+        let response = serde_json::json!({
+            "sha": self.revision,
+            "truncated": false,
+            "tree": tree,
+        });
+        let rendered = must(serde_json::to_string(&response), "render trees response");
+        must(
+            fs::write(self.serve.join("trees.json"), rendered),
+            "serve trees response",
+        );
+    }
+
     /// Serve a release asset whose bytes report `reported_closure` (and the
     /// fixture revision), and return the bytes' digest for the manifest.
     fn serve_asset(&self, reported_closure: &str) -> String {
@@ -808,14 +867,18 @@ impl ConsumerFixture {
         let dead_server_str = must_some(dead_server.to_str(), "dead server is UTF-8");
         let mut env: Vec<(&str, &str)> = vec![
             ("CHECKOUT_PATH", checkout_str),
+            (
+                "PRODUCT_REPOSITORY",
+                crate::workflow_setup_action_repository(),
+            ),
             ("GITHUB_SERVER_URL", dead_server_str),
             ("GITHUB_REPOSITORY", "example/consumer"),
             ("CARGO_HOME", cargo_home_str),
             ("GITHUB_ENV", env_str),
         ];
         env.extend_from_slice(extra);
-        // The provisioner's `git fetch` carries no `-C`: in CI the step runs
-        // at the workspace root, so the run mirrors that working directory.
+        // In CI the step runs at the workspace root, so the run mirrors
+        // that working directory.
         (
             self.run_script("provision", &script, &env, Some(checkout)),
             env_file,
@@ -1279,16 +1342,7 @@ fn velnor_provisioner_untrusted_signer_rejects() {
 fn velnor_provisioner_fails_closed_when_pin_unresolvable() {
     let fixture = ConsumerFixture::open("velnor-unresolvable");
     let checkout = init_unrelated_checkout(&fixture.root, "consumer-checkout");
-    init_unrelated_checkout(&fixture.root, "remotes/consumer/repo");
-    let server = fixture.root.join("remotes");
-    let server_str = must_some(server.to_str(), "server path is UTF-8");
-    let (output, _) = fixture.run_velnor_provisioner(
-        &checkout,
-        &[
-            ("GITHUB_SERVER_URL", server_str),
-            ("GITHUB_REPOSITORY", "consumer/repo"),
-        ],
-    );
+    let (output, _) = fixture.run_velnor_provisioner(&checkout, &[]);
     assert!(!output.status.success(), "an unresolvable pin fails");
     assert!(
         !fixture.gh_log_text().contains("release-download"),
@@ -1298,36 +1352,29 @@ fn velnor_provisioner_fails_closed_when_pin_unresolvable() {
 }
 
 #[test]
-fn velnor_provisioner_resolves_fetched_pin_to_its_true_closure() {
-    let fixture = ConsumerFixture::open("velnor-fetch");
+fn velnor_provisioner_resolves_remote_pin_to_its_true_closure() {
+    let fixture = ConsumerFixture::open("velnor-remote");
     let checkout = init_unrelated_checkout(&fixture.root, "consumer-checkout");
-    let remote = fixture.root.join("remotes/consumer/repo");
-    let status = must(
-        Command::new("git")
-            .arg("clone")
-            .arg("--quiet")
-            .arg(&fixture.checkout)
-            .arg(&remote)
-            .status(),
-        "clone fetch remote",
-    );
-    assert!(status.success(), "the fetch remote carries the pin");
-    let server = fixture.root.join("remotes");
-    let server_str = must_some(server.to_str(), "server path is UTF-8");
-    let (output, _) = fixture.run_velnor_provisioner(
-        &checkout,
-        &[
-            ("GITHUB_SERVER_URL", server_str),
-            ("GITHUB_REPOSITORY", "consumer/repo"),
-            ("GH_STUB_RELEASE_FAIL", "1"),
-        ],
-    );
+    // The pin is absent from the consumer checkout: resolution goes to the
+    // product-repo trees API, which serves the pin's committed tree.
+    fixture.serve_trees();
+    let (output, _) = fixture.run_velnor_provisioner(&checkout, &[("GH_STUB_RELEASE_FAIL", "1")]);
     assert!(!output.status.success(), "the missing product fails");
     let stderr = stderr_of(&output);
     let prefix = &fixture.closure[..16];
     assert!(
         stderr.contains(&format!("(closure {prefix})")),
         "resolution yields the pin's true closure, not the checkout's tree: {stderr}"
+    );
+    let log = fixture.gh_log_text();
+    let endpoint = format!(
+        "repos/{}/git/trees/{}?recursive=1",
+        crate::workflow_setup_action_repository(),
+        fixture.revision,
+    );
+    assert!(
+        log.contains(&endpoint),
+        "the closure resolves over the product repository API: {log}"
     );
 }
 
