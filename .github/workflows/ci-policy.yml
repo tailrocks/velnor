@@ -21,8 +21,8 @@ jobs:
     # Trust invariant: this job runs the base branch's Stage-0 validator
     # product against the audited tree under pull_request_target. It holds
     # `contents: read` only, references no secrets, persists no credentials,
-    # and never compiles. When the audited pin's closure differs from the
-    # base validator's, it additionally EXECUTES the PR run's prebuilt
+    # and never compiles. When the audited tree differs from the declared
+    # pin's render, it additionally EXECUTES the PR run's prebuilt
     # candidate generator — PR-built code, same-repository runs only, bound
     # to the audited tree by manifest closure plus binary digest before
     # execution — with no secret references, no persisted credentials, the
@@ -76,13 +76,26 @@ jobs:
           base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
           pin_closure="$(velnor-workflow closure --rev="$pin")"
           if [[ "$pin_closure" == "$base_closure" ]]; then
-            echo "pin $pin shares the base closure; the Stage-0 validator renders"
-            echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
-            exit 0
+            # Same closure means the running base validator IS the pin's
+            # renderer, so --check decides tree==pin-render with no extra
+            # provisioning. A match exits early; a differ falls through to
+            # the candidate path (a generator change in flight) instead of
+            # stranding the validator with a cleared manifest and a red pin
+            # leg. The check output stays visible: on a fall-through it is
+            # the diagnosis, on a match it is one line.
+            if velnor-workflow --plain --check; then
+              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
+              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
           fi
           [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || { echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }
-          pin_candidate="$(velnor-workflow closure --rev="$pin" --candidate)"
-          name="velnor-workflow-candidate-${pin_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"
+          if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+          fi
+          head_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
+          name="velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"
           deadline=$((SECONDS + 900))
           run_id=""
           while (( SECONDS < deadline )); do
@@ -123,7 +136,7 @@ jobs:
           [[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
-          [[ "$manifest_closure" == "$pin_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the pin's candidate $pin_candidate" >&2; exit 1; }
+          [[ "$manifest_closure" == "$head_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }
           reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
           [[ "$reported" == "$manifest_closure" ]] || { echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }
           echo "VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow" >> "$GITHUB_ENV"
