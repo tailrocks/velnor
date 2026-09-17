@@ -1,0 +1,29 @@
+schema = 1
+
+[generator]
+repository = "example/synthetic-release"
+
+[workflow]
+velnor_labels = ["self-hosted", "example-lane"]
+
+[release]
+enabled = true
+kind = "tasks"
+modes = ["validate"]
+tag_pattern = "v[0-9]*"
+
+[[release.job]]
+id = "build"
+tasks = ["build-release", "verify-release"]
+
+[[release.job]]
+id = "sign"
+name = "Sign release"
+tasks = ["sign-release"]
+needs = ["build"]
+runner = "macos"
+modes = ["publish"]
+
+[[declare]]
+primitive = "release"
+file = "release.yml"
