@@ -1,13 +1,13 @@
 //! Build or stage the reproducible Firecracker guest kernel and rootfs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use velnor_runner::execution::{
     build_guest_image_cli, expected_checksums_for_arch, stage_release_dir, GuestArch, RealHostFs,
     KERNEL_TARBALL,
 };
 
-const USAGE: &str = "usage: velnor-guest-image stage --root DIR --arch ARCH [--rootfs-sha256 HEX] [--guest-agent-sha256 HEX] | build --arch ARCH --out DIR --tarball PATH --guest-agent PATH";
+const USAGE: &str = "usage: velnor-guest-image stage --root DIR --arch ARCH [--rootfs-sha256 HEX] [--guest-agent-sha256 HEX] | build --arch ARCH --out DIR --tarball PATH --guest-agent PATH [--work-dir DIR]";
 
 fn main() {
     if let Err(error) = run() {
@@ -91,11 +91,24 @@ fn stage(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Scratch lives next to `--out`, never inside it: nesting the Debian tree
+/// under the publish dir once let the artifact upload walk absolute symlinks
+/// out onto a root-only host path (EACCES scandir).
+fn default_work_dir(out: &Path) -> Result<PathBuf, String> {
+    let name = out
+        .file_name()
+        .ok_or_else(|| "need --work-dir when --out has no file name".to_string())?;
+    let mut sibling = name.to_os_string();
+    sibling.push("-work");
+    Ok(out.with_file_name(sibling))
+}
+
 fn build(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let mut arch = None;
     let mut out = None;
     let mut tarball = None;
     let mut guest_agent = None;
+    let mut work_dir = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--arch" => {
@@ -122,6 +135,12 @@ fn build(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
                         .ok_or_else(|| "missing --guest-agent value".to_string())?,
                 ));
             }
+            "--work-dir" => {
+                work_dir = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "missing --work-dir value".to_string())?,
+                ));
+            }
             other => return Err(format!("unknown build flag {other}")),
         }
     }
@@ -134,9 +153,23 @@ fn build(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
         .map_err(|error| format!("read {}: {error}", tarball_path.display()))?;
     let agent_bytes = std::fs::read(&guest_agent_path)
         .map_err(|error| format!("read {}: {error}", guest_agent_path.display()))?;
-    let work = out.join("work");
+    let explicit_work_dir = work_dir.is_some();
+    let work = match work_dir {
+        Some(dir) => dir,
+        None => default_work_dir(&out)?,
+    };
     let (kernel, rootfs) = build_guest_image_cli(&work, &out, arch, &tarball_bytes, &agent_bytes)
         .map_err(|error| error.to_string())?;
+    if !explicit_work_dir {
+        // The default sibling is ours to remove; an explicit --work-dir stays
+        // for the caller to inspect. Removal failure must not fail the build.
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            eprintln!(
+                "velnor-guest-image: warning: remove {}: {error}",
+                work.display()
+            );
+        }
+    }
     println!("built {} and {}", kernel.display(), rootfs.display());
     println!("kernel source {KERNEL_TARBALL}");
     Ok(())
@@ -217,6 +250,41 @@ mod tests {
         ]))
         .unwrap_err();
         assert_eq!(error, "missing --guest-agent");
+    }
+
+    #[test]
+    fn build_requires_work_dir_value() {
+        let error = build(&mut strings(&[
+            "--arch",
+            "x86_64",
+            "--out",
+            "/out",
+            "--tarball",
+            "/t",
+            "--guest-agent",
+            "/a",
+            "--work-dir",
+        ]))
+        .unwrap_err();
+        assert_eq!(error, "missing --work-dir value");
+    }
+
+    #[test]
+    fn default_work_dir_is_sibling_not_child() {
+        let out = PathBuf::from("dist/microvm");
+        let work = default_work_dir(&out).unwrap();
+        assert_eq!(work, PathBuf::from("dist/microvm-work"));
+        assert!(
+            !work.starts_with(&out),
+            "scratch must not nest under the publish dir: {}",
+            work.display()
+        );
+    }
+
+    #[test]
+    fn default_work_dir_fails_closed_without_file_name() {
+        let error = default_work_dir(Path::new("")).unwrap_err();
+        assert!(error.contains("--work-dir"), "{error}");
     }
 
     #[test]

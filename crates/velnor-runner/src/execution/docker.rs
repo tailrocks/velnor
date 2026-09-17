@@ -5,13 +5,8 @@ use super::isolation::IsolationIdentity;
 use super::ExecutionWorld;
 use crate::docker::facts::{self, Fact, FactLifetime};
 use crate::executor::CommandRunner;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use velnor_model::JobConclusion;
-
-/// The drop-in that sets the job slice's CPU quota. Its modification time is
-/// the generation of every host fact derived from the slice's configuration.
-const JOB_CGROUP_DROPIN: &str = "/etc/systemd/system/velnor-jobs.slice.d/10-host-cpu.conf";
 
 /// The Engine's cgroup driver and cgroup version.
 ///
@@ -22,8 +17,8 @@ const JOB_CGROUP_DROPIN: &str = "/etc/systemd/system/velnor-jobs.slice.d/10-host
 /// failing user step, which cannot change a cgroup driver.
 static CGROUP_DRIVER: Fact<String> = Fact::new("docker-info-cgroup", FactLifetime::Daemon);
 
-/// Proof that the Docker VM preserves Velnor's per-container resource controls
-/// (`--cpus`, `--memory`, `--cgroup-parent`).
+/// Proof that the Docker VM preserves Velnor's per-container placement
+/// (`--cgroup-parent`) while leaving containers unbounded.
 ///
 /// A daemon-generation fact: the projection is decided by the Engine and the
 /// VM kernel it runs on, both of which are part of the daemon key. It used to
@@ -31,12 +26,6 @@ static CGROUP_DRIVER: Fact<String> = Fact::new("docker-info-cgroup", FactLifetim
 /// because the daemon generation could not be observed on macOS.
 static VM_RESOURCE_CONTROLS: Fact<()> =
     Fact::new("docker-vm-resource-controls", FactLifetime::Daemon);
-
-/// The `CPUQuota=` the job slice's unit configuration declares.
-///
-/// A host fact: it changes only when the drop-in on disk changes, which is the
-/// generation it is keyed on.
-static SLICE_UNIT_QUOTA: Fact<String> = Fact::new("job-slice-unit-quota", FactLifetime::Host);
 
 pub const DOCKER_JOB_CGROUP_PARENT: &str = crate::docker_lease::JOB_CGROUP_PARENT;
 pub const DOCKER_RESOURCE_BOUNDARY_CHECK: &str = "docker-resource-boundary";
@@ -71,50 +60,19 @@ impl HostPlatform {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DockerResourceCapabilities {
-    pub cpu_limit: bool,
-    pub memory_limit: bool,
-    pub cgroup_parent: bool,
-}
-
-impl DockerResourceCapabilities {
-    pub fn all() -> Self {
-        Self {
-            cpu_limit: true,
-            memory_limit: true,
-            cgroup_parent: true,
-        }
-    }
-
-    fn missing(self) -> Vec<&'static str> {
-        let mut missing = Vec::new();
-        if !self.cpu_limit {
-            missing.push("--cpus");
-        }
-        if !self.memory_limit {
-            missing.push("--memory");
-        }
-        if !self.cgroup_parent {
-            missing.push("--cgroup-parent");
-        }
-        missing
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockerIsolationMode {
     LinuxSystemdV2,
     DockerVmCgroupV2,
 }
 
 /// Select the host isolation proof without assuming that the host kernel is
-/// the kernel running Docker. macOS Docker engines are Linux VMs: cgroupfs v2
-/// is acceptable only after Docker itself proves the controls Velnor emits.
+/// the kernel running Docker. This selects the cgroup driver and version
+/// only — a mode, not a ceiling. Placement under the job cgroup is proven
+/// separately, and no CPU/RAM ceiling is ever required or applied.
 pub fn validate_docker_isolation(
     platform: HostPlatform,
     driver: &str,
     version: &str,
-    capabilities: DockerResourceCapabilities,
 ) -> std::result::Result<DockerIsolationMode, String> {
     if version != "2" {
         return Err(format!(
@@ -130,36 +88,28 @@ pub fn validate_docker_isolation(
             if driver.eq_ignore_ascii_case("cgroupfs")
                 || driver.eq_ignore_ascii_case("systemd") =>
         {
-            let missing = capabilities.missing();
-            if missing.is_empty() {
-                Ok(DockerIsolationMode::DockerVmCgroupV2)
-            } else {
-                Err(format!(
-                    "macOS Docker VM does not expose equivalent resource isolation; Docker {driver} cgroup v2 is missing {}. Velnor requires Docker support for --cpus, --memory, and --cgroup-parent",
-                    missing.join(", ")
-                ))
-            }
+            Ok(DockerIsolationMode::DockerVmCgroupV2)
         }
         _ => Err(format!(
-            "Docker job isolation requires systemd cgroup driver on Linux or a macOS Docker VM with cgroupfs v2 resource controls; got driver {driver:?}, version {version:?} on {}",
+            "Docker job isolation requires systemd cgroup driver on Linux or a macOS Docker VM with cgroup v2; got driver {driver:?}, version {version:?} on {}",
             platform.label()
         )),
     }
 }
 
-/// Validate the Docker-visible projection of the per-container resource
-/// boundary used by the macOS Docker VM path.
-pub fn validate_docker_resource_projection(
+/// Validate the Docker-visible projection of the per-container boundary used
+/// by the macOS Docker VM path: the probe container lands under the job
+/// cgroup parent with no CPU or memory ceiling (`NanoCpus=0`, `Memory=0`).
+pub fn validate_unbounded_resource_projection(
     cgroup_parent: &str,
     nano_cpus: &str,
     memory: &str,
 ) -> std::result::Result<(), String> {
-    if cgroup_parent == DOCKER_JOB_CGROUP_PARENT && nano_cpus == "500000000" && memory == "67108864"
-    {
+    if cgroup_parent == DOCKER_JOB_CGROUP_PARENT && nano_cpus == "0" && memory == "0" {
         Ok(())
     } else {
         Err(format!(
-            "{DOCKER_RESOURCE_BOUNDARY_CHECK} expected CgroupParent={DOCKER_JOB_CGROUP_PARENT}, NanoCpus=500000000, Memory=67108864; got CgroupParent={cgroup_parent:?}, NanoCpus={nano_cpus:?}, Memory={memory:?}"
+            "{DOCKER_RESOURCE_BOUNDARY_CHECK} expected unbounded CgroupParent={DOCKER_JOB_CGROUP_PARENT}, NanoCpus=0, Memory=0; got CgroupParent={cgroup_parent:?}, NanoCpus={nano_cpus:?}, Memory={memory:?}"
         ))
     }
 }
@@ -315,20 +265,8 @@ pub(crate) fn verify_docker_job_cgroup_boundary_with_image(
     }
     let driver_name = words[0];
     let version = words[1];
-    let mode = validate_docker_isolation(
-        HostPlatform::current(),
-        driver_name,
-        version,
-        if host_runner {
-            DockerResourceCapabilities::all()
-        } else {
-            // Test and guest runners cannot prove host Docker capabilities;
-            // their scripted cgroup projection is covered by the pure policy
-            // tests below and must never populate host facts.
-            DockerResourceCapabilities::all()
-        },
-    )
-    .map_err(ExecutionError::DockerPreflight)?;
+    let mode = validate_docker_isolation(HostPlatform::current(), driver_name, version)
+        .map_err(ExecutionError::DockerPreflight)?;
 
     if mode == DockerIsolationMode::DockerVmCgroupV2 {
         if host_runner {
@@ -342,88 +280,28 @@ pub(crate) fn verify_docker_job_cgroup_boundary_with_image(
         return Ok(());
     }
 
+    // The job slice is identity and cleanup ancestry, not a ceiling: it must
+    // be loaded, and its effective CPU/RAM properties must all read
+    // `infinity`. Any finite value is a surviving quota — a stale package
+    // drop-in or an operator override — and fails closed.
     let slice = crate::docker_lease::JOB_CGROUP_PARENT;
-    let cpu_count = runner
-        .run("getconf", &["_NPROCESSORS_ONLN".into()])
-        .map_err(|error| {
-            ExecutionError::DockerPreflight(format!("online CPU count probe for {slice}: {error}"))
-        })?;
-    if cpu_count.code != 0 {
+    let state = systemd_slice_load_and_ceilings(runner, slice)?;
+    if state.load_state != "loaded" {
         return Err(ExecutionError::DockerPreflight(format!(
-            "online CPU count probe for {slice} exited {}: {}",
-            cpu_count.code, cpu_count.stderr
+            "Docker job cgroup boundary requires loaded {slice}; got {:?}",
+            state.load_state
         )));
     }
-
-    let cpu_count = cpu_count.stdout.trim().parse::<u64>().map_err(|_| {
-        ExecutionError::DockerPreflight(format!(
-            "online CPU count probe for {slice} returned invalid value {:?}",
-            cpu_count.stdout.trim()
-        ))
-    })?;
-    let expected_quota = cpu_count.checked_mul(95).ok_or_else(|| {
-        ExecutionError::DockerPreflight(format!(
-            "online CPU count is too large to calculate CPUQuota for {slice}"
-        ))
-    })?;
-    if expected_quota == 0 {
-        return Err(ExecutionError::DockerPreflight(format!(
-            "online CPU count is zero for {slice}"
-        )));
-    }
-
-    let (load_state, quota) = systemd_slice_state(runner, slice)?;
-    if load_state != "loaded" {
-        return Err(ExecutionError::DockerPreflight(format!(
-            "Docker job cgroup boundary requires loaded {slice}; got {load_state:?}"
-        )));
-    }
-    let expected_quota_usec = u128::from(expected_quota) * 10_000;
-    let effective_quota_usec = parse_systemd_duration_usec(&quota).ok_or_else(|| {
-        ExecutionError::DockerPreflight(format!(
-            "Docker job cgroup boundary requires finite CPUQuotaPerSecUSec on {slice}; got {quota:?}"
-        ))
-    })?;
-    if effective_quota_usec != expected_quota_usec {
-        return Err(ExecutionError::DockerPreflight(format!(
-            "Docker job cgroup boundary requires CPUQuotaPerSecUSec={expected_quota_usec}us on {slice}; got {quota:?}"
-        )));
-    }
-
-    // The unit's declared quota is a host fact keyed on the drop-in that sets
-    // it. The comparison below runs every time even on a cache hit, so a
-    // changed expectation is still rejected.
-    let declared_quota = SLICE_UNIT_QUOTA.get_or_try_init(
-        host_runner
-            .then(|| facts::host(Path::new(JOB_CGROUP_DROPIN)))
-            .flatten(),
-        || -> Result<String, ExecutionError> {
-            let unit = runner
-                .run("systemctl", &["cat".into(), slice.into()])
-                .map_err(|error| {
-                    ExecutionError::DockerPreflight(format!(
-                        "systemd configuration probe for {slice}: {error}"
-                    ))
-                })?;
-            if unit.code != 0 {
-                return Err(ExecutionError::DockerPreflight(format!(
-                    "systemd configuration probe for {slice} exited {}: {}",
-                    unit.code, unit.stderr
-                )));
-            }
-            Ok(unit
-                .stdout
-                .lines()
-                .filter_map(|line| line.trim().strip_prefix("CPUQuota="))
-                .next_back()
-                .unwrap_or_default()
-                .to_string())
-        },
-    )?;
-    if declared_quota != format!("{expected_quota}%") {
-        return Err(ExecutionError::DockerPreflight(format!(
-            "Docker job cgroup boundary requires CPUQuota={expected_quota}% on {slice}; got {declared_quota:?}"
-        )));
+    for (property, value) in [
+        ("CPUQuotaPerSecUSec", state.cpu_quota.as_str()),
+        ("MemoryMax", state.memory_max.as_str()),
+        ("MemoryHigh", state.memory_high.as_str()),
+    ] {
+        if !value.eq_ignore_ascii_case("infinity") {
+            return Err(ExecutionError::DockerPreflight(format!(
+                "Docker job cgroup boundary requires no CPU/RAM ceiling on {slice}; {property} is {value:?}"
+            )));
+        }
     }
 
     Ok(())
@@ -435,16 +313,14 @@ fn verify_docker_vm_resource_controls(
 ) -> Result<(), ExecutionError> {
     let sequence = CAPABILITY_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = format!("velnor-capability-probe-{}-{sequence}", std::process::id());
+    // Placement only: the probe carries no --cpus/--memory, and the
+    // projection must show the container unbounded under the job parent.
     let create_args = vec![
         "create".to_owned(),
         "--name".to_owned(),
         name.clone(),
         "--cgroup-parent".to_owned(),
         crate::docker_lease::JOB_CGROUP_PARENT.to_owned(),
-        "--cpus".to_owned(),
-        "0.5".to_owned(),
-        "--memory".to_owned(),
-        "67108864".to_owned(),
         image.to_owned(),
     ];
     let created = runner.run("docker", &create_args).map_err(|error| {
@@ -454,7 +330,7 @@ fn verify_docker_vm_resource_controls(
     })?;
     if created.code != 0 {
         return Err(ExecutionError::DockerPreflight(format!(
-            "macOS Docker VM resource-isolation probe failed to create a container with --cpus=0.5, --memory=67108864, and --cgroup-parent={}: exited {}: {}",
+            "macOS Docker VM resource-isolation probe failed to create a container with --cgroup-parent={}: exited {}: {}",
             crate::docker_lease::JOB_CGROUP_PARENT,
             created.code,
             created.stderr.trim()
@@ -511,18 +387,26 @@ fn verify_docker_vm_resource_controls(
             inspected.stdout.trim()
         )));
     };
-    if let Err(detail) = validate_docker_resource_projection(parent, cpus, memory) {
+    if let Err(detail) = validate_unbounded_resource_projection(parent, cpus, memory) {
         return Err(ExecutionError::DockerPreflight(format!(
-            "macOS Docker VM resource-isolation probe did not preserve Velnor limits: {detail}"
+            "macOS Docker VM resource-isolation probe found a ceiling on the probe container: {detail}"
         )));
     }
     Ok(())
 }
 
-fn systemd_slice_state(
+/// Effective load state and CPU/RAM ceiling properties of the job slice.
+struct SystemdSliceState {
+    load_state: String,
+    cpu_quota: String,
+    memory_max: String,
+    memory_high: String,
+}
+
+fn systemd_slice_load_and_ceilings(
     runner: &mut dyn CommandRunner,
     slice: &str,
-) -> Result<(String, String), ExecutionError> {
+) -> Result<SystemdSliceState, ExecutionError> {
     let result = runner
         .run(
             "systemctl",
@@ -530,6 +414,8 @@ fn systemd_slice_state(
                 "show".into(),
                 "--property=LoadState".into(),
                 "--property=CPUQuotaPerSecUSec".into(),
+                "--property=MemoryMax".into(),
+                "--property=MemoryHigh".into(),
                 slice.into(),
             ],
         )
@@ -548,62 +434,35 @@ fn systemd_slice_state(
     // `systemctl --value` does not preserve the requested property order on
     // every systemd version. Parse named fields so the probe is order-safe.
     let mut load_state = None;
-    let mut quota = None;
+    let mut cpu_quota = None;
+    let mut memory_max = None;
+    let mut memory_high = None;
     for line in result.stdout.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         match key {
             "LoadState" => load_state = Some(value.trim().to_string()),
-            "CPUQuotaPerSecUSec" => quota = Some(value.trim().to_string()),
+            "CPUQuotaPerSecUSec" => cpu_quota = Some(value.trim().to_string()),
+            "MemoryMax" => memory_max = Some(value.trim().to_string()),
+            "MemoryHigh" => memory_high = Some(value.trim().to_string()),
             _ => {}
         }
     }
-    let (Some(load_state), Some(quota)) = (load_state, quota) else {
+    let (Some(load_state), Some(cpu_quota), Some(memory_max), Some(memory_high)) =
+        (load_state, cpu_quota, memory_max, memory_high)
+    else {
         return Err(ExecutionError::DockerPreflight(format!(
             "systemd slice state probe for {slice} returned malformed output {:?}",
             result.stdout.trim()
         )));
     };
-    Ok((load_state, quota))
-}
-
-fn parse_systemd_duration_usec(value: &str) -> Option<u128> {
-    let value = value.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("infinity") {
-        return None;
-    }
-    let (number, multiplier) = [
-        ("min", 60_000_000),
-        ("ms", 1_000),
-        ("us", 1),
-        ("s", 1_000_000),
-        ("h", 3_600_000_000),
-        ("d", 86_400_000_000),
-        ("w", 604_800_000_000),
-    ]
-    .iter()
-    .find_map(|(unit, multiplier)| value.strip_suffix(unit).map(|number| (number, *multiplier)))
-    .unwrap_or((value, 1));
-    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
-    if whole.is_empty() && fraction.is_empty()
-        || !whole.chars().all(|character| character.is_ascii_digit())
-        || !fraction.chars().all(|character| character.is_ascii_digit())
-    {
-        return None;
-    }
-    let whole = whole.parse::<u128>().ok()?;
-    let whole_usec = whole.checked_mul(multiplier)?;
-    let fraction_usec = if fraction.is_empty() {
-        0
-    } else {
-        let scale = 10_u128.checked_pow(fraction.len().try_into().ok()?)?;
-        let fraction = fraction.parse::<u128>().ok()?;
-        let fraction_usec = fraction.checked_mul(multiplier)?;
-        (fraction_usec % scale == 0).then_some(fraction_usec / scale)?
-    };
-    let total = whole_usec.checked_add(fraction_usec)?;
-    (total > 0).then_some(total)
+    Ok(SystemdSliceState {
+        load_state,
+        cpu_quota,
+        memory_max,
+        memory_high,
+    })
 }
 
 #[cfg(test)]
@@ -621,73 +480,41 @@ mod tests {
     #[test]
     fn linux_systemd_v2_keeps_the_host_slice_proof() {
         assert_eq!(
-            validate_docker_isolation(
-                HostPlatform::Linux,
-                "systemd",
-                "2",
-                DockerResourceCapabilities::all(),
-            ),
+            validate_docker_isolation(HostPlatform::Linux, "systemd", "2",),
             Ok(DockerIsolationMode::LinuxSystemdV2)
         );
     }
 
     #[test]
     fn linux_cgroupfs_v2_does_not_bypass_the_systemd_boundary() {
-        let Err(error) = validate_docker_isolation(
-            HostPlatform::Linux,
-            "cgroupfs",
-            "2",
-            DockerResourceCapabilities::all(),
-        ) else {
+        let Err(error) = validate_docker_isolation(HostPlatform::Linux, "cgroupfs", "2") else {
             panic!("cgroupfs on Linux must not skip the systemd boundary");
         };
         assert!(error.contains("systemd cgroup driver"), "{error}");
     }
 
     #[test]
-    fn macos_vm_cgroupfs_v2_accepts_equivalent_docker_controls() {
+    fn macos_vm_cgroupfs_v2_selects_the_vm_mode() {
         assert_eq!(
-            validate_docker_isolation(
-                HostPlatform::MacOs,
-                "cgroupfs",
-                "2",
-                DockerResourceCapabilities::all(),
-            ),
+            validate_docker_isolation(HostPlatform::MacOs, "cgroupfs", "2",),
             Ok(DockerIsolationMode::DockerVmCgroupV2)
         );
     }
 
     #[test]
-    fn macos_vm_rejects_missing_resource_control() {
-        let Err(error) = validate_docker_isolation(
-            HostPlatform::MacOs,
-            "cgroupfs",
-            "2",
-            DockerResourceCapabilities {
-                cpu_limit: true,
-                memory_limit: false,
-                cgroup_parent: true,
-            },
-        ) else {
-            panic!("macOS Docker VM must require memory limits");
-        };
-        assert!(error.contains("--memory"), "{error}");
-        assert!(error.contains("macOS Docker VM"), "{error}");
-    }
-
-    #[test]
-    fn macos_vm_resource_projection_matches_per_container_limits() {
-        assert!(validate_docker_resource_projection(
-            DOCKER_JOB_CGROUP_PARENT,
-            "500000000",
-            "67108864",
-        )
-        .is_ok());
-        let error =
-            validate_docker_resource_projection(DOCKER_JOB_CGROUP_PARENT, "1000000000", "67108864")
-                .unwrap_err();
-        assert!(error.contains(DOCKER_RESOURCE_BOUNDARY_CHECK), "{error}");
-        assert!(error.contains("NanoCpus"), "{error}");
+    fn macos_vm_resource_projection_requires_unbounded_placement() {
+        assert!(
+            validate_unbounded_resource_projection(DOCKER_JOB_CGROUP_PARENT, "0", "0",).is_ok()
+        );
+        // A ceiling on the probe container fails, as does a wrong parent.
+        for (parent, cpus, memory) in [
+            (DOCKER_JOB_CGROUP_PARENT, "500000000", "0"),
+            (DOCKER_JOB_CGROUP_PARENT, "0", "67108864"),
+            ("other.slice", "0", "0"),
+        ] {
+            let error = validate_unbounded_resource_projection(parent, cpus, memory).unwrap_err();
+            assert!(error.contains(DOCKER_RESOURCE_BOUNDARY_CHECK), "{error}");
+        }
     }
 
     #[test]
@@ -697,12 +524,7 @@ mod tests {
             HostPlatform::MacOs,
             HostPlatform::Other,
         ] {
-            let Err(error) = validate_docker_isolation(
-                platform,
-                "cgroupfs",
-                "1",
-                DockerResourceCapabilities::all(),
-            ) else {
+            let Err(error) = validate_docker_isolation(platform, "cgroupfs", "1") else {
                 panic!("{platform:?} must reject cgroup v1");
             };
             assert!(error.contains("cgroup v2"), "{error}");

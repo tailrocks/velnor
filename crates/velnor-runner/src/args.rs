@@ -224,8 +224,9 @@ pub struct RunArgs {
     pub dry_run_jobs: bool,
     pub dump_job_message: Option<PathBuf>,
     pub docker_image: String,
-    pub job_cpus: String,
-    pub job_memory: String,
+    /// Host-wide permit ledger database. `None` resolves to the default path
+    /// next to the operational state db.
+    pub permit_ledger: Option<PathBuf>,
     pub trust_scope: String,
     pub emergency_reserve_bytes: u64,
     pub job_peak_bytes: u64,
@@ -268,8 +269,18 @@ pub struct DaemonArgs {
     pub dry_run_jobs: bool,
     pub dump_job_message: Option<PathBuf>,
     pub docker_image: String,
-    pub job_cpus: String,
-    pub job_memory: String,
+    /// Host-wide maximum concurrent jobs. `None` (or 0) falls back to
+    /// `slots`, which is correct only for single-daemon hosts.
+    #[serde(default)]
+    pub max_jobs: Option<u32>,
+    /// Host-wide permit ledger database. `None` resolves to the default path
+    /// next to the operational state db.
+    #[serde(default)]
+    pub permit_ledger: Option<PathBuf>,
+    /// Scale-set lane config file (TOML). `None` disables the lane and the
+    /// daemon runs its native slots exactly as before.
+    #[serde(default)]
+    pub scale_set_config: Option<PathBuf>,
     pub trust_scope: String,
     pub emergency_reserve_bytes: u64,
     pub job_peak_bytes: u64,

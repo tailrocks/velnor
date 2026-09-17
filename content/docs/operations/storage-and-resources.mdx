@@ -5,8 +5,10 @@ title: "Storage and resource budgets"
 # Storage and resource budgets
 
 Velnor derives what a job may use from what the machine actually has, rather
-than letting each tool assume it owns the host. This page describes the store
-catalog, the host budget and the per-slot share derived from it, and how disk
+than letting each tool assume it owns the host. Jobs run unbounded — no
+CPU/RAM ceiling is imposed on any container, daemon, or compiler — and host
+capacity is governed by a single `max_jobs=N` permit ledger. This page
+describes the store catalog, the unbounded execution policy, and how disk
 pressure is handled.
 
 > Navigation: [← Observability](/operations/observability) · [Index](/) · [Security and data →](/operations/security-and-data)
@@ -32,7 +34,7 @@ store cannot be written at one path and reclaimed at another.
 Each reclaimable class declares a lease class a running job publishes to mark
 the store live, so a reclaimer cannot delete a class it does not own, and
 cannot delete a store a job is using. `docker` declares none: Velnor never
-reclaims Docker's storage by scope, but the host budget must account for it,
+reclaims Docker's storage by scope, but host disk accounting must include it,
 because it consumes the same filesystem.
 
 Stores resolve under `VELNOR_STORAGE_ROOT` when set, otherwise through the
@@ -58,55 +60,24 @@ baseline measurement with
 the 2 GiB admission floor; it does not delete live leases. BuildKit and Docker
 image storage remain operator-managed on trusted docker hosts.
 
-## The host budget
+## Unbounded execution and the host permit ledger
 
-Velnor, Cargo, Mr Boxington, Docker and BuildKit each default to assuming they
-own the machine. Four slots on a sixteen-core host would therefore run four
-builds that each pick `-j16` inside one `velnor-jobs.slice` whose aggregate
-quota is 15.2 cores: everything runnable, nothing progressing.
+Jobs run unbounded. No Docker `--cpus`/`--memory`/cpuset flag, no
+`velnor-jobs.slice` CPU/RAM ceiling, and no compiler partition
+(`CARGO_BUILD_JOBS`, `MAKEFLAGS`, `MBX_SCHEDULER_*`) is ever imposed:
+every container sees the whole machine, and builders size themselves.
+Workflow `container.options` quota flags are stripped at admission and
+again at emission; nested creates through the job lease proxy are
+stripped the same way. `velnor-jobs.slice` exists for identity and
+cleanup ancestry only.
 
-The budget is derived, not assumed. CPU capacity is the smallest of every
-constraint that actually applies:
-
-- `available_parallelism`;
-- every cgroup v2 `cpu.max` between the cgroup root and this process;
-- the effective cpuset;
-- the aggregate quota on `velnor-jobs.slice`, which the package pins to 95% of
-  the host's online CPUs.
-
-Memory is the smallest of `/proc/meminfo` `MemTotal` and every applicable
-`memory.max`.
-
-A value that cannot be read is *unobservable* and carries the reason. It is
-never cached and never replaced by a guess. An unobservable CPU budget produces
-no `CARGO_BUILD_JOBS`, no `--cpus`, and no sizing at all.
-
-## The per-slot share
-
-The slice quota is an aggregate ceiling for every job on the host, not a
-per-slot allowance, so a slot gets `budget / slots`. CPUs are floored, never
-rounded up into the next slot, and floor at one — a slot that is admitted at
-all must be able to run one compiler process. Memory is taken at 85% of the
-share, the same headroom Mr Boxington documents for its own default.
-
-The share is capped, never widened, by an explicit operator limit
-(`VELNOR_JOB_CPUS`) or a workflow `createOptions` `--cpus`.
-
-The job then receives:
-
-| Variable | Value |
-| --- | --- |
-| `CARGO_BUILD_JOBS` | the slot's whole-CPU share |
-| `MAKEFLAGS` | `-j<share>`, for the `make` invoked by `-sys` build scripts |
-| `MBX_SCHEDULER_CPUS` | the same share |
-| `MBX_SCHEDULER_MEMORY` | the slot's memory share, in MiB |
-| `VELNOR_JOB_BUDGET` | one line naming the budget, its sources, the slot count, and any workflow value it overrode |
-
-The container also gets `--cpus`, unless an explicit limit is already in force.
-
-These four resource variables are appended after the workflow's own
-environment, so a workflow that sets them cannot widen its share. The override
-is named in `VELNOR_JOB_BUDGET` rather than applied silently.
+Host capacity is governed instead by a single host-wide `max_jobs=N`
+permit ledger, shared by the native and Scale Set lanes. One top-level
+job holds one permit from acquisition-commit until terminal work and
+owned cleanup are confirmed; a full ledger skips the acquisition and
+the broker redelivers. The only number to tune for completed-work
+throughput is `N` (`--max-jobs` / `VELNOR_MAX_JOBS`, defaulting to the
+daemon's slot count on single-daemon hosts).
 
 ## Mr Boxington store limits
 
@@ -136,7 +107,7 @@ the platform's default **10 GB** repository cap; idle entries are evicted after
 **seven days** regardless of Velnor policy. Producers on the default branch
 refresh trusted snapshots; consumers on pull requests restore only. Prefix
 restore (matched restore-key, primary key miss) is an expected warm path, not
-a failure. Do not raise Velnor host budgets when GitHub entries are cold—the
+a failure. Do not raise `VELNOR_MAX_JOBS` when GitHub entries are cold—the
 lanes are independent.
 
 ## Disk pressure
