@@ -2624,6 +2624,13 @@ fn apply_unit_row(
     Ok(())
 }
 
+/// Hosted image builds authenticate the Dockerfile's mise provisioning layer:
+/// the `github_token` build secret carries the checks step's `GITHUB_TOKEN`
+/// into the layer (the same secret id the release lane passes), so
+/// shared-runner unauthenticated GitHub API quota exhaustion cannot fail
+/// `mise install`.
+const DOCKER_BUILD_GITHUB_TOKEN_SECRET: &str = "--secret id=github_token,env=GITHUB_TOKEN";
+
 fn docker_pull_request_target(command: &str) -> String {
     if command.contains("--target ci") {
         command.to_owned()
@@ -2657,6 +2664,10 @@ fn docker_hosted_pull_request_command(command: &str, unit_id: &str) -> String {
     if !cmd.contains("--cache-to type=gha") {
         cmd.push(' ');
         cmd.push_str(&cache_to);
+    }
+    if !cmd.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET) {
+        cmd.push(' ');
+        cmd.push_str(DOCKER_BUILD_GITHUB_TOKEN_SECRET);
     }
     cmd
 }
@@ -2740,6 +2751,14 @@ fn materialize_capability_commands(
                     primitives::MUTABLE_MOUNT_EXPORT_TARGET,
                     primitives::MUTABLE_MOUNT_HOST_DIR
                 ));
+                for command in &mut github_full {
+                    if command.contains("docker")
+                        && !command.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET)
+                    {
+                        command.push(' ');
+                        command.push_str(DOCKER_BUILD_GITHUB_TOKEN_SECRET);
+                    }
+                }
                 unit.github_full_commands = Some(github_full);
             }
             let _ = (scope, file, ctx);

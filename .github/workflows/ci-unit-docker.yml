@@ -307,6 +307,7 @@ jobs:
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
           timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
