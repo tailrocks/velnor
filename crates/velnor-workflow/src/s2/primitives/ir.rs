@@ -105,6 +105,38 @@ mod tests {
     }
 
     #[test]
+    fn caller_and_callee_selectors_share_one_plan_json_needle() {
+        // The aggregate callers read the plan's `units` JSON through
+        // `needs.plan.outputs.units`; the kind reusables read the same JSON
+        // through `inputs.selected_units`. GitHub `contains()` is a literal
+        // substring test, so both needles must appear verbatim in the plan
+        // output: bare quotes, no backslashes. The caller once over-escaped
+        // its needle (`'\"unit_id\":\"…\"'`), which never matches plan JSON
+        // and skipped every unit job.
+        let aggregate = super::aggregate_selected_unit_selector("docker");
+        let reusable = super::reusable_selected_unit_selector("docker");
+        assert_eq!(
+            aggregate.replace("needs.plan.outputs.units", "UNITS"),
+            reusable.replace("inputs.selected_units", "UNITS"),
+            "caller and callee share one needle spelling: {aggregate} vs {reusable}"
+        );
+        assert!(
+            !aggregate.contains('\\'),
+            "the caller needle carries no escape characters: {aggregate}"
+        );
+        let needle = "\"unit_id\":\"docker\"";
+        assert!(
+            aggregate.contains(&format!("'{needle}'")),
+            "the caller needle quotes the member exactly as plan JSON spells it: {aggregate}"
+        );
+        let plan_units = r#"[{"unit_id":"docker","providers":["github-hosted","velnor"]}]"#;
+        assert!(
+            plan_units.contains(needle),
+            "the needle matches a plan `units` record under contains() semantics"
+        );
+    }
+
+    #[test]
     fn automatic_admission_follows_the_automatic_set_and_trust_adds_the_event_gate() {
         let owner = "example/owner";
         let mut ir = owner_test_ir(owner, Vec::new());
@@ -2671,10 +2703,22 @@ pub(crate) struct RequiredCaller {
     pub(crate) prerequisite: bool,
 }
 
+/// The plan-JSON needle both the aggregate callers and the kind reusables
+/// match with `contains(...)`: bare quotes, exactly as the plan output spells
+/// the `unit_id` member. One spelling shared by both emitters so they cannot
+/// diverge again — GitHub `contains()` is a literal substring test, so an
+/// over-escaped needle never matches and every unit job skips.
+fn selected_unit_needle(unit_id: &str) -> String {
+    format!("'\"unit_id\":\"{unit_id}\"'")
+}
+
 /// `contains(...)` over the plan's `units` JSON output for one unit id, as the
 /// aggregate callers spell it.
 fn aggregate_selected_unit_selector(unit_id: &str) -> String {
-    format!("contains(needs.plan.outputs.units, '\\\"unit_id\\\":\\\"{unit_id}\\\"')")
+    format!(
+        "contains(needs.plan.outputs.units, {})",
+        selected_unit_needle(unit_id)
+    )
 }
 
 fn workflow_dispatch_inputs(
@@ -3196,7 +3240,10 @@ fn render_caller_inputs(inputs: &[(&str, String)]) -> String {
 /// job count linear in the kind's units. A caller-side matrix instantiates
 /// every job in the reusable for every selected unit: N×N skipped jobs.
 fn reusable_selected_unit_selector(unit_id: &str) -> String {
-    format!("contains(inputs.selected_units, '\"unit_id\":\"{unit_id}\"')")
+    format!(
+        "contains(inputs.selected_units, {})",
+        selected_unit_needle(unit_id)
+    )
 }
 
 /// The `env:` entries of the required check carrying each admission class
