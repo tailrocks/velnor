@@ -273,3 +273,41 @@ Findings and dispositions:
 | Q8 | docker publisher can only log in to GHCR; Jackin construct publishes to Docker Hub | DONE: docker-only registry-auth triple (`registry` + `registry_username_secret` + `registry_password_secret`, all-or-nothing), shared `docker_login_step`, GHCR automatic-token default byte-identical (3× login count test); secret-name reuse of `validate_secret_name`; non-docker kinds refuse; 6 tests |
 | Q6 | preview/docs/scheduled/maintenance render static github runs-on under dual lanes; no dispatch lane selection | DONE: shared `Args::flag` + `admit_lanes_input` (Both + labels + no-runner-group gate) + `lanes_runs_on`/`lanes_dispatch_inputs`/`lanes_input_entry` (no `both` option); preview/docs/checks/maintenance honor `lanes_input` with lanes-first inputs; preview refuses guest/macos/pinned-cell routing; checks enforce per-file lane homogeneity with macos always static; renovate migrated byte-identically (dispatch inputs + `json_string`); 2 shared + 7 preview + 3 docs + 7 checks + 4 maintenance tests |
 | pins | legacy + identity `release.yml` pinned digests predate E-2's M-1..M-4 bytes | REBASED after byte-audit: dumped renders contain exactly E-2's intended gates (rehearse arm, non-dispatch image gates, native event gate, ls-remote re-check) over byte-identical Q7/Q8 refactors (verified per call site); preview/maintenance/signer pins held |
+
+## 10. Landing log (Velnor PR #917, candidate path per #914)
+
+- Policy evaluates new-schema configs only via the candidate product:
+  self-surface `revision` names the generator commit; the base validator
+  cannot parse new keys, so `[release] image_package`/`dockerfile`
+  self-surface use moves to a post-merge follow-up. Runtime product for
+  the generator closure is dispatched per #914 precedent (`release ...
+  for the proof PR's generator`); two superseded closure releases are
+  orphaned by later fix commits (immutable, content-addressed, unused).
+- CI-found, fixed in-PR: (a) `migration_contract` plan probe inherited
+  the CI job's repo-relative `VELNOR_SELECTION_FILE` (local/CI split —
+  local runs never set it); test now scrubs it. (b) Q1 law-probe
+  `include_str!` is a genuine new compile input the scanner truthfully
+  traces into the `rust-velnor-workflow` mbx key; pinned
+  pre-parameterization key rebased after byte-audit (sole delta is the
+  probe file, already covered by the `tests/**` glob). (c) 75
+  markdownlint errors across the new plans memos (table style/counts,
+  list blanks/markers). (d) Migration-found generator bug:
+  multi-word `scheduled-checks` `name` rendered
+  `run-name: "Name words" · ${{...}}` (quoted part + trailing content =
+  invalid YAML, aborts generation); the whole composed value is now
+  quoted like the versioned-tool renderer, locked by a regression test
+  verified to fail on the old composition. Only `check_profiles.rs`
+  composed user input mid-line (`ir.rs`/`release.rs` sites use fixed
+  vocabularies).
+- Velnor-lane `operational_store` rejections (`Docker`/`Documentation`/
+  `OpenTofu`/`Prepare Cargo` on Velnor) are PRE-EXISTING INFRA, not this
+  branch: identical rejections on unrelated PR #916 (base-identical
+  admission rows) and a Velnor failure on merged #914 (which landed with
+  `ci-required` red). No Velnor-side fix in scope.
+- Migration-flag triage (draft report): flag 2 (push-trigger widening)
+  DISSOLVES — the desktop-cadence copy has no push trigger, so the
+  faithful mapping is schedule+dispatch only (drop `events=["push"]`);
+  main-only push triggering is a Jackin product decision, not a schema
+  gap. Flag 3 (renovate `lanes="github"`, validator `--strict`,
+  dropped mise allowance) and flag 4 (anonymous tool-download rate
+  limits) are Jackin migration-review items, not Velnor bugs.
