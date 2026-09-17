@@ -4784,10 +4784,12 @@ async fn configure_daemon_slots(
     Ok(usable_slots)
 }
 
-/// Open the host-wide `max_jobs=N` permit ledger: set `N`, begin a new
-/// epoch, reconcile durable occupancy against this daemon's in-flight
-/// markers, and sweep dead attempts. Fail-closed: no daemon pass may
-/// supervise slots without the capacity authority.
+/// Open the host-wide `max_jobs=N` permit ledger: adopt `N` (set on first
+/// start, keep the configured value on later starts unless this start
+/// carries an explicit `--max-jobs`), begin a new epoch, reconcile durable
+/// occupancy against this daemon's in-flight markers, and sweep dead
+/// attempts. Fail-closed: no daemon pass may supervise slots without the
+/// capacity authority.
 /// Attested scale-set holders for the startup reconcile: every demand
 /// row in a permit state, read from the lane's state db. Unconfigured
 /// lane attests nothing. A corrupt demand store fails the pass loudly —
@@ -4914,12 +4916,24 @@ fn init_host_permit_ledger(args: &DaemonArgs, config_base: &Path, slots: usize) 
     use velnor_control::permit_ledger::PermitLedger;
     let ledger_path =
         crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
-    let max_jobs = crate::permit_guard::resolve_max_jobs(args.max_jobs, slots);
     let mut ledger =
         PermitLedger::open(&ledger_path).map_err(|error| anyhow::anyhow!("{error:#}"))?;
-    ledger
-        .set_max_jobs(max_jobs)
-        .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    // Adopt, don't clobber: a second scope daemon's slot fallback must
+    // never rewrite the host-wide N another daemon configured.
+    let (max_jobs, resized) =
+        crate::permit_guard::apply_max_jobs(&mut ledger, args.max_jobs, slots)
+            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    if resized {
+        println!(
+            "Host permit ledger {}: configured max_jobs={max_jobs}.",
+            ledger_path.display()
+        );
+    } else {
+        println!(
+            "Host permit ledger {}: adopted configured max_jobs={max_jobs} (pass an explicit --max-jobs to resize).",
+            ledger_path.display()
+        );
+    }
     let generation = ledger
         .begin_epoch()
         .map_err(|error| anyhow::anyhow!("{error:#}"))?;
@@ -7637,6 +7651,21 @@ async fn handle_v2_message(
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
+    // Oldest-observed-first admission: record this offer's age before any
+    // fence can skip it, so a redelivery retains the original age even when
+    // this slot shuts down (cordon/drain) before reaching the permit fence.
+    // Best-effort and silent: the fence below re-submits authoritatively.
+    {
+        let ledger_path =
+            crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
+        if let Ok(mut demand) = crate::native_demand::NativeDemandStore::open(&ledger_path) {
+            let _ = demand.submit_offer(
+                &reference.runner_request_id,
+                &stored.settings.github_url,
+                crate::native_demand::now_unix(),
+            );
+        }
+    }
     let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
     let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
     // A cordoned slot must leave the broker session before acknowledging or
@@ -7700,9 +7729,43 @@ async fn handle_v2_message(
     let permit_holder = crate::permit_guard::native_permit_holder(&reference.runner_request_id);
     let ledger_path =
         crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
+    // Oldest-observed-first admission across every scope: defer while older
+    // fresh eligible demand exists that free permits cannot also cover. The
+    // broker redelivers; no global FIFO is promised.
+    match crate::native_demand::fence_admission(
+        &ledger_path,
+        &reference.runner_request_id,
+        &stored.settings.github_url,
+        crate::native_demand::now_unix(),
+        crate::native_demand::STALE_AFTER_SECS,
+    ) {
+        crate::native_demand::FenceOutcome::Grant => {}
+        crate::native_demand::FenceOutcome::Defer { older } => {
+            forensics.broker(&format!(
+                "admission DEFERRED request={} older_fresh_eligible={older}",
+                reference.runner_request_id
+            ));
+            println!(
+                "Deferring broker message {}: {older} older eligible demand rows hold priority; waiting for redelivery.",
+                message.message_id
+            );
+            return Ok(V2MessageAction::None);
+        }
+        crate::native_demand::FenceOutcome::Blind { reason } => {
+            forensics.broker(&format!(
+                "admission BLIND request={} reason={reason}",
+                reference.runner_request_id
+            ));
+            eprintln!(
+                "Warning: oldest-first ordering blind for broker message {} ({reason}); ledger capacity still enforced.",
+                message.message_id
+            );
+        }
+    }
     let permit_guard = match crate::permit_guard::NativePermitGuard::acquire(
         &ledger_path,
         permit_holder,
+        &stored.settings.github_url,
     ) {
         Ok(Some(guard)) => guard,
         Ok(None) => {

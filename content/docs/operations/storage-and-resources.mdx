@@ -77,7 +77,18 @@ job holds one permit from acquisition-commit until terminal work and
 owned cleanup are confirmed; a full ledger skips the acquisition and
 the broker redelivers. The only number to tune for completed-work
 throughput is `N` (`--max-jobs` / `VELNOR_MAX_JOBS`, defaulting to the
-daemon's slot count on single-daemon hosts).
+daemon's slot count on single-daemon hosts). The first daemon start
+configures `N`; later starts adopt the configured value, so a second
+scope daemon's slot count never rewrites host capacity — an explicit
+`--max-jobs` always wins as deliberate intent.
+
+Native offers queue oldest-observed-first across every scope: each broker
+offer is recorded with an immutable first-seen age, redelivery retains
+the original age, and a younger offer defers while older eligible demand
+exists that free permits cannot also cover. Ordering is advisory and
+bounded by freshness; `occupied <= N` is enforced atomically by the
+ledger behind it. No global FIFO is promised: GitHub controls delivery
+order.
 
 ## Mr Boxington store limits
 
