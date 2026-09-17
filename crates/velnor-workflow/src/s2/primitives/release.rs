@@ -11,9 +11,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
-    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
-    render_retained_output_cache_note, Args, CacheBackend, Primitive, RenderCtx, Rendered,
-    WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
+    checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
+    render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
+    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER,
+    STATIC_WORKFLOW,
 };
 use crate::s2::provider::{runs_on_for, ProviderId};
 use crate::s2::{
@@ -3193,9 +3194,10 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let cargo_offline = checks_env(unit);
+    let token_env = docker_build_token_env_for_members(&[unit]);
     let _ = writeln!(
         output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
         yaml_scalar(&unit.id),
         yaml_scalar(&unit.id)
     );
@@ -5387,6 +5389,36 @@ mod tests {
                 "release verification must fan out to every provider: {release_workflow}"
             );
         }
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn release_docker_verification_exports_the_build_token() {
+        let mut cfg = config(&["release.yml"], Some(binary_spec()));
+        let mut docker = unit("docker-example");
+        docker.kind = crate::s2::UnitKind::Docker;
+        docker.full_commands = vec![
+            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
+                .to_owned(),
+        ];
+        cfg.units.push(docker);
+        let Some(release) = cfg.release.as_ref() else {
+            panic!("release fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&cfg, release);
+        let docker_job = yaml_job(&workflow, "release-github-hosted-docker-example");
+        assert!(
+            docker_job.contains("GITHUB_TOKEN: ${{ github.token }}"),
+            "the release docker checks step provides the build secret's token: {docker_job}"
+        );
+        let rust_job = yaml_job(&workflow, "release-github-hosted-rust-example");
+        assert!(
+            !rust_job.contains("GITHUB_TOKEN: ${{ github.token }}"),
+            "other kinds get no token: {rust_job}"
+        );
     }
 
     #[test]

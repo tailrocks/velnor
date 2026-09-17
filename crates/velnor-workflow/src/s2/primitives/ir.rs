@@ -159,6 +159,23 @@ mod tests {
         }
     }
 
+    /// One hand-built Docker unit: its image build commands pass the
+    /// `github_token` build secret, so its checks steps must export it.
+    fn docker_unit(id: &str) -> Unit {
+        let mut unit = rust_unit(id, ".");
+        unit.label = format!("Docker ({id})");
+        unit.kind = UnitKind::Docker;
+        unit.pr_commands = vec![
+            "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
+                .to_owned(),
+        ];
+        unit.full_commands = vec![
+            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
+                .to_owned(),
+        ];
+        unit
+    }
+
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
         WorkflowIr {
             default_branch: "main".to_owned(),
@@ -776,6 +793,78 @@ mod tests {
             step.contains("git fetch --no-tags --depth 1"),
             "a shallow checkout gains the pin commit: {step}"
         );
+    }
+
+    #[test]
+    fn docker_checks_steps_export_the_build_token_on_every_provider() {
+        let owner = "example/owner";
+        let ir = owner_test_ir(owner, vec![docker_unit("docker-example")]);
+        let rendered = must_ok(
+            ir.render_kind_unit_workflow(UnitKind::Docker, None),
+            "docker kind reusable renders",
+        );
+        let content = must_some(rendered, "docker kind has members").1;
+        let checks = content
+            .split("- name: Run unit checks")
+            .skip(1)
+            .collect::<Vec<_>>();
+        assert!(
+            !checks.is_empty(),
+            "docker kind renders checks steps: {content}"
+        );
+        for step in &checks {
+            let env = must_some(step.split_once("run: |"), "checks step runs commands").0;
+            assert!(
+                env.contains("GITHUB_TOKEN: ${{ github.token }}"),
+                "every docker checks step exports the token: {env}"
+            );
+        }
+        let rust = owner_test_ir(owner, vec![rust_unit("rust-example", ".")]);
+        let rust_content = must_some(
+            must_ok(
+                rust.render_kind_unit_workflow(UnitKind::Rust, None),
+                "rust kind reusable renders",
+            ),
+            "rust kind has members",
+        )
+        .1;
+        assert!(
+            !rust_content.contains("GITHUB_TOKEN: ${{ github.token }}"),
+            "other kinds run no secret-passing command and get no token: {rust_content}"
+        );
+    }
+
+    #[test]
+    fn report_inputs_carry_the_telemetry_lane_not_the_provider_id() {
+        // The report action speaks telemetry schema v1 (`lane` is
+        // `github|velnor`), so every provider maps to its lane label at
+        // the call site; the provider id would neither match the action's
+        // `ci_lane` input nor the schema enum.
+        for (provider, lane) in [
+            (ProviderId::GithubHosted, "github"),
+            (ProviderId::GithubSelfHosted, "github"),
+            (ProviderId::Velnor, "velnor"),
+        ] {
+            let mut output = String::new();
+            super::render_phase_report_step(
+                &mut output,
+                "./.github/actions/report-velnor-ci-outcomes",
+                "example",
+                provider,
+                &super::CacheReportFacts {
+                    layers: BTreeSet::new(),
+                    host_warm_layers: None,
+                },
+            );
+            assert!(
+                output.contains(&format!("ci_lane: {lane}\n")),
+                "{provider:?} reports the {lane} lane: {output}"
+            );
+            assert!(
+                !output.contains("ci_provider"),
+                "{provider:?} must not rename the report action's input: {output}"
+            );
+        }
     }
 
     #[expect(
@@ -1583,7 +1672,15 @@ fn render_cache_outcome_report_inputs(
     provider: ProviderId,
     facts: &CacheReportFacts,
 ) {
-    let _ = writeln!(output, "          ci_provider: {}", provider.as_str());
+    // The report action speaks telemetry schema v1, whose `lane` enum is
+    // `github|velnor`: the provider maps to the lane label at this
+    // boundary instead of renaming the action's input. Both GitHub
+    // fleets are the github lane; only the Velnor fleet is velnor.
+    let lane_name = match provider {
+        ProviderId::GithubHosted | ProviderId::GithubSelfHosted => "github",
+        ProviderId::Velnor => "velnor",
+    };
+    let _ = writeln!(output, "          ci_lane: {lane_name}");
     if provider.is_local() {
         if let Some(layers) = &facts.host_warm_layers {
             let _ = writeln!(output, "          host_warm_layers: {layers}");
@@ -1700,6 +1797,19 @@ fn checks_env_for_members(unit: &Unit, members: &[&Unit]) -> String {
     }
     env.push_str(mise_auto_install_env());
     env
+}
+
+/// The checks-step token a Docker job exports: its image build commands
+/// pass `--secret id=github_token,env=GITHUB_TOKEN`, so the step must
+/// provide the automatic token. Every provider runs the same commands, so
+/// every provider's Docker checks step exports it. Other kinds run no such
+/// command and get no token.
+pub(crate) fn docker_build_token_env_for_members(members: &[&Unit]) -> &'static str {
+    if members.iter().any(|unit| unit.kind == UnitKind::Docker) {
+        "\n          GITHUB_TOKEN: ${{ github.token }}"
+    } else {
+        ""
+    }
 }
 
 /// The checks env of a collapsed provider job. `CARGO_NET_OFFLINE` is a literal
@@ -4625,9 +4735,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // Verification.
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+        let token_env = docker_build_token_env_for_members(members);
         let _ = writeln!(
             output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
         );
 
         // Stage-1 candidate packaging, after the checks that build the

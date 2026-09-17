@@ -339,34 +339,39 @@ fn automatic_both_gates_pair_except_fork_pr_admission() {
         &root,
         "runners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
     );
+    // The dogfood repository flipped to schema 2 (R2m): transplant the
+    // production Velnor placement from its provider selector into this
+    // schema-1 surface. `pull_request_on_velnor` requires the approved
+    // runner contract, and the crate must never spell the estate's
+    // labels itself (see generic_surface_literals), so the values flow
+    // from the repository's own config at test time.
     let approved = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github-gen/velnor-workflow.toml"),
     )
     .unwrap();
-    let path = root.join(".github-gen/velnor-workflow.toml");
-    let current = fs::read_to_string(&path).unwrap();
-    let mut lines = current
-        .lines()
-        .filter(|line| {
-            ![
-                "velnor_labels =",
-                "velnor_runner_group =",
-                "pull_request_on_velnor =",
-            ]
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-        })
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    for prefix in [
-        "velnor_labels =",
-        "velnor_runner_group =",
-        "pull_request_on_velnor =",
-    ] {
-        if let Some(line) = approved.lines().find(|line| line.starts_with(prefix)) {
-            lines.push(line.to_owned());
+    let selector = "[workflow.selectors.velnor]";
+    let mut in_selector = false;
+    let mut transplanted = None;
+    for line in approved.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_selector = trimmed == selector;
+            continue;
+        }
+        if in_selector && trimmed.starts_with("runs_on =") {
+            transplanted = Some(trimmed.replacen("runs_on =", "velnor_labels =", 1));
+            break;
         }
     }
+    let transplanted = transplanted.expect("the repository declares a velnor provider selector");
+    let path = root.join(".github-gen/velnor-workflow.toml");
+    let current = fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = current
+        .lines()
+        .filter(|line| !line.starts_with("velnor_labels ="))
+        .map(str::to_owned)
+        .collect();
+    lines.push(transplanted);
     fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
 
     let generated = generate(&root);
