@@ -3077,6 +3077,7 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "manifest-schema",
             "signer",
             "passphrase-env",
+            "key-env",
             "keyring",
             "origin",
             "identity-dir",
@@ -3108,6 +3109,7 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
         apt_arches: Vec::new(),
         signer_fingerprint: required_option(&options, "signer")?.to_owned(),
         passphrase_secret: required_option(&options, "passphrase-env")?.to_owned(),
+        signing_key_secret: required_option(&options, "key-env")?.to_owned(),
         keyring_path: required_option(&options, "keyring")?.to_owned(),
         apt_origin: required_option(&options, "origin")?.to_owned(),
         apt_identity_dir: required_option(&options, "identity-dir")?.to_owned(),
@@ -3132,6 +3134,8 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let contract = crate::apt::AptContract::resolve(&spec)?;
     let passphrase_env = required_option(&options, "passphrase-env")?.to_owned();
     let passphrase = std::env::var(&passphrase_env).ok();
+    let key_env = required_option(&options, "key-env")?.to_owned();
+    let key_material = std::env::var(&key_env).ok();
     let empty_prev;
     let prev_dir = match options.get("prev-dir") {
         Some(dir) if !dir.is_empty() => {
@@ -3151,6 +3155,8 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
         bootstrap: flag_bool(&options, "bootstrap")?,
         passphrase_env,
         passphrase,
+        key_env,
+        key_material,
         backend: crate::apt::DebBackend::Auto,
         path_overlay: None,
     };
@@ -6394,6 +6400,8 @@ workspace_check = true
                 "0123456789ABCDEF0123456789ABCDEF01234567",
                 "--passphrase-env",
                 "APT_PASSPHRASE",
+                "--key-env",
+                "APT_SIGNING_KEY",
                 "--keyring",
                 "example.gpg",
                 "--origin",
