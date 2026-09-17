@@ -452,7 +452,7 @@ mod tests {
         ledger.reconcile(&[]).unwrap();
         assert_eq!(advertise_free(&ledger), 2);
         let generation = ledger.generation().unwrap();
-        let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset:7:1", generation).unwrap();
+        let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(outcome, ReserveOutcome::Reserved);
         assert_eq!(advertise_free(&ledger), 1);
     }
@@ -462,13 +462,13 @@ mod tests {
         let mut ledger = ledgers();
         ledger.reconcile(&[]).unwrap();
         let generation = ledger.generation().unwrap();
-        let (first, _) = reserve_for_offer(&mut ledger, "scaleset:7:1", generation).unwrap();
-        let (again, _) = reserve_for_offer(&mut ledger, "scaleset:7:1", generation).unwrap();
+        let (first, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let (again, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(first, ReserveOutcome::Reserved);
         assert_eq!(again, ReserveOutcome::Reserved);
         assert_eq!(ledger.occupied().unwrap(), 1);
-        let _ = reserve_for_offer(&mut ledger, "scaleset:7:2", generation).unwrap();
-        let (full, _) = reserve_for_offer(&mut ledger, "scaleset:7:3", generation).unwrap();
+        let _ = reserve_for_offer(&mut ledger, "scaleset/7/2", generation).unwrap();
+        let (full, _) = reserve_for_offer(&mut ledger, "scaleset/7/3", generation).unwrap();
         assert_eq!(full, ReserveOutcome::CapacityExhausted);
     }
 
@@ -479,7 +479,7 @@ mod tests {
         let stale = ledger.generation().unwrap();
         ledger.begin_epoch();
         ledger.reconcile(&[]).unwrap();
-        let (outcome, landed) = reserve_for_offer(&mut ledger, "scaleset:7:9", stale).unwrap();
+        let (outcome, landed) = reserve_for_offer(&mut ledger, "scaleset/7/9", stale).unwrap();
         assert_eq!(outcome, ReserveOutcome::Reserved);
         assert_eq!(landed, stale + 1);
     }
@@ -490,17 +490,17 @@ mod tests {
         let generation = ledger.generation().unwrap();
         ledger
             .acquire(
-                "scaleset:7:1",
+                "scaleset/7/1",
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Running,
                 generation,
             )
             .unwrap();
         let report = ledger.reconcile(&[]).unwrap();
-        assert_eq!(report.marked_uncertain, vec!["scaleset:7:1".to_owned()]);
+        assert_eq!(report.marked_uncertain, vec!["scaleset/7/1".to_owned()]);
         assert_eq!(ledger.occupied().unwrap(), 1);
         assert_eq!(
-            ledger.holder_state("scaleset:7:1").unwrap(),
+            ledger.holder_state("scaleset/7/1").unwrap(),
             Some(LedgerPermitState::Uncertain)
         );
     }

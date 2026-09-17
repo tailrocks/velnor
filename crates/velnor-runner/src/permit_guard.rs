@@ -16,7 +16,6 @@
 //! the recorded-job recovery path releases the crashed attempt's permit
 //! after it completes and cleans the job.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use velnor_control::permit_ledger::{
@@ -327,24 +326,6 @@ pub(crate) fn release_permit_best_effort(ledger_path: &Path, holder: &str) {
     }
 }
 
-/// Reconcile durable occupancy against this daemon's live work and sweep
-/// dead attempts. Runs at daemon startup after the generation bump:
-/// `alive` carries the in-flight holders observed from slot markers.
-pub(crate) fn reconcile_and_sweep(
-    ledger_path: &Path,
-    alive: &[String],
-) -> Result<(velnor_control::permit_ledger::ReconcileReport, Vec<String>), LedgerError> {
-    let mut ledger = PermitLedger::open(ledger_path)?;
-    let alive_refs: Vec<(&str, PermitLane, PermitState)> = alive
-        .iter()
-        .map(|holder| (holder.as_str(), PermitLane::Native, PermitState::Running))
-        .collect();
-    let report = ledger.reconcile(&alive_refs)?;
-    let protected: BTreeSet<String> = alive.iter().cloned().collect();
-    let swept = ledger.sweep_dead_uncertain(&pid_alive, &protected)?;
-    Ok((report, swept))
-}
-
 /// Owned cleanup is confirmed inside the teardown thread: release the
 /// attempt's permit there. The thread retries teardown until it succeeds,
 /// so this runs exactly when cleanup is confirmed — including after a join
@@ -549,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_and_sweep_converge_dead_attempts() {
+    fn startup_reconcile_converges_dead_native_attempts() {
         let path = temp_ledger_path("sweep");
         configure(&path, 4);
         // A live attempt and a crashed attempt (impossible pid).
@@ -575,7 +556,12 @@ mod tests {
             let mut ledger = PermitLedger::open(&path).unwrap();
             ledger.begin_epoch().unwrap();
         }
-        let (report, swept) = reconcile_and_sweep(&path, &[native_permit_holder("live")]).unwrap();
+        // The one startup call site both lanes share (no scale-set
+        // attestation on this native-only host).
+        let live_holder = native_permit_holder("live");
+        let (report, swept) =
+            crate::scaleset::allocator::startup_reconcile(&path, &[], &[&live_holder], &pid_alive)
+                .unwrap();
         assert_eq!(report.confirmed, vec![native_permit_holder("live")]);
         assert_eq!(
             report.marked_uncertain,

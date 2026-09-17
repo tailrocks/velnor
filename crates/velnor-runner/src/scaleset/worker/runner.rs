@@ -738,6 +738,7 @@ pub(crate) fn runner_connection(
     reason = "tests may panic"
 )]
 mod tests {
+    use super::super::ownership::OwnershipId;
     use super::super::WorkerOutput;
     use super::*;
     use std::collections::VecDeque;
@@ -1071,6 +1072,23 @@ mod tests {
             .unwrap();
         assert_eq!(attestation.content_version, DIND_VERSION);
         assert_eq!(attestation.source, None);
+    }
+
+    #[test]
+    fn runner_spec_debug_redacts_jit_blob() {
+        let profile = HomogeneousProfile::for_arch("x86_64").unwrap();
+        let spec = RunnerSpec::new(
+            WorkerIdentity::new(OwnershipId::bind(7, "velnor-7-4244")),
+            profile.runner().clone(),
+            std::path::Path::new("/tmp/velnor-jit-redact"),
+            "live-jit-config-blob",
+        );
+        let rendered = format!("{spec:?}");
+        assert!(
+            !rendered.contains("live-jit-config-blob"),
+            "RunnerSpec Debug leaked JIT: {rendered}"
+        );
+        assert!(rendered.contains("velnor-7-4244"));
     }
 
     #[test]

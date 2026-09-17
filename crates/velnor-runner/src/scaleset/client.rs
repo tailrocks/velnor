@@ -57,8 +57,8 @@ pub struct SystemInfo {
 
 /// Cached Actions Service admin token (`actionsServiceAdminToken`).
 ///
-/// `Debug` never prints the credential: the header renders redacted,
-/// mirroring [`ActionsAuth`].
+/// `Debug` never prints the credential: the authorization header renders
+/// redacted, mirroring [`ActionsAuth`].
 #[derive(Clone)]
 struct AdminToken {
     authorization_header: String,
@@ -1109,6 +1109,21 @@ mod tests {
         assert_eq!(admin_token_expires_at(jwt).unwrap(), 2_000_000_000);
         assert!(admin_token_expires_at("not-a-jwt").is_err());
         assert!(admin_token_expires_at("a.eyJub2V4cCI6MX0.c").is_err());
+    }
+
+    #[test]
+    fn admin_token_debug_redacts_authorization_header() {
+        let token = AdminToken {
+            authorization_header: "Bearer live-admin-token".into(),
+            expires_at_epoch: 2_000_000_000,
+            url: "https://actions.invalid/tenant".into(),
+        };
+        let rendered = format!("{token:?}");
+        assert!(
+            !rendered.contains("live-admin-token"),
+            "admin token Debug leaked: {rendered}"
+        );
+        assert!(rendered.contains("https://actions.invalid/tenant"));
     }
 
     #[test]

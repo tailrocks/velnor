@@ -726,6 +726,24 @@ mod tests {
     }
 
     #[test]
+    fn provision_plan_debug_redacts_jit_blob() {
+        let profile = runner::HomogeneousProfile::for_arch("x86_64").unwrap();
+        let plan = ProvisionPlan {
+            identity: WorkerIdentity::new(OwnershipId::bind(7, "velnor-7-4244")),
+            profile,
+            state_dir: std::path::PathBuf::from("/tmp/velnor-plan-redact"),
+            jit_config: "live-jit-config-blob".to_owned(),
+            ready_attempts: 2,
+        };
+        let rendered = format!("{plan:?}");
+        assert!(
+            !rendered.contains("live-jit-config-blob"),
+            "ProvisionPlan Debug leaked JIT: {rendered}"
+        );
+        assert!(rendered.contains("velnor-7-4244"));
+    }
+
+    #[test]
     fn internal_command_runners_serve_the_worker_seam() {
         use crate::executor::{CommandResult, CommandRunner};
         struct EchoRunner;

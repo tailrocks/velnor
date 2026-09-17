@@ -277,6 +277,10 @@ pub struct DaemonArgs {
     /// next to the operational state db.
     #[serde(default)]
     pub permit_ledger: Option<PathBuf>,
+    /// Scale-set lane config file (TOML). `None` disables the lane and the
+    /// daemon runs its native slots exactly as before.
+    #[serde(default)]
+    pub scale_set_config: Option<PathBuf>,
     pub trust_scope: String,
     pub emergency_reserve_bytes: u64,
     pub job_peak_bytes: u64,

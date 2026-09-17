@@ -23,9 +23,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
 
 use velnor_control::permit_ledger::{AcquireOutcome, PermitLane, PermitLedger, PermitState};
-use velnor_runner::scaleset::allocator::{
-    scaleset_permit_holder, startup_reconcile, ScaleSetAllocator,
-};
+use velnor_runner::scaleset::allocator::{startup_reconcile, ScaleSetAllocator};
+use velnor_runner::scaleset::permit_holder;
 
 fn temp_ledger(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -108,7 +107,7 @@ fn thundering_herd_grants_exactly_one_per_permit() {
         );
         threads.push(std::thread::spawn(move || {
             start.wait();
-            let holder = scaleset_permit_holder(7, 1000 + index);
+            let holder = permit_holder(7, 1000 + index);
             let guard = allocator.acquire(&holder).unwrap();
             if guard.is_some() {
                 wins.fetch_add(1, Ordering::SeqCst);
@@ -169,7 +168,7 @@ fn occupancy_never_exceeds_n_under_churn() {
             barrier.wait();
             for round in 0..25 {
                 if lane % 2 == 0 {
-                    let holder = scaleset_permit_holder(7, i64::from(lane * 1000 + round));
+                    let holder = permit_holder(7, i64::from(lane * 1000 + round));
                     if let Some(guard) = allocator.acquire(&holder).unwrap() {
                         if allocator.occupied().unwrap() > 4 {
                             violations.fetch_add(1, Ordering::SeqCst);
@@ -208,15 +207,12 @@ fn native_occupancy_denies_scaleset_and_vice_versa() {
     // Native fills N: scale-set is refused (no per-lane reserve).
     assert_eq!(native.acquire("native/a"), AcquireOutcome::Acquired);
     assert_eq!(native.acquire("native/b"), AcquireOutcome::Acquired);
-    assert!(allocator
-        .acquire(&scaleset_permit_holder(7, 1))
-        .unwrap()
-        .is_none());
+    assert!(allocator.acquire(&permit_holder(7, 1)).unwrap().is_none());
 
     // One native release frees exactly one scale-set grant.
     assert!(native.release("native/a"));
     let guard = allocator
-        .acquire(&scaleset_permit_holder(7, 1))
+        .acquire(&permit_holder(7, 1))
         .unwrap()
         .expect("shared N frees one grant");
     // And the scale-set hold now denies native.
@@ -238,7 +234,7 @@ fn stale_generation_grants_nothing() {
     assert_eq!(
         ledger
             .acquire(
-                &scaleset_permit_holder(7, 9),
+                &permit_holder(7, 9),
                 PermitLane::ScaleSet,
                 PermitState::Acquiring,
                 stale,
@@ -250,10 +246,7 @@ fn stale_generation_grants_nothing() {
     assert_eq!(allocator.occupied().unwrap(), 0);
 
     // The allocator retries internally: its own acquire still grants.
-    assert!(allocator
-        .acquire(&scaleset_permit_holder(7, 9))
-        .unwrap()
-        .is_some());
+    assert!(allocator.acquire(&permit_holder(7, 9)).unwrap().is_some());
 }
 
 #[test]
@@ -270,7 +263,7 @@ fn reconcile_before_advertise_marks_epoch_once() {
     PermitLedger::open(&path)
         .unwrap()
         .acquire(
-            &scaleset_permit_holder(7, 4242),
+            &permit_holder(7, 4242),
             PermitLane::ScaleSet,
             PermitState::Running,
             generation,
@@ -307,7 +300,7 @@ fn sweep_never_frees_scaleset_rows() {
     // One uncertain scale-set row (cleanup failure), one uncertain native
     // row with a dead pid, both unprotected.
     let guard = allocator
-        .acquire(&scaleset_permit_holder(7, 4242))
+        .acquire(&permit_holder(7, 4242))
         .unwrap()
         .expect("grants");
     guard.mark_uncertain_and_disarm();
@@ -325,9 +318,7 @@ fn sweep_never_frees_scaleset_rows() {
     assert_eq!(swept, vec!["native/dead".to_string()]);
     let ledger = PermitLedger::open(&path).unwrap();
     assert_eq!(
-        ledger
-            .holder_state(&scaleset_permit_holder(7, 4242))
-            .unwrap(),
+        ledger.holder_state(&permit_holder(7, 4242)).unwrap(),
         Some(PermitState::Uncertain)
     );
     assert_eq!(allocator.occupied().unwrap(), 1);

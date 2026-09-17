@@ -75,6 +75,9 @@ pub struct DaemonArgs {
     /// Host-wide permit ledger database. Must match `velnor_runner::service`.
     #[arg(long, env = "VELNOR_PERMIT_LEDGER")]
     pub permit_ledger: Option<PathBuf>,
+    /// Scale-set lane config file (TOML). Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_SCALE_SET_CONFIG")]
+    pub scale_set_config: Option<PathBuf>,
     /// Pool trust boundary. Flattened from the single declaration in
     /// `velnor_runner::trust_scope`, so this binary and `velnor-runner` cannot
     /// disagree about a security gate.
@@ -371,6 +374,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             docker_image: args.docker_image,
             max_jobs: args.max_jobs,
             permit_ledger: args.permit_ledger,
+            scale_set_config: args.scale_set_config,
             trust_scope: args.trust.resolve().into_string(),
             emergency_reserve_bytes: args.emergency_reserve_bytes,
             job_peak_bytes: args.job_peak_bytes,

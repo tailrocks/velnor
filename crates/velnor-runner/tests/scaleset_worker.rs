@@ -23,7 +23,8 @@ use std::collections::VecDeque;
 
 use velnor_control::permit_ledger::{PermitLedger, PermitState};
 use velnor_model::ScaleSetWorkerState;
-use velnor_runner::scaleset::allocator::{scaleset_permit_holder, ScaleSetAllocator};
+use velnor_runner::scaleset::allocator::ScaleSetAllocator;
+use velnor_runner::scaleset::permit_holder;
 use velnor_runner::scaleset::worker::{
     provision_worker, DockerToolContentHook, HomogeneousProfile, OwnershipId, PinnedImage,
     ProvisionPlan, ScaleSetWorker, Supervision, SupervisionOutcome, VecEdgeSink, WorkerIdentity,
@@ -137,14 +138,14 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
     ledger.reconcile(&[]).unwrap();
 
     let allocator = ScaleSetAllocator::open(&ledger_path);
-    let holder = scaleset_permit_holder(7, 4242);
+    let holder = permit_holder(7, 4242);
     let guard = allocator
         .acquire(&holder)
         .unwrap()
         .expect("N=1 grants once");
     // Full while held: a second acquisition is refused, not queued.
     assert!(allocator
-        .acquire(&scaleset_permit_holder(7, 4243))
+        .acquire(&permit_holder(7, 4243))
         .unwrap()
         .is_none());
 
@@ -275,7 +276,7 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
     // The ledger is empty again and the freed N grants immediately.
     assert_eq!(allocator.occupied().unwrap(), 0);
     assert!(allocator
-        .acquire(&scaleset_permit_holder(7, 4243))
+        .acquire(&permit_holder(7, 4243))
         .unwrap()
         .is_some());
     assert_eq!(sink.edges().len(), 12);
@@ -292,7 +293,7 @@ fn cleanup_failure_retains_permit_uncertain() {
     ledger.reconcile(&[]).unwrap();
 
     let allocator = ScaleSetAllocator::open(&ledger_path);
-    let holder = scaleset_permit_holder(7, 4242);
+    let holder = permit_holder(7, 4242);
     let guard = allocator.acquire(&holder).unwrap().expect("grants");
 
     let identity = WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007"));
@@ -324,7 +325,7 @@ fn cleanup_failure_retains_permit_uncertain() {
     );
     // Still full: the residue occupies its N.
     assert!(allocator
-        .acquire(&scaleset_permit_holder(7, 4243))
+        .acquire(&permit_holder(7, 4243))
         .unwrap()
         .is_none());
     std::fs::remove_dir_all(&root).unwrap();
