@@ -20,8 +20,8 @@ use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, unit_display_label,
     velnor_runner, velnor_runner_group, workflow_runtime_setup,
     workflow_runtime_setup_with_install_rev, workflow_setup_install_rev, yaml_scalar, ActionPin,
-    GeneratorError, ProjectConfig, ReleaseSpec, RunnerMode, Unit, UnitKind, GENERATED_HEADER,
-    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    GeneratorError, ProjectConfig, ReleaseJobSpec, ReleaseSpec, RunnerMode, Unit, UnitKind,
+    GENERATED_HEADER, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -295,6 +295,13 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt" | "docker") => {
             args.string("kind")?.unwrap_or_default()
         }
+        // Job tables cannot travel in declare-row arguments: the tasks
+        // publisher is config-only by construction.
+        Some("tasks") => {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` kind `tasks` needs `[release]` with `[[release.job]]` rows; declare rows carry no job tables"
+            )));
+        }
         Some(other) => {
             return Err(GeneratorError::usage(format!(
                 "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, `apt`, or `docker`, found `{other}`"
@@ -353,6 +360,9 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         registry,
         registry_username_secret,
         registry_password_secret,
+        // Declare rows carry scalar bindings only; job tables come from the
+        // `[release]` config, never from a row.
+        jobs: Vec::new(),
     })
 }
 
@@ -403,6 +413,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         registry: String::new(),
         registry_username_secret: String::new(),
         registry_password_secret: String::new(),
+        jobs: Vec::new(),
     })
 }
 
@@ -871,6 +882,7 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
         "pages" => !release.artifact_path.is_empty(),
         "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
         "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
+        "tasks" => !release.jobs.is_empty(),
         "docker" => {
             !release.image.is_empty() && crate::config::valid_docker_platforms(&release.platforms)
         }
@@ -3125,21 +3137,93 @@ fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpe
     )
 }
 
+/// The lane selector for one tasks-publisher job: the hosted Linux label,
+/// the hosted Apple label, or the repository's own Velnor labels. Config
+/// validation rejects a Velnor lane without labels before rendering.
+fn tasks_job_runs_on(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
+    match job.runner.as_str() {
+        "macos" => yaml_scalar(&config.macos_runner),
+        "velnor" => velnor_runner(&config.velnor_labels, velnor_runner_group(config)),
+        _ => yaml_scalar(&config.github_runner),
+    }
+}
+
+/// The event gate for one tasks-publisher job: dispatch drills run
+/// `validate` jobs, tag pushes run `publish` jobs, and a job declaring both
+/// or neither runs on every release event.
+fn tasks_job_gate(job: &ReleaseJobSpec) -> Option<&'static str> {
+    let validate = job.modes.iter().any(|mode| mode == "validate");
+    let publish = job.modes.iter().any(|mode| mode == "publish");
+    match (validate, publish) {
+        (true, false) => Some("${{ github.event_name == 'workflow_dispatch' }}"),
+        (false, true) => Some("${{ github.event_name != 'workflow_dispatch' }}"),
+        _ => None,
+    }
+}
+
+/// One tasks-publisher job: the lane it runs on, the mode gate it carries,
+/// and the steps that check out, provision mise, and run the named tasks.
+fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
+    let mut output = format!("  {}:\n    name: {}\n", job.id, yaml_scalar(&job.name));
+    if !job.needs.is_empty() {
+        let _ = writeln!(output, "    needs: [{}]", job.needs.join(", "));
+    }
+    if let Some(gate) = tasks_job_gate(job) {
+        let _ = writeln!(output, "    if: {gate}");
+    }
+    let _ = writeln!(output, "    runs-on: {}", tasks_job_runs_on(config, job));
+    let _ = writeln!(output, "    timeout-minutes: {}", job.timeout_minutes);
+    let _ = writeln!(
+        output,
+        "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
+        ActionPin::Checkout.reference(),
+        render_versioned_tool_mise_setup(config),
+    );
+    output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
+    output
+}
+
+/// The `tasks` publisher: tag pushes plus dispatch drills over declared
+/// named-task jobs. Releases serialize on the ref like every other
+/// publisher; publication stays tag-triggered while dispatch drills the
+/// validate-gated jobs.
+fn render_tasks_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let trigger = format!("{}  workflow_dispatch:\n", release_trigger_block(release));
+    let mut output = format!(
+        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\n{trigger}\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n"
+    );
+    output = inject_dispatch_modes(&output, release);
+    for job in &release.jobs {
+        output.push_str(&render_tasks_release_job(config, job));
+    }
+    output
+}
+
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     if !release_contract_complete(release) {
         return format!(
             "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
         );
     }
-    if has_tarball_bindings(release) && !matches!(release.kind.as_str(), "rust-binary" | "native") {
+    // The tasks publisher renders dispatch modes (the drill input its jobs
+    // gate on) but no producer, archive, or credential bindings. Config
+    // validation rejects those combinations with precise errors; this gate is
+    // the backstop for specs built outside it.
+    let bindings_supported = matches!(release.kind.as_str(), "rust-binary" | "native")
+        || (release.kind.as_str() == "tasks"
+            && !has_producer_binding(release)
+            && !has_archive_contract(release)
+            && release.credentials.is_empty());
+    if has_tarball_bindings(release) && !bindings_supported {
         return format!(
-            "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers.\n"
+            "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers (`tasks` renders dispatch modes only).\n"
         );
     }
     match release.kind.as_str() {
         "crates" => render_crates_release(config, release),
         "rust-binary" => render_binary_release(config, release),
         "native" => render_native_release(config, release),
+        "tasks" => render_tasks_release(config, release),
         "pages" => render_pages_release(config, release),
         "homebrew" => render_homebrew_release(config, release),
         "apt" => render_apt_release(config, release),
@@ -5297,6 +5381,40 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
+        }
+    }
+
+    fn tasks_job(id: &str, tasks: &[&str]) -> crate::ReleaseJobSpec {
+        crate::ReleaseJobSpec {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            tasks: tasks.iter().map(|task| (*task).to_owned()).collect(),
+            needs: Vec::new(),
+            runner: "github".to_owned(),
+            modes: Vec::new(),
+            timeout_minutes:
+                crate::primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES,
+        }
+    }
+
+    /// A tasks publisher: a build job every release runs plus a publish-gated
+    /// sign job on the macOS lane. All task names are fixture-local.
+    fn tasks_spec() -> ReleaseSpec {
+        let mut sign = tasks_job("sign", &["sign-release"]);
+        sign.name = "Sign release".to_owned();
+        sign.needs = vec!["build".to_owned()];
+        sign.runner = "macos".to_owned();
+        sign.modes = vec!["publish".to_owned()];
+        ReleaseSpec {
+            kind: "tasks".to_owned(),
+            modes: vec!["validate".to_owned()],
+            tag_pattern: "v[0-9]*".to_owned(),
+            jobs: vec![
+                tasks_job("build", &["build-release", "verify-release"]),
+                sign,
+            ],
+            ..ReleaseSpec::default()
         }
     }
 
@@ -5334,6 +5452,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
         }
     }
 
@@ -5367,6 +5486,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
         }
     }
 
@@ -6001,6 +6121,113 @@ mod tests {
         );
         assert_eq!(surface.added_files, vec!["release.yml".to_owned()]);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tasks_release_renders_declared_jobs_with_gates_and_lanes() {
+        let config = config(&["release.yml"], Some(tasks_spec()));
+        let Some(release) = config.release.as_ref() else {
+            panic!("tasks fixture must carry a release contract");
+        };
+        let workflow = super::render_release(&config, release);
+        for expected in [
+            "name: Release",
+            "tags: [\"v[0-9]*\"]",
+            "workflow_dispatch:",
+            "default: validate",
+            "group: release-${{ github.ref }}",
+            "  build:\n    name: build\n",
+            "  sign:\n    name: \"Sign release\"\n    needs: [build]\n",
+            "if: ${{ github.event_name != 'workflow_dispatch' }}",
+            "run: mise run build-release",
+            "run: mise run verify-release",
+            "run: mise run sign-release",
+        ] {
+            assert!(
+                workflow.contains(expected),
+                "tasks release must render {expected:?}: {workflow}"
+            );
+        }
+        let build = workflow
+            .split("  build:\n")
+            .nth(1)
+            .unwrap_or_default()
+            .split("\n  sign:\n")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            build.contains("runs-on: ubuntu-24.04"),
+            "the build job runs on the github lane: {build}"
+        );
+        assert!(
+            !build.contains("github.event_name"),
+            "the ungated job carries no event gate: {build}"
+        );
+        let sign = workflow.split("\n  sign:\n").nth(1).unwrap_or_default();
+        assert!(
+            sign.contains("runs-on: macos-15"),
+            "the sign job runs on the macos lane: {sign}"
+        );
+    }
+
+    #[test]
+    fn tasks_release_mode_gates_follow_declared_modes() {
+        let mut validate = tasks_job("drill", &["drill-release"]);
+        validate.modes = vec!["validate".to_owned()];
+        let mut both = tasks_job("always", &["always-release"]);
+        both.modes = vec!["validate".to_owned(), "publish".to_owned()];
+        assert_eq!(
+            super::tasks_job_gate(&validate),
+            Some("${{ github.event_name == 'workflow_dispatch' }}")
+        );
+        assert_eq!(super::tasks_job_gate(&both), None);
+        let mut publish = tasks_job("ship", &["ship-release"]);
+        publish.modes = vec!["publish".to_owned()];
+        assert_eq!(
+            super::tasks_job_gate(&publish),
+            Some("${{ github.event_name != 'workflow_dispatch' }}")
+        );
+    }
+
+    #[test]
+    fn tasks_release_without_jobs_is_omitted() {
+        let mut spec = tasks_spec();
+        spec.jobs = Vec::new();
+        assert!(!super::release_contract_complete(&spec));
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        assert!(
+            workflow.contains("# Release omitted: artifact, platform, registry, or signer contract is incomplete."),
+            "a jobless tasks contract renders the omission notice: {workflow}"
+        );
+    }
+
+    #[test]
+    fn tasks_release_omits_artifact_bindings_at_render() {
+        // Config validation rejects these combinations first; the render
+        // gate is the backstop for specs built outside it.
+        let mut spec = tasks_spec();
+        spec.producer_workflow = "CI".to_owned();
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        assert!(
+            workflow.contains("# Release omitted: producer bindings"),
+            "a producer-bound tasks contract must not render: {workflow}"
+        );
+    }
+
+    #[test]
+    fn tasks_release_velnor_lane_renders_repository_labels() {
+        let mut job = tasks_job("build", &["build-release"]);
+        job.runner = "velnor".to_owned();
+        let mut spec = tasks_spec();
+        spec.jobs = vec![job];
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        assert!(
+            workflow.contains("runs-on: [self-hosted, example-runner]"),
+            "the velnor lane renders the repository labels: {workflow}"
+        );
     }
 
     #[test]
@@ -7306,6 +7533,7 @@ mod tests {
                 registry: String::new(),
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
+                jobs: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7459,6 +7687,7 @@ mod tests {
                 registry: String::new(),
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
+                jobs: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7722,6 +7951,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
         }
     }
 
