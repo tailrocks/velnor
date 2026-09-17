@@ -100,10 +100,10 @@ jobs:
         if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+          rev: 51e635aff74fdffab138d5751249ca7105b678c4
       - name: Set trusted workflow policy revision
         if: steps.retention-gate.outputs.skip != 'true'
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=7341ef4bdf750c1fbe419e94fb3848c5b8dde718" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=51e635aff74fdffab138d5751249ca7105b678c4" >> "$GITHUB_ENV"
       - name: Sweep closed-PR merge-ref caches
         if: steps.retention-gate.outputs.skip != 'true'
         env:
