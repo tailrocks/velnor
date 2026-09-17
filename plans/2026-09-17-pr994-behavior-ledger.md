@@ -193,6 +193,49 @@ verification · removal status.
 
 (nothing removed yet; #994 still OPEN, no Jackin migration started)
 
+## 6a. Independent gap re-audit (2026-09-17, PR bytes vs ledger)
+
+Read-only agent enumerated every behavior-bearing hunk of `ab5b0c4e`
+(63 files, +13408/−51 confirmed) and hashed all 27 static sources
+byte-identical to their dests. Ledger coverage substantively confirmed
+(§53-item verified-covered list in the agent report); corrections below.
+
+Row corrections (ledger wording the PR bytes refute):
+
+- C1 → L3: `cache-cleanup.yml` is `workflow_dispatch`-only with a manual
+  `ref` input; NO closed-PR trigger exists. The gh-purge half is
+  dispatch-only; the merge-ref-cache pruning half is pre-existing base
+  behavior (base `maintenance.yml` diff is pin-swap-only). L3 disposition
+  stands (H bounded cleanup, no retry-without-progress); trigger text fixed.
+- C2 → L4: no `buildx bake` invocation exists in `construct.yml` (builds
+  run via `mise run construct-init-buildx/construct-build-platform/
+  construct-push-platform`); `docker-bake.hcl` appears only in
+  paths-filters. Wording fixed; D-slice disposition stands.
+- C3 → L11: `renovate-validate.yml` (70 lines) has exactly 2 steps
+  (checkout + mise-arch asset check); ZERO customManagers-source checks
+  exist — only the header comment describes them. L11's "upstream-content
+  checks stay Jackin named tasks" is revised: the copy preserves nothing
+  here; the validator remainder is the mise-arch asset check only.
+
+New dispositions (PR behaviors the ledger never named):
+
+| # | Behavior | Disposition |
+|---|----------|-------------|
+| G1 | `[scan] exclude += ".github-gen/sources/**"` (keeps vendored runtime `package.json` from selecting a Node unit) | obsolete-with-sources: dies with the vendored runtime; no Velnor change |
+| G2 | `[policy] exclude_workflows` 10-entry "#965 interim" exemption (12 static workflow mappings vs 10 excludes; `desktop-cadence.yml` has push/schedule/dispatch yet is not exempt) | obsolete: slice-8 drops all 10; replacement workflows conform (no exclusions). Migration step: verify zero excludes post-regen |
+| G3 | Dead PR/push lane-branch arms beyond renovate (cache-cleanup PR arm, hygiene push arm + 13 runs-on, preview push-matrix arms, release `pull_request` arms — none in triggers) | obsolete/incorrect, delete (extends L11 dead-branch verdict to 4 more files; same bug class) |
+| G4 | `download-ci-xtask` env contract (`CI_XTASK/CI_TOOLS_PATH/CI_XTASK_HIT/…`, 9 call sites) | obsolete-with-copy: dies with L17; prepared-tool handoff defines its own contract |
+| G5 | Shared `homebrew-tap-publish` concurrency group across `jackin-dev.yml` + `preview.yml` | Jackin remainder: cross-workflow mutex is product deployment serialization; E-followup covers per-file single-writer gating only. Migration: keep ONE product-owned group if both publishers survive, else drop |
+| G6 | Preview dispatch default `github` (vs `velnor` in all 10 other dispatch inputs) + `lanes != 'velnor'` routing | obsolete: Q6 `lanes_input` supersedes with per-family defaults; no `github`-default special case |
+| G7 | `desktop-cadence` event split (dispatch = merge-only job, schedule = scheduled-only job; `lanes` input wholly ignored, static macos-26) | covered by G-followup `events` (one file, one trigger set) + per-profile lanes; static-macos + ignored-input shape obsolete |
+| G8 | Preview fail-open error semantics (diff failure → rebuild; missing old_sha → rebuild; formula-fetch failure warn-only) | safe-direction copy choice; Velnor renders fail-closed gates by default. Jackin remainder ONLY if product requires rebuild-on-diff-failure: express as an explicit named-task policy, not a copy |
+| G9 | Cache-save write gating (main/dispatch/same-repo-PR gates on registry save, result publish, mise `cache_save: main-only`, mbx save-on-dispatch) | covered: B-slice save gate + `publish_guard` (default-branch-only) + per-candidate head-branch check (F-1 fix). Copy's ad-hoc gates obsolete |
+| G10 | Renovate per-run repo cache (`renovate-<os>-<run_id>` key + prefix restore, `/tmp/renovate` paths) | obsolete shape: H renovate `cache = true` renders the generic cache contract; copy's key scheme dies with it |
+| G11 | `external-links` input on `check-deployed-docs` (default true, never overridden → post-deploy gate checks externals) | covered by F `verify_commands` (Jackin configures which deployed checks run); input plumbing obsolete |
+| G12 | Construct lane×platform matrix (Velnor = amd64-only, arm64 via GitHub `ubuntu-24.04-arm`; BuildKit `mirror.gcr.io`; fork-safe login gating; `MISE_TASK_RUN_AUTO_INSTALL=false`) | platform routing: D-slice native per-arch publishers + A capability placement supersede the hardcoded matrix; mirror/login/task-env are Jackin Dockerfile/task config (consumer-owned, retained) |
+| G13 | `Swatinem/rust-cache` in release builds alongside `cache-cargo-registry` | Jackin remainder: backend choice is consumer-owned cache config; Velnor neither mandates nor forbids it |
+| G14 | Vestigial `writer` flag in reuse matrix (never read); capitalized lane names in matrices | obsolete: E-followup redefines `writer` as live single-writer gating; lane names lowercase (internal 2-day artifacts) |
+
 ## 7. Independent-verifier dispositions (`/tmp/verify-merged-report.md`)
 
 Slices 1–2, G, F, D, E, H8a re-verified by an independent read-only agent:
