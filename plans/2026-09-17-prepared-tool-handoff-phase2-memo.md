@@ -96,8 +96,8 @@ all three fixtures (`synthetic-workspace`, `synthetic-release`,
 - `src/primitives/mod.rs`: `PREPARED_TOOL` id, registry, contract
   classification, module visibility (allow removed).
 - `src/primitives/ir.rs`: kind union + gates + conditional header,
-  `lane_input::PREPARED_TOOLS` + `contains_gate`, `LaneStepFacts` field
-  + caller values, legacy provisioning hook, render tests.
+  `lane_input::PREPARED_TOOLS` + `contains_gate`, `LaneStepFacts` field,
+  caller values, legacy provisioning hook, render tests.
 - `src/runtime.rs`: `prepared-tool-install` verb (+ `--check-save-key`,
   `--curl` seam), curl executor + response split, retention
   conditional, all verb tests.

@@ -24,6 +24,7 @@ inputs. REUSE lint stays a named task; generic code owns triggers only.
 ANSWER: partially expressible; GENERALIZE the `release` family (E-followup slice).
 
 Evidence per workflow:
+
 - construct → `docker-image-pipeline` unit (D slice). Expressible.
 - preview → `preview` declare family, per-row args. Expressible.
 - release → `release` declare family, per-row contract args
@@ -70,6 +71,7 @@ Defer to migration time; read from PR docs.yml then. No generator work.
 REVISED after A landed (proven on /tmp/jackin-render): YES for A, no for C.
 A adds `[[units]] capabilities` (+ `os`/`arch`, products, prerequisites).
 Jackin's migration MUST declare:
+
 - `swift-package-native`: `capabilities = ["xcframework"]` (declared unit,
   scan-excluded manifest; without this it renders ubuntu, regressing slice 1).
 - `swift-package-native-design-prototypes-unifiedagentusage` (scanned):

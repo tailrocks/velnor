@@ -313,6 +313,10 @@ fn ffi_change_selects_the_swift_consumer() {
         .env("EVENT_NAME", "pull_request")
         .env("VELNOR_LANES", "github")
         .env("GITHUB_OUTPUT", &github_output)
+        // The CI unit job exports a repo-relative VELNOR_SELECTION_FILE;
+        // an inheriting child would try to write it under the fixture
+        // instead of asserting on GITHUB_OUTPUT alone.
+        .env_remove("VELNOR_SELECTION_FILE")
         .args(["plan", "--config", contract.to_str().unwrap()])
         .output()
         .expect("run velnor-workflow plan");
