@@ -111,7 +111,6 @@ jobs:
           done
           echo "skip=false" >> "$GITHUB_OUTPUT"
       - name: Checkout setup action
-        if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
@@ -121,13 +120,12 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         id: runtime
-        if: ${{ steps.retention-gate.outputs.skip != 'true' && runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+          rev: d8138ef0572d6abfbece8f8904f36692fedcfb51
       - name: Set trusted workflow policy revision
         if: steps.retention-gate.outputs.skip != 'true'
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=a6fa8d4a5096e6df37250b59a8105abfebdb9013" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=d8138ef0572d6abfbece8f8904f36692fedcfb51" >> "$GITHUB_ENV"
       - name: Sweep closed-PR merge-ref caches
         if: steps.retention-gate.outputs.skip != 'true'
         env:

@@ -21,7 +21,10 @@ on:
       head_sha:
         required: true
         type: string
-      lane:
+      plan_digest:
+        required: true
+        type: string
+      provider:
         required: true
         type: string
       mise_tools:
@@ -100,10 +103,14 @@ on:
         required: false
         type: boolean
         default: false
-      apple_executor:
+      unit_platform:
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: ""
+      unit_trust:
+        required: false
+        type: string
+        default: ""
       unit_dependencies:
         required: false
         type: string
@@ -116,7 +123,7 @@ on:
 jobs:
   velnor-prepare-cargo-sources:
     name: prepare-cargo
-    if: ${{ inputs.lane == 'control' && (contains(format(',{0},', inputs.selected_units), ',rust-unit-collector,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-bench,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-client,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-control,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-model,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-render,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-runner,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-tools,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow,') || contains(format(',{0},', inputs.selected_units), ',rust-velnor-workflow-contract,') || contains(format(',{0},', inputs.selected_units), ',rust-velnorctl,') || contains(format(',{0},', inputs.selected_units), ',rust-production-topology,')) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
+    if: ${{ inputs.provider == 'control' && (contains(inputs.selected_units, '"unit_id":"rust-unit-collector"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-bench"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-client"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-control"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-model"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-render"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-runner"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-tools"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-workflow"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-workflow-contract"') || contains(inputs.selected_units, '"unit_id":"rust-velnorctl"') || contains(inputs.selected_units, '"unit_id":"rust-production-topology"')) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 20
     steps:
@@ -133,16 +140,18 @@ jobs:
           SELECTION_SCOPE: ${{ inputs.scope }}
           SELECTION_UNITS: ${{ inputs.selected_units }}
           SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
         run: |
           set -euo pipefail
           mkdir -p .velnor-ci-selection
           {
-            printf 'version=1\n'
+            printf 'version=2\n'
             printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
             printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
             printf 'scope=%s\n' "$SELECTION_SCOPE"
             printf 'units=%s\n' "$SELECTION_UNITS"
             printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
           } > .velnor-ci-selection/velnor-ci-selection
       - name: Prepare Cargo sources
         env:
@@ -163,9 +172,9 @@ jobs:
             cargo fetch --locked
           fi
           cd -- "$GITHUB_WORKSPACE"
-  verify-github:
-    name: GitHub
-    if: ${{ inputs.lane == 'github' && contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
+  verify-github-hosted:
+    name: "GitHub · hosted"
+    if: ${{ inputs.provider == 'github-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -191,13 +200,13 @@ jobs:
           UNIT_ID: ${{ inputs.unit }}
           UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}
           UNIT_ADMISSION: ${{ inputs.unit_admission }}
-          UNIT_LANE: ${{ inputs.lane }}
+          UNIT_PROVIDER: ${{ inputs.provider }}
         run: |
           {
             echo '## Unit dependencies'
             echo
             echo "- Unit: $UNIT_ID"
-            echo "- Lane: $UNIT_LANE"
+            echo "- Provider: $UNIT_PROVIDER"
             echo "- Admission: $UNIT_ADMISSION"
             if [[ -z "$UNIT_DEPENDENCIES" ]]; then
               echo '- Dependencies: none'
@@ -208,12 +217,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-d8138ef0572d6abfbece8f8904f36692fedcfb51-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+          EXPECTED_REVISION: d8138ef0572d6abfbece8f8904f36692fedcfb51
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -227,7 +236,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+          EXPECTED_REVISION: d8138ef0572d6abfbece8f8904f36692fedcfb51
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
@@ -258,16 +267,18 @@ jobs:
           SELECTION_SCOPE: ${{ inputs.scope }}
           SELECTION_UNITS: ${{ inputs.selected_units }}
           SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
         run: |
           set -euo pipefail
           mkdir -p .velnor-ci-selection
           {
-            printf 'version=1\n'
+            printf 'version=2\n'
             printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
             printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
             printf 'scope=%s\n' "$SELECTION_SCOPE"
             printf 'units=%s\n' "$SELECTION_UNITS"
             printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
           } > .velnor-ci-selection/velnor-ci-selection
       - name: Mark selection transport end
         if: always()
@@ -323,10 +334,10 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.11.1
-          cache-key: velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-${{ hashFiles(inputs.mbx_freshness_files) }}
+          cache-key: velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-${{ hashFiles(inputs.mbx_freshness_files) }}
           restore-keys: |
-            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-
-            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.unit }}-
+            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-
+            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-
           save-on-workflow-dispatch: true
       - name: Restore cargo bin toolchain
         if: ${{ inputs.cargo_bin_tools != '' }}
@@ -440,9 +451,9 @@ jobs:
         with:
           path: |
             ${{ inputs.cache_paths }}
-          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles(inputs.cache_key_files) }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-${{ hashFiles(inputs.cache_key_files) }}
           restore-keys: |
-            ci-${{ runner.os }}-${{ runner.arch }}-rust-
+            ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-
       - name: Mark cache prep end
         if: always()
         run: |
@@ -624,7 +635,7 @@ jobs:
         with:
           path: |
             ${{ inputs.cache_paths }}
-          key: ci-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles(inputs.cache_key_files) }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-${{ hashFiles(inputs.cache_key_files) }}
       - name: Mark cleanup end
         if: always()
         run: |
@@ -653,8 +664,8 @@ jobs:
           cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
 
   verify-velnor:
-    name: Velnor
-    if: ${{ inputs.lane == 'velnor' && contains(format(',{0},', inputs.selected_units), format(',{0},', inputs.unit)) && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
+    name: velnor
+    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 45
     steps:
@@ -680,13 +691,13 @@ jobs:
           UNIT_ID: ${{ inputs.unit }}
           UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}
           UNIT_ADMISSION: ${{ inputs.unit_admission }}
-          UNIT_LANE: ${{ inputs.lane }}
+          UNIT_PROVIDER: ${{ inputs.provider }}
         run: |
           {
             echo '## Unit dependencies'
             echo
             echo "- Unit: $UNIT_ID"
-            echo "- Lane: $UNIT_LANE"
+            echo "- Provider: $UNIT_PROVIDER"
             echo "- Admission: $UNIT_ADMISSION"
             if [[ -z "$UNIT_DEPENDENCIES" ]]; then
               echo '- Dependencies: none'
@@ -694,21 +705,6 @@ jobs:
               echo "- Dependencies: $UNIT_DEPENDENCIES"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Velnor runner identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo '## Velnor runner identity'
-            echo
-            echo "- Host: ${VELNOR_HOST:-unset}"
-            echo "- Instance: ${VELNOR_INSTANCE:-unset}"
-            echo "- Slot: ${VELNOR_SLOT:-unset}"
-            echo "- GitHub runner: ${RUNNER_NAME:-unset}"
-            echo "- OS/arch: ${RUNNER_OS:-unset}/${RUNNER_ARCH:-unset}"
-            echo "- Execution backend: ${VELNOR_EXECUTION_BACKEND:-unset}"
-            echo "- Velnor version: ${VELNOR_MANIFEST_VERSION:-${VELNOR_SOURCE_SHA:-unset}}"
-          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -729,16 +725,18 @@ jobs:
           SELECTION_SCOPE: ${{ inputs.scope }}
           SELECTION_UNITS: ${{ inputs.selected_units }}
           SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
         run: |
           set -euo pipefail
           mkdir -p .velnor-ci-selection
           {
-            printf 'version=1\n'
+            printf 'version=2\n'
             printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
             printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
             printf 'scope=%s\n' "$SELECTION_SCOPE"
             printf 'units=%s\n' "$SELECTION_UNITS"
             printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
           } > .velnor-ci-selection/velnor-ci-selection
       - name: Mark selection transport end
         if: always()
@@ -757,7 +755,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PINNED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+          PINNED_REVISION: d8138ef0572d6abfbece8f8904f36692fedcfb51
           CHECKOUT_PATH: ${{ github.workspace }}
         run: |
           set -euo pipefail
