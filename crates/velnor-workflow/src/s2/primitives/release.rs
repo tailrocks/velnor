@@ -3001,11 +3001,11 @@ fn render_versioned_tool_assert_job(config: &ProjectConfig, spec: &VersionedTool
     )
 }
 
-/// The matrix build: declared targets crossed with the version job's lane
+/// The matrix build: declared targets crossed with the version job's provider
 /// configs. The declared build tasks own the compile — cross-builders like
 /// zigbuild stay named tasks, never generic code — and generic code
 /// packages the conventional `target/<triple>/release/<binary>` output,
-/// attests it, and uploads it per lane and target.
+/// attests it, and uploads it per provider and target.
 fn render_versioned_tool_build_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
     let mut targets = String::new();
     for target in &spec.targets {
@@ -3029,9 +3029,9 @@ fn render_versioned_tool_build_job(config: &ProjectConfig, spec: &VersionedToolS
     )
 }
 
-/// The mutexed immutable publish: downloads every lane's archives,
+/// The mutexed immutable publish: downloads every provider's archives,
 /// re-verifies provenance and checksums, and creates the versioned release
-/// once — no clobber, and no tag check, because no tag triggered this lane.
+/// once — no clobber, and no tag check, because no tag triggered this flow.
 fn render_versioned_tool_publish_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
     format!(
         "  publish:\n    name: Publish immutable tool release\n    needs: [version, assert-version, build]\n    if: ${{{{ github.ref == 'refs/heads/{}' && needs.assert-version.outputs.published != 'true' }}}}\n    runs-on: {}\n    timeout-minutes: 20\n    environment: github-release\n    concurrency:\n      group: {}\n      cancel-in-progress: false\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download tool artifacts\n        uses: {}\n        with:\n          path: dist\n          pattern: \"*-*\"\n          merge-multiple: true\n      - name: Verify artifact provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in dist/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable tool release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          tag=\"{}$VERSION\"\n          gh release create \"$tag\" dist/* --target \"$COMMIT\" --title \"$tag\" --generate-notes\n",

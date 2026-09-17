@@ -2758,18 +2758,21 @@ fn validate_check_profile_row(
         }
     }
     if row.runner.as_deref().unwrap_or("github") == "velnor" {
-        let universe = parse_provider_set(
-            config.workflow.providers.as_deref().unwrap_or(&[]),
-            "[workflow] providers",
-        )?;
+        let universe = config
+            .workflow
+            .providers
+            .as_deref()
+            .map(|providers| parse_provider_set(providers, "[workflow] providers"))
+            .transpose()?
+            .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
         if !universe.contains(&ProviderId::Velnor) {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runs on velnor, but [workflow] providers has no velnor entry"
+                "[[check_profile]] {id} runs on velnor, but [workflow] providers has no velnor provider"
             )));
         }
         if !config.workflow.selectors.contains_key("velnor") {
             return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} runs on velnor, but [workflow.selectors.velnor] names no runs-on labels"
+                "[[check_profile]] {id} runs on velnor, but [workflow.selectors.velnor] names no selector for the job"
             )));
         }
     }
@@ -4485,31 +4488,26 @@ mod tests {
         let github_only = config_for(&check_profile_config(
             "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n\n\
              [workflow]\nproviders = [\"github-hosted\"]\n\n\
-             [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n",
+             [workflow.selectors.velnor]\nruns_on = [\"self-hosted\"]\n",
         ));
         let error = must_fail(
             github_only.validate(&[], &[], &BTreeSet::new()),
             "a Velnor profile on a GitHub-only surface must fail",
         );
         assert!(
-            error
-                .to_string()
-                .contains("[workflow] providers has no velnor entry"),
+            error.to_string().contains("has no velnor provider"),
             "{error}"
         );
 
         let unrouted = config_for(&check_profile_config(
-            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n\n\
-             [workflow]\nproviders = [\"velnor\"]\n",
+            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n",
         ));
         let error = must_fail(
             unrouted.validate(&[], &[], &BTreeSet::new()),
             "a Velnor profile without a selector must fail",
         );
         assert!(
-            error
-                .to_string()
-                .contains("[workflow.selectors.velnor] names no runs-on labels"),
+            error.to_string().contains("[workflow.selectors.velnor]"),
             "{error}"
         );
     }

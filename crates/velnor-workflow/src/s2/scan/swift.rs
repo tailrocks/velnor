@@ -48,10 +48,9 @@ fn swift_package_unit(package_root: &str) -> Unit {
     } else {
         format!("Swift package ({package_root})")
     };
-    // A SwiftPM package is portable: it verifies wherever its toolchain
-    // provisions, on the lane's default executor. Only Xcode scheme work
-    // below carries an Apple need.
-    result.platform = crate::s2::provider::Platform::LinuxX64;
+    // A SwiftPM package keeps the portable contract: it verifies wherever
+    // its toolchain provisions. Only Xcode scheme work below and XCFramework
+    // consumers carry an Apple need.
     result
 }
 

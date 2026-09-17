@@ -1369,7 +1369,7 @@ mod tests {
             assert_eq!(
                 line.trim(),
                 "runs-on: ubuntu-24.04",
-                "every job stays on the static lane: {workflow}"
+                "every job stays on the static runner: {workflow}"
             );
         }
     }
