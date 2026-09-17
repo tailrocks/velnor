@@ -1,11 +1,15 @@
-//! Scale-set protocol foundation (D1 part A).
+//! Scale-set protocol foundation (D1 part A) + worker lane (D1 part B).
 //!
 //! Rust port of the `actions/scaleset` wire protocol at
 //! [`upstream_pin::UPSTREAM_COMMIT`]: admin-plane client, message-session
 //! client (long poll, ACK, AcquireJobs, JIT config), credential chain, and
-//! recorded fixtures. The poll→Scale→ACK loop (listener) lands in part B;
-//! this module owns the protocol surface only.
+//! recorded fixtures. Part B adds the homogeneous worker lane
+//! ([`worker`]: pinned official runner + private DinD, supervision, owned
+//! cleanup) and the shared [`allocator`] binding to the ONE host-wide
+//! `max_jobs=N` ledger. The poll→Scale→ACK loop (listener) lands later;
+//! this module owns the protocol surface + worker lane only.
 
+pub mod allocator;
 pub mod backoff;
 pub mod client;
 pub mod config;
@@ -14,7 +18,11 @@ pub mod errors;
 pub mod fixtures;
 pub mod session;
 pub mod upstream_pin;
+pub mod worker;
 
+pub use allocator::{
+    scaleset_permit_holder, AllocatorError, ScaleSetAllocator, ScaleSetPermitGuard,
+};
 pub use backoff::RetryPolicy;
 pub use client::{ScaleSetClient, SystemInfo};
 pub use config::{GitHubConfig, GitHubScope};

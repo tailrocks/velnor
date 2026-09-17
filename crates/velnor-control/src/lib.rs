@@ -15,6 +15,7 @@ pub mod journal;
 pub mod lifecycle;
 pub mod logs;
 pub mod observation;
+pub mod permit_ledger;
 pub mod ports;
 pub mod query;
 pub mod storage;
