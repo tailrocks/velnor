@@ -21,6 +21,8 @@ use serde_yaml::Value;
 
 mod closure;
 mod config;
+#[cfg(all(test, unix))]
+mod consumer_negatives;
 mod estate;
 pub(crate) mod platform;
 mod policy;
