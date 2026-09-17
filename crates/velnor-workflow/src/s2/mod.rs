@@ -19,20 +19,26 @@ use clap::Parser;
 use serde::Serialize;
 use serde_yaml::Value;
 
+mod capability_tests;
 mod closure;
 mod config;
 pub(crate) mod dispatch;
 mod estate;
+mod planner;
 pub(crate) mod platform;
 mod policy;
 mod primitives;
 pub(crate) mod provider;
+mod results;
 mod reuse;
+mod routing;
 pub(crate) mod runtime;
 mod scan;
 mod template_memory;
+mod trust;
 #[cfg(feature = "tui")]
 mod tui;
+mod watchdog;
 
 use crate::s2::primitives::prepared_tools::PreparedToolNeed;
 use crate::s2::primitives::{WorkflowIr, WorkflowKind};

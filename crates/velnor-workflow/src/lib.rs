@@ -952,6 +952,29 @@ struct ReleaseSpec {
     pub(crate) registry_username_secret: String,
     /// The secret holding the registry password. A name, never the value.
     pub(crate) registry_password_secret: String,
+    /// Named-task jobs the `tasks` publisher renders. Empty for every other
+    /// publisher: their job graph is fixed.
+    pub(crate) jobs: Vec<ReleaseJobSpec>,
+}
+
+/// One named-task release job: the job id, display name, repository tasks it
+/// runs, sibling jobs it waits on, the lane it runs on, the release modes
+/// that run it (empty runs on every release event), its timeout, the
+/// environment it runs in, the subjects it attests, and its permission and
+/// environment overrides.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReleaseJobSpec {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) tasks: Vec<String>,
+    pub(crate) needs: Vec<String>,
+    pub(crate) runner: String,
+    pub(crate) modes: Vec<String>,
+    pub(crate) timeout_minutes: u32,
+    pub(crate) environment: String,
+    pub(crate) attest_subjects: Vec<String>,
+    pub(crate) permissions: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
 }
 
 /// One credential the release lane mounts and must unmount: the setup
@@ -2012,7 +2035,7 @@ fn apply_generation_config(
     if let Some(null) = generation.actionlint_config_variables_null() {
         config.actionlint_config_variables_null = null;
     }
-    apply_release(config, generation.release());
+    apply_release(config, generation.release(), root)?;
     apply_renovate(config, generation.renovate(), root)?;
     apply_docs(config, generation.docs())?;
     apply_check_profiles(config, generation.check_profiles(), root)?;
@@ -2343,7 +2366,11 @@ fn apply_maintenance(
 /// The release contract a repository declares. `enabled` and `reason` are the
 /// recorded decision; the rest is the contract the publisher renders from.
 #[allow(clippy::too_many_lines)]
-fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
+fn apply_release(
+    config: &mut ProjectConfig,
+    release: &config::ReleaseSection,
+    root: &Path,
+) -> Result<(), GeneratorError> {
     if let Some(enabled) = release.enabled() {
         config.release_enabled = enabled;
     }
@@ -2374,9 +2401,10 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
         || release.tag_pattern().is_some()
         || release.registry().is_some()
         || release.registry_username_secret().is_some()
-        || release.registry_password_secret().is_some();
+        || release.registry_password_secret().is_some()
+        || !release.jobs().is_empty();
     if !declared {
-        return;
+        return Ok(());
     }
     let mut spec = config.release.clone().unwrap_or_default();
     if let Some(kind) = release.kind() {
@@ -2465,7 +2493,41 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
     if let Some(secret) = release.registry_password_secret() {
         secret.clone_into(&mut spec.registry_password_secret);
     }
+    if !release.jobs().is_empty() {
+        // Like every unit `mise run` command, a job task reference must name
+        // a task the repository's `mise.toml` declares.
+        let mise_tasks = parse_mise_task_names(root)?;
+        let mut jobs = Vec::new();
+        for row in release.jobs() {
+            let id = row.id().unwrap_or_default();
+            for task in row.tasks().unwrap_or_default() {
+                if !mise_tasks.iter().any(|name| name == task) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} names mise task `{task}`, which mise.toml does not declare"
+                    )));
+                }
+            }
+            jobs.push(ReleaseJobSpec {
+                id: id.to_owned(),
+                name: row.name().unwrap_or(id).to_owned(),
+                tasks: row.tasks().unwrap_or_default().to_vec(),
+                needs: row.needs().unwrap_or_default().to_vec(),
+                runner: row.runner().unwrap_or("github").to_owned(),
+                modes: row.modes().unwrap_or_default().to_vec(),
+                timeout_minutes: row
+                    .timeout_minutes()
+                    .and_then(|timeout| u32::try_from(timeout).ok())
+                    .unwrap_or(primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES),
+                environment: row.environment().unwrap_or_default().to_owned(),
+                attest_subjects: row.attest_subjects().unwrap_or_default().to_vec(),
+                permissions: row.permissions().clone(),
+                env: row.env().clone(),
+            });
+        }
+        spec.jobs = jobs;
+    }
     config.release = Some(spec);
+    Ok(())
 }
 
 /// Apply the `[[unit]]` rows a repository declares: a row whose `id` the scan
