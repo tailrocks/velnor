@@ -384,20 +384,73 @@ pub(crate) fn cmp_stable_versions(
         .ok_or_else(|| GeneratorError::usage("stable versions are not comparable numeric triples"))
 }
 
-/// One `dpkg` character-order rank for the hex alphabet preview suffixes use:
-/// digits sort before letters, matching `dpkg --compare-versions`.
-fn dpkg_hex_rank(byte: u8) -> u8 {
-    if byte.is_ascii_digit() {
-        byte
-    } else {
-        byte.saturating_add(64)
+/// One `dpkg` non-digit character rank, ported from `order` in
+/// `lib/dpkg/version.c`: end-of-string and digits rank 0, `~` ranks -1 so it
+/// sorts before everything, letters rank by ASCII value, and every other
+/// character ranks above the letters.
+fn verrevcmp_order(byte: Option<u8>) -> i32 {
+    match byte {
+        None => 0,
+        Some(byte) if byte.is_ascii_digit() => 0,
+        Some(byte) if byte.is_ascii_alphabetic() => i32::from(byte),
+        Some(b'~') => -1,
+        Some(byte) => i32::from(byte) + 256,
     }
 }
 
+/// `dpkg` revision-string comparison, ported exactly from `verrevcmp` in
+/// `lib/dpkg/version.c` (checked against `dpkg --compare-versions`): the
+/// inputs alternate between non-digit runs compared by [`verrevcmp_order`]
+/// and digit runs compared numerically (leading zeros skipped, the longer
+/// run wins, then the first differing digit decides).
+fn verrevcmp(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut left, mut right) = (left.as_bytes(), right.as_bytes());
+    let digit = |bytes: &[u8]| bytes.first().is_some_and(u8::is_ascii_digit);
+    while !left.is_empty() || !right.is_empty() {
+        let mut first_diff = 0;
+        while left.first().is_some_and(|byte| !byte.is_ascii_digit())
+            || right.first().is_some_and(|byte| !byte.is_ascii_digit())
+        {
+            let order = verrevcmp_order(left.first().copied())
+                .cmp(&verrevcmp_order(right.first().copied()));
+            if order != Ordering::Equal {
+                return order;
+            }
+            left = left.get(1..).unwrap_or_default();
+            right = right.get(1..).unwrap_or_default();
+        }
+        while left.first() == Some(&b'0') {
+            left = &left[1..];
+        }
+        while right.first() == Some(&b'0') {
+            right = &right[1..];
+        }
+        while digit(left) && digit(right) {
+            if first_diff == 0 {
+                first_diff = i32::from(left[0]) - i32::from(right[0]);
+            }
+            left = &left[1..];
+            right = &right[1..];
+        }
+        if digit(left) {
+            return Ordering::Greater;
+        }
+        if digit(right) {
+            return Ordering::Less;
+        }
+        if first_diff != 0 {
+            return first_diff.cmp(&0);
+        }
+    }
+    Ordering::Equal
+}
+
 /// Compare two preview versions in `dpkg` order: base triple numerically,
-/// then sequence numerically, then the commit suffix by `dpkg` character
-/// order. Both inputs must satisfy the preview grammar; anything else fails
-/// closed instead of guessing an order.
+/// then sequence numerically, then the commit suffix by `dpkg` `verrevcmp`
+/// order (digit runs count numerically, so `+0000009` sorts after `+000000a`
+/// just as `dpkg --compare-versions` reports). Both inputs must satisfy the
+/// preview grammar; anything else fails closed instead of guessing an order.
 pub(crate) fn cmp_preview_versions(
     left: &str,
     right: &str,
@@ -422,11 +475,7 @@ pub(crate) fn cmp_preview_versions(
     if left_seq != right_seq {
         return Ok(left_seq.cmp(&right_seq));
     }
-    Ok(left
-        .sha
-        .bytes()
-        .map(dpkg_hex_rank)
-        .cmp(right.sha.bytes().map(dpkg_hex_rank)))
+    Ok(verrevcmp(&left.sha, &right.sha))
 }
 
 /// Previous-version retention: how many rollback versions each suite index
@@ -3808,7 +3857,11 @@ mod tests {
         let pairs: &[(&str, &str)] = &[
             ("1.2.3~preview.1+0000000", "1.2.3~preview.2+0000000"),
             ("1.2.3~preview.9+ffffff0", "1.2.3~preview.10+0000000"),
-            ("1.2.3~preview.1+0000009", "1.2.3~preview.1+000000a"),
+            // `verrevcmp` reads the leading digit run numerically: `0000009`
+            // is 9 while `000000a` is 0-then-letter, so the letter suffix
+            // sorts first (confirmed via `dpkg --compare-versions`).
+            ("1.2.3~preview.1+000000a", "1.2.3~preview.1+0000009"),
+            ("1.2.3~preview.1+9aaaaaa", "1.2.3~preview.1+10aaaaa"),
             ("0.1.9~preview.3+abc1234", "0.1.10~preview.1+0000000"),
         ];
         let Ok(dpkg) = which_dpkg() else {
@@ -3833,6 +3886,37 @@ mod tests {
                 "{left} vs {right}"
             );
         }
+    }
+
+    #[test]
+    fn preview_digit_run_suffix_sorts_after_letter_suffix() {
+        use std::cmp::Ordering;
+        // Regression pin for the `0000009` vs `000000a` dispute: a byte-wise
+        // digits-before-letters comparison reports Less here, but `dpkg`
+        // reads the leading digit run numerically (9 > 0) and reports
+        // Greater. Both directions plus the multi-digit numeric case below
+        // were confirmed with `dpkg --compare-versions`.
+        assert_eq!(
+            must(
+                cmp_preview_versions("1.2.3~preview.1+0000009", "1.2.3~preview.1+000000a"),
+                "compare"
+            ),
+            Ordering::Greater,
+        );
+        assert_eq!(
+            must(
+                cmp_preview_versions("1.2.3~preview.1+000000a", "1.2.3~preview.1+0000009"),
+                "compare"
+            ),
+            Ordering::Less,
+        );
+        assert_eq!(
+            must(
+                cmp_preview_versions("1.2.3~preview.1+10aaaaa", "1.2.3~preview.1+9aaaaaa"),
+                "compare"
+            ),
+            Ordering::Greater,
+        );
     }
 
     fn which_dpkg() -> Result<PathBuf, ()> {
