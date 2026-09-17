@@ -9773,7 +9773,10 @@ mod tests {
     /// `skipped`, check red) nor skips for one its callee needs.
     #[test]
     fn prepare_cargo_caller_and_callee_select_the_same_restricted_units() {
-        let files = rendered_repository_files();
+        let files = must(
+            generated_files(&restricted_fixture_config()),
+            "render restricted fixture",
+        );
         let pr = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
             "ci-pr.yml",
@@ -11922,38 +11925,67 @@ channel = "stable"
         );
     }
 
-    /// Every file the generator writes for this repository, rendered the way
-    /// `run` renders them: the declared surface first, then the generated
-    /// families over it.
-    fn rendered_repository_files() -> BTreeMap<PathBuf, String> {
-        let root = must(
-            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
-            "repository root",
-        );
-        let scanned = must(
-            scan_target(&root, RunnerMode::Both, "main"),
-            "scan this repository",
-        );
-        let mut config = scanned.config;
-        let surface = must(
-            crate::primitives::generate(
-                &root,
-                &scanned.shape,
-                &config,
-                scanned.generation.as_ref(),
-            ),
-            "render declared surface",
-        );
-        config.units.clone_from(&surface.units);
-        for file in &surface.added_files {
-            if !config.workflow_files.contains(file) {
-                config.workflow_files.push(file.clone());
-            }
-        }
+    /// Every file the generator writes for the schema-1 polyglot fixture.
+    /// The dogfood repository flipped to schema 2 (R2m), so fixture
+    /// renders — not repository renders — carry the surface-wide
+    /// assertions.
+    fn rendered_fixture_files() -> BTreeMap<PathBuf, String> {
         must(
-            generated_files_with_surface(&config, Some(&surface)),
-            "render this repository's generated files",
+            generated_files(&scanned_fixture(RunnerMode::Both)),
+            "render fixture files",
         )
+    }
+
+    /// The fixture configuration with two cargo-restricted Rust units: the
+    /// clones keep the scanned commands (which resolve no inputs of their
+    /// own) and pin their lockfiles, so the prepare-cargo aggregate and
+    /// the per-lane prep jobs render.
+    fn restricted_fixture_config() -> ProjectConfig {
+        let mut config = scanned_fixture(RunnerMode::Both);
+        let rust = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Rust)
+                .cloned(),
+            "fixture rust unit",
+        );
+        for index in 0..2 {
+            let mut unit = rust.clone();
+            unit.id = format!("rust-restricted-{index}");
+            unit.label = format!("Rust restricted {index}");
+            unit.pinned_lockfile = true;
+            config.units.push(unit);
+        }
+        if let Some(unit) = config
+            .units
+            .iter_mut()
+            .find(|unit| unit.kind == UnitKind::Rust && !unit.id.starts_with("rust-restricted-"))
+        {
+            unit.pinned_lockfile = true;
+        }
+        config
+    }
+
+    /// A scanned schema-1 repository declaring the rust-binary release
+    /// contract: the release-family renders (release, preview,
+    /// maintenance) for surface-wide assertions.
+    fn scanned_release_config() -> ProjectConfig {
+        let root = configured_repository(
+            "release-surface",
+            Some(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nrunners = \"github\"\n\n\
+                 [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
+                 binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
+            ),
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan release repository",
+        );
+        let _ = fs::remove_dir_all(root);
+        config
     }
 
     fn workflow_job_block(files: &BTreeMap<PathBuf, String>, file: &str, job: &str) -> String {
@@ -11984,7 +12016,7 @@ channel = "stable"
     #[test]
     fn github_backend_mr_boxington_jobs_export_the_hosted_store_budget() {
         let export = format!("{MR_BOXINGTON_STORE_BUDGET_ENV}={MR_BOXINGTON_HOSTED_STORE_BUDGET}");
-        let files = rendered_repository_files();
+        let files = rendered_fixture_files();
         must(
             validate_hosted_mr_boxington_store_budget(&files),
             "every rendered GitHub-backend Mr. Boxington job carries the store budget",
@@ -12026,8 +12058,8 @@ channel = "stable"
             }
         }
         assert!(
-            hosted_jobs > 1,
-            "the tree renders hosted Mr. Boxington jobs"
+            hosted_jobs >= 1,
+            "the fixture renders hosted Mr. Boxington jobs"
         );
     }
 
@@ -12089,7 +12121,17 @@ channel = "stable"
     /// pin and a shallow checkout holds neither.
     #[test]
     fn policy_running_jobs_check_out_full_history() {
-        let files = rendered_repository_files();
+        let mut files = rendered_fixture_files();
+        // The fixture declares no release contract, so the release-family
+        // validator jobs come from the release repository.
+        let release_config = scanned_release_config();
+        if let Some(release) = crate::primitives::release::release_content(&release_config) {
+            files.insert(PathBuf::from(".github/workflows/release.yml"), release);
+        }
+        files.insert(
+            PathBuf::from(".github/workflows/preview.yml"),
+            crate::primitives::release::preview_content(&release_config),
+        );
         must(
             validate_policy_jobs_check_out_full_history(&files),
             "every rendered validator-running job checks out full history",
@@ -12130,12 +12172,11 @@ channel = "stable"
                 validator_jobs.push(format!("{path}#{job}"));
             }
         }
-        // The preview identity job is the one that failed on `main`
-        // (`Preview · push · main` run 35051490706); the release verify and
-        // policy jobs are the other call sites (nightly dispatches ci-main
-        // and runs no validator of its own).
+        // The release-family validator jobs come from the rust-binary
+        // release repository (the fixture declares no release contract);
+        // nightly dispatches ci-main and runs no validator of its own.
         for expected in [
-            ".github/workflows/preview.yml#identity",
+            ".github/workflows/preview.yml#build",
             ".github/workflows/release.yml#verify",
             ".github/workflows/ci-policy.yml#policy",
             ".github/workflows/ci-main.yml#policy",
@@ -12197,7 +12238,7 @@ channel = "stable"
     /// layout is the one Planning and the unit jobs address.
     #[test]
     fn every_runtime_install_owns_a_revision_addressed_root() {
-        let files = rendered_repository_files();
+        let files = rendered_fixture_files();
         must(
             validate_workflow_runtime_install_roots(&files),
             "every rendered velnor-workflow install owns its root",
@@ -12504,13 +12545,59 @@ channel = "stable"
 
     #[test]
     fn preview_static_surface_saves_guest_seed_on_trusted_exact_miss() {
-        let root = must(
-            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
-            "repository root",
+        // A synthetic microvm repository: the guest-seed lifecycle needs a
+        // microvm-watching unit plus scanned guest-agent/guest-image bins,
+        // which the schema-2 dogfood tree can no longer lend this suite.
+        let root = temporary_repository("preview-guest-seed");
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n",
+            ),
+            "write toolchain pin with release targets",
+        );
+        must(
+            fs::create_dir_all(root.join("microvm/src/bin")),
+            "create microvm sources",
+        );
+        must(
+            fs::write(
+                root.join("microvm/Cargo.toml"),
+                "[package]\nname = \"example\"\nversion = \"0.1.0\"\n\n\
+                 [features]\nrelease-build = []\n\n\
+                 [[bin]]\nname = \"example-guest-agent\"\npath = \"src/bin/agent.rs\"\n\n\
+                 [[bin]]\nname = \"example-guest-image\"\npath = \"src/bin/image.rs\"\n",
+            ),
+            "write microvm manifest",
+        );
+        must(
+            fs::write(root.join("microvm/src/bin/agent.rs"), "fn main() {}\n"),
+            "write agent source",
+        );
+        must(
+            fs::write(root.join("microvm/src/bin/image.rs"), "fn main() {}\n"),
+            "write image source",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create config dir",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nrunners = \"both\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+                 files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\"]\n\n\
+                 [release]\nenabled = true\nkind = \"native\"\npackage = \"example\"\n\
+                 binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
+                 consumer_repository = \"example/consumer\"\n\n\
+                 [[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n",
+            ),
+            "write generation config",
         );
         let scanned = must(
             scan_target(&root, RunnerMode::Both, "main"),
-            "scan this repository",
+            "scan microvm repository",
         );
         let surface = must(
             crate::primitives::generate(
@@ -12541,8 +12628,8 @@ channel = "stable"
         assert!(preview.contains("guest-seed-${{ matrix.arch }}-"));
         assert!(preview.contains("hashFiles("));
         assert!(preview.contains("'microvm/**'"));
-        assert!(preview.contains("crates/velnor-model/**"));
-        assert!(preview.contains("crates/velnor-control/**"));
+        assert!(preview.contains("Cargo.lock"));
+        assert!(preview.contains("rust-toolchain.toml"));
         assert!(preview.contains("restored=false"));
         assert!(!preview.contains("guest-seed-${{ matrix.arch }}-${{ github.sha }}"));
         assert!(preview.contains("if: steps.guest-seed-reuse.outputs.restored != 'true'"));
@@ -12556,14 +12643,14 @@ channel = "stable"
         assert!(preview.contains("mmdebstrap"), "{preview}");
         assert!(preview.contains("gcc-aarch64-linux-gnu"), "{preview}");
         assert!(preview.contains("flex bison bc"), "{preview}");
-        assert!(preview.contains("--bin velnor-guest-agent"), "{preview}");
-        assert!(preview.contains("--bin velnor-guest-image"), "{preview}");
+        assert!(preview.contains("--bin example-guest-agent"), "{preview}");
+        assert!(preview.contains("--bin example-guest-image"), "{preview}");
         assert!(
-            preview.contains(
-                "mbx run --locked --release --package velnor-runner --bin velnor-guest-image"
-            ) || preview.contains(
-                "cargo run --locked --release --package velnor-runner --bin velnor-guest-image"
-            ),
+            preview
+                .contains("mbx run --locked --release --package example --bin example-guest-image")
+                || preview.contains(
+                    "cargo run --locked --release --package example --bin example-guest-image"
+                ),
             "guest image build must invoke the scanned guest-image bin: {preview}"
         );
         assert!(
@@ -12723,6 +12810,7 @@ channel = "stable"
             !release.contains("velnor-workflow release package-guest"),
             "{release}"
         );
+        let _ = fs::remove_dir_all(root);
     }
 
     /// The Docker mutable mount seed renders the whole lifecycle in order —
@@ -14547,54 +14635,26 @@ channel = "stable"
         }
     }
 
-    /// The checked-in workflows are byte-identical to what the generator
-    /// renders for this repository: regeneration is a fixed point, so a
-    /// template change without its regen (or a hand-edit) fails here before
-    /// it fails in CI. The harness renders the repository's own surface the
-    /// way `run` renders it, which makes comparing every workflow trivial —
-    /// including the shared policy job in `ci-policy.yml` and `ci-main.yml`.
+    /// The dogfood repository flipped to schema 2 (R2m), so the schema-1
+    /// pipeline owns no checked-in tree anymore: it must fail closed on the
+    /// repository's config instead of rendering a mixed surface. (Render
+    /// identity over the schema-2 tree is proven by the schema-2
+    /// byte-for-byte test, not here: the pin inside every render moves with
+    /// each commit.)
     #[test]
-    fn checked_in_workflows_match_the_generator_byte_for_byte() {
+    fn schema1_pipeline_refuses_the_schema2_repository() {
         let root = must(
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
-        let files = rendered_repository_files();
-        let entries = must(
-            fs::read_dir(root.join(".github/workflows")),
-            "read checked-in workflows",
+        let error = must_fail(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scanning the schema-2 repository with the schema-1 pipeline must fail",
         );
-        let mut checked_in = 0;
-        for entry in entries {
-            let path = must(entry, "workflow entry").path();
-            if path.extension().is_none_or(|extension| extension != "yml") {
-                continue;
-            }
-            let name = must_some(
-                path.file_name().and_then(|name| name.to_str()),
-                "workflow file name",
-            )
-            .to_owned();
-            let disk = must(fs::read_to_string(&path), &format!("read {name}"));
-            let rendered = must_some(
-                files.get(&PathBuf::from(".github/workflows").join(&name)),
-                &format!("the generator renders {name}"),
-            );
-            assert_eq!(rendered, &disk, "{name} drifted from the generator");
-            checked_in += 1;
-        }
-        assert!(checked_in > 0, "the repository checks in workflows");
-        for path in files.keys() {
-            if path.starts_with(".github/workflows")
-                && path.extension().is_some_and(|extension| extension == "yml")
-            {
-                assert!(
-                    root.join(path).is_file(),
-                    "{} is rendered but not checked in",
-                    path.display()
-                );
-            }
-        }
+        assert!(
+            error.to_string().contains("invalid generation config"),
+            "the refusal must reject the schema-2 config: {error}"
+        );
     }
 
     /// The acquire step, the unit-job publisher, and the validator's
@@ -15980,13 +16040,12 @@ channel = "stable"
 
     #[test]
     fn velnor_lane_yaml_omits_actions_cache_for_every_supported_unit_kind() {
-        let root = must(
-            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
-            "repository root",
-        );
+        // The dogfood repository flipped to schema 2 (R2m), so the audit
+        // runs over the schema-1 fixture's kinds instead of the
+        // repository's.
         let scanned = must(
-            scan_target(&root, RunnerMode::Both, "main"),
-            "scan repository",
+            scan_target(&fixture_root(), RunnerMode::Both, "main"),
+            "scan fixture",
         );
         let ir = WorkflowIr::from_config(&scanned.config);
         let mut covered_kinds = std::collections::BTreeSet::new();
@@ -16024,6 +16083,10 @@ channel = "stable"
                 );
             }
         }
+        assert!(
+            !covered_kinds.is_empty(),
+            "the fixture must lend the audit at least one Velnor-supported kind"
+        );
         for kind in scanned
             .config
             .units

@@ -2490,6 +2490,14 @@ fn apply_unit_row(
     Ok(())
 }
 
+/// Image builds authenticate the Dockerfile's mise provisioning layer: the
+/// `github_token` build secret carries the checks step's `GITHUB_TOKEN` into
+/// the layer (the same secret id the release lane passes), so shared-runner
+/// unauthenticated GitHub API quota exhaustion cannot fail `mise install`.
+/// Every provider runs the same commands, so every provider's Docker checks
+/// step exports the token.
+const DOCKER_BUILD_GITHUB_TOKEN_SECRET: &str = "--secret id=github_token,env=GITHUB_TOKEN";
+
 fn docker_pull_request_target(command: &str) -> String {
     if command.contains("--target ci") {
         command.to_owned()
@@ -2524,6 +2532,10 @@ fn docker_seed_pull_request_command(command: &str, unit_id: &str) -> String {
         cmd.push(' ');
         cmd.push_str(&cache_to);
     }
+    if !cmd.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET) {
+        cmd.push(' ');
+        cmd.push_str(DOCKER_BUILD_GITHUB_TOKEN_SECRET);
+    }
     cmd
 }
 
@@ -2551,6 +2563,10 @@ fn docker_seed_full_command(command: &str, unit_id: &str) -> String {
     if !cmd.contains("--cache-to type=gha") {
         cmd.push(' ');
         cmd.push_str(&cache_to);
+    }
+    if !cmd.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET) {
+        cmd.push(' ');
+        cmd.push_str(DOCKER_BUILD_GITHUB_TOKEN_SECRET);
     }
     cmd
 }
@@ -2607,11 +2623,14 @@ fn materialize_capability_commands(
                         *command = docker_seed_full_command(command, scope);
                     }
                 }
-                unit.full_commands.push(format!(
+                let mut export = format!(
                     "docker buildx build --target {} --output type=local,dest={}/export {seed} --file {file} {ctx}",
                     primitives::MUTABLE_MOUNT_EXPORT_TARGET,
                     primitives::MUTABLE_MOUNT_HOST_DIR
-                ));
+                );
+                export.push(' ');
+                export.push_str(DOCKER_BUILD_GITHUB_TOKEN_SECRET);
+                unit.full_commands.push(export);
             }
             let _ = (scope, file, ctx);
         }
@@ -5508,9 +5527,12 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
         .any(|unit| unit.platform == provider::Platform::MacosArm64)
         || apple_release)
         .then_some(MACOS_HOSTED_RUNS_ON.to_owned());
+    // Universe-scoped: scan defaults seed selectors for providers outside
+    // the repo's universe, but only universe routing can reach a `runs-on`.
     let labels = config
-        .selectors
-        .values()
+        .providers
+        .iter()
+        .filter_map(|provider| config.selectors.get(provider))
         .flat_map(|selector| selector.runs_on.iter())
         .cloned()
         .chain(macos)
@@ -13146,6 +13168,71 @@ lockfile = true
     }
 
     #[test]
+    fn docker_seed_commands_carry_the_github_token_build_secret() {
+        let pr = docker_seed_pull_request_command(
+            "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'",
+            "example-docker",
+        );
+        assert!(
+            pr.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET),
+            "seeded PR commands authenticate mise provisioning: {pr}"
+        );
+        assert_eq!(
+            docker_seed_pull_request_command(&pr, "example-docker")
+                .matches(DOCKER_BUILD_GITHUB_TOKEN_SECRET)
+                .count(),
+            1,
+            "reseeding never duplicates the secret: {pr}"
+        );
+        let full = docker_seed_full_command(
+            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'",
+            "example-docker",
+        );
+        assert!(
+            full.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET),
+            "seeded full commands authenticate mise provisioning: {full}"
+        );
+        assert_eq!(
+            docker_seed_full_command(&full, "example-docker")
+                .matches(DOCKER_BUILD_GITHUB_TOKEN_SECRET)
+                .count(),
+            1,
+            "reseeding never duplicates the secret: {full}"
+        );
+    }
+
+    #[test]
+    fn docker_materialized_commands_all_carry_the_build_secret() {
+        let (mut config, index) = both_runner_docker_config();
+        // Unseeded full commands: materialization seeds them and appends the
+        // cache-export build, and every one must carry the token secret.
+        config.units[index].full_commands =
+            vec!["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'".to_owned()];
+        let root = temporary_repository("docker-token-secret");
+        must(
+            materialize_capability_commands(&mut config, &root),
+            "materialize",
+        );
+        for command in config.units[index]
+            .pr_commands
+            .iter()
+            .chain(config.units[index].full_commands.iter())
+        {
+            assert!(
+                command.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET),
+                "every materialized docker command carries the secret: {command}"
+            );
+        }
+        assert_eq!(config.units[index].full_commands.len(), 2);
+        assert!(
+            config.units[index].full_commands[1].contains("velnor-cache-export"),
+            "the export build is materialized: {:?}",
+            config.units[index].full_commands
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn collapsed_trust_gated_docker_renders_the_trusted_verify_job() {
         let (mut config, index) = both_runner_docker_config();
         config.units[index].trust = provider::TrustReq::TrustedOnly;
@@ -14102,6 +14189,25 @@ lockfile = true
         assert!(actionlint.contains("    - self-hosted\n"));
         assert!(actionlint.contains("    - ubuntu-24.04\n"));
         assert!(actionlint.contains("    - example-runner-label\n"));
+    }
+
+    #[test]
+    fn generated_actionlint_config_omits_selectors_outside_the_universe() {
+        let config = scanned_fixture(provider_set([
+            provider::ProviderId::GithubHosted,
+            provider::ProviderId::Velnor,
+        ]));
+        let files = must(generated_files(&config), "generate");
+        let actionlint = must_some(
+            files.get(&PathBuf::from(".github/actionlint.yaml")),
+            "generated actionlint configuration",
+        );
+        assert!(actionlint.contains("    - ubuntu-24.04\n"), "{actionlint}");
+        assert!(actionlint.contains("    - self-hosted\n"), "{actionlint}");
+        assert!(
+            !actionlint.contains("bastion-scale-set"),
+            "scan defaults for providers outside the universe never reach runs-on: {actionlint}"
+        );
     }
 
     #[test]
@@ -15113,17 +15219,53 @@ lockfile = true
         }
     }
 
-    /// The schema-2 pipeline refuses the schema-1 dogfood repository: the
-    /// bridge keeps the dogfood tree on schema 1, so the schema-1 path
-    /// owns it and the schema-2 scan must fail closed on its config
-    /// instead of rendering a mixed surface. (Render-identity over the
-    /// schema-1 tree is proven by the bridge evidence, not by a unit
-    /// test: the pin inside every render moves with each commit.)
-    #[test]
-    fn schema2_pipeline_refuses_the_schema1_repository() {
+    /// Every file the schema-2 pipeline renders for this repository: the
+    /// scan, surface, and file stages of `run` without the write.
+    fn rendered_repository_files() -> BTreeMap<PathBuf, String> {
         let root = must(
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
+        );
+        let default_branch = must(resolve_default_branch(&root), "resolve default branch");
+        let scanned = must(
+            scan_target(&root, None, &default_branch),
+            "scan this repository",
+        );
+        let mut config = scanned.config;
+        let surface = must(
+            crate::s2::primitives::generate(
+                &root,
+                &scanned.shape,
+                &config,
+                scanned.generation.as_ref(),
+            ),
+            "render declared surface",
+        );
+        config.units.clone_from(&surface.units);
+        for file in &surface.added_files {
+            if !config.workflow_files.contains(file) {
+                config.workflow_files.push(file.clone());
+            }
+        }
+        must(
+            generated_files_with_surface(&config, Some(&surface)),
+            "render this repository's generated files",
+        )
+    }
+
+    /// The schema-2 pipeline refuses a schema-1 repository: the dogfood
+    /// tree flipped to schema 2 (R2m), so the refusal now runs against a
+    /// synthetic schema-1 config instead of the repository itself. The
+    /// scan must fail closed on the foreign config instead of rendering
+    /// a mixed surface.
+    #[test]
+    fn schema2_pipeline_refuses_a_schema1_repository() {
+        let root = configured_repository(
+            "schema1-refusal",
+            Some(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nrunners = \"both\"\n",
+            ),
         );
         let error = must_fail(
             scan_target(
@@ -15131,12 +15273,64 @@ lockfile = true
                 Some(crate::s2::provider::ProviderId::ALL.into_iter().collect()),
                 "main",
             ),
-            "scanning the schema-1 repository with the schema-2 pipeline must fail",
+            "scanning a schema-1 repository with the schema-2 pipeline must fail",
         );
         assert!(
             error.to_string().contains("invalid generation config"),
             "the refusal must reject the schema-1 config: {error}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The checked-in workflows are byte-identical to what the schema-2
+    /// pipeline renders for this repository: regeneration is a fixed
+    /// point, so a template change without its regen (or a hand-edit)
+    /// fails here before it fails in CI. The harness renders the
+    /// repository's own surface the way `run` renders it, which makes
+    /// comparing every workflow trivial — including the shared policy
+    /// job in `ci-policy.yml` and `ci-main.yml`.
+    #[test]
+    fn checked_in_workflows_match_the_generator_byte_for_byte() {
+        let root = must(
+            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            "repository root",
+        );
+        let files = rendered_repository_files();
+        let entries = must(
+            fs::read_dir(root.join(".github/workflows")),
+            "read checked-in workflows",
+        );
+        let mut checked_in = 0;
+        for entry in entries {
+            let path = must(entry, "workflow entry").path();
+            if path.extension().is_none_or(|extension| extension != "yml") {
+                continue;
+            }
+            let name = must_some(
+                path.file_name().and_then(|name| name.to_str()),
+                "workflow file name",
+            )
+            .to_owned();
+            let disk = must(fs::read_to_string(&path), &format!("read {name}"));
+            let rendered = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(&name)),
+                &format!("the generator renders {name}"),
+            );
+            assert_eq!(rendered, &disk, "{name} drifted from the generator");
+            checked_in += 1;
+        }
+        assert!(checked_in > 0, "the repository checks in workflows");
+        for path in files.keys() {
+            if path.starts_with(".github/workflows")
+                && path.extension().is_some_and(|extension| extension == "yml")
+            {
+                assert!(
+                    root.join(path).is_file(),
+                    "{} is rendered but not checked in",
+                    path.display()
+                );
+            }
+        }
     }
 
     /// The acquire step, the unit-job publisher, and the validator's
