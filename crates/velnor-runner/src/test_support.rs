@@ -253,7 +253,7 @@ pub fn run_ops_telemetry_probe() -> (String, Vec<u8>) {
                 queued_fields,
             )
             .is_some());
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
 
         let cache_fields = BTreeMap::from([
             ("hit".to_owned(), serde_json::json!(false)),
@@ -396,7 +396,7 @@ pub fn run_ops_telemetry_sink_failure_probe() -> (TelemetrySinkStats, Vec<serde_
         .expect("queue event is valid");
     assert!(!queued.file_written());
 
-    assert!(sink.record_admission(&admission));
+    assert!(sink.record_admission(&admission).is_ok());
     let cache = sink
         .emit_telemetry_for_admission(
             &admission,
@@ -444,7 +444,7 @@ pub fn run_ops_store_failure_probe(
     );
 
     arm_failure(&state_path);
-    let accepted = sink.record_admission(&admission);
+    let accepted = sink.record_admission(&admission).is_ok();
     let forensic_failures = sink.forensic_failures();
     drop(sink);
 
@@ -496,7 +496,7 @@ pub fn render_deterministic_telemetry_fixture() -> String {
             ]),
         )
         .is_some_and(|emission| emission.file_written()));
-    assert!(sink.record_admission(&admission));
+    assert!(sink.record_admission(&admission).is_ok());
     assert!(sink
         .emit_telemetry_for_admission(
             &admission,

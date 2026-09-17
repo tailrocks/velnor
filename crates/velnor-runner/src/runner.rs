@@ -159,7 +159,7 @@ const OPERATIONAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdmissionPersistenceOutcome {
     Accepted,
-    Rejected,
+    Rejected(&'static str),
     InfrastructureFailure,
     DeadlineExceeded,
 }
@@ -353,7 +353,12 @@ async fn persist_admission_on_blocking_pool_with<F>(
     persist: F,
 ) -> AdmissionPersistenceOutcome
 where
-    F: FnOnce(Arc<crate::ops::OpsSink>, crate::ops::JobAdmission) -> bool + Send + 'static,
+    F: FnOnce(
+            Arc<crate::ops::OpsSink>,
+            crate::ops::JobAdmission,
+        ) -> Result<(), crate::ops::AdmissionRejection>
+        + Send
+        + 'static,
 {
     // `Store` is already a single-writer boundary (connection mutex + WAL +
     // busy_timeout) and the blocking pool is explicitly sized, so a busy
@@ -365,8 +370,8 @@ where
     let telemetry_admission = admission.clone();
     let worker = tokio::task::spawn_blocking(move || persist(sink, admission));
     let outcome = match tokio::time::timeout(deadline, worker).await {
-        Ok(Ok(true)) => AdmissionPersistenceOutcome::Accepted,
-        Ok(Ok(false)) => AdmissionPersistenceOutcome::Rejected,
+        Ok(Ok(Ok(()))) => AdmissionPersistenceOutcome::Accepted,
+        Ok(Ok(Err(rejection))) => AdmissionPersistenceOutcome::Rejected(rejection.code),
         Ok(Err(_join_error)) => AdmissionPersistenceOutcome::InfrastructureFailure,
         Err(_elapsed) => AdmissionPersistenceOutcome::DeadlineExceeded,
     };
@@ -1402,6 +1407,20 @@ fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Daemon build identity for pre-admission telemetry: crate version plus
+/// the embedded source SHA, so a skew-driven rejection streak is
+/// attributable to a stale slot without daemon SSH. Development builds carry
+/// no source SHA and report the version alone.
+fn daemon_build_id() -> String {
+    const DEVELOPMENT: &str = "development";
+    let sha = env!("VELNOR_SOURCE_SHA");
+    if sha == DEVELOPMENT {
+        crate::protocol::VELNOR_VERSION.to_owned()
+    } else {
+        format!("{}/{sha}", crate::protocol::VELNOR_VERSION)
+    }
+}
+
 fn run_queued_telemetry_fields(
     queue_ms: u64,
     queue_time_present: bool,
@@ -1426,6 +1445,10 @@ fn run_queued_telemetry_fields(
             "admitted_scope".to_owned(),
             Value::from(admitted_scope.to_owned()),
         ),
+        // RunQueued fires before the admission write, so it is recorded even
+        // for jobs that are then rejected: the build id names the daemon that
+        // made the decision.
+        ("daemon_build".to_owned(), Value::from(daemon_build_id())),
     ])
 }
 
@@ -7836,14 +7859,21 @@ async fn handle_job_request(
         let admission_outcome =
             persist_admission_on_blocking_pool(Arc::clone(sink), admission).await;
         if admission_outcome != AdmissionPersistenceOutcome::Accepted {
-            const REJECTED_REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
             const WORKER_FAILURE_REASON: &str =
                 "operational store admission worker failed; job failed closed before execution";
             const DEADLINE_REASON: &str = "operational store admission exceeded its 30s bounded deadline (wait_reason=operational_store_writer); job failed closed before execution";
-            let reason = match admission_outcome {
-                AdmissionPersistenceOutcome::Rejected => REJECTED_REASON,
-                AdmissionPersistenceOutcome::DeadlineExceeded => DEADLINE_REASON,
-                _ => WORKER_FAILURE_REASON,
+            let (reason, remediation) = match admission_outcome {
+                AdmissionPersistenceOutcome::Rejected(code) => (
+                    admission_rejection_reason(code),
+                    admission_rejection_remediation(code),
+                ),
+                AdmissionPersistenceOutcome::DeadlineExceeded => {
+                    (DEADLINE_REASON.to_owned(), REJECTION_DAEMON_REMEDIATION)
+                }
+                _ => (
+                    WORKER_FAILURE_REASON.to_owned(),
+                    REJECTION_DAEMON_REMEDIATION,
+                ),
             };
             // No admission row exists on any of these failure paths. The
             // completion below records the terminal `job.rejected` edge only
@@ -7852,12 +7882,13 @@ async fn handle_job_request(
             // a forensic line and never changes the run-service outcome.
             // Completion is the truthful run-service diagnostic and is
             // always attempted.
-            let completion = complete_acquired_job_failure(
+            let completion = complete_acquired_job_failure_with_remediation(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
                 Some(&job),
                 Some("operational_store".to_string()),
-                reason,
+                &reason,
+                remediation,
             )
             .await;
             completion.context("failed to complete the rejected job")?;
@@ -7867,12 +7898,13 @@ async fn handle_job_request(
         Some(telemetry_admission)
     } else {
         const REASON: &str = "operational store is unavailable; job failed closed before execution";
-        let completion = complete_acquired_job_failure(
+        let completion = complete_acquired_job_failure_with_remediation(
             &run_service_job,
             &AcquiredJobIdentity::from_job(&job),
             Some(&job),
             Some("operational_store".to_string()),
             REASON,
+            REJECTION_DAEMON_REMEDIATION,
         )
         .await;
         completion.context("failed to complete the job rejected for store unavailability")?;
@@ -14760,6 +14792,24 @@ fn terminal_acquired_job_completion(
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> RunServiceCompleteJob {
+    terminal_acquired_job_completion_with_remediation(
+        identity,
+        billing_owner_id,
+        conclusion,
+        infrastructure_failure_category,
+        reason,
+        REJECTION_WORKFLOW_REMEDIATION,
+    )
+}
+
+fn terminal_acquired_job_completion_with_remediation(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    conclusion: TaskResult,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+    remediation: &str,
+) -> RunServiceCompleteJob {
     // GitHub renders jobs with empty step_results as zero-step failures with
     // no operator-visible reason. Always emit one synthetic failed step plus
     // an annotation so the rejection category and message show up in the UI
@@ -14786,7 +14836,8 @@ fn terminal_acquired_job_completion(
         conclusion,
         started_at: Some(now.clone()),
         completed_at: Some(now),
-        completed_log_lines: rejection_log_lines(category, reason).len() as i64,
+        completed_log_lines: rejection_log_lines_with_remediation(category, reason, remediation)
+            .len() as i64,
         annotations: vec![RunServiceAnnotation {
             level: annotation_level,
             message: message.clone(),
@@ -14859,7 +14910,37 @@ fn recovered_terminal_completion(
     }
 }
 
-fn rejection_log_lines(category: &str, reason: &str) -> Vec<String> {
+/// Remediation for a rejection the workflow controls: a rejected field, ref,
+/// or action, or a capability Velnor has not reviewed yet.
+const REJECTION_WORKFLOW_REMEDIATION: &str = "remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun";
+/// Remediation for a daemon-side rejection: the workflow was not at fault, so
+/// the fix is on the daemon, never in workflow fields.
+const REJECTION_DAEMON_REMEDIATION: &str = "remediation: daemon-side operational-store rejection; inspect the daemon forensic line (forensics.ops event=store-write-failed), check disk capacity, then restart/redeploy the daemon and rerun";
+
+/// GitHub-facing reason for one admission check failure. The code is part of
+/// the reason so a rejected job names the check that failed it closed.
+fn admission_rejection_reason(code: &str) -> String {
+    format!(
+        "operational store rejected the sanitized admission row ({code}); job failed closed before execution"
+    )
+}
+
+/// Remediation class for one admission check failure. Only
+/// `store.admission.validate` blames workflow input; every infra code — and
+/// any unknown future code — is a daemon action, never a workflow edit.
+fn admission_rejection_remediation(code: &str) -> &'static str {
+    if code == "store.admission.validate" {
+        REJECTION_WORKFLOW_REMEDIATION
+    } else {
+        REJECTION_DAEMON_REMEDIATION
+    }
+}
+
+fn rejection_log_lines_with_remediation(
+    category: &str,
+    reason: &str,
+    remediation: &str,
+) -> Vec<String> {
     let mut lines = vec![
         "##[error]Velnor rejected this job before workflow execution.".to_string(),
         format!("phase: {category}"),
@@ -14871,12 +14952,16 @@ fn rejection_log_lines(category: &str, reason: &str) -> Vec<String> {
     }
     lines.extend([
         "effect: no declared workflow command was executed".to_string(),
-        "remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun".to_string(),
+        remediation.to_string(),
     ]);
     lines
 }
 
-fn failed_acquired_job_step_log(category: &str, reason: &str) -> StepLog {
+fn failed_acquired_job_step_log_with_remediation(
+    category: &str,
+    reason: &str,
+    remediation: &str,
+) -> StepLog {
     let now = unix_now_iso8601();
     StepLog {
         step_id: format!("velnor-pre-execution-{category}"),
@@ -14884,7 +14969,7 @@ fn failed_acquired_job_step_log(category: &str, reason: &str) -> StepLog {
         order: 1,
         started_at: now.clone(),
         completed_at: now,
-        lines: rejection_log_lines(category, reason),
+        lines: rejection_log_lines_with_remediation(category, reason, remediation),
         masks: Vec::new(),
         annotations: Vec::new(),
         telemetry: Vec::new(),
@@ -14905,13 +14990,33 @@ async fn complete_acquired_job_failure(
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> Result<()> {
-    complete_acquired_job_outcome(
+    complete_acquired_job_failure_with_remediation(
+        run_service_job,
+        identity,
+        job,
+        infrastructure_failure_category,
+        reason,
+        REJECTION_WORKFLOW_REMEDIATION,
+    )
+    .await
+}
+
+async fn complete_acquired_job_failure_with_remediation(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+    job: Option<&AgentJobRequestMessage>,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+    remediation: &str,
+) -> Result<()> {
+    complete_acquired_job_outcome_with_remediation(
         run_service_job,
         identity,
         job,
         TaskResult::Failed,
         infrastructure_failure_category,
         reason,
+        remediation,
     )
     .await
 }
@@ -15181,6 +15286,27 @@ async fn complete_acquired_job_outcome(
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> Result<()> {
+    complete_acquired_job_outcome_with_remediation(
+        run_service_job,
+        identity,
+        job,
+        conclusion,
+        infrastructure_failure_category,
+        reason,
+        REJECTION_WORKFLOW_REMEDIATION,
+    )
+    .await
+}
+
+async fn complete_acquired_job_outcome_with_remediation(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+    job: Option<&AgentJobRequestMessage>,
+    conclusion: TaskResult,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+    remediation: &str,
+) -> Result<()> {
     let masked_reason = job.map_or_else(
         || reason.to_string(),
         |job| {
@@ -15193,7 +15319,8 @@ async fn complete_acquired_job_outcome(
         .as_deref()
         .unwrap_or("pre_execution");
     if let Some(job) = job {
-        let log = failed_acquired_job_step_log(category, &masked_reason);
+        let log =
+            failed_acquired_job_step_log_with_remediation(category, &masked_reason, remediation);
         // The local page first: the rejection reason must survive on disk
         // even when every upload below fails.
         let pages = StepLogPages::open(&run_service_job.step_log_pages_root, job);
@@ -15256,13 +15383,15 @@ async fn complete_acquired_job_outcome(
             );
         }
     }
-    let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
-        identity,
-        run_service_job.billing_owner_id.clone(),
-        conclusion,
-        infrastructure_failure_category,
-        &masked_reason,
-    ))?;
+    let completion =
+        fail_closed_pre_execution_completion(terminal_acquired_job_completion_with_remediation(
+            identity,
+            run_service_job.billing_owner_id.clone(),
+            conclusion,
+            infrastructure_failure_category,
+            &masked_reason,
+            remediation,
+        ))?;
     establish_durable_completion_ownership(run_service_job, identity)
         .await
         .context("establish durable ownership before acquired-job completion")?;
@@ -18203,7 +18332,7 @@ mod tests {
                     queued_fields,
                 )
                 .is_some());
-            assert!(sink.record_admission(&admission));
+            assert!(sink.record_admission(&admission).is_ok());
 
             let stored = sink
                 .store_for_tests()
@@ -21234,6 +21363,132 @@ jobs:
     }
 
     #[test]
+    fn run_queued_telemetry_names_the_deciding_daemon_build() {
+        let fields = run_queued_telemetry_fields(7, true, "trusted", "trusted");
+
+        let daemon_build = fields
+            .get("daemon_build")
+            .and_then(Value::as_str)
+            .expect("run_queued carries the daemon build id");
+        assert!(
+            daemon_build.starts_with(crate::protocol::VELNOR_VERSION),
+            "the build id starts with the crate version: {daemon_build}"
+        );
+        // Secret-safe by construction: a version plus an optional hex SHA.
+        assert!(daemon_build
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '/' | '-' | '_')));
+    }
+
+    #[test]
+    fn run_queued_telemetry_with_daemon_build_satisfies_the_wire_contract() {
+        let base = unique_temp_dir("run-queued-daemon-build");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+        let admission = blocking_admission_test_input("job-run-queued-contract");
+
+        // The contract rejects unknown fields fail-closed, so emitting through
+        // the real sink proves `daemon_build` is registered for RunQueued.
+        let emission = sink.emit_telemetry_for_admission(
+            &admission,
+            TelemetryEvent::RunQueued,
+            run_queued_telemetry_fields(7, true, "trusted", "trusted"),
+        );
+        assert!(emission.is_some());
+
+        let (_, envelopes) = sink.telemetry_probe_snapshot();
+        let queued = envelopes
+            .iter()
+            .find(|envelope| serde_json::to_value(envelope).unwrap()["event"] == "run_queued")
+            .expect("run_queued envelope");
+        let record = serde_json::to_value(queued).unwrap();
+        assert_eq!(
+            record["fields"]["daemon_build"],
+            Value::from(daemon_build_id())
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn assert_admission_rejection_renders(code: &str, expected_remediation: &str) {
+        assert_eq!(admission_rejection_remediation(code), expected_remediation);
+        let reason = admission_rejection_reason(code);
+        assert!(
+            reason.contains(code),
+            "the reason names the failing check: {reason}"
+        );
+        let lines = rejection_log_lines_with_remediation(
+            "operational_store",
+            &reason,
+            admission_rejection_remediation(code),
+        );
+        assert!(lines.iter().any(|line| line == expected_remediation));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("reason:") && line.contains(code)));
+    }
+
+    #[test]
+    fn admission_rejection_identity_renders_daemon_remediation() {
+        assert_admission_rejection_renders(
+            "store.admission.identity",
+            REJECTION_DAEMON_REMEDIATION,
+        );
+    }
+
+    #[test]
+    fn admission_rejection_validate_renders_workflow_remediation() {
+        assert_admission_rejection_renders(
+            "store.admission.validate",
+            REJECTION_WORKFLOW_REMEDIATION,
+        );
+    }
+
+    #[test]
+    fn admission_rejection_instance_renders_daemon_remediation() {
+        assert_admission_rejection_renders(
+            "store.admission.instance",
+            REJECTION_DAEMON_REMEDIATION,
+        );
+    }
+
+    #[test]
+    fn admission_rejection_transition_renders_daemon_remediation() {
+        assert_admission_rejection_renders(
+            "store.admission.transition",
+            REJECTION_DAEMON_REMEDIATION,
+        );
+    }
+
+    #[test]
+    fn admission_rejection_masks_renders_daemon_remediation() {
+        assert_admission_rejection_renders("store.masks", REJECTION_DAEMON_REMEDIATION);
+    }
+
+    #[test]
+    fn admission_rejection_physical_budget_renders_daemon_remediation() {
+        assert_admission_rejection_renders(
+            "store.admission.physical-budget",
+            REJECTION_DAEMON_REMEDIATION,
+        );
+    }
+
+    #[test]
+    fn admission_rejection_persist_renders_daemon_remediation() {
+        assert_admission_rejection_renders("store.admission.persist", REJECTION_DAEMON_REMEDIATION);
+    }
+
+    #[test]
+    fn admission_rejection_unknown_code_fails_closed_to_daemon_remediation() {
+        assert_admission_rejection_renders(
+            "store.admission.future-check",
+            REJECTION_DAEMON_REMEDIATION,
+        );
+    }
+
+    #[test]
     fn no_progress_telemetry_fields_are_bounded_and_secret_free() {
         let fields = no_progress_telemetry_fields(u64::MAX, "passive_wait");
 
@@ -21371,7 +21626,7 @@ jobs:
         let sink =
             crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap();
         let admission = blocking_admission_test_input("job-plan-summary-unknown");
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -21404,7 +21659,7 @@ jobs:
         let sink =
             crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap();
         let admission = blocking_admission_test_input("job-plan-summary");
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -21942,8 +22197,11 @@ jobs:
         assert_eq!(completion.step_results.len(), 1);
         assert_eq!(completion.step_results[0].conclusion, TaskResult::Failed);
         assert_eq!(completion.step_results[0].number, Some(1));
-        let rejection_log =
-            failed_acquired_job_step_log("executor_panic", "join Docker job execution task");
+        let rejection_log = failed_acquired_job_step_log_with_remediation(
+            "executor_panic",
+            "join Docker job execution task",
+            REJECTION_WORKFLOW_REMEDIATION,
+        );
         assert_eq!(rejection_log.exit_code, 1);
         assert!(rejection_log
             .lines
@@ -22024,7 +22282,7 @@ jobs:
         rejected.run_id = None;
         assert_eq!(
             persist_admission_on_blocking_pool(Arc::clone(&sink), rejected).await,
-            AdmissionPersistenceOutcome::Rejected
+            AdmissionPersistenceOutcome::Rejected("store.admission.persist")
         );
         assert!(sink.degraded());
 
@@ -22043,7 +22301,9 @@ jobs:
             sink,
             blocking_admission_test_input("job-blocking-panic"),
             OPERATIONAL_ADMISSION_TIMEOUT,
-            |_sink, _admission| -> bool { panic!("test-only admission worker panic") },
+            |_sink, _admission| -> Result<(), crate::ops::AdmissionRejection> {
+                panic!("test-only admission worker panic")
+            },
         )
         .await;
 
@@ -22174,12 +22434,12 @@ jobs:
             sink,
             blocking_admission_test_input("job-blocking-deadline"),
             deadline,
-            |_sink, _admission| -> bool {
+            |_sink, _admission| -> Result<(), crate::ops::AdmissionRejection> {
                 // Long enough that only the deadline can end the wait, short
                 // enough that the runtime's blocking task does not hold test
                 // shutdown open.
                 std::thread::sleep(Duration::from_secs(2));
-                true
+                Ok(())
             },
         )
         .await;
@@ -22794,13 +23054,14 @@ jobs:
             completion.annotations
         );
         assert!(!completion.annotations[0].message.trim().is_empty());
-        let rejection_log = failed_acquired_job_step_log(
+        let rejection_log = failed_acquired_job_step_log_with_remediation(
             "host_capacity",
             &crate::capacity::host_capacity_timeout_reason(
                 elapsed,
                 timeout,
                 "capacity backpressure: free=117548818432 required=134432476364",
             ),
+            REJECTION_WORKFLOW_REMEDIATION,
         );
         assert_eq!(rejection_log.exit_code, 1);
         assert!(rejection_log
@@ -23584,7 +23845,9 @@ jobs:
         fs::create_dir_all(&base).unwrap();
         let sink =
             crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap();
-        assert!(sink.record_admission(&blocking_admission_test_input("job-1")));
+        assert!(sink
+            .record_admission(&blocking_admission_test_input("job-1"))
+            .is_ok());
 
         assert!(record_job_transition(
             &sink,
