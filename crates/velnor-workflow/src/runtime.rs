@@ -340,6 +340,63 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// `velnor-workflow promote --rev SHA|HEAD [--repo PATH] [--generator-repo PATH]
+/// [--default-branch BRANCH] [--runners MODE] [--message TEXT] [--dry-run]`:
+/// stamp the D19 pin and regenerate the whole tree in one atomic commit. The
+/// running binary must render with exactly the source closure the pin names
+/// (render with X ⇒ stamp X); anything else fails closed before touching the
+/// tree. `--generator-repo` points fleet promotion at a product checkout
+/// holding the pin's history; it defaults to the promoted repository itself.
+fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let (flags, rest): (Vec<&OsString>, Vec<&OsString>) = arguments
+        .iter()
+        .partition(|argument| argument.to_str().is_some_and(|value| value == "--dry-run"));
+    if flags.len() > 1 {
+        return Err(GeneratorError::usage(
+            "duplicate option: --dry-run".to_owned(),
+        ));
+    }
+    let dry_run = !flags.is_empty();
+    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
+    let options = parse_options(
+        &rest,
+        &[
+            "rev",
+            "repo",
+            "generator-repo",
+            "default-branch",
+            "runners",
+            "message",
+        ],
+    )?;
+    let rev = options
+        .get("rev")
+        .ok_or_else(|| GeneratorError::usage("promote requires --rev SHA".to_owned()))?;
+    let repo = match options.get("repo") {
+        Some(path) => PathBuf::from(path.as_str()),
+        None => env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("resolve promote root: {error}")))?,
+    };
+    let runners = options
+        .get("runners")
+        .map_or(Ok(crate::RunnerMode::Both), |value| {
+            crate::parse_runner_mode(value)
+        })?;
+    let report = crate::promote::run_promote(&crate::promote::PromoteOptions {
+        rev: rev.clone(),
+        repo,
+        generator_repo: options
+            .get("generator-repo")
+            .map(|path| PathBuf::from(path.as_str())),
+        default_branch: options.get("default-branch").cloned(),
+        runners,
+        message: options.get("message").cloned(),
+        dry_run,
+    })?;
+    print!("{}", crate::promote::render_report(&report));
+    Ok(())
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
 pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
@@ -389,6 +446,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "closure" => {
             print_closure(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "promote" => {
+            promote_command(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "cache-plan" => {

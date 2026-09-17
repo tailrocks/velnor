@@ -53,7 +53,7 @@ use super::{
 };
 
 /// The generation config the audited tree declares itself with.
-const GENERATION_CONFIG: &str = ".github-gen/velnor-workflow.toml";
+pub(crate) const GENERATION_CONFIG: &str = ".github-gen/velnor-workflow.toml";
 /// The runtime contract, kept beside the generation config for the Velnor
 /// lane fields the advisory audit needs.
 const RUNTIME_CONFIG: &str = ".github/ci/project.toml";
@@ -463,14 +463,14 @@ fn generated_tree_report(
         Ok(TreeComparison::Candidate(closure)) if mainline => RuleReport::fail(
             "generated-tree",
             format!(
-                "the pin is stale on mainline: the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}; bump [generator] revision to HEAD and regenerate"
+                "the pin is stale on mainline: the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}; run `velnor-workflow promote --rev HEAD` to stamp the pin and regenerate atomically"
             ),
             Vec::new(),
         ),
         Ok(TreeComparison::Candidate(closure)) => RuleReport::pass(
             "generated-tree",
             format!(
-                "the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}: a generator change in flight; bump [generator] revision after merge"
+                "the tree matches the candidate render ({closure}), not the render of velnor-workflow at {pin}: a generator change in flight; run `velnor-workflow promote --rev HEAD` after merge"
             ),
         ),
         Ok(TreeComparison::Differences(differences)) => RuleReport::fail(
@@ -577,7 +577,7 @@ pub(crate) fn verify_declared_pin_renders_tree(
         TreeComparison::Pin => Ok(()),
         TreeComparison::Candidate(closure) => {
             eprintln!(
-                "notice: the tree matches the candidate render ({closure}), not the render of the declared pin {pin}; bump `[generator] revision` in {GENERATION_CONFIG} after merge"
+                "notice: the tree matches the candidate render ({closure}), not the render of the declared pin {pin}; run `velnor-workflow promote --rev HEAD` after merge"
             );
             Ok(())
         }
