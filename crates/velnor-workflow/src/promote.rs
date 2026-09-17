@@ -164,13 +164,21 @@ fn promote_rendered_tree(
             .cloned()
             .chain([PathBuf::from(OWNERSHIP_STATE)]),
     )?;
+    // Promotion overwrites generator-owned files by design: every genuine pin
+    // advance changes existing rendered bytes, so the conflicts guard would
+    // refuse every real promotion. Force is the intended semantic here — the
+    // promotion already requires a tracked-clean tree, snapshots every
+    // preimage for restore, and proves determinism plus write integrity after
+    // the write. Force bypasses only the conflicts guard: ownership proof
+    // still rejects manually modified files, and adopt stays false so unowned
+    // workflows are never deleted.
     write_generated_with_options(
         repo,
         &rendered.files,
         &rendered.inputs,
         false,
         false,
-        false,
+        true,
         false,
     )?;
     verify_promoted_tree(repo, &rendered.files, options.runners, default_branch)?;
