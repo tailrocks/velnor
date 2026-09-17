@@ -125,7 +125,7 @@ async fn test_client(server: &MockServer) -> ScaleSetClient {
 #[tokio::test]
 async fn fixtures_verify_pin_hashes_and_redaction() {
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
-    assert_eq!(fixtures.manifest().files.len(), 11);
+    assert_eq!(fixtures.manifest().files.len(), 21);
 
     let session: ScaleSetSession = fixtures.parse("session_created.json").unwrap();
     assert_eq!(session.owner_name, OWNER);

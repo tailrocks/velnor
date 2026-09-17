@@ -79,6 +79,28 @@ impl RetryPolicy {
         scaled.min(self.wait_max)
     }
 
+    /// Delay before the next poll after `outcome`, given
+    /// `consecutive_errors` failed polls in a row (reset on any `Ok`).
+    ///
+    /// Messages drain immediately (the server long-poll paces us); nils
+    /// wait a flat [`IdlePolicy::nil_delay`] — upstream loops at once, but
+    /// an instant-202 server (mock, outage page) would hot-spin the loop
+    /// without this floor; errors back off exponentially per
+    /// [`RetryPolicy::delay_for_attempt`].
+    #[must_use]
+    pub fn poll_delay(
+        &self,
+        outcome: PollOutcomeClass,
+        consecutive_errors: u32,
+        idle: &IdlePolicy,
+    ) -> Duration {
+        match outcome {
+            PollOutcomeClass::Message => Duration::ZERO,
+            PollOutcomeClass::Nil => idle.nil_delay,
+            PollOutcomeClass::Error => self.delay_for_attempt(consecutive_errors.saturating_sub(1)),
+        }
+    }
+
     /// Rate-limit wait from response headers, reusing the shared
     /// [`GitHubRateLimitStatus`](crate::protocol::GitHubRateLimitStatus)
     /// exhaustion rule (429, or 403 with `remaining=0`/`Retry-After`).
@@ -101,6 +123,29 @@ impl RetryPolicy {
             .map_or(default, |epoch| {
                 Duration::from_secs(epoch.saturating_sub(now_epoch)).max(default)
             })
+    }
+}
+
+/// Poll-result class driving [`RetryPolicy::poll_delay`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollOutcomeClass {
+    Message,
+    Nil,
+    Error,
+}
+
+/// Idle-poll pacing. The flat nil floor only binds when polls return
+/// instantly; ordinary 5-minute server long-polls never see it.
+#[derive(Debug, Clone)]
+pub struct IdlePolicy {
+    pub nil_delay: Duration,
+}
+
+impl Default for IdlePolicy {
+    fn default() -> Self {
+        Self {
+            nil_delay: Duration::from_secs(1),
+        }
     }
 }
 
@@ -188,6 +233,32 @@ mod tests {
             Duration::from_secs(2),
         );
         assert_eq!(delay, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn poll_delay_drains_messages_and_backs_off_errors() {
+        let retry = RetryPolicy::default();
+        let idle = IdlePolicy::default();
+        assert_eq!(
+            retry.poll_delay(PollOutcomeClass::Message, 0, &idle),
+            Duration::ZERO
+        );
+        assert_eq!(
+            retry.poll_delay(PollOutcomeClass::Nil, 0, &idle),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            retry.poll_delay(PollOutcomeClass::Error, 1, &idle),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            retry.poll_delay(PollOutcomeClass::Error, 3, &idle),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            retry.poll_delay(PollOutcomeClass::Error, 99, &idle),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]
