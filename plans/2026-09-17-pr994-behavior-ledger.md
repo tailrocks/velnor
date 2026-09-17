@@ -304,10 +304,22 @@ Findings and dispositions:
   branch: identical rejections on unrelated PR #916 (base-identical
   admission rows) and a Velnor failure on merged #914 (which landed with
   `ci-required` red). No Velnor-side fix in scope.
-- Migration-flag triage (draft report): flag 2 (push-trigger widening)
-  DISSOLVES — the desktop-cadence copy has no push trigger, so the
-  faithful mapping is schedule+dispatch only (drop `events=["push"]`);
-  main-only push triggering is a Jackin product decision, not a schema
-  gap. Flag 3 (renovate `lanes="github"`, validator `--strict`,
-  dropped mise allowance) and flag 4 (anonymous tool-download rate
-  limits) are Jackin migration-review items, not Velnor bugs.
+- Migration-flag triage, corrected by independent review: flag 2 does
+  NOT dissolve — the desktop-cadence copy HAS `push: branches: [main]`
+  (merge job runs on push-to-main + dispatch), and the earlier
+  "no push trigger" grounding was false. Branch-scoped push is a proven
+  generic gap, implemented as scheduled-checks `branches`
+  (velnor PR #919); Jackin declares `events = ["push"]` +
+  `branches = ["main"]`. The `events = ["workflow_dispatch"]`
+  dispatch-only spelling (validates, renders nothing extra) remains for
+  genuinely manual-only files. Flag 3 (`lanes="github"` forced by
+  missing trust facts — schema-verified; `--strict` validator passes on
+  the current renovate.json; the copy's
+  `RENOVATE_ALLOWED_UNSAFE_EXECUTIONS=mise` has no live effect since
+  renovate.json configures no post-upgrade execution, and
+  `[renovate] allowed_commands` exists for `RENOVATE_ALLOWED_COMMANDS`
+  if that is ever configured) and flag 4 (DISSOLVED — `mise-action`
+  defaults `github_token` to `github.token`) are recorded acceptances,
+  not Velnor bugs. Review also caught a dead
+  `scripts/ci/docs-lychee-contract.sh` (0 refs; L6 says delete) —
+  removed in the migration.
