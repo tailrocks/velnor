@@ -20,8 +20,8 @@ use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, unit_display_label,
     velnor_runner, velnor_runner_group, workflow_runtime_setup,
     workflow_runtime_setup_with_install_rev, workflow_setup_install_rev, yaml_scalar, ActionPin,
-    GeneratorError, ProjectConfig, ReleaseSpec, RunnerMode, Unit, UnitKind, GENERATED_HEADER,
-    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    GeneratorError, ProjectConfig, ReleaseJobSpec, ReleaseSpec, RunnerMode, Unit, UnitKind,
+    GENERATED_HEADER, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -117,10 +117,6 @@ impl Primitive for Release {
 
     fn schema(&self) -> &'static [&'static str] {
         &[
-            "apt_arches",
-            "apt_feed_url",
-            "apt_identity_dir",
-            "apt_origin",
             "archive_checksum",
             "archive_members",
             "archive_retention_days",
@@ -133,14 +129,12 @@ impl Primitive for Release {
             "dockerfile",
             "image",
             "image_package",
-            "keyring_path",
             "kind",
             "manifest_schema",
             "modes",
             "name",
             "package",
             "packages",
-            "passphrase_secret",
             "platforms",
             "producer_conclusion",
             "producer_workflow",
@@ -150,8 +144,6 @@ impl Primitive for Release {
             "registry",
             "registry_password_secret",
             "registry_username_secret",
-            "retention",
-            "signer_fingerprint",
             "source_repository",
             "tag_pattern",
             "targets",
@@ -303,6 +295,13 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt" | "docker") => {
             args.string("kind")?.unwrap_or_default()
         }
+        // Job tables cannot travel in declare-row arguments: the tasks
+        // publisher is config-only by construction.
+        Some("tasks") => {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` kind `tasks` needs `[release]` with `[[release.job]]` rows; declare rows carry no job tables"
+            )));
+        }
         Some(other) => {
             return Err(GeneratorError::usage(format!(
                 "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, `apt`, or `docker`, found `{other}`"
@@ -321,7 +320,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         args.string("registry_username_secret")?.as_deref(),
         args.string("registry_password_secret")?.as_deref(),
     )?;
-    let spec = ReleaseSpec {
+    Ok(ReleaseSpec {
         kind,
         package: args.string("package")?.unwrap_or_default(),
         packages: args.strings("packages")?.unwrap_or_default(),
@@ -334,21 +333,6 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         artifact_path: args.string("artifact_path")?.unwrap_or_default(),
         description: String::new(),
         manifest_schema: args.string("manifest_schema")?.unwrap_or_default(),
-        apt_arches: args.strings("apt_arches")?.unwrap_or_default(),
-        signer_fingerprint: args.string("signer_fingerprint")?.unwrap_or_default(),
-        passphrase_secret: args.string("passphrase_secret")?.unwrap_or_default(),
-        keyring_path: args.string("keyring_path")?.unwrap_or_default(),
-        apt_origin: args.string("apt_origin")?.unwrap_or_default(),
-        apt_identity_dir: args.string("apt_identity_dir")?.unwrap_or_default(),
-        apt_feed_url: args.string("apt_feed_url")?.unwrap_or_default(),
-        retention: match args.integer("retention")? {
-            None => 0,
-            Some(value) => u32::try_from(value).map_err(|_| {
-                GeneratorError::usage(format!(
-                    "`{family}` `retention` must be a non-negative count, found `{value}`"
-                ))
-            })?,
-        },
         dockerfile: args.string("dockerfile")?.unwrap_or_default(),
         context: args.string("context")?.unwrap_or_default(),
         platforms: args.strings("platforms")?.unwrap_or_default(),
@@ -376,17 +360,10 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         registry,
         registry_username_secret,
         registry_password_secret,
-    };
-    // A declared apt contract is validated now: malformed values fail the
-    // declaration loudly instead of rendering a broken feed.
-    if spec.kind == "apt" && release_contract_complete(&spec) {
-        crate::apt::AptContract::resolve(&spec).map_err(|error| {
-            GeneratorError::usage(format!(
-                "`{family}` declares an invalid apt contract: {error}"
-            ))
-        })?;
-    }
-    Ok(spec)
+        // Declare rows carry scalar bindings only; job tables come from the
+        // `[release]` config, never from a row.
+        jobs: Vec::new(),
+    })
 }
 
 /// Parse a declared rolling-preview contract: the preview lane publishes a
@@ -407,14 +384,6 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         artifact_path: String::new(),
         description: String::new(),
         manifest_schema: String::new(),
-        apt_arches: Vec::new(),
-        signer_fingerprint: String::new(),
-        passphrase_secret: String::new(),
-        keyring_path: String::new(),
-        apt_origin: String::new(),
-        apt_identity_dir: String::new(),
-        apt_feed_url: String::new(),
-        retention: 0,
         dockerfile: String::new(),
         context: String::new(),
         platforms: Vec::new(),
@@ -444,6 +413,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         registry: String::new(),
         registry_username_secret: String::new(),
         registry_password_secret: String::new(),
+        jobs: Vec::new(),
     })
 }
 
@@ -858,7 +828,6 @@ fn incomplete_contract(family: &str, spec: &ReleaseSpec) -> GeneratorError {
         "crates" => "`packages`",
         "rust-binary" => "`package`, `binary`, and `targets`",
         "pages" => "`artifact_path`",
-        "apt" => "`package`, `binary`, `source_repository`, `consumer_repository`, `manifest_schema`, `signer_fingerprint`, `passphrase_secret`, and `apt_feed_url`",
         "docker" => "`image`",
         _ => "the contract",
     };
@@ -912,16 +881,8 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
         }
         "pages" => !release.artifact_path.is_empty(),
         "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
-        "apt" => {
-            !release.package.is_empty()
-                && !release.binary.is_empty()
-                && !release.source_repository.is_empty()
-                && !release.consumer_repository.is_empty()
-                && !release.manifest_schema.is_empty()
-                && !release.signer_fingerprint.is_empty()
-                && !release.passphrase_secret.is_empty()
-                && !release.apt_feed_url.is_empty()
-        }
+        "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
+        "tasks" => !release.jobs.is_empty(),
         "docker" => {
             !release.image.is_empty() && crate::config::valid_docker_platforms(&release.platforms)
         }
@@ -1312,7 +1273,7 @@ fn render_guest_payload_job(
         ("", "")
     };
     Some(format!(
-        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n{needs}    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: |\n            dist/microvm/vmlinux\n            dist/microvm/rootfs.ext4\n            dist/microvm/rootfs.sha256\n            dist/microvm/{agent_bin}\n            dist/microvm/guest-agent.sha256\n          if-no-files-found: error\n",
+        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n{needs}    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm/*\n          if-no-files-found: error\n",
     ))
 }
 
@@ -1690,12 +1651,7 @@ fn render_identity_debian_job(
 /// One signer call per Debian architecture: the shared package signer
 /// attests the exact bytes the debian job uploaded, binding the lane's
 /// source ref. The consumer lane verifies these attestations before it
-/// binds any deb — the APT feed verify job runs `gh attestation verify`
-/// over every fetched deb (source repo + pinned signer workflow +
-/// `--source-ref`/`--source-digest`) before `apt-verify` — so
-/// attestation never stays an inline afterthought. The release record
-/// and manifests carry no Sigstore attestation (sidecar checksums
-/// only); the debs are the attested subjects.
+/// binds any deb, so attestation never stays an inline afterthought.
 fn render_sign_deb_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -3181,21 +3137,121 @@ fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpe
     )
 }
 
+/// The lane selector for one tasks-publisher job: the hosted Linux label,
+/// the hosted Apple label, or the repository's own Velnor labels. Config
+/// validation rejects a Velnor lane without labels before rendering.
+fn tasks_job_runs_on(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
+    match job.runner.as_str() {
+        "macos" => yaml_scalar(&config.macos_runner),
+        "velnor" => velnor_runner(&config.velnor_labels, velnor_runner_group(config)),
+        _ => yaml_scalar(&config.github_runner),
+    }
+}
+
+/// The event gate for one tasks-publisher job: dispatch drills run
+/// `validate` jobs, tag pushes run `publish` jobs, and a job declaring both
+/// or neither runs on every release event.
+fn tasks_job_gate(job: &ReleaseJobSpec) -> Option<&'static str> {
+    let validate = job.modes.iter().any(|mode| mode == "validate");
+    let publish = job.modes.iter().any(|mode| mode == "publish");
+    match (validate, publish) {
+        (true, false) => Some("${{ github.event_name == 'workflow_dispatch' }}"),
+        (false, true) => Some("${{ github.event_name != 'workflow_dispatch' }}"),
+        _ => None,
+    }
+}
+
+/// One tasks-publisher job: the lane it runs on, the mode gate it carries,
+/// the environment and permission overrides it declares, and the steps that
+/// check out, provision mise, run the named tasks, and attest the declared
+/// subjects.
+fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
+    let mut output = format!("  {}:\n    name: {}\n", job.id, yaml_scalar(&job.name));
+    if !job.needs.is_empty() {
+        let _ = writeln!(output, "    needs: [{}]", job.needs.join(", "));
+    }
+    if let Some(gate) = tasks_job_gate(job) {
+        let _ = writeln!(output, "    if: {gate}");
+    }
+    let _ = writeln!(output, "    runs-on: {}", tasks_job_runs_on(config, job));
+    let _ = writeln!(output, "    timeout-minutes: {}", job.timeout_minutes);
+    if !job.environment.is_empty() {
+        let _ = writeln!(output, "    environment: {}", yaml_scalar(&job.environment));
+    }
+    if !job.permissions.is_empty() {
+        output.push_str("    permissions:\n");
+        for (scope, level) in &job.permissions {
+            let _ = writeln!(output, "      {scope}: {level}");
+        }
+    }
+    if !job.env.is_empty() {
+        output.push_str("    env:\n");
+        for (key, value) in &job.env {
+            let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
+        }
+    }
+    let _ = writeln!(
+        output,
+        "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
+        ActionPin::Checkout.reference(),
+        render_versioned_tool_mise_setup(config),
+    );
+    output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
+    if !job.attest_subjects.is_empty() {
+        let mut subjects = String::new();
+        for subject in &job.attest_subjects {
+            let _ = writeln!(subjects, "            {subject}");
+        }
+        let _ = writeln!(
+            output,
+            "      - name: Attest release artifacts\n        uses: {}\n        with:\n          subject-path: |\n{subjects}",
+            ActionPin::Attest.reference(),
+        );
+    }
+    output
+}
+
+/// The `tasks` publisher: tag pushes plus dispatch drills over declared
+/// named-task jobs. Releases serialize on the ref like every other
+/// publisher; publication stays tag-triggered while dispatch drills the
+/// validate-gated jobs.
+fn render_tasks_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let trigger = format!("{}  workflow_dispatch:\n", release_trigger_block(release));
+    let mut output = format!(
+        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\n{trigger}\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n"
+    );
+    output = inject_dispatch_modes(&output, release);
+    for job in &release.jobs {
+        output.push_str(&render_tasks_release_job(config, job));
+    }
+    output
+}
+
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     if !release_contract_complete(release) {
         return format!(
             "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
         );
     }
-    if has_tarball_bindings(release) && !matches!(release.kind.as_str(), "rust-binary" | "native") {
+    // The tasks publisher renders dispatch modes (the drill input its jobs
+    // gate on) but no producer, archive, or credential bindings. Config
+    // validation rejects those combinations with precise errors; this gate is
+    // the backstop for specs built outside it.
+    let bindings_supported = matches!(release.kind.as_str(), "rust-binary" | "native")
+        || (release.kind.as_str() == "tasks"
+            && !has_producer_binding(release)
+            && !has_archive_contract(release)
+            && release.credentials.is_empty());
+    if has_tarball_bindings(release) && !bindings_supported {
         return format!(
-            "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers.\n"
+            "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers (`tasks` renders dispatch modes only).\n"
         );
     }
     match release.kind.as_str() {
         "crates" => render_crates_release(config, release),
         "rust-binary" => render_binary_release(config, release),
         "native" => render_native_release(config, release),
+        "tasks" => render_tasks_release(config, release),
         "pages" => render_pages_release(config, release),
         "homebrew" => render_homebrew_release(config, release),
         "apt" => render_apt_release(config, release),
@@ -3271,6 +3327,7 @@ fn render_release_unit_job(
     // the host's persistent executable store instead.
     if lane == crate::RunnerMode::Velnor && super::ir::unit_runs_workflow_plain_check(unit) {
         output.push_str(&crate::workflow_pinned_policy_runtime_velnor(
+            &workflow.workflow_revision,
             "${{ github.workspace }}",
         ));
     }
@@ -4124,55 +4181,11 @@ fn render_homebrew_release(config: &ProjectConfig, release: &ReleaseSpec) -> Str
 }
 
 fn render_apt_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
-    // Declared and config-driven contracts are validated before rendering,
-    // so resolution here only fails when a caller bypassed validation — and
-    // then no feed renders at all rather than a broken one.
-    let Ok(contract) = crate::apt::AptContract::resolve(release) else {
-        return format!(
-            "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
-        );
-    };
-    // The feed publishes from GitHub only, so the GitHub-lane runtime setup
-    // applies regardless of the repository's own lane mode: the jobs below
-    // run on `github_runner` even for a Velnor-mode repository.
-    let setup = workflow_runtime_setup(
-        RunnerMode::Github,
-        &config.repository,
-        &config.workflow_revision,
-    );
-    let runner = yaml_scalar(&config.github_runner);
-    let branch = &config.default_branch;
-    let source = shell_quote(&contract.source_repo);
-    let package = shell_quote(&contract.package);
-    // Names interpolated inside double-quoted shell strings stay raw: the
-    // typed validators forbid every metacharacter, so quoting them would
-    // corrupt the interpolation instead of protecting it.
-    let package_raw = &contract.package;
-    // The repository slug (owner/name, no metacharacters) for the
-    // attestation signer identity.
-    let source_raw = &contract.source_repo;
-    let binary = shell_quote(&contract.binary);
-    let schema = shell_quote(&contract.manifest_schema);
-    let signer = shell_quote(&contract.signer);
-    let secret = &contract.passphrase_secret;
-    let keyring = shell_quote(&contract.keyring);
-    let identity = shell_quote(&contract.identity_dir);
-    let origin = shell_quote(&contract.origin);
-    let description = shell_quote(&contract.description);
-    let feed = shell_quote(&contract.feed_url);
-    let consumer = shell_quote(&contract.consumer_repo);
-    let letter = crate::apt::pool_letter(&contract.package);
-    let checkout = ActionPin::Checkout.reference();
-    let upload = ActionPin::UploadArtifact.reference();
-    let download = ActionPin::DownloadArtifact.reference();
-    let policy = policy_enforcement_step();
-    format!(
-        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · apt · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n      version:\n        description: Target version (empty discovers the channel head)\n        required: false\n        default: ''\n        type: string\n      commit:\n        description: Target source commit (empty resolves it)\n        required: false\n        default: ''\n        type: string\n\nconcurrency:\n  group: package-feed-apt-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  admit-runner:\n    name: Admit feed runner\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only feed mutation\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo 'apt feed mutation publishes from GitHub only' >&2\n          exit 1\n  verify:\n    name: Verify apt feed\n    needs: [admit-runner]\n    runs-on: {runner}\n    timeout-minutes: 30\n    outputs:\n      version: ${{{{ steps.feed.outputs.version }}}}\n      commit: ${{{{ steps.feed.outputs.commit }}}}\n      channel: ${{{{ steps.feed.outputs.channel }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Fetch and verify feed inputs\n        id: feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n          INPUT_VERSION: ${{{{ github.event.inputs.version || '' }}}}\n          INPUT_COMMIT: ${{{{ github.event.inputs.commit || '' }}}}\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          channel=\"$CHANNEL\"\n          case \"$channel\" in stable|preview) ;; *) echo \"::error::unknown channel $channel\" >&2; exit 1 ;; esac\n          version=\"$INPUT_VERSION\"\n          commit=\"$INPUT_COMMIT\"\n          if [ \"$channel\" = stable ]; then\n            if [ -z \"$version\" ]; then\n              version=\"$(gh release list --repo {source} --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')\"\n            fi\n            if [ -z \"$commit\" ]; then\n              commit=\"$(velnor-workflow release apt-resolve-commit --source-repo {source} --version \"$version\")\"\n            fi\n          else\n            rm -rf discover\n            gh release download preview --repo {source} --pattern 'release-manifest.json' --dir discover\n            manifest_version=\"$(jq -er .version discover/release-manifest.json)\"\n            if [ -z \"$version\" ]; then\n              version=\"$manifest_version\"\n            elif [ \"$version\" != \"$manifest_version\" ]; then\n              echo \"::error::requested $version disagrees with the rolling manifest $manifest_version\" >&2\n              exit 1\n            fi\n            if [ -z \"$commit\" ]; then\n              commit=\"$(gh release view preview --repo {source} --json targetCommitish --jq .targetCommitish)\"\n            fi\n          fi\n          rm -rf incoming\n          velnor-workflow release apt-fetch --suite \"$channel\" --source-repo {source} --package {package} --version \"$version\" --dir incoming\n          if [ \"$channel\" = stable ]; then\n            source_ref=\"refs/tags/$version\"\n          else\n            source_ref=\"refs/heads/{branch}\"\n          fi\n          shopt -s nullglob\n          attest_subjects=(incoming/*.deb)\n          [ \"${{#attest_subjects[@]}}\" -gt 0 ] || {{ echo \"::error::no fetched debs to attest\" >&2; exit 1; }}\n          for subject in \"${{attest_subjects[@]}}\"; do\n            gh attestation verify \"$subject\" --repo {source} --signer-workflow \"{source_raw}/.github/workflows/ci-release-package-signer.yml\" --source-ref \"$source_ref\" --source-digest \"$commit\"\n          done\n          live_fpr=\"$(gpg --show-keys --with-colons {keyring} | awk -F: '/^fpr:/{{print $10; exit}}')\"\n          if [ \"$channel\" = stable ]; then\n            velnor-workflow release apt-verify --suite \"$channel\" --source-repo {source} --package {package} --binary {binary} --identity-dir {identity} --manifest-schema {schema} --version \"$version\" --incoming incoming --commit \"$commit\" --signer \"$live_fpr\" --expect-signer {signer} --verify-oci true\n          else\n            velnor-workflow release apt-verify --suite \"$channel\" --source-repo {source} --package {package} --binary {binary} --identity-dir {identity} --manifest-schema {schema} --version \"$version\" --incoming incoming --commit \"$commit\" --signer \"$live_fpr\" --expect-signer {signer}\n          fi\n          {{\n            echo \"version=$version\"\n            echo \"commit=$commit\"\n            echo \"channel=$channel\"\n          }} >> \"$GITHUB_OUTPUT\"\n      - name: Upload verified feed inputs\n        uses: {upload}\n        with:\n          name: apt-incoming\n          path: incoming\n          if-no-files-found: error\n          retention-days: 2\n  publish:\n    name: Publish apt feed\n    needs: [admit-runner, verify]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event.inputs.runner != 'velnor' }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    outputs:\n      version: ${{{{ needs.verify.outputs.version }}}}\n      commit: ${{{{ needs.verify.outputs.commit }}}}\n      channel: ${{{{ needs.verify.outputs.channel }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download verified feed inputs\n        uses: {download}\n        with:\n          name: apt-incoming\n          path: .\n      - name: Recover the prior pair and derive the previous pointer\n        id: prior\n        env:\n          CHANNEL: ${{{{ needs.verify.outputs.channel }}}}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n        run: |\n          set -euo pipefail\n          rm -rf prev\n          mkdir -p prev\n          feed={feed}\n          echo \"bootstrap=false\" >> \"$GITHUB_OUTPUT\"\n          case \"$CHANNEL\" in\n            stable)\n              prev_tag=\"$(curl --fail --show-error --silent --location \"$feed/last-publish\")\"\n              prev_version=\"${{prev_tag#v}}\"\n              case \"$prev_version\" in ''|*[!0-9.]*) echo \"::error::live last-publish is not a version: $prev_tag\" >&2; exit 1 ;; esac\n              for arch in amd64 arm64; do\n                curl --fail --show-error --silent --location --retry 3 \\\n                  -o \"prev/{package_raw}-$prev_version-$arch.deb\" \\\n                  \"$feed/pool/main/{letter}/{package_raw}/{package_raw}_${{prev_version}}_${{arch}}.deb\"\n              done\n              candidate_sha=\"$(awk '{{print $1}}' incoming/release-record.json.sha256)\"\n              curl --fail --show-error --silent --location -o published.json \"$feed/publication-record.json\"\n              velnor-workflow release apt-previous-pointer --suite stable --published published.json --prior \"$prev_tag\" --candidate \"$VERSION\" --candidate-sha \"$candidate_sha\" > previous-pointer.json\n              ;;\n            preview)\n              if curl --fail --show-error --silent --location --output /dev/null \"$feed/dists/preview/InRelease\"; then\n                curl --fail --show-error --silent --location -o live-packages \"$feed/dists/preview/main/binary-amd64/Packages\"\n                rollback=\"$(awk '$1==\"Package:\"{{p=$2}} p==\"{package_raw}\" && $1==\"Version:\"{{print $2}}' live-packages | sort -u | grep -Fxv \"$VERSION\")\"\n                [ -n \"$rollback\" ] || {{ echo \"::error::no retained rollback in the live preview index\" >&2; exit 1; }}\n                [ \"$(printf '%s\\n' \"$rollback\" | wc -l | tr -d ' ')\" = 1 ] || {{ echo \"::error::live preview index retains more than one rollback\" >&2; exit 1; }}\n                case \"$rollback\" in ''|*[!0-9A-Za-z.+:~-]*) echo \"::error::live preview rollback is not a pool version: $rollback\" >&2; exit 1 ;; esac\n                for arch in amd64 arm64; do\n                  curl --fail --show-error --silent --location --retry 3 \\\n                    -o \"prev/{package_raw}_${{rollback}}_${{arch}}.deb\" \\\n                    \"$feed/pool/preview/main/{letter}/{package_raw}/{package_raw}_${{rollback}}_${{arch}}.deb\"\n                done\n                velnor-workflow release apt-previous-pointer --suite preview > previous-pointer.json\n              else\n                velnor-workflow release apt-previous-pointer --suite preview --bootstrap true > previous-pointer.json\n                echo \"bootstrap=true\" >> \"$GITHUB_OUTPUT\"\n              fi\n              ;;\n          esac\n      - name: Publish the staged suite\n        env:\n          CHANNEL: ${{{{ needs.verify.outputs.channel }}}}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          COMMIT: ${{{{ needs.verify.outputs.commit }}}}\n          {secret}: ${{{{ secrets.{secret} }}}}\n        run: |\n          set -euo pipefail\n          args=(--suite \"$CHANNEL\" --source-repo {source} --package {package} --binary {binary} --consumer-repo {consumer} --manifest-schema {schema} --identity-dir {identity} --keyring {keyring} --origin {origin} --description {description} --feed-url {feed} --signer {signer} --passphrase-env {secret} --version \"$VERSION\" --incoming incoming --previous-pointer previous-pointer.json --staging public)\n          if [ \"${{{{ steps.prior.outputs.bootstrap }}}}\" = true ]; then\n            args+=(--bootstrap true)\n          else\n            args+=(--prev-dir prev)\n          fi\n          velnor-workflow release apt-publish \"${{args[@]}}\"\n          if [ \"$CHANNEL\" = stable ]; then\n            ref=\"refs/tags/$VERSION\"\n            manifest=\"incoming/manifest.json\"\n          else\n            ref=\"refs/heads/main\"\n            manifest=\"incoming/release-manifest.json\"\n          fi\n          velnor-workflow release apt-channel-update --suite \"$CHANNEL\" --source-repo {source} --source-ref \"$ref\" --commit \"$COMMIT\" --version \"$VERSION\" --package {package} --manifest \"$manifest\" --staging public\n      - name: Upload staged feed tree\n        uses: {upload}\n        with:\n          name: apt-staging\n          path: public\n          if-no-files-found: error\n          retention-days: 2\n  deploy:\n    name: Deploy apt feed\n    needs: [admit-runner, publish]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event.inputs.runner != 'velnor' }}}}\n    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-pages\n    permissions:\n      contents: read\n      pages: write\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download staged feed tree\n        uses: {download}\n        with:\n          name: apt-staging\n          path: .\n      - name: Guard against a rollback deploy\n        env:\n          CHANNEL: ${{{{ needs.publish.outputs.channel }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then last=\"last-publish\"; else last=\"last-publish-preview\"; fi\n          live=\"unknown\"\n          if curl --fail --show-error --silent --location -o live-last-publish {feed}/$last; then\n            live=\"$(cat live-last-publish)\"\n          fi\n          velnor-workflow release apt-deploy-guard --suite \"$CHANNEL\" --staged public --live-version \"$live\"\n      - name: Configure Pages\n        uses: {configure_pages}\n      - name: Upload Pages artifact\n        uses: {upload_pages}\n        with:\n          path: public\n      - name: Deploy Pages\n        uses: {deploy_pages}\n  feed-result:\n    name: Feed result\n    needs: [admit-runner, verify, publish, deploy]\n    if: ${{{{ always() }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Fail closed unless the feed verified and published\n        env:\n          REF: ${{{{ github.ref }}}}\n          VERIFY: ${{{{ needs.verify.result }}}}\n          PUBLISH: ${{{{ needs.publish.result }}}}\n          DEPLOY: ${{{{ needs.deploy.result }}}}\n        run: |\n          set -euo pipefail\n          [ \"$VERIFY\" = success ] || {{ echo \"::error::feed verification did not succeed: $VERIFY\" >&2; exit 1; }}\n          if [ \"$REF\" = \"refs/heads/{branch}\" ]; then\n            [ \"$PUBLISH\" = success ] || {{ echo \"::error::feed publication did not succeed: $PUBLISH\" >&2; exit 1; }}\n            [ \"$DEPLOY\" = success ] || {{ echo \"::error::feed deployment did not succeed: $DEPLOY\" >&2; exit 1; }}\n          else\n            [ \"$PUBLISH\" = skipped ] || {{ echo \"::error::unexpected publication state off the default branch: $PUBLISH\" >&2; exit 1; }}\n            [ \"$DEPLOY\" = skipped ] || {{ echo \"::error::unexpected deployment state off the default branch: $DEPLOY\" >&2; exit 1; }}\n          fi\n",
-        branch = branch,
-        policy = policy,
-        configure_pages = ActionPin::ConfigurePages.reference(),
-        upload_pages = ActionPin::UploadPages.reference(),
-        deploy_pages = ActionPin::DeployPages.reference(),
+    render_package_feed(
+        config,
+        "apt",
+        &release.package,
+        &release.consumer_repository,
     )
 }
 
@@ -5382,14 +5395,6 @@ mod tests {
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: String::new(),
-            apt_arches: Vec::new(),
-            signer_fingerprint: String::new(),
-            passphrase_secret: String::new(),
-            keyring_path: String::new(),
-            apt_origin: String::new(),
-            apt_identity_dir: String::new(),
-            apt_feed_url: String::new(),
-            retention: 0,
             dockerfile: String::new(),
             context: String::new(),
             platforms: Vec::new(),
@@ -5404,6 +5409,44 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
+        }
+    }
+
+    fn tasks_job(id: &str, tasks: &[&str]) -> crate::ReleaseJobSpec {
+        crate::ReleaseJobSpec {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            tasks: tasks.iter().map(|task| (*task).to_owned()).collect(),
+            needs: Vec::new(),
+            runner: "github".to_owned(),
+            modes: Vec::new(),
+            timeout_minutes:
+                crate::primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES,
+            environment: String::new(),
+            attest_subjects: Vec::new(),
+            permissions: std::collections::BTreeMap::new(),
+            env: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// A tasks publisher: a build job every release runs plus a publish-gated
+    /// sign job on the macOS lane. All task names are fixture-local.
+    fn tasks_spec() -> ReleaseSpec {
+        let mut sign = tasks_job("sign", &["sign-release"]);
+        sign.name = "Sign release".to_owned();
+        sign.needs = vec!["build".to_owned()];
+        sign.runner = "macos".to_owned();
+        sign.modes = vec!["publish".to_owned()];
+        ReleaseSpec {
+            kind: "tasks".to_owned(),
+            modes: vec!["validate".to_owned()],
+            tag_pattern: "v[0-9]*".to_owned(),
+            jobs: vec![
+                tasks_job("build", &["build-release", "verify-release"]),
+                sign,
+            ],
+            ..ReleaseSpec::default()
         }
     }
 
@@ -5427,14 +5470,6 @@ mod tests {
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
-            apt_arches: Vec::new(),
-            signer_fingerprint: String::new(),
-            passphrase_secret: String::new(),
-            keyring_path: String::new(),
-            apt_origin: String::new(),
-            apt_identity_dir: String::new(),
-            apt_feed_url: String::new(),
-            retention: 0,
             dockerfile: String::new(),
             context: String::new(),
             platforms: Vec::new(),
@@ -5449,6 +5484,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
         }
     }
 
@@ -5468,14 +5504,6 @@ mod tests {
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: String::new(),
-            apt_arches: Vec::new(),
-            signer_fingerprint: String::new(),
-            passphrase_secret: String::new(),
-            keyring_path: String::new(),
-            apt_origin: String::new(),
-            apt_identity_dir: String::new(),
-            apt_feed_url: String::new(),
-            retention: 0,
             dockerfile: "Dockerfile".to_owned(),
             context: ".".to_owned(),
             platforms: vec!["linux/amd64".to_owned(), "linux/arm64".to_owned()],
@@ -5490,6 +5518,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
         }
     }
 
@@ -5697,12 +5726,7 @@ mod tests {
         pages.artifact_path = "site".to_owned();
         let mut apt = binary_spec();
         apt.kind = "apt".to_owned();
-        apt.source_repository = "example/app".to_owned();
         apt.consumer_repository = "example/apt".to_owned();
-        apt.manifest_schema = "example.test/apt-manifest-v1".to_owned();
-        apt.signer_fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567".to_owned();
-        apt.passphrase_secret = "APT_PASSPHRASE".to_owned();
-        apt.apt_feed_url = "https://feed.example.test".to_owned();
         let mut homebrew = binary_spec();
         homebrew.kind = "homebrew".to_owned();
         homebrew.source_repository = "example/app".to_owned();
@@ -5765,147 +5789,6 @@ mod tests {
             "pinned identity renders diverged:\n  {}",
             divergent.join("\n  ")
         );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    /// Daemon and runtime delivery resolve exact identities, never a rolling
-    /// `latest`: the daemon ships through the APT feed off immutable `v*`
-    /// releases, the runtime through closure-pinned product releases. A
-    /// `latest` selector in any rendered surface would reintroduce the
-    /// mutable identity both schemes exist to exclude, so every `latest`
-    /// token in the rendered release, preview, maintenance, signer,
-    /// producer, and consumer surfaces fails — except the one error-message
-    /// prose line that tells the operator to re-run the newest preview run.
-    #[test]
-    fn rendered_surfaces_never_select_latest() {
-        let root = scanned_root("no-latest-legacy");
-        let legacy = generate(
-            &root,
-            &config(
-                &[
-                    "release.yml",
-                    "preview.yml",
-                    "maintenance.yml",
-                    "ci-release-package-signer.yml",
-                ],
-                Some(binary_spec()),
-            ),
-            None,
-        );
-        let identity_root = scanned_root("no-latest-identity");
-        let identity = generate(
-            &identity_root,
-            &native_identity_config(&["release.yml", "preview.yml"]),
-            None,
-        );
-        let mut owner = config(&["maintenance.yml"], Some(binary_spec()));
-        owner.repository = crate::workflow_setup_action_repository().to_owned();
-        let producer = must_some(
-            super::super::runtime_products::runtime_products_content(&owner),
-            "the owner renders the runtime producer",
-        );
-        let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
-        let action = must(
-            fs::read_to_string(&action_path),
-            "read the setup action source",
-        );
-        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
-        let mut surfaces: Vec<(&str, &str)> = Vec::new();
-        for (path, content) in legacy.files.iter().chain(identity.files.iter()) {
-            surfaces.push((path.to_str().unwrap_or("surface"), content.as_str()));
-        }
-        surfaces.push(("ci-runtime-products.yml", producer.as_str()));
-        surfaces.push(("setup-velnor-workflow/action.yml", action.as_str()));
-        surfaces.push(("velnor-provisioner", velnor.as_str()));
-        assert_eq!(
-            surfaces.len(),
-            9,
-            "the legacy, identity, producer, and consumer surfaces all render"
-        );
-        let mut scanned_lines = 0;
-        for (name, content) in &surfaces {
-            for (index, line) in content.lines().enumerate() {
-                scanned_lines += 1;
-                if line.to_lowercase().contains("latest") {
-                    assert!(
-                        line.contains("re-run the LATEST preview run instead"),
-                        "unexpected `latest` in {name}:{}: {line}",
-                        index + 1
-                    );
-                }
-            }
-        }
-        assert!(
-            scanned_lines > 1_000,
-            "the scan covered {scanned_lines} lines"
-        );
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(identity_root);
-    }
-
-    /// The runtime product tags (`velnor-workflow-runtime-v1-*`) and the
-    /// daemon release tags (`v*`) are disjoint identities: the release
-    /// version gate admits `v[0-9]*`, and the product prefix's second byte
-    /// is a fixed non-digit, so no product tag — whatever the closure —
-    /// can ever match the gate, and no release tag carries the product
-    /// prefix.
-    #[test]
-    fn runtime_product_tags_are_disjoint_from_release_tags() {
-        let root = scanned_root("tag-disjointness");
-        let surface = generate(
-            &root,
-            &native_identity_config(&["release.yml", "preview.yml"]),
-            None,
-        );
-        let release = rendered(&surface, "release.yml");
-        assert!(
-            release.contains("tags: [\"v*\"]"),
-            "the release workflow triggers on v* tags"
-        );
-        assert!(
-            release.contains("v[0-9]*)"),
-            "the release version gate admits v[0-9]*"
-        );
-        let prefix = crate::closure::PRODUCT_TAG_PREFIX;
-        assert_eq!(
-            prefix.as_bytes()[0],
-            b'v',
-            "the disjointness proof starts from the shared leading v: {prefix}"
-        );
-        assert!(
-            !prefix.as_bytes()[1].is_ascii_digit(),
-            "the product prefix's second byte is a fixed non-digit, so no product tag matches v[0-9]*: {prefix}"
-        );
-        for tag in ["v0.0.1", "v1.2.3", "v10.0.0-rc.1"] {
-            assert!(
-                !tag.starts_with(prefix),
-                "release tag {tag} carries no product prefix"
-            );
-            assert!(
-                tag.strip_prefix('v').is_some_and(|rest| rest
-                    .bytes()
-                    .next()
-                    .is_some_and(|byte| byte.is_ascii_digit())),
-                "release tag {tag} matches the version gate"
-            );
-        }
-        for closure in ["0".repeat(64), "9".repeat(64), "f".repeat(64)] {
-            let tag = crate::closure::product_tag(&closure);
-            assert!(
-                tag.starts_with(prefix),
-                "the product tag carries the product prefix: {tag}"
-            );
-            let matches_gate = tag.strip_prefix('v').is_some_and(|rest| {
-                rest.bytes()
-                    .next()
-                    .is_some_and(|byte| byte.is_ascii_digit())
-            });
-            assert!(
-                !matches_gate,
-                "product tag {tag} must not match the release gate"
-            );
-        }
         let _ = fs::remove_dir_all(root);
     }
 
@@ -6270,6 +6153,153 @@ mod tests {
         );
         assert_eq!(surface.added_files, vec!["release.yml".to_owned()]);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tasks_release_renders_declared_jobs_with_gates_and_lanes() {
+        let config = config(&["release.yml"], Some(tasks_spec()));
+        let Some(release) = config.release.as_ref() else {
+            panic!("tasks fixture must carry a release contract");
+        };
+        let workflow = super::render_release(&config, release);
+        for expected in [
+            "name: Release",
+            "tags: [\"v[0-9]*\"]",
+            "workflow_dispatch:",
+            "default: validate",
+            "group: release-${{ github.ref }}",
+            "  build:\n    name: build\n",
+            "  sign:\n    name: \"Sign release\"\n    needs: [build]\n",
+            "if: ${{ github.event_name != 'workflow_dispatch' }}",
+            "run: mise run build-release",
+            "run: mise run verify-release",
+            "run: mise run sign-release",
+        ] {
+            assert!(
+                workflow.contains(expected),
+                "tasks release must render {expected:?}: {workflow}"
+            );
+        }
+        let build = workflow
+            .split("  build:\n")
+            .nth(1)
+            .unwrap_or_default()
+            .split("\n  sign:\n")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            build.contains("runs-on: ubuntu-24.04"),
+            "the build job runs on the github lane: {build}"
+        );
+        assert!(
+            !build.contains("github.event_name"),
+            "the ungated job carries no event gate: {build}"
+        );
+        let sign = workflow.split("\n  sign:\n").nth(1).unwrap_or_default();
+        assert!(
+            sign.contains("runs-on: macos-15"),
+            "the sign job runs on the macos lane: {sign}"
+        );
+    }
+
+    #[test]
+    fn tasks_release_renders_job_shape() {
+        let mut job = tasks_job("sign", &["sign-release"]);
+        job.environment = "example-signing".to_owned();
+        job.attest_subjects = vec!["dist/example-app.zip".to_owned()];
+        job.permissions = [("id-token".to_owned(), "write".to_owned())]
+            .into_iter()
+            .collect();
+        job.env = [
+            (
+                "DEVELOPER_DIR".to_owned(),
+                "/Applications/Xcode.app/Contents/Developer".to_owned(),
+            ),
+            (
+                "SIGNING_KEY_ID".to_owned(),
+                "${{ secrets.EXAMPLE_SIGNING_KEY_ID }}".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut spec = tasks_spec();
+        spec.jobs = vec![job];
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        for expected in [
+            "    environment: example-signing\n",
+            "    permissions:\n      id-token: write\n",
+            "    env:\n      DEVELOPER_DIR: \"/Applications/Xcode.app/Contents/Developer\"\n",
+            "      SIGNING_KEY_ID: \"${{ secrets.EXAMPLE_SIGNING_KEY_ID }}\"\n",
+            "      - name: Attest release artifacts\n",
+            "actions/attest-build-provenance@",
+            "          subject-path: |\n            dist/example-app.zip\n",
+        ] {
+            assert!(
+                workflow.contains(expected),
+                "tasks release must render {expected:?}: {workflow}"
+            );
+        }
+    }
+
+    #[test]
+    fn tasks_release_mode_gates_follow_declared_modes() {
+        let mut validate = tasks_job("drill", &["drill-release"]);
+        validate.modes = vec!["validate".to_owned()];
+        let mut both = tasks_job("always", &["always-release"]);
+        both.modes = vec!["validate".to_owned(), "publish".to_owned()];
+        assert_eq!(
+            super::tasks_job_gate(&validate),
+            Some("${{ github.event_name == 'workflow_dispatch' }}")
+        );
+        assert_eq!(super::tasks_job_gate(&both), None);
+        let mut publish = tasks_job("ship", &["ship-release"]);
+        publish.modes = vec!["publish".to_owned()];
+        assert_eq!(
+            super::tasks_job_gate(&publish),
+            Some("${{ github.event_name != 'workflow_dispatch' }}")
+        );
+    }
+
+    #[test]
+    fn tasks_release_without_jobs_is_omitted() {
+        let mut spec = tasks_spec();
+        spec.jobs = Vec::new();
+        assert!(!super::release_contract_complete(&spec));
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        assert!(
+            workflow.contains("# Release omitted: artifact, platform, registry, or signer contract is incomplete."),
+            "a jobless tasks contract renders the omission notice: {workflow}"
+        );
+    }
+
+    #[test]
+    fn tasks_release_omits_artifact_bindings_at_render() {
+        // Config validation rejects these combinations first; the render
+        // gate is the backstop for specs built outside it.
+        let mut spec = tasks_spec();
+        spec.producer_workflow = "CI".to_owned();
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        assert!(
+            workflow.contains("# Release omitted: producer bindings"),
+            "a producer-bound tasks contract must not render: {workflow}"
+        );
+    }
+
+    #[test]
+    fn tasks_release_velnor_lane_renders_repository_labels() {
+        let mut job = tasks_job("build", &["build-release"]);
+        job.runner = "velnor".to_owned();
+        let mut spec = tasks_spec();
+        spec.jobs = vec![job];
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        assert!(
+            workflow.contains("runs-on: [self-hosted, example-runner]"),
+            "the velnor lane renders the repository labels: {workflow}"
+        );
     }
 
     #[test]
@@ -7561,14 +7591,6 @@ mod tests {
                 artifact_path: String::new(),
                 description: String::new(),
                 manifest_schema: String::new(),
-                apt_arches: Vec::new(),
-                signer_fingerprint: String::new(),
-                passphrase_secret: String::new(),
-                keyring_path: String::new(),
-                apt_origin: String::new(),
-                apt_identity_dir: String::new(),
-                apt_feed_url: String::new(),
-                retention: 0,
                 dockerfile: String::new(),
                 context: String::new(),
                 platforms: Vec::new(),
@@ -7583,6 +7605,7 @@ mod tests {
                 registry: String::new(),
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
+                jobs: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7639,23 +7662,6 @@ mod tests {
             assert!(release.contains(".tarballs[$a].url"), "{release}");
             assert!(release.contains("--guest dist/microvm"), "{release}");
             assert!(!release.contains("velnor-guest-"), "{release}");
-            // The upload must name the exact 5-file consumer contract: a
-            // `dist/microvm/*` wildcard once walked build scratch into a
-            // symlink escape onto a root-only host path (EACCES scandir).
-            let upload = format!(
-                "          path: |\n            dist/microvm/vmlinux\n            dist/microvm/rootfs.ext4\n            dist/microvm/rootfs.sha256\n            dist/microvm/{agent}\n            dist/microvm/guest-agent.sha256\n"
-            );
-            for workflow in [&preview, &release] {
-                let payload = yaml_job(workflow, "guest-payload");
-                assert!(
-                    payload.contains(&upload),
-                    "guest payload upload must list the exact consumer files: {payload}"
-                );
-                assert!(
-                    !workflow.contains("dist/microvm/*"),
-                    "guest payload upload must not use a wildcard: {workflow}"
-                );
-            }
             let _ = fs::remove_dir_all(root);
         }
     }
@@ -7739,14 +7745,6 @@ mod tests {
                 artifact_path: String::new(),
                 description: String::new(),
                 manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
-                apt_arches: Vec::new(),
-                signer_fingerprint: String::new(),
-                passphrase_secret: String::new(),
-                keyring_path: String::new(),
-                apt_origin: String::new(),
-                apt_identity_dir: String::new(),
-                apt_feed_url: String::new(),
-                retention: 0,
                 dockerfile: String::new(),
                 context: String::new(),
                 platforms: Vec::new(),
@@ -7761,6 +7759,7 @@ mod tests {
                 registry: String::new(),
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
+                jobs: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7843,363 +7842,35 @@ mod tests {
         }
     }
 
-    fn apt_args(package: &str, source: &str, consumer: &str, origin: &str) -> String {
-        format!(
-            "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
-             [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
-             binary = \"{package}\"\nsource_repository = \"{source}\"\n\
-             consumer_repository = \"{consumer}\"\n\
-             manifest_schema = \"example.test/apt-manifest-v1\"\n\
-             signer_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"\n\
-             passphrase_secret = \"APT_PASSPHRASE\"\n\
-             apt_origin = \"{origin}\"\n\
-             apt_feed_url = \"https://feed.example.test\"\n"
-        )
-    }
-
-    fn apt_release_yml(declaration: &str, root_name: &str) -> (String, PathBuf) {
-        let root = scanned_root(root_name);
-        let surface = generate(&root, &config(&[], None), Some(declaration));
-        let release = surface
-            .files
-            .get(&PathBuf::from(".github/workflows/release.yml"))
-            .unwrap_or_else(|| panic!("an apt feed must render release.yml"))
-            .clone();
-        (release, root)
-    }
-
     #[test]
     fn a_declared_apt_feed_mutates_from_github_only() {
-        for (name, package, source, consumer) in [
-            ("apt-feed", "example", "example/app", "example/apt"),
-            ("apt-feed-acme", "widget", "acme/widget", "acme/apt"),
+        for (name, package, consumer) in [
+            ("apt-feed", "example", "example/apt"),
+            ("apt-feed-acme", "widget", "acme/apt"),
         ] {
-            let (release, root) =
-                apt_release_yml(&apt_args(package, source, consumer, "Example"), name);
+            let root = scanned_root(name);
+            let surface = generate(
+                &root,
+                &config(&[], None),
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
+                     consumer_repository = \"{consumer}\"\n"
+                )),
+            );
+            let release = surface
+                .files
+                .get(&PathBuf::from(".github/workflows/release.yml"))
+                .unwrap_or_else(|| panic!("an apt feed must render release.yml"));
             assert!(release.contains("Package feed"), "{release}");
-            assert!(release.contains("release apt-fetch"), "{release}");
-            assert!(release.contains("release apt-verify"), "{release}");
-            assert!(release.contains("release apt-publish"), "{release}");
-            assert!(release.contains("release apt-deploy-guard"), "{release}");
+            assert!(release.contains("--kind apt"), "{release}");
             assert!(
-                release.contains(&format!("--package '{package}'")),
+                release.contains(&format!("--package {package}")),
                 "{release}"
             );
             assert!(release.contains(consumer), "{release}");
             assert!(release.contains("default: github"), "{release}");
-            assert!(
-                release.contains("feed mutation publishes from GitHub only"),
-                "{release}"
-            );
-            // The feed is real: fetch, verify, publish, deploy, and a
-            // fail-closed result — never an omission notice.
-            for job in ["verify:", "publish:", "deploy:", "feed-result:"] {
-                assert!(release.contains(&format!("\n  {job}")), "{release}");
-            }
-            assert!(!release.contains("omitted"), "{release}");
-            assert!(release.contains("group: package-feed-apt-"), "{release}");
-            assert!(release.contains("environment: package-feed"), "{release}");
-            assert!(release.contains("environment: github-pages"), "{release}");
-            assert!(release.contains("pages: write"), "{release}");
-            assert!(release.contains("id-token: write"), "{release}");
             let _ = fs::remove_dir_all(root);
-        }
-    }
-
-    #[test]
-    fn preview_rollback_version_is_charset_validated_before_use() {
-        let (release, root) = apt_release_yml(
-            &apt_args("example", "example/app", "example/apt", "Example"),
-            "apt-rollback-gate",
-        );
-        // The preview `prior` step validates the live-feed rollback
-        // against the `valid_pool_version` charset (rejecting `/` with
-        // everything else outside it) before embedding it in a path/URL,
-        // mirroring the stable `last-publish` gate.
-        let gate = "case \"$rollback\" in ''|*[!0-9A-Za-z.+:~-]*)";
-        assert!(release.contains(gate), "{release}");
-        let gate_at = must_some(release.find(gate), "rollback gate renders");
-        let use_at = must_some(
-            release.find("-o \"prev/example_${rollback}_${arch}.deb\""),
-            "rollback use renders",
-        );
-        assert!(
-            gate_at < use_at,
-            "the rollback gate must precede its first use: {release}"
-        );
-        assert!(
-            release.contains("case \"$prev_version\" in ''|*[!0-9.]*"),
-            "the stable gate is the mirror: {release}"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn feed_verify_attests_every_fetched_deb_before_apt_verify() {
-        let (release, root) = apt_release_yml(
-            &apt_args("example", "example/app", "example/apt", "Example"),
-            "apt-attestation",
-        );
-        // Every fetched deb is attested against the source repo, the
-        // pinned package-signer workflow, and the resolved source
-        // ref/digest — before `apt-verify` sees any byte. A forged
-        // self-consistent record+manifest+debs set fails here, never at
-        // the signing key.
-        let attestation = "gh attestation verify \"$subject\" --repo 'example/app' \
-             --signer-workflow \"example/app/.github/workflows/ci-release-package-signer.yml\" \
-             --source-ref \"$source_ref\" --source-digest \"$commit\"";
-        assert!(release.contains(attestation), "{release}");
-        assert!(
-            release.contains("source_ref=\"refs/tags/$version\""),
-            "{release}"
-        );
-        assert!(
-            release.contains("source_ref=\"refs/heads/main\""),
-            "{release}"
-        );
-        // Fail closed on an empty fetch: no subjects, no silent pass.
-        assert!(release.contains("no fetched debs to attest"), "{release}");
-        let fetch_at = must_some(release.find("release apt-fetch"), "fetch renders");
-        let attest_at = must_some(release.find("gh attestation verify"), "attestation renders");
-        let verify_at = must_some(release.find("release apt-verify"), "verify renders");
-        assert!(
-            fetch_at < attest_at && attest_at < verify_at,
-            "attestation must run after fetch and before apt-verify: {release}"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_declared_apt_feed_is_generic_over_names() {
-        // Renamed-fixture proof at the generator layer: two declarations
-        // that differ only in package/source/consumer/origin render the
-        // same workflow shape with the names substituted — no name-keyed
-        // branches anywhere in the renderer.
-        let (first, first_root) = apt_release_yml(
-            &apt_args("example", "example/app", "example/apt", "Example"),
-            "apt-generic-a",
-        );
-        let (second, second_root) = apt_release_yml(
-            &apt_args("widget", "acme/widget", "acme/feed", "Widget Works"),
-            "apt-generic-b",
-        );
-        assert!(second.contains("--package 'widget'"), "{second}");
-        assert!(second.contains("--binary 'widget'"), "{second}");
-        assert!(second.contains("acme/widget"), "{second}");
-        assert!(second.contains("--origin 'Widget Works'"), "{second}");
-        assert!(second.contains("pool/main/w/widget"), "{second}");
-        assert!(second.contains("pool/preview/main/w/widget"), "{second}");
-        // The shape is identical modulo names: the same job set and the
-        // same fixed command lines on both surfaces.
-        for job in [
-            "admit-runner:",
-            "verify:",
-            "publish:",
-            "deploy:",
-            "feed-result:",
-        ] {
-            assert!(first.contains(&format!("\n  {job}")), "{first}");
-            assert!(second.contains(&format!("\n  {job}")), "{second}");
-        }
-        for command in [
-            "release apt-resolve-commit",
-            "release apt-fetch",
-            "release apt-verify",
-            "release apt-publish",
-            "release apt-previous-pointer",
-            "release apt-channel-update",
-            "release apt-deploy-guard",
-        ] {
-            assert!(first.contains(command), "{first}");
-            assert!(second.contains(command), "{second}");
-        }
-        assert_eq!(
-            first.matches("velnor-workflow release apt-").count(),
-            second.matches("velnor-workflow release apt-").count(),
-        );
-        let _ = fs::remove_dir_all(first_root);
-        let _ = fs::remove_dir_all(second_root);
-    }
-
-    #[test]
-    fn malformed_apt_declarations_fail_closed() {
-        let base = apt_args("example", "example/app", "example/apt", "Example");
-        // Each case breaks one typed field; the declaration must fail with
-        // a diagnostic, never render a feed around the bad value.
-        let cases: &[(&str, &str, &str)] = &[
-            (
-                "bad source",
-                "source_repository = \"example/app\"",
-                "source_repository = \"not-a-slug\"",
-            ),
-            (
-                "bad consumer",
-                "consumer_repository = \"example/apt\"",
-                "consumer_repository = \"\"",
-            ),
-            (
-                "bad package",
-                "package = \"example\"",
-                "package = \"has space\"",
-            ),
-            (
-                "bad schema",
-                "manifest_schema = \"example.test/apt-manifest-v1\"",
-                "manifest_schema = \"has space\"",
-            ),
-            (
-                "bad signer",
-                "signer_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"",
-                "signer_fingerprint = \"short\"",
-            ),
-            (
-                "bad secret",
-                "passphrase_secret = \"APT_PASSPHRASE\"",
-                "passphrase_secret = \"lowercase\"",
-            ),
-            (
-                "bad origin",
-                "apt_origin = \"Example\"",
-                "apt_origin = \"a;id\"",
-            ),
-            (
-                "bad feed",
-                "apt_feed_url = \"https://feed.example.test\"",
-                "apt_feed_url = \"http://plain\"",
-            ),
-            (
-                "bad retention",
-                "apt_feed_url = \"https://feed.example.test\"",
-                "apt_feed_url = \"https://feed.example.test\"\nretention = 2",
-            ),
-            (
-                "bad arches",
-                "apt_feed_url = \"https://feed.example.test\"",
-                "apt_feed_url = \"https://feed.example.test\"\napt_arches = [\"amd64\", \"i386\"]",
-            ),
-        ];
-        for (name, from, to) in cases {
-            let root = scanned_root(&format!("apt-malformed-{name}"));
-            let declaration = base.replace(from, to);
-            let error = match try_generate(&root, &config(&[], None), Some(&declaration)) {
-                Ok(_) => panic!("{name} must fail closed"),
-                Err(error) => error.to_string(),
-            };
-            assert!(
-                error.contains("apt") || error.contains("retention") || error.contains("arches"),
-                "{name}: {error}"
-            );
-            let _ = fs::remove_dir_all(root);
-        }
-    }
-
-    #[test]
-    fn incomplete_apt_declarations_name_the_missing_contract() {
-        let root = scanned_root("apt-incomplete");
-        let error = match try_generate(
-            &root,
-            &config(&[], None),
-            Some(
-                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
-                 [declare.args]\nkind = \"apt\"\npackage = \"example\"\n\
-                 consumer_repository = \"example/apt\"\n",
-            ),
-        ) {
-            Ok(_) => panic!("an incomplete apt declaration must fail closed"),
-            Err(error) => error.to_string(),
-        };
-        assert!(error.contains("incomplete release contract"), "{error}");
-        assert!(error.contains("signer_fingerprint"), "{error}");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn apt_config_values_cannot_inject_shell_or_yaml() {
-        // Every value that reaches the shell is either a validated scalar
-        // (whose charset excludes metacharacters) or single-quoted; the
-        // hostile shapes below never survive validation.
-        let hostile: &[(&str, &str)] = &[
-            ("package", "x\"; echo pwned; echo \""),
-            ("binary", "x`id`"),
-            ("source_repository", "example/app$(id)"),
-            (
-                "signer_fingerprint",
-                "0123456789ABCDEF0123456789ABCDEF0123456;id",
-            ),
-            ("passphrase_secret", "A;B"),
-            ("keyring_path", "a.gpg; id"),
-            ("apt_origin", "a`id`"),
-            ("apt_identity_dir", "a/b"),
-            ("apt_feed_url", "https://feed.example.test/a`id`"),
-        ];
-        for (field, value) in hostile {
-            let mut spec = apt_spec_for_render();
-            match *field {
-                "package" => spec.package = value.to_string(),
-                "binary" => spec.binary = value.to_string(),
-                "source_repository" => spec.source_repository = value.to_string(),
-                "signer_fingerprint" => spec.signer_fingerprint = value.to_string(),
-                "passphrase_secret" => spec.passphrase_secret = value.to_string(),
-                "keyring_path" => spec.keyring_path = value.to_string(),
-                "apt_origin" => spec.apt_origin = value.to_string(),
-                "apt_identity_dir" => spec.apt_identity_dir = value.to_string(),
-                "apt_feed_url" => spec.apt_feed_url = value.to_string(),
-                _ => panic!("unknown hostile field {field}"),
-            }
-            let error = match crate::apt::AptContract::resolve(&spec) {
-                Ok(_) => panic!("hostile {field} must fail validation"),
-                Err(error) => error.to_string(),
-            };
-            assert!(!error.is_empty(), "{field}");
-        }
-        // And the rendered feed quotes what it interpolates: no raw config
-        // bytes outside validated scalars and single quotes.
-        let (release, root) = apt_release_yml(
-            &apt_args("example", "example/app", "example/apt", "Example Feed 2.0"),
-            "apt-quoting",
-        );
-        assert!(release.contains("--origin 'Example Feed 2.0'"), "{release}");
-        assert!(!release.contains("Example Feed 2.0\n"), "{release}");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    /// A complete fixture apt spec for renderer-level tests.
-    fn apt_spec_for_render() -> ReleaseSpec {
-        ReleaseSpec {
-            kind: "apt".to_owned(),
-            package: "example".to_owned(),
-            packages: Vec::new(),
-            binary: "example".to_owned(),
-            targets: Vec::new(),
-            image: String::new(),
-            image_package: String::new(),
-            source_repository: "example/app".to_owned(),
-            consumer_repository: "example/apt".to_owned(),
-            artifact_path: String::new(),
-            description: String::new(),
-            manifest_schema: "example.test/apt-manifest-v1".to_owned(),
-            apt_arches: Vec::new(),
-            signer_fingerprint: "0123456789ABCDEF0123456789ABCDEF01234567".to_owned(),
-            passphrase_secret: "APT_PASSPHRASE".to_owned(),
-            keyring_path: String::new(),
-            apt_origin: String::new(),
-            apt_identity_dir: String::new(),
-            apt_feed_url: "https://feed.example.test".to_owned(),
-            retention: 0,
-            dockerfile: String::new(),
-            context: String::new(),
-            platforms: Vec::new(),
-            producer_workflow: String::new(),
-            producer_conclusion: String::new(),
-            modes: Vec::new(),
-            archive_members: Vec::new(),
-            archive_checksum: String::new(),
-            archive_retention_days: 0,
-            credentials: Vec::new(),
-            tag_pattern: String::new(),
-            registry: String::new(),
-            registry_username_secret: String::new(),
-            registry_password_secret: String::new(),
         }
     }
 
@@ -8330,14 +8001,6 @@ mod tests {
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
-            apt_arches: Vec::new(),
-            signer_fingerprint: String::new(),
-            passphrase_secret: String::new(),
-            keyring_path: String::new(),
-            apt_origin: String::new(),
-            apt_identity_dir: String::new(),
-            apt_feed_url: String::new(),
-            retention: 0,
             dockerfile: String::new(),
             context: String::new(),
             platforms: Vec::new(),
@@ -8360,6 +8023,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            jobs: Vec::new(),
         }
     }
 

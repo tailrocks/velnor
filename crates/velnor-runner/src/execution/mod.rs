@@ -47,9 +47,9 @@ pub(crate) use command_output::{
 pub(crate) use composite_scopes::{CompositeConclusionScopes, StepOutcome};
 pub(crate) use docker::verify_docker_job_cgroup_boundary_with_image;
 pub use docker::{
-    validate_docker_isolation, validate_unbounded_resource_projection, DockerBackend,
-    DockerIsolationMode, HostPlatform, DOCKER_JOB_CGROUP_PARENT, DOCKER_RESOURCE_BOUNDARY_CHECK,
-    MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
+    validate_docker_isolation, validate_docker_resource_projection, DockerBackend,
+    DockerIsolationMode, DockerResourceCapabilities, HostPlatform, DOCKER_JOB_CGROUP_PARENT,
+    DOCKER_RESOURCE_BOUNDARY_CHECK, MACOS_DOCKER_CAPABILITY_PROBE_IMAGE,
 };
 pub use firecracker::{
     create_golden_snapshot, restore_or_cold_boot, FirecrackerApi, FirecrackerBackend,
@@ -523,9 +523,9 @@ pub struct RecordingCommands {
     /// Default Docker contract fixture: a systemd-backed cgroup-v2 daemon.
     /// Set to `None` or a failing result when testing admission failures.
     pub docker_cgroup_probe: Option<CommandResult>,
-    /// Default slice contract fixture: the job slice loaded with no
-    /// CPU/RAM ceiling (`infinity` on every ceiling property).
-    pub docker_slice_state: Option<CommandResult>,
+    pub docker_cgroup_cpu_count: Option<CommandResult>,
+    pub docker_cgroup_unit: Option<CommandResult>,
+    pub docker_cgroup_quota: Option<CommandResult>,
     pub next_pid: u32,
     pub fail_spawn: Option<String>,
     pub fail_kill: Option<String>,
@@ -557,10 +557,19 @@ impl Default for RecordingCommands {
                 stdout: "systemd 2".into(),
                 stderr: String::new(),
             }),
-            docker_slice_state: Some(CommandResult {
+            docker_cgroup_cpu_count: Some(CommandResult {
                 code: 0,
-                stdout: "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryMax=infinity\nMemoryHigh=infinity\n"
-                    .into(),
+                stdout: "1\n".into(),
+                stderr: String::new(),
+            }),
+            docker_cgroup_unit: Some(CommandResult {
+                code: 0,
+                stdout: "[Slice]\nCPUQuota=95%\n".into(),
+                stderr: String::new(),
+            }),
+            docker_cgroup_quota: Some(CommandResult {
+                code: 0,
+                stdout: "950ms\n".into(),
                 stderr: String::new(),
             }),
             next_pid: 1,
@@ -670,17 +679,38 @@ impl CommandRunner for RecordingCommands {
             if let Some(probe) = &self.docker_cgroup_probe {
                 result = probe.clone();
             }
+        } else if program == "getconf" && args == ["_NPROCESSORS_ONLN".to_string()] {
+            if let Some(cpu_count) = &self.docker_cgroup_cpu_count {
+                result = cpu_count.clone();
+            }
+        } else if program == "systemctl"
+            && args
+                == [
+                    "cat".to_string(),
+                    crate::docker_lease::JOB_CGROUP_PARENT.to_string(),
+                ]
+        {
+            if let Some(unit) = &self.docker_cgroup_unit {
+                result = unit.clone();
+            }
         } else if program == "systemctl"
             && args.first().is_some_and(|arg| arg == "show")
-            && args.len() == 6
+            && args.len() == 4
             && args[1] == "--property=LoadState"
             && args[2] == "--property=CPUQuotaPerSecUSec"
-            && args[3] == "--property=MemoryMax"
-            && args[4] == "--property=MemoryHigh"
-            && args[5] == crate::docker_lease::JOB_CGROUP_PARENT
-            && let Some(state) = &self.docker_slice_state
+            && args[3] == crate::docker_lease::JOB_CGROUP_PARENT
         {
-            result = state.clone();
+            let quota = self
+                .docker_cgroup_quota
+                .as_ref()
+                .map_or_else(|| "950ms".into(), |quota| quota.stdout.trim().to_string());
+            result.stdout = format!("CPUQuotaPerSecUSec={quota}\nLoadState=loaded\n");
+            if let Some(quota) = &self.docker_cgroup_quota {
+                result.code = quota.code;
+                if !quota.stderr.is_empty() {
+                    result.stderr = quota.stderr.clone();
+                }
+            }
         }
         self.finish_result(result)
     }

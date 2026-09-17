@@ -52,7 +52,7 @@ impl Primitive for ScheduledChecks {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &["name", "profiles", "events", "lanes_input"]
+        &["name", "profiles", "events", "branches", "lanes_input"]
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
@@ -60,6 +60,7 @@ impl Primitive for ScheduledChecks {
         let label = if file.is_empty() { ctx.family } else { file };
         let profiles = select_profiles(&ctx.config.check_profiles, args, label)?;
         let events = select_events(args, label)?;
+        let branches = select_branches(args, label, &events)?;
         let lanes_input = args.flag("lanes_input")?;
         let content = render_checks_file(
             ctx.config,
@@ -67,6 +68,7 @@ impl Primitive for ScheduledChecks {
             args.string("name")?,
             &profiles,
             &events,
+            &branches,
             lanes_input,
         )?;
         render_file(ctx, content)
@@ -229,6 +231,43 @@ fn select_events(args: &Args<'_>, file: &str) -> Result<Vec<String>, GeneratorEr
         .collect())
 }
 
+/// The push branches one `scheduled-checks` row declares, in configuration
+/// order. Absent renders the bare `push:` trigger byte for byte, so
+/// `branches` is purely additive. It scopes the push trigger only: branches
+/// without a `push` event fail closed instead of silently scoping nothing.
+///
+/// # Errors
+/// Returns a usage error naming the file for an empty list, a `branches`
+/// declaration without `push` in `events`, or a branch that is not one
+/// non-empty line.
+fn select_branches(
+    args: &Args<'_>,
+    file: &str,
+    events: &[String],
+) -> Result<Vec<String>, GeneratorError> {
+    let Some(declared) = args.strings("branches")? else {
+        return Ok(Vec::new());
+    };
+    if declared.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "`{file}` declares an empty `branches`; name the push branches the file runs on, or remove `branches` for an unscoped push trigger"
+        )));
+    }
+    if !events.iter().any(|event| event == "push") {
+        return Err(GeneratorError::usage(format!(
+            "`{file}` declares `branches` but no `push` event; `branches` scopes the push trigger only, so declare `push` in `events` or remove `branches`"
+        )));
+    }
+    for branch in &declared {
+        if branch.is_empty() || branch.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(format!(
+                "`{file}` `branches` must be one non-empty line per branch"
+            )));
+        }
+    }
+    Ok(declared)
+}
+
 /// A `needs` edge cannot span workflow files: GitHub resolves it within one
 /// file only, so a dependency outside the rendered set is unrenderable.
 fn check_needs_within_file(
@@ -318,6 +357,7 @@ fn render_checks_file(
     name: Option<String>,
     profiles: &[&CheckProfileSpec],
     events: &[String],
+    branches: &[String],
     lanes_input: bool,
 ) -> Result<String, GeneratorError> {
     let stem = file.strip_suffix(".yml").unwrap_or(file);
@@ -341,7 +381,16 @@ fn render_checks_file(
     );
     output.push_str("\non:\n");
     for event in events {
-        let _ = writeln!(output, "  {event}:");
+        if event == "push" && !branches.is_empty() {
+            let list = branches
+                .iter()
+                .map(|branch| yaml_scalar(branch))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(output, "  {event}:\n    branches: [{list}]");
+        } else {
+            let _ = writeln!(output, "  {event}:");
+        }
     }
     if !schedule.is_empty() {
         output.push_str("  schedule:\n");
@@ -356,9 +405,7 @@ fn render_checks_file(
         output,
         "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.ref }}}}"
     );
-    if events.is_empty() {
-        output.push_str("  cancel-in-progress: true\n\njobs:\n");
-    } else {
+    if events.iter().any(|event| event == "pull_request") {
         // PR-only cancel, like the docs-site and Renovate files:
         // pull-request runs supersede each other for fast feedback, while
         // push, schedule, and dispatch runs — the compliance signal on the
@@ -367,6 +414,11 @@ fn render_checks_file(
         output.push_str(
             "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n",
         );
+    } else {
+        // No pull_request trigger: the PR expression would be constant-false,
+        // so stale runs would queue per-ref instead of superseding. Cancel
+        // like the cron-only files.
+        output.push_str("  cancel-in-progress: true\n\njobs:\n");
     }
     for profile in profiles {
         render_profile_job(
@@ -445,7 +497,7 @@ fn render_scheduled_checks(
     name: Option<String>,
     profiles: &[&CheckProfileSpec],
 ) -> Result<String, GeneratorError> {
-    render_checks_file(config, file, name, profiles, &[], false)
+    render_checks_file(config, file, name, profiles, &[], &[], false)
 }
 
 /// One profile job: the lane it runs on, the timeout it holds, the threshold
@@ -992,8 +1044,26 @@ mod tests {
         profiles: &[&CheckProfileSpec],
         events: &[String],
     ) -> String {
+        render_with_events_and_branches(config, name, profiles, events, &[])
+    }
+
+    fn render_with_events_and_branches(
+        config: &ProjectConfig,
+        name: Option<String>,
+        profiles: &[&CheckProfileSpec],
+        events: &[String],
+        branches: &[String],
+    ) -> String {
         must(
-            render_checks_file(config, "scheduled-daily.yml", name, profiles, events, false),
+            render_checks_file(
+                config,
+                "scheduled-daily.yml",
+                name,
+                profiles,
+                events,
+                branches,
+                false,
+            ),
             "render scheduled checks",
         )
     }
@@ -1071,6 +1141,109 @@ mod tests {
             1,
             "{workflow}"
         );
+    }
+
+    #[test]
+    fn declared_branches_scope_the_push_trigger_only() {
+        let smoke = unscheduled("smoke");
+        let config = profile_config(vec![smoke]);
+        let map = args_for(
+            r#"events = ["push", "pull_request"]
+branches = ["main", "release/*"]"#,
+        );
+        let args = Args(&map);
+        let events = must(
+            select_events(&args, "scheduled-daily.yml"),
+            "select the declared events",
+        );
+        let branches = must(
+            select_branches(&args, "scheduled-daily.yml", &events),
+            "select the declared branches",
+        );
+        assert_eq!(branches, vec!["main", "release/*"]);
+        let selected = must(
+            select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
+            "select every profile",
+        );
+        let workflow =
+            render_with_events_and_branches(&config, None, &selected, &events, &branches);
+        assert!(
+            workflow.contains("  push:\n    branches: [main, \"release/*\"]\n"),
+            "glob branches quote (`*` is a YAML alias indicator): {workflow}"
+        );
+        assert!(
+            workflow.contains("  pull_request:\n"),
+            "branches never scope pull_request: {workflow}"
+        );
+        assert!(
+            !workflow.contains("  pull_request:\n    branches:"),
+            "{workflow}"
+        );
+    }
+
+    #[test]
+    fn absent_branches_render_the_bare_push_trigger() {
+        let smoke = unscheduled("smoke");
+        let config = profile_config(vec![smoke]);
+        let map = args_for(r#"events = ["push"]"#);
+        let args = Args(&map);
+        let events = must(
+            select_events(&args, "scheduled-daily.yml"),
+            "select the declared events",
+        );
+        let branches = must(
+            select_branches(&args, "scheduled-daily.yml", &events),
+            "absent branches default to empty",
+        );
+        assert!(branches.is_empty());
+        let selected = must(
+            select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
+            "select every profile",
+        );
+        let workflow =
+            render_with_events_and_branches(&config, None, &selected, &events, &branches);
+        assert!(workflow.contains("  push:\n"), "{workflow}");
+        assert!(!workflow.contains("branches:"), "{workflow}");
+    }
+
+    #[test]
+    fn branches_without_push_empty_and_multiline_are_refused() {
+        let no_push = args_for(
+            r#"events = ["pull_request"]
+branches = ["main"]"#,
+        );
+        let error = must_fail(
+            select_branches(
+                &Args(&no_push),
+                "scheduled-daily.yml",
+                &["pull_request".to_owned()],
+            ),
+            "branches without push must fail",
+        );
+        assert!(error.to_string().contains("scheduled-daily.yml"), "{error}");
+        assert!(error.to_string().contains("`branches`"), "{error}");
+        assert!(error.to_string().contains("`push`"), "{error}");
+
+        let empty = args_for(
+            r#"events = ["push"]
+branches = []"#,
+        );
+        let error = must_fail(
+            select_branches(&Args(&empty), "scheduled-daily.yml", &["push".to_owned()]),
+            "empty branches must fail",
+        );
+        assert!(error.to_string().contains("empty `branches`"), "{error}");
+
+        let multiline = args_for("events = [\"push\"]\nbranches = [\"main\\nx\"]");
+        let error = must_fail(
+            select_branches(
+                &Args(&multiline),
+                "scheduled-daily.yml",
+                &["push".to_owned()],
+            ),
+            "multiline branches must fail",
+        );
+        assert!(error.to_string().contains("one non-empty line"), "{error}");
     }
 
     #[test]
@@ -1202,6 +1375,43 @@ mod tests {
     }
 
     #[test]
+    fn push_without_pr_cancels_like_cron_only() {
+        let smoke = profile("smoke");
+        let config = profile_config(vec![smoke]);
+        for events_toml in [
+            r#"events = ["push"]"#,
+            r#"events = ["push"]
+branches = ["main"]"#,
+            r#"events = ["push", "workflow_dispatch"]"#,
+        ] {
+            let map = args_for(events_toml);
+            let args = Args(&map);
+            let selected = must(
+                select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
+                "select every profile",
+            );
+            let events = must(
+                select_events(&args, "scheduled-daily.yml"),
+                "select the declared events",
+            );
+            let branches = must(
+                select_branches(&args, "scheduled-daily.yml", &events),
+                "select the declared branches",
+            );
+            let rendered =
+                render_with_events_and_branches(&config, None, &selected, &events, &branches);
+            assert!(
+                rendered.contains("cancel-in-progress: true"),
+                "a file without a pull_request trigger cancels stale runs: {events_toml}\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("cancel-in-progress: ${{"),
+                "the PR expression would be constant-false without the trigger: {events_toml}\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn cron_only_trigger_block_is_unchanged() {
         let smoke = profile("smoke");
         let config = profile_config(vec![smoke]);
@@ -1222,7 +1432,15 @@ mod tests {
         config: &ProjectConfig,
         profiles: &[&CheckProfileSpec],
     ) -> Result<String, GeneratorError> {
-        render_checks_file(config, "scheduled-daily.yml", None, profiles, &[], true)
+        render_checks_file(
+            config,
+            "scheduled-daily.yml",
+            None,
+            profiles,
+            &[],
+            &[],
+            true,
+        )
     }
 
     fn select_all<'a>(config: &'a ProjectConfig, args: &Args<'_>) -> Vec<&'a CheckProfileSpec> {

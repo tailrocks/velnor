@@ -1,6 +1,6 @@
 //! Source identity embedding for `velnor-workflow`.
 //!
-//! Four values are stamped into every binary:
+//! Two values are stamped into every binary:
 //!
 //! * `VELNOR_WORKFLOW_SOURCE_SHA`: the exact 40-hex `HEAD` of the crate's
 //!   checkout (`velnor-workflow --revision`). Provenance metadata: which
@@ -9,13 +9,6 @@
 //!   checkout's `HEAD` tree (`velnor-workflow --closure`, see
 //!   `src/closure.rs`). Product identity: binaries built from different
 //!   commits with the same closure are interchangeable renderers.
-//! * `VELNOR_WORKFLOW_FEATURES`: the sorted enabled-feature list the closure
-//!   footer hashed (see `cargo_features`).
-//! * `VELNOR_WORKFLOW_PROFILE`: the Cargo profile the closure footer hashed.
-//!   Together with the feature list it lets `promote` recompute the stamped
-//!   pin's closure under exactly the running binary's own build identity, so
-//!   the render-with-X-stamp-X binding holds for release products and
-//!   development builds alike.
 //!
 //! The closure duplicates the canonicalization in `src/closure.rs` (a build
 //! script cannot import the crate it builds): `git ls-tree -r HEAD` over the
@@ -72,10 +65,6 @@ fn main() {
     println!(
         "cargo:rustc-env=VELNOR_WORKFLOW_FEATURES={}",
         cargo_features()
-    );
-    println!(
-        "cargo:rustc-env=VELNOR_WORKFLOW_PROFILE={}",
-        std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned())
     );
 }
 

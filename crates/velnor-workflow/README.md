@@ -10,7 +10,6 @@ generated `run.sh`, `policy.sh`, and `release.sh` helpers:
 ```sh
 velnor-workflow REPOSITORY --plain
 velnor-workflow REPOSITORY --runners both --plain
-velnor-workflow promote --rev HEAD
 velnor-workflow plan --config .github/ci/project.toml
 velnor-workflow run --config .github/ci/project.toml --scope affected
 velnor-workflow test-crates --config .github/ci/project.toml
@@ -31,11 +30,8 @@ and requires a byte-identical result, and evaluates its own semantic rules
 (only the entrypoint on `pull_request_target`; every self-hosted job gated;
 every action SHA-pinned; the entrypoint on `contents: read` with no secrets;
 the ruleset's required contexts emitted). Every rule prints `PASS`/`FAIL`
-with a one-line reason. Bump the pin with `velnor-workflow promote --rev HEAD`
-after the last generator change: it verifies the running binary renders with
-the pin's own source closure, then stamps the pin and regenerates the whole
-tree in a single commit; `--check` verifies the pinned generator renders the
-tree.
+with a one-line reason. Bump the pin in a single commit after the last
+generator change; `--check` verifies the pinned generator renders the tree.
 
 Runtime commands are derived from scanned capabilities, not from config-supplied
 shell arrays. GitHub-hosted execution is the automatic and omitted-dispatch

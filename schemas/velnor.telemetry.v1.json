@@ -242,8 +242,7 @@
         "queued_for_ms": {"type": "integer", "minimum": 0},
         "queue_time_present": {"type": "boolean"},
         "job_trust": {"type": "string"},
-        "admitted_scope": {"type": "string"},
-        "daemon_build": {"type": "string"}
+        "admitted_scope": {"type": "string"}
       },
       "additionalProperties": true
     },

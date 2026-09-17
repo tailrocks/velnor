@@ -4588,6 +4588,40 @@ where
                         stdout.push_str("No other holders: daemon already stopped, cache kept\n");
                     }
                 }
+                // Holders remain: shrink the daemon ceiling for those that
+                // do, so a once-shared builder does not keep a machine-sized
+                // ceiling for one job. The ceiling sums the remaining
+                // holders' own recordings — the releaser's limits are not
+                // theirs — with the same per-dimension static fallback
+                // setup uses. Best-effort like the stop: sizing is an
+                // optimization, never a release failure. Unreadable
+                // holders resize nothing, and a final release resizes
+                // nothing either: the daemon is stopped or already gone.
+                if matches!(outcome, Some(outcome) if !outcome.removed_last)
+                    && let Some(run_root) = run_root.as_ref()
+                    && let Some(remaining) =
+                        crate::buildkit::builder_holders_for_sizing(run_root, &name)
+                    && !remaining.is_empty()
+                {
+                    let entitlements: Vec<_> = remaining
+                        .iter()
+                        .map(|holder| holder.entitlement())
+                        .collect();
+                    let derived = container.buildkit_size_summed(&entitlements);
+                    let (static_cpu, static_memory) = container.static_buildkit_fallback();
+                    let size = derived.with_fallback(static_cpu, static_memory);
+                    if !size.is_empty()
+                        && let Err(error) = crate::buildkit::resize_builder_daemon(
+                            &name,
+                            size.cpu_milli,
+                            size.memory_bytes,
+                        )
+                    {
+                        use std::fmt::Write as _;
+                        let _ =
+                            writeln!(stderr, "buildx post: resize of {name} failed ({error:#})");
+                    }
+                }
                 Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState::default(),
@@ -5166,8 +5200,19 @@ where
         // another job's release could stop a daemon mid-build. Without a
         // temp dir or run root there are no claims at all, so nobody stops
         // and the builder only ever leaks (converged by the horizon path).
-        // Builders run unbounded: the claim records no CPU/memory
-        // entitlement and no daemon is ever sized or resized.
+        // This job's own entitlement, recorded in its claim below so the
+        // daemon ceiling sums what each holder measured for itself. Computed
+        // before the claim: a malformed declared limit fails setup here —
+        // the same rejection `start_args` applies — instead of claiming a
+        // builder this setup then refuses to size.
+        let own_entitlement = container.own_buildkit_entitlement()?;
+        // The holder set below sizes the daemon for the jobs sharing it
+        // now; without a run root there is nothing to read, so a created
+        // daemon is sized for this job alone and an existing daemon is left
+        // untouched — resizing it to a single share could throttle sharers
+        // this setup cannot see.
+        let mut entitlements = vec![own_entitlement];
+        let mut holders_known = false;
         if let (Some(temp), Some(run_root)) = (
             state.temp_host.as_deref(),
             crate::buildkit::claims_run_root(),
@@ -5183,6 +5228,7 @@ where
                 },
                 &job_scope_from_temp(Some(temp)),
                 &container.name,
+                own_entitlement,
             )?;
             // Cap the workflow-minted builders in this scope/tier/repository:
             // per-victim failures are best-effort, but an over-cap group with
@@ -5214,7 +5260,36 @@ where
                     );
                 }
             }
+            // Read after the claim above, so this job is included. The read
+            // only fails when the file this setup just wrote cannot be read
+            // back; a created daemon is then sized for this job alone rather
+            // than failing the step, while an existing daemon is left
+            // untouched — an uncounted resize could throttle unseen sharers.
+            // The job's own recording is appended when the read somehow
+            // misses it, so sizing never drops the holder standing here.
+            match crate::buildkit::builder_holders_for_sizing(&run_root, &name) {
+                Some(holders) => {
+                    entitlements = holders.iter().map(|holder| holder.entitlement()).collect();
+                    if !holders
+                        .iter()
+                        .any(|holder| holder.container == container.name)
+                    {
+                        entitlements.push(own_entitlement);
+                    }
+                    holders_known = true;
+                }
+                None => {
+                    entitlements = vec![own_entitlement];
+                }
+            }
         }
+        // The summed holder entitlements size the daemon for the jobs
+        // sharing it now. Each known dimension wins independently: an
+        // unobservable CPU must not discard an explicit memory ceiling,
+        // and an unobservable memory budget must not discard an explicit
+        // CPU ceiling. Total absence keeps the verbatim static spelling.
+        let buildkit_size = container.buildkit_size_summed(&entitlements);
+        let driver_opts = buildx_driver_options(&buildkit_size, &container.resource_options)?;
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
@@ -5236,10 +5311,31 @@ where
             self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
         let result = if inspect_result.code == 0 {
             let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
-            self.container_docker(container, &action_state, &use_args, None, timeout)?
+            let result =
+                self.container_docker(container, &action_state, &use_args, None, timeout)?;
+            // An existing daemon keeps whatever ceiling it was born with, so
+            // resize it for the holders present now, with the same
+            // per-dimension static fallback creation uses: an unobservable
+            // budget resizes an existing daemon exactly as it would create
+            // one. Best-effort: a wrong ceiling slows builds, it never
+            // breaks them, and the next setup converges it. Uncounted
+            // holders resize nothing, and a dimension with neither a
+            // derived nor a static value keeps the daemon's existing
+            // ceiling there.
+            let (static_cpu, static_memory) = container.static_buildkit_fallback();
+            let effective = buildkit_size.with_fallback(static_cpu, static_memory);
+            if holders_known
+                && !effective.is_empty()
+                && let Err(error) = crate::buildkit::resize_builder_daemon(
+                    &name,
+                    effective.cpu_milli,
+                    effective.memory_bytes,
+                )
+            {
+                eprintln!("buildx setup: resize of {name}: {error:#}");
+            }
+            result
         } else {
-            // No `--driver-opt` resource sizing: the builder daemon runs
-            // unbounded like every other workload container.
             let mut args = vec![
                 "buildx".to_string(),
                 "create".to_string(),
@@ -5249,6 +5345,9 @@ where
                 driver,
                 "--use".to_string(),
             ];
+            if !driver_opts.is_empty() {
+                args.extend(["--driver-opt".to_string(), driver_opts.join(",")]);
+            }
             if let Some(config) = buildkitd_config_container {
                 args.extend(["--config".to_string(), config]);
             }
@@ -12107,6 +12206,95 @@ fn sanitize_artifact_name(name: &str) -> String {
     }
 }
 
+fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<String>> {
+    let mut options = Vec::new();
+    let (chunks, remainder) = resource_options.as_chunks::<2>();
+    for [flag, value] in chunks {
+        match flag.as_str() {
+            "--memory" => options.push(format!("memory={value}")),
+            "--cpus" => {
+                let cpus = value
+                    .parse::<f64>()
+                    .with_context(|| format!("invalid job CPU limit '{value}'"))?;
+                if !cpus.is_finite() || cpus <= 0.0 {
+                    bail!("invalid job CPU limit '{value}'");
+                }
+                let quota = (cpus * 100_000.0).round();
+                if quota > u64::MAX as f64 {
+                    bail!("job CPU limit '{value}' is too large");
+                }
+                options.push("cpu-period=100000".to_string());
+                options.push(format!("cpu-quota={quota:.0}"));
+            }
+            option => bail!("unsupported BuildKit resource option '{option}'"),
+        }
+    }
+    if !remainder.is_empty() {
+        bail!("job resource options must be flag/value pairs");
+    }
+    Ok(options)
+}
+
+/// Merge a derived daemon size with the static `resource_options`
+/// spelling: each known dimension wins independently, and only unknown
+/// dimensions inherit the static value. Total absence returns the static
+/// spelling verbatim, flag order included. Entries outside the
+/// `cpu-*`/`memory=` vocabulary pass through untouched rather than
+/// vanishing.
+fn buildx_driver_options(
+    buildkit_size: &crate::container::host_budget::BuildkitSize,
+    resource_options: &[String],
+) -> Result<Vec<String>> {
+    let fallback = buildx_driver_resource_options(resource_options)?;
+    if buildkit_size.is_empty() {
+        return Ok(fallback);
+    }
+
+    let derived = buildkit_size.driver_opts();
+    let has_derived_cpu = buildkit_size.cpu_milli.is_some_and(|milli| milli > 0);
+    let has_derived_memory = buildkit_size.memory_bytes.is_some_and(|bytes| bytes > 0);
+    let mut options = Vec::new();
+
+    if has_derived_cpu {
+        options.extend(
+            derived
+                .iter()
+                .filter(|option| option.starts_with("cpu-"))
+                .cloned(),
+        );
+    } else {
+        options.extend(
+            fallback
+                .iter()
+                .filter(|option| option.starts_with("cpu-"))
+                .cloned(),
+        );
+    }
+    if has_derived_memory {
+        options.extend(
+            derived
+                .iter()
+                .filter(|option| option.starts_with("memory="))
+                .cloned(),
+        );
+    } else {
+        options.extend(
+            fallback
+                .iter()
+                .filter(|option| option.starts_with("memory="))
+                .cloned(),
+        );
+    }
+    options.extend(
+        derived
+            .iter()
+            .chain(fallback.iter())
+            .filter(|option| !option.starts_with("cpu-") && !option.starts_with("memory="))
+            .cloned(),
+    );
+    Ok(options)
+}
+
 fn job_scope_from_temp(temp: Option<&Path>) -> String {
     let scope_path = temp
         .filter(|path| path.file_name().is_some_and(|name| name == "temp"))
@@ -14656,7 +14844,7 @@ mod tests {
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission).is_ok());
+        assert!(sink.record_admission(&admission));
 
         let steps = vec![ExecutableStep::Native {
             step_id: "mise".to_owned(),
@@ -14737,7 +14925,7 @@ mod tests {
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission).is_ok());
+        assert!(sink.record_admission(&admission));
 
         let action = |adapter, cache_kind, inputs: &[(&str, &str)]| NativeActionInvocation {
             git_ref: "cache-action".to_owned(),
@@ -16295,8 +16483,10 @@ esac
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
+            slot_count: std::num::NonZeroU32::MIN,
             slot_store_key: None,
             env: Vec::new(),
+            resource_options: Vec::new(),
             options: Vec::new(),
             services: Vec::new(),
             node_action_image: String::new(),
@@ -16762,6 +16952,66 @@ esac
         fs::remove_dir_all(lease_dir).ok();
     }
 
+    #[test]
+    fn buildkit_resource_limits_are_derived_and_fail_closed() {
+        assert_eq!(
+            buildx_driver_resource_options(&[
+                "--cpus".into(),
+                "2.5".into(),
+                "--memory".into(),
+                "12g".into(),
+            ])
+            .unwrap(),
+            ["cpu-period=100000", "cpu-quota=250000", "memory=12g"]
+        );
+        assert!(buildx_driver_resource_options(&["--cpus".into(), "0".into()]).is_err());
+        assert!(buildx_driver_resource_options(&["--pids-limit".into(), "512".into()]).is_err());
+        assert!(buildx_driver_resource_options(&["--memory".into()]).is_err());
+    }
+
+    #[test]
+    fn partial_derived_size_inherits_only_unknown_static_dimensions() {
+        use crate::container::host_budget::BuildkitSize;
+        let derived = BuildkitSize {
+            cpu_milli: Some(4000),
+            memory_bytes: None,
+        };
+        let static_options = ["--cpus".into(), "8".into(), "--memory".into(), "12g".into()];
+        // Derived CPU wins over static `--cpus 8`; unobserved memory keeps
+        // the static `memory=12g` instead of silently uncapping.
+        assert_eq!(
+            buildx_driver_options(&derived, &static_options).unwrap(),
+            ["cpu-period=100000", "cpu-quota=400000", "memory=12g",]
+        );
+    }
+
+    #[test]
+    fn buildkit_resource_fallbacks_fill_unknown_dimensions_independently() {
+        let static_options = [
+            "--cpus".into(),
+            "2.5".into(),
+            "--memory".into(),
+            "12g".into(),
+        ];
+        let cpu_only = crate::container::host_budget::BuildkitSize {
+            cpu_milli: Some(1500),
+            memory_bytes: None,
+        };
+        assert_eq!(
+            buildx_driver_options(&cpu_only, &static_options).unwrap(),
+            ["cpu-period=100000", "cpu-quota=150000", "memory=12g"]
+        );
+
+        let memory_only = crate::container::host_budget::BuildkitSize {
+            cpu_milli: None,
+            memory_bytes: Some(1024),
+        };
+        assert_eq!(
+            buildx_driver_options(&memory_only, &static_options).unwrap(),
+            ["cpu-period=100000", "cpu-quota=250000", "memory=1024"]
+        );
+    }
+
     /// Under a teardown owner the executor must hold no network guard: not
     /// the one handed over from the pre-create thread, and none from a lazy
     /// start. Either would fire at executor drop, before the teardown removes
@@ -16955,7 +17205,7 @@ esac
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission).is_ok());
+        assert!(sink.record_admission(&admission));
         let step = ScriptStep {
             id: "tests".into(),
             display_name: "Tests".into(),
@@ -17042,7 +17292,7 @@ esac
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission).is_ok());
+        assert!(sink.record_admission(&admission));
         let step = ScriptStep {
             id: "compile".into(),
             display_name: "Compile".into(),
@@ -19516,7 +19766,27 @@ type=sha,format=long,prefix=,enable=true"
             codes: vec![0, 0, 1],
         })
         .with_trust_scope("trusted");
-        let spec = container(&temp);
+        let mut spec = container(&temp);
+        spec.resource_options = vec!["--cpus".into(), "4".into(), "--memory".into(), "12g".into()];
+
+        // Pin the host budget to a synthetic 16-CPU/16-GiB tree: the
+        // expected daemon ceiling below is hand-derived from it, so this
+        // test asserts an exact argv instead of recomputing one from the
+        // machine it happens to run on.
+        let budget_root = temp.join("synthetic-budget");
+        fs::create_dir_all(budget_root.join("proc")).unwrap();
+        fs::create_dir_all(budget_root.join("sys/fs/cgroup/velnor-jobs.slice")).unwrap();
+        fs::write(
+            budget_root.join("proc/meminfo"),
+            "MemTotal:       16777216 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            budget_root.join("sys/fs/cgroup/velnor-jobs.slice/cpu.max"),
+            "1600000 100000\n",
+        )
+        .unwrap();
+        let _budget = crate::container::host_budget::TestBudgetGuard::pin(&budget_root, Some(16));
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -19571,19 +19841,38 @@ type=sha,format=long,prefix=,enable=true"
             builder,
             "velnor-builder-shared-trusted-unknown-unknown-repository"
         );
-        // Unbounded: the builder daemon is created with no resource
-        // `--driver-opt` sizing (no cpu-*/memory= entries at all).
+        // The synthetic budget pins this job to 16 CPUs and the 85% memory
+        // pool of 16 GiB on one slot; the declared `--cpus 4` narrows CPU
+        // to 4000 milli and the declared `--memory 12g` narrows memory to
+        // exactly 12 GiB. No run root exists in tests, so the daemon is
+        // sized for this job alone: the exact ceiling is asserted literally
+        // below, while the recomputed size only selects the fallback
+        // assertion branch after it.
+        let own = spec.own_buildkit_entitlement().unwrap();
+        let size = spec.buildkit_size_summed(&[own]);
         let create = calls
             .iter()
             .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
             .expect("buildx create call");
         assert!(
-            !create.contains("'--driver-opt'"),
-            "builder daemon must be created unbounded, got: {create}"
+            create
+                .contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12884901888'"),
+            "derived budget must reach buildkitd, got: {create}"
         );
         assert!(create.contains(&format!(
             "'--config' '/__t/buildkitd-config-{builder}.toml'"
         )));
+        if size.memory_bytes.is_some_and(|bytes| bytes > 0) {
+            assert!(
+                !create.contains("memory=12g"),
+                "derived budget wins over the static spelling, got: {create}"
+            );
+        } else {
+            assert!(
+                create.contains("memory=12g"),
+                "static memory policy must survive an unobservable derived dimension, got: {create}"
+            );
+        }
         assert_eq!(
             fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
@@ -27394,7 +27683,7 @@ fi"#
             execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             masks: vec!["secret-marker".to_owned()],
         };
-        assert!(sink.record_admission(&admission).is_ok());
+        assert!(sink.record_admission(&admission));
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
             display_name: String::new(),

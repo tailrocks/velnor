@@ -71,10 +71,30 @@ fn write_rust_fixture(root: &Path, crates: usize) {
 }
 
 fn enable_approved_velnor_pull_requests(root: &Path) {
+    // The dogfood repository flipped to schema 2 (R2m): transplant the
+    // production Velnor placement from its provider selector into this
+    // schema-1 surface. The crate must never spell the estate's labels
+    // itself (see generic_surface_literals), so the values flow from the
+    // repository's own config at test time.
     let approved = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github-gen/velnor-workflow.toml"),
     )
     .unwrap();
+    let selector = "[workflow.selectors.velnor]";
+    let mut in_selector = false;
+    let mut transplanted = None;
+    for line in approved.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_selector = trimmed == selector;
+            continue;
+        }
+        if in_selector && trimmed.starts_with("runs_on =") {
+            transplanted = Some(trimmed.replacen("runs_on =", "velnor_labels =", 1));
+            break;
+        }
+    }
+    let transplanted = transplanted.expect("the repository declares a velnor provider selector");
     let path = root.join(".github-gen/velnor-workflow.toml");
     let current = fs::read_to_string(&path).unwrap();
     let mut lines = current
@@ -90,15 +110,8 @@ fn enable_approved_velnor_pull_requests(root: &Path) {
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    for prefix in [
-        "velnor_labels =",
-        "velnor_runner_group =",
-        "pull_request_on_velnor =",
-    ] {
-        if let Some(line) = approved.lines().find(|line| line.starts_with(prefix)) {
-            lines.push(line.to_owned());
-        }
-    }
+    lines.push(transplanted);
+    lines.push("pull_request_on_velnor = true".to_owned());
     fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
 }
 
@@ -991,7 +1004,7 @@ fn regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only(
     );
     assert!(
         velnor.contains("gh release download \"$tag\" --repo ")
-            && velnor.contains("gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main")
+            && velnor.contains("gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml")
             && velnor.contains("gh attestation verify \"$temporary/manifest.json\"")
             && velnor.contains("if [[ \"$existing\" != \"$expected\" ]]; then")
             && velnor.contains("sha256sum \"$binary\"")

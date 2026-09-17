@@ -155,11 +155,10 @@ comparing jobs — a node whose trust scope changed reads a different partition
 and looks cold once. Cargo registry and Git source caches are separate, so a
 warm registry does not imply a warm Mr Boxington store.
 
-If the build looks under-parallelized, the daemon is not throttling it:
-jobs run unbounded and no compiler partition is imposed. Check the tool's
-own parallelism settings (`CARGO_BUILD_JOBS` is whatever the workflow or
-tool default sets — the daemon no longer overrides it) and the host's
-actual load against `VELNOR_MAX_JOBS`.
+If the build looks under-parallelized, read `VELNOR_JOB_BUDGET` from the job
+environment before assuming a defect: `CARGO_BUILD_JOBS` is the slot's share of
+the derived host budget, not the host's core count, and a workflow that sets it
+is overridden.
 
 Set `MBX_DISABLE=1` in the workflow to reproduce with plain Cargo outside Mr
 Boxington. An explicit `mozilla-actions/sccache-action` is the only supported

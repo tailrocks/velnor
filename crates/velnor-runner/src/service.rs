@@ -187,24 +187,13 @@ pub struct DaemonArgs {
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
 
-    /// Host-wide maximum concurrent jobs. Native and Scale Set lanes share
-    /// one permit ledger capped at this N; job containers run unbounded and
-    /// only this number is tuned for throughput. Unset (or 0) falls back to
-    /// --slots, which is correct only for single-daemon hosts.
-    #[arg(long, env = "VELNOR_MAX_JOBS")]
-    pub max_jobs: Option<u32>,
+    /// Docker --cpus limit appended to every job container. Empty disables the daemon-level CPU cap.
+    #[arg(long, env = "VELNOR_JOB_CPUS", default_value = "")]
+    pub job_cpus: String,
 
-    /// Host-wide permit ledger database. Defaults to `permit-ledger.db` next
-    /// to the operational state db. Every daemon on the host must resolve to
-    /// the same file.
-    #[arg(long, env = "VELNOR_PERMIT_LEDGER")]
-    pub permit_ledger: Option<PathBuf>,
-
-    /// Scale-set lane config file (TOML). When set, the daemon supervises
-    /// the Scale Set adapter next to its native slots on the shared
-    /// host-wide permit ledger. Unset disables the lane entirely.
-    #[arg(long, env = "VELNOR_SCALE_SET_CONFIG")]
-    pub scale_set_config: Option<PathBuf>,
+    /// Docker --memory limit appended to every job container. Empty disables the daemon-level memory cap.
+    #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
+    pub job_memory: String,
 
     /// Pool trust boundary. Declared once in [`crate::trust_scope`] and
     /// flattened here so this binary and `velnorctl` cannot disagree about a
@@ -266,9 +255,8 @@ pub struct RunArgs {
     pub dry_run_jobs: bool,
     pub dump_job_message: Option<PathBuf>,
     pub docker_image: String,
-    /// Host-wide permit ledger database. `None` resolves to the default path
-    /// next to the operational state db.
-    pub permit_ledger: Option<PathBuf>,
+    pub job_cpus: String,
+    pub job_memory: String,
     pub trust_scope: String,
     pub emergency_reserve_bytes: u64,
     pub job_peak_bytes: u64,
@@ -457,9 +445,8 @@ impl From<DaemonArgs> for crate::args::DaemonArgs {
             dry_run_jobs: a.dry_run_jobs,
             dump_job_message: a.dump_job_message,
             docker_image: a.docker_image,
-            max_jobs: a.max_jobs,
-            permit_ledger: a.permit_ledger,
-            scale_set_config: a.scale_set_config,
+            job_cpus: a.job_cpus,
+            job_memory: a.job_memory,
             // The one resolution point of the pool trust boundary: the ceiling
             // every job on this pool runs under. Admission narrows it by the
             // job's trust class, and everything downstream — the capability
@@ -567,7 +554,8 @@ impl From<RunArgs> for crate::args::RunArgs {
             dry_run_jobs: a.dry_run_jobs,
             dump_job_message: a.dump_job_message,
             docker_image: a.docker_image,
-            permit_ledger: a.permit_ledger,
+            job_cpus: a.job_cpus,
+            job_memory: a.job_memory,
             trust_scope: crate::trust_scope::resolve(&a.trust_scope).into_string(),
             emergency_reserve_bytes: a.emergency_reserve_bytes,
             job_peak_bytes: a.job_peak_bytes,

@@ -367,6 +367,43 @@ pub(crate) struct CheckProfileSection {
     env: BTreeMap<String, String>,
 }
 
+/// One named-task job a `kind = "tasks"` release renders into `release.yml`.
+/// The row names the job, the repository tasks it runs, the sibling jobs it
+/// waits on, the lane it runs on, and the release modes that run it. Product
+/// build, sign, and publish logic stays in the named tasks; the renderer
+/// owns triggers, ordering, mode gates, and the lane.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReleaseJobSection {
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tasks: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    needs: Option<Vec<String>>,
+    runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_minutes: Option<i64>,
+    /// The GitHub environment the job runs in (protection rules, scoped
+    /// secrets). Empty runs outside any environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment: Option<String>,
+    /// Build-provenance attestation subjects: artifact paths the job
+    /// attests after its tasks succeed. Empty attests nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attest_subjects: Option<Vec<String>>,
+    /// Job-level permission overrides. Empty keeps the workflow default
+    /// (`contents: read`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    permissions: BTreeMap<String, String>,
+    /// Job-level environment the named tasks read: toolchain pins and
+    /// secret references (`${{ secrets.NAME }}`), never secret values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseSection {
@@ -390,15 +427,6 @@ pub(crate) struct ReleaseSection {
     artifact_path: Option<String>,
     description: Option<String>,
     manifest_schema: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    apt_arches: Vec<String>,
-    signer_fingerprint: Option<String>,
-    passphrase_secret: Option<String>,
-    keyring_path: Option<String>,
-    apt_origin: Option<String>,
-    apt_identity_dir: Option<String>,
-    apt_feed_url: Option<String>,
-    retention: Option<i64>,
     dockerfile: Option<String>,
     context: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -435,6 +463,11 @@ pub(crate) struct ReleaseSection {
     registry_username_secret: Option<String>,
     /// The secret holding the registry password. A name, never the value.
     registry_password_secret: Option<String>,
+    /// Named-task jobs, one `[[release.job]]` row per job the `tasks`
+    /// publisher renders. Any other kind rejects the rows: publishers with
+    /// their own job graph take no sibling jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    job: Vec<ReleaseJobSection>,
 }
 
 /// One credential the release lane mounts: the setup command that
@@ -838,38 +871,6 @@ impl ReleaseSection {
         self.manifest_schema.as_deref()
     }
 
-    pub(crate) fn apt_arches(&self) -> &[String] {
-        &self.apt_arches
-    }
-
-    pub(crate) fn signer_fingerprint(&self) -> Option<&str> {
-        self.signer_fingerprint.as_deref()
-    }
-
-    pub(crate) fn passphrase_secret(&self) -> Option<&str> {
-        self.passphrase_secret.as_deref()
-    }
-
-    pub(crate) fn keyring_path(&self) -> Option<&str> {
-        self.keyring_path.as_deref()
-    }
-
-    pub(crate) fn apt_origin(&self) -> Option<&str> {
-        self.apt_origin.as_deref()
-    }
-
-    pub(crate) fn apt_identity_dir(&self) -> Option<&str> {
-        self.apt_identity_dir.as_deref()
-    }
-
-    pub(crate) fn apt_feed_url(&self) -> Option<&str> {
-        self.apt_feed_url.as_deref()
-    }
-
-    pub(crate) fn retention(&self) -> Option<i64> {
-        self.retention
-    }
-
     pub(crate) fn dockerfile(&self) -> Option<&str> {
         self.dockerfile.as_deref()
     }
@@ -924,6 +925,56 @@ impl ReleaseSection {
 
     pub(crate) fn registry_password_secret(&self) -> Option<&str> {
         self.registry_password_secret.as_deref()
+    }
+
+    pub(crate) fn jobs(&self) -> &[ReleaseJobSection] {
+        &self.job
+    }
+}
+
+impl ReleaseJobSection {
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub(crate) fn tasks(&self) -> Option<&[String]> {
+        self.tasks.as_deref()
+    }
+
+    pub(crate) fn needs(&self) -> Option<&[String]> {
+        self.needs.as_deref()
+    }
+
+    pub(crate) fn runner(&self) -> Option<&str> {
+        self.runner.as_deref()
+    }
+
+    pub(crate) fn modes(&self) -> Option<&[String]> {
+        self.modes.as_deref()
+    }
+
+    pub(crate) fn timeout_minutes(&self) -> Option<i64> {
+        self.timeout_minutes
+    }
+
+    pub(crate) fn environment(&self) -> Option<&str> {
+        self.environment.as_deref()
+    }
+
+    pub(crate) fn attest_subjects(&self) -> Option<&[String]> {
+        self.attest_subjects.as_deref()
+    }
+
+    pub(crate) fn permissions(&self) -> &BTreeMap<String, String> {
+        &self.permissions
+    }
+
+    pub(crate) fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
     }
 }
 
@@ -2302,7 +2353,37 @@ const RELEASE_KINDS: &[&str] = &[
     "homebrew",
     "apt",
     "docker",
+    "tasks",
 ];
+
+/// The modes a `[[release.job]]` row gates on. `validate` runs the job on
+/// dispatch drills only; `publish` runs it on tag pushes only. An empty
+/// list runs the job on every release event.
+pub(crate) const RELEASE_JOB_MODES: &[&str] = &["validate", "publish"];
+
+/// The permission scopes a `[[release.job]]` row may override. A typo'd
+/// scope would silently do nothing, so anything outside this set fails
+/// closed instead of rendering a dead permission.
+pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "models",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+];
+
+/// The access levels a `[[release.job]]` permission override may grant.
+pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
 
 /// The OCI platforms the `docker` publisher builds. Native builders exist
 /// for exactly these; anything else fails closed instead of silently
@@ -2861,6 +2942,7 @@ impl RepoGenerationConfig {
     fn validate_release(&self) -> Result<(), GeneratorError> {
         let release = &self.release;
         validate_release_bindings(release)?;
+        validate_release_jobs(&self.workflow, release)?;
         if release.enabled != Some(true) {
             return Ok(());
         }
@@ -2913,6 +2995,7 @@ impl RepoGenerationConfig {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
             }
+            "tasks" => !release.job.is_empty(),
             "docker" => {
                 release
                     .image
@@ -3351,6 +3434,22 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
     if kind.is_empty() || matches!(kind, "rust-binary" | "native") {
         return Ok(());
     }
+    if kind == "tasks" {
+        // The tasks publisher renders dispatch modes (the drill input its
+        // jobs gate on) but no producer, archive, or credential bindings:
+        // it orchestrates repository tasks, not artifacts.
+        let bound = release.producer_workflow.is_some()
+            || release.archive_checksum.is_some()
+            || release.archive_retention_days.is_some()
+            || !release.archive_members.is_empty()
+            || !release.credential.is_empty();
+        if bound {
+            return Err(GeneratorError::usage(format!(
+                "[release] producer bindings, archive contracts, and credential pairings render only for kind `rust-binary` or `native`, not `{kind}`"
+            )));
+        }
+        return Ok(());
+    }
     let bound = release.producer_workflow.is_some()
         || !release.modes.is_empty()
         || release.archive_checksum.is_some()
@@ -3429,6 +3528,187 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
         if credential.teardown.as_deref().is_none_or(str::is_empty) {
             return Err(GeneratorError::usage(format!(
                 "[release] credential `{name}` needs `teardown`: a setup without a teardown leaks host state"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The `[[release.job]]` rows a `tasks` release renders: job identity,
+/// named tasks, sibling dependencies, lane, mode gates, and timeout. Any
+/// other kind rejects the rows next to its own publisher contract.
+fn validate_release_jobs(
+    workflow: &WorkflowSection,
+    release: &ReleaseSection,
+) -> Result<(), GeneratorError> {
+    if release.job.is_empty() {
+        return Ok(());
+    }
+    let kind = release.kind.as_deref().unwrap_or_default();
+    if kind != "tasks" {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] rows render only for kind `tasks`, not `{kind}`; publishers with their own job graph take no sibling jobs"
+        )));
+    }
+    let mut ids = BTreeSet::new();
+    for row in &release.job {
+        let id = row.id.as_deref().unwrap_or_default();
+        if id.is_empty() {
+            return Err(GeneratorError::usage(
+                "[[release.job]] is missing `id`; name the job the row renders",
+            ));
+        }
+        if !valid_check_profile_id(id) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} is not a job id; use letters, digits, `-`, and `_` starting with a letter or `_`"
+            )));
+        }
+        if !ids.insert(id) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} is declared twice; job ids must be unique"
+            )));
+        }
+    }
+    for row in &release.job {
+        let id = row.id.as_deref().unwrap_or_default();
+        validate_release_job_row(workflow, row, id, &ids)?;
+    }
+    Ok(())
+}
+
+/// One job row against the repository around it: display name, task
+/// references, dependencies, lane, mode gates, and timeout.
+fn validate_release_job_row(
+    workflow: &WorkflowSection,
+    row: &ReleaseJobSection,
+    id: &str,
+    ids: &BTreeSet<&str>,
+) -> Result<(), GeneratorError> {
+    if let Some(name) = row.name.as_deref()
+        && (name.is_empty() || name.contains(['\n', '\r']))
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} name must be one non-empty line"
+        )));
+    }
+    match row.tasks.as_deref() {
+        None => {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} is missing `tasks`; name the mise tasks the job runs"
+            )));
+        }
+        Some(tasks) => {
+            if tasks.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} declares an empty tasks; name the mise tasks the job runs"
+                )));
+            }
+            for task in tasks {
+                if !valid_check_profile_task(task) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} names task `{task}`, which is not a plain task reference; use names such as build-release without whitespace or shell syntax"
+                    )));
+                }
+            }
+        }
+    }
+    if let Some(needs) = row.needs.as_deref() {
+        for dependency in needs {
+            if dependency == id {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} needs itself; a job cannot wait on its own completion"
+                )));
+            }
+            if !ids.contains(dependency.as_str()) {
+                let known = ids.iter().copied().collect::<Vec<_>>().join(", ");
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} needs `{dependency}`, which no job declares; declared jobs: {known}"
+                )));
+            }
+        }
+    }
+    match row.runner.as_deref() {
+        None | Some("github" | "macos" | "velnor") => {}
+        Some(runner) => {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} runner must be one of: github, macos, velnor; found `{runner}`"
+            )));
+        }
+    }
+    if row.runner.as_deref().unwrap_or("github") == "velnor" {
+        if workflow.runners.as_deref() == Some("github") {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} runs on velnor, but [workflow] runners = \"github\" has no Velnor lane"
+            )));
+        }
+        if workflow.velnor_labels.as_ref().is_none_or(Vec::is_empty) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} runs on velnor, but [workflow] velnor_labels names no runner labels"
+            )));
+        }
+    }
+    if let Some(modes) = row.modes.as_deref() {
+        for mode in modes {
+            if !RELEASE_JOB_MODES.contains(&mode.as_str()) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} modes must be one of {}, found `{mode}`; validate runs on dispatch drills, publish on tag pushes",
+                    RELEASE_JOB_MODES.join(", ")
+                )));
+            }
+        }
+    }
+    if let Some(timeout) = row.timeout_minutes
+        && (timeout < 1 || u32::try_from(timeout).is_err())
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} timeout_minutes must be a positive number of minutes, found {timeout}"
+        )));
+    }
+    validate_release_job_shape(row, id)
+}
+
+/// A job row's execution shape: environment, attestation subjects,
+/// permission overrides, and task environment.
+fn validate_release_job_shape(row: &ReleaseJobSection, id: &str) -> Result<(), GeneratorError> {
+    if let Some(environment) = row.environment.as_deref()
+        && (environment.is_empty() || environment.contains(['\n', '\r']))
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} environment must be one non-empty line"
+        )));
+    }
+    if let Some(subjects) = row.attest_subjects.as_deref() {
+        for subject in subjects {
+            if subject.is_empty() || subject.contains(['\n', '\r']) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} attest_subjects must be one non-empty line per subject"
+                )));
+            }
+        }
+    }
+    for (scope, level) in &row.permissions {
+        if !RELEASE_JOB_PERMISSIONS.contains(&scope.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} permissions names `{scope}`, which is not a job permission scope; use one of {}",
+                RELEASE_JOB_PERMISSIONS.join(", ")
+            )));
+        }
+        if !RELEASE_JOB_PERMISSION_LEVELS.contains(&level.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} permissions `{scope}` must be one of {}, found `{level}`",
+                RELEASE_JOB_PERMISSION_LEVELS.join(", ")
+            )));
+        }
+    }
+    for (key, value) in &row.env {
+        if !valid_check_profile_env_key(key) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} env names `{key}`, which is not an environment name; use shell identifiers such as DEVELOPER_DIR"
+            )));
+        }
+        if value.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} env `{key}` must be one line"
             )));
         }
     }
@@ -3658,6 +3938,216 @@ mod tests {
                 "validate accepted workflow runner mode",
             );
         }
+    }
+
+    #[test]
+    fn tasks_release_accepts_named_task_jobs() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\n\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\", \"verify-release\"]\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"sign-release\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\ntimeout_minutes = 45\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate tasks release with two jobs",
+        );
+        let jobs = config.release().jobs();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id(), Some("build"));
+        assert_eq!(
+            jobs[0].tasks(),
+            Some(&["build-release".to_owned(), "verify-release".to_owned()][..])
+        );
+        assert_eq!(jobs[1].needs(), Some(&["build".to_owned()][..]));
+        assert_eq!(jobs[1].runner(), Some("macos"));
+        assert_eq!(jobs[1].modes(), Some(&["publish".to_owned()][..]));
+        assert_eq!(jobs[1].timeout_minutes(), Some(45));
+    }
+
+    #[test]
+    fn tasks_release_accepts_job_shape() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\n\n[[release.job]]\nid = \"sign\"\ntasks = [\"sign-release\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"example-signing\"\nattest_subjects = [\"dist/example-app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\nattestations = \"write\"\n\n[release.job.env]\nDEVELOPER_DIR = \"/Applications/Xcode.app/Contents/Developer\"\nSIGNING_KEY_ID = \"${{ secrets.EXAMPLE_SIGNING_KEY_ID }}\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate tasks release with job shape",
+        );
+        let jobs = config.release().jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].environment(), Some("example-signing"));
+        assert_eq!(
+            jobs[0].attest_subjects(),
+            Some(&["dist/example-app.zip".to_owned()][..])
+        );
+        assert_eq!(
+            jobs[0].permissions().get("id-token").map(String::as_str),
+            Some("write")
+        );
+        assert_eq!(
+            jobs[0].env().get("DEVELOPER_DIR").map(String::as_str),
+            Some("/Applications/Xcode.app/Contents/Developer")
+        );
+    }
+
+    #[test]
+    fn tasks_release_rejects_bad_job_shape() {
+        for (name, shape, fragment) in [
+            (
+                "empty-environment",
+                "environment = \"\"\n",
+                "environment must be one non-empty line",
+            ),
+            (
+                "empty-subject",
+                "attest_subjects = [\"\"]\n",
+                "one non-empty line per subject",
+            ),
+            (
+                "bad-scope",
+                "[release.job.permissions]\noidc = \"write\"\n",
+                "not a job permission scope",
+            ),
+            (
+                "bad-level",
+                "[release.job.permissions]\ncontents = \"admin\"\n",
+                "must be one of read, write, none",
+            ),
+            (
+                "bad-env-key",
+                "[release.job.env]\n\"has space\" = \"x\"\n",
+                "not an environment name",
+            ),
+            (
+                "multiline-env-value",
+                "[release.job.env]\nKEY = \"a\\nb\"\n",
+                "must be one line",
+            ),
+        ] {
+            let error = must_fail(
+                config_for(&format!(
+                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\"]\n{shape}"
+                ))
+                .validate(&[], &[], &BTreeSet::new()),
+                "bad release job shape must fail",
+            );
+            assert!(error.to_string().contains(fragment), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn tasks_release_requires_jobs_and_rejects_artifact_bindings() {
+        let missing = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "enabled tasks release without jobs must fail",
+        );
+        assert!(missing.to_string().contains("tasks"), "{missing}");
+        for (name, binding) in [
+            ("members", "archive_members = [\"app.tar.gz\"]\n"),
+            (
+                "credential",
+                "[[release.credential]]\nname = \"signing\"\nsetup = \"setup-signing\"\nteardown = \"teardown-signing\"\n",
+            ),
+            ("producer", "producer_workflow = \"CI\"\n"),
+        ] {
+            let error = must_fail(
+                config_for(&format!(
+                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n{binding}\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\"]\n"
+                ))
+                .validate(&[], &[], &BTreeSet::new()),
+                "tasks release with artifact bindings must fail",
+            );
+            assert!(
+                error.to_string().contains("render only for kind"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_jobs_reject_other_kinds_and_bad_rows() {
+        let other_kind = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"pages\"\nartifact_path = \"dist\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\"]\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "jobs on a pages release must fail",
+        );
+        assert!(
+            other_kind.to_string().contains("only for kind `tasks`"),
+            "{other_kind}"
+        );
+        for (name, row, fragment) in [
+            (
+                "missing-id",
+                "tasks = [\"build-release\"]\n",
+                "missing `id`",
+            ),
+            (
+                "bad-id",
+                "id = \"9build\"\ntasks = [\"build-release\"]\n",
+                "is not a job id",
+            ),
+            ("missing-tasks", "id = \"build\"\n", "missing `tasks`"),
+            ("empty-tasks", "id = \"build\"\ntasks = []\n", "empty tasks"),
+            (
+                "shell-task",
+                "id = \"build\"\ntasks = [\"build-release; rm -rf /\"]\n",
+                "not a plain task reference",
+            ),
+            (
+                "self-need",
+                "id = \"build\"\ntasks = [\"build-release\"]\nneeds = [\"build\"]\n",
+                "needs itself",
+            ),
+            (
+                "unknown-need",
+                "id = \"build\"\ntasks = [\"build-release\"]\nneeds = [\"absent\"]\n",
+                "which no job declares",
+            ),
+            (
+                "bad-runner",
+                "id = \"build\"\ntasks = [\"build-release\"]\nrunner = \"windows\"\n",
+                "runner must be one of",
+            ),
+            (
+                "bad-mode",
+                "id = \"build\"\ntasks = [\"build-release\"]\nmodes = [\"rehearse\"]\n",
+                "modes must be one of",
+            ),
+            (
+                "bad-timeout",
+                "id = \"build\"\ntasks = [\"build-release\"]\ntimeout_minutes = 0\n",
+                "timeout_minutes must be a positive number",
+            ),
+            (
+                "velnor-without-labels",
+                "id = \"build\"\ntasks = [\"build-release\"]\nrunner = \"velnor\"\n",
+                "velnor_labels names no runner labels",
+            ),
+        ] {
+            let error = must_fail(
+                config_for(&format!(
+                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\n{row}"
+                ))
+                .validate(&[], &[], &BTreeSet::new()),
+                "bad release job row must fail",
+            );
+            assert!(error.to_string().contains(fragment), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn release_jobs_reject_duplicate_ids() {
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\"]\n\n[[release.job]]\nid = \"build\"\ntasks = [\"verify-release\"]\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "duplicate release job ids must fail",
+        );
+        assert!(error.to_string().contains("declared twice"), "{error}");
     }
 
     #[test]

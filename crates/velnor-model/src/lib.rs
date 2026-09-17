@@ -71,13 +71,8 @@ pub use resources::{
 };
 pub use sanitized::{IdentityRef, RepositoryRef, SanitizedUrl, SecretRef};
 pub use scheduler::{
-    AcquireJobsResponse, RunnerGroup, RunnerGroupList, RunnerReference, RunnerReferenceList,
-    RunnerScaleSet, RunnerScaleSetJitRunnerConfig, RunnerScaleSetJitRunnerSetting,
-    RunnerScaleSetList, RunnerScaleSetMessage, RunnerScaleSetMessageResponse,
-    RunnerScaleSetStatistic, RunnerSetting, ScaleSetJobAssigned, ScaleSetJobAvailable,
-    ScaleSetJobCompleted, ScaleSetJobMessage, ScaleSetJobMessageType, ScaleSetJobStarted,
-    ScaleSetLabel, ScaleSetSession, ScaleSetWorkerState, SchedulerKind, SchedulerNotCurrent,
-    SCALESET_API_VERSION, SCALESET_ENDPOINT, SCALESET_MAX_CAPACITY_HEADER,
+    RunnerScaleSetMessageResponse, RunnerScaleSetStatistic, ScaleSetJobMessageType, SchedulerKind,
+    SchedulerNotCurrent, SCALESET_API_VERSION, SCALESET_ENDPOINT, SCALESET_MAX_CAPACITY_HEADER,
     SCALESET_UPSTREAM_COMMIT,
 };
 pub use since::{InvalidSince, Since};

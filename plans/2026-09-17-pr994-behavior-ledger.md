@@ -304,10 +304,109 @@ Findings and dispositions:
   branch: identical rejections on unrelated PR #916 (base-identical
   admission rows) and a Velnor failure on merged #914 (which landed with
   `ci-required` red). No Velnor-side fix in scope.
-- Migration-flag triage (draft report): flag 2 (push-trigger widening)
-  DISSOLVES — the desktop-cadence copy has no push trigger, so the
-  faithful mapping is schedule+dispatch only (drop `events=["push"]`);
-  main-only push triggering is a Jackin product decision, not a schema
-  gap. Flag 3 (renovate `lanes="github"`, validator `--strict`,
-  dropped mise allowance) and flag 4 (anonymous tool-download rate
-  limits) are Jackin migration-review items, not Velnor bugs.
+- Migration-flag triage, corrected by independent review: flag 2 does
+  NOT dissolve — the desktop-cadence copy HAS `push: branches: [main]`
+  (merge job runs on push-to-main + dispatch), and the earlier
+  "no push trigger" grounding was false. Branch-scoped push is a proven
+  generic gap, implemented as scheduled-checks `branches`
+  (velnor PR #919); Jackin declares `events = ["push"]` +
+  `branches = ["main"]`. The `events = ["workflow_dispatch"]`
+  dispatch-only spelling (validates, renders nothing extra) remains for
+  genuinely manual-only files. Flag 3 (`lanes="github"` forced by
+  missing trust facts — schema-verified; `--strict` validator passes on
+  the current renovate.json; the copy's
+  `RENOVATE_ALLOWED_UNSAFE_EXECUTIONS=mise` has no live effect since
+  renovate.json configures no post-upgrade execution, and
+  `[renovate] allowed_commands` exists for `RENOVATE_ALLOWED_COMMANDS`
+  if that is ever configured) and flag 4 (DISSOLVED — `mise-action`
+  defaults `github_token` to `github.token`) are recorded acceptances,
+  not Velnor bugs. Review also caught a dead
+  `scripts/ci/docs-lychee-contract.sh` (0 refs; L6 says delete) —
+  removed in the migration.
+
+## 11. Landing log (Velnor PR #919, branch-scoped push; merged 0765af35)
+
+- `scheduled-checks` gains `branches` (push-trigger scoping; bare
+  `push:` byte-identical without it; `branches` without `push` fails
+  closed). Jackin desktop-merge declares `events = ["push"]` +
+  `branches = ["main"]`, faithful to the desktop-cadence copy.
+- Policy green via the tight Pin leg after a pin-roll to the merge
+  commit + dispatched runtime product (pre-#916 escape hatch); two
+  main-moves (#918 rendezvous, #920 pin-bump) each forced a re-merge
+  and re-verification. Merged with `ci-required` red on the same
+  pre-existing Velnor-lane outage as §10.
+- Ops finding (maintainer-owned): the generator-state `scan` hash
+  reads transient git state — regen during an open merge commits a
+  value a clean checkout never reproduces. Always regen after
+  committing the merge, never during.
+
+## 12. Landing log (Velnor PR #921, D1 cancel fix; merged b6f53c09)
+
+- D1 (independent review of the Jackin migration): scheduled-checks
+  files with events but no `pull_request` trigger rendered the PR
+  cancel expression constant-false, so stale per-ref runs queued
+  instead of superseding. The renderer now emits the expression only
+  when `pull_request` is declared, else literal `true` like the
+  cron-only files (copy-faithful; docs-site/Renovate always declare
+  PR and are unaffected). Locked by
+  `push_without_pr_cancels_like_cron_only` over push, branch-scoped
+  push, and push+dispatch sets.
+- #916 closed branch product-dispatch (producer publishes from main
+  only), killing the #919 self-bump playbook mid-flight. #921 landed
+  on the pure phase-1 flow #914/#916 proved instead: pin reverted to
+  the base validator, Planning consumes the published base product,
+  Policy proves the tree on the candidate path. Self-bump + dispatch
+  is dead; do not attempt it again.
+- D2 (same review): the migration had dropped the #994 MISE
+  release-asset liveness probe and added schema validation the copy
+  explicitly rejected. Schema half proven safe empirically
+  (`renovate-config-validator --strict` exit 0 on the current
+  renovate.json at the pinned 44.93.6 — the copy's false negatives
+  were cross-version skew, eliminated by same-version pinning); the
+  liveness probe restored as Jackin-owned mise task
+  `renovate-upstream-sources` (live HEAD check passes) under a
+  generic scheduled-checks file on push[main]+PR+dispatch.
+
+## 13. Consumer-bootstrap law (Jackin adoption in two PRs)
+
+- A consumer cannot introduce new-schema config sections in the same
+  PR that bumps the pin past them: the base-branch validator parses
+  `.github-gen/velnor-workflow.toml` with `deny_unknown_fields` and
+  hard-errors on tables it does not know (reproduced: old binary on
+  `[[check_profile]]` → `unknown field 'check_profile'`). Step 1 is
+  pin-bump + regen of the old-schema config (both validators 11/11);
+  step 2 adds the new schema once the base runs the new code.
+- Structural hardening (recommended, out of goal scope): the
+  validator should parse the generation config leniently for the
+  small subset it reads (pin, repository, excludes, ruleset checks),
+  so old gates stay green over new configs. Until then every
+  consumer schema adoption needs two PRs.
+- Jackin main is red independent of this migration
+  (`jackin-runtime`, `jackin-xtask` unit checks fail identically on
+  0be3fcf; Swift lanes also red there). Migration PRs must show
+  failure-set parity with main, not absolute green, for those lanes.
+
+## 14. E-slice completion (L10 tasks publisher; branch `feat/release-tasks-jobs`)
+
+- L10's remaining generic gap was named-task jobs: `[release]` could
+  not declare the `mise run desktop-*` jobs the pre-#992 `release.yml`
+  ran, so no generated release workflow could satisfy Jackin's
+  `release_workflow_invokes_canonical_mise_tasks` contract (red on
+  main since #992 removed the file). New `kind = "tasks"` publisher
+  renders `[[release.job]]` rows (id/tasks/needs/runner/modes/timeout)
+  into `release.yml` with tag+dispatch triggers, mode gates
+  (`validate` = dispatch-only, `publish` = tag-only), and
+  github/macos/velnor lanes — mirroring the `[[check_profile]]`
+  task-reference shape, reusing its validators and the versioned-tool
+  `mise run` step shape. Producer/archive/credential bindings stay
+  `rust-binary`/`native`-only; every task must be declared in the
+  repository's `mise.toml` like every unit `mise run` command.
+- Verification: 4 config tests (accept/shape matrix incl. shell-task,
+  self/unknown needs, velnor-without-labels, kind restriction,
+  duplicates), 5 render tests (jobs/gates/lanes, gate matrix,
+  jobless omission, binding backstop, velnor labels), 4 end-to-end
+  tests over neutral `example/*` fixtures (render, byte-identical
+  regen, undeclared-task and wrong-kind fail-closed). Full suite
+  773 lib + all integration green, clippy/fmt clean, genericity gate
+  green. Jackin step-3 (declare `[[release.job]]`, regen
+  `release.yml`, xtask green) pending the merge pin.

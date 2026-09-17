@@ -42,12 +42,20 @@ ENV MISE_DATA_DIR=/opt/mise \
 COPY docker/build-mise.toml /opt/mise/config/mise.toml
 COPY docker/build-mise.lock /opt/mise/config/mise.lock
 COPY rust-toolchain.toml /opt/mise/config/rust-toolchain.toml
-RUN mkdir -p /opt/mise/bin \
+# The GitHub-lane image build passes the automatic token as the `github_token`
+# build secret (the same secret id docker/job-ubuntu.Dockerfile consumes);
+# mise authenticates its release-list fetches from MISE_GITHUB_TOKEN, so
+# shared-runner unauthenticated quota exhaustion cannot fail provisioning.
+# The mount stays optional: local and Velnor-lane builds without the secret
+# keep the previous unauthenticated behavior.
+RUN --mount=type=secret,id=github_token \
+    mkdir -p /opt/mise/bin \
     && : > /tmp/mise-empty.toml \
     && cd /opt/mise/config \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
     && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.9" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise trust /opt/mise/config/mise.toml \
+    && if [ -f /run/secrets/github_token ]; then export MISE_GITHUB_TOKEN="$(cat /run/secrets/github_token)"; fi \
     && mise install --locked --yes rust mr-boxington \
     && mise reshim \
     && mise exec -- rustc --version \

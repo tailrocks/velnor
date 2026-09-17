@@ -19,19 +19,16 @@ use clap::{Parser, ValueEnum};
 use serde::Serialize;
 use serde_yaml::Value;
 
-mod apt;
 mod closure;
 mod config;
-#[cfg(all(test, unix))]
-mod consumer_negatives;
 mod estate;
 pub(crate) mod platform;
 mod policy;
 mod primitives;
-mod promote;
 mod reuse;
 mod runners;
 pub(crate) mod runtime;
+pub(crate) mod s2;
 mod scan;
 mod template_memory;
 #[cfg(feature = "tui")]
@@ -105,12 +102,6 @@ pub const SOURCE_REVISION: &str = env!("VELNOR_WORKFLOW_SOURCE_SHA");
 /// no git). `velnor-workflow --closure` prints it; the D19 guard accepts a
 /// renderer whose closure equals the declared pin's closure.
 pub const SOURCE_CLOSURE: &str = env!("VELNOR_WORKFLOW_CLOSURE_DIGEST");
-/// The Cargo feature list and profile the stamped [`SOURCE_CLOSURE`] footer
-/// hashed. `promote` recomputes the stamped pin's closure under exactly this
-/// build identity, so the render-with-X-stamp-X binding holds for release
-/// products and development builds alike.
-pub(crate) const SOURCE_FEATURES: &str = env!("VELNOR_WORKFLOW_FEATURES");
-pub(crate) const SOURCE_PROFILE: &str = env!("VELNOR_WORKFLOW_PROFILE");
 /// Names a `velnor-workflow` binary built at the pinned policy revision. The
 /// D19 guard consults it first; generated hosted jobs export it after
 /// installing the runtime artifact's policy binary so `--check` never needs
@@ -916,25 +907,6 @@ struct ReleaseSpec {
     /// `release-manifest.json`. A consumer-contract value the repository
     /// declares; the generic renderer never invents one.
     pub(crate) manifest_schema: String,
-    /// The typed APT architecture set. Empty selects both arches; any
-    /// explicit set must equal exactly both arches.
-    pub(crate) apt_arches: Vec<String>,
-    /// The pinned APT publisher signing-key fingerprint (full 40-hex).
-    pub(crate) signer_fingerprint: String,
-    /// The environment secret holding the APT signing passphrase (name only).
-    pub(crate) passphrase_secret: String,
-    /// The repository-local APT keyring path. Empty derives `<package>.gpg`.
-    pub(crate) keyring_path: String,
-    /// The APT `Origin`/`Label`. Empty derives the package name.
-    pub(crate) apt_origin: String,
-    /// The packaged-identity directory inside the deb. Empty derives the
-    /// source repository name.
-    pub(crate) apt_identity_dir: String,
-    /// The served feed base URL for prior-pair recovery and the no-rollback
-    /// deploy guard.
-    pub(crate) apt_feed_url: String,
-    /// The retained rollback count. Zero means unset and selects one.
-    pub(crate) retention: u32,
     /// The consumer-owned Dockerfile the `docker` publisher builds, relative
     /// to the repository root. Empty selects the `Dockerfile` convention.
     /// Generation-time only: pinned runtimes never consume it.
@@ -980,6 +952,29 @@ struct ReleaseSpec {
     pub(crate) registry_username_secret: String,
     /// The secret holding the registry password. A name, never the value.
     pub(crate) registry_password_secret: String,
+    /// Named-task jobs the `tasks` publisher renders. Empty for every other
+    /// publisher: their job graph is fixed.
+    pub(crate) jobs: Vec<ReleaseJobSpec>,
+}
+
+/// One named-task release job: the job id, display name, repository tasks it
+/// runs, sibling jobs it waits on, the lane it runs on, the release modes
+/// that run it (empty runs on every release event), its timeout, the
+/// environment it runs in, the subjects it attests, and its permission and
+/// environment overrides.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReleaseJobSpec {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) tasks: Vec<String>,
+    pub(crate) needs: Vec<String>,
+    pub(crate) runner: String,
+    pub(crate) modes: Vec<String>,
+    pub(crate) timeout_minutes: u32,
+    pub(crate) environment: String,
+    pub(crate) attest_subjects: Vec<String>,
+    pub(crate) permissions: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
 }
 
 /// One credential the release lane mounts and must unmount: the setup
@@ -2040,7 +2035,7 @@ fn apply_generation_config(
     if let Some(null) = generation.actionlint_config_variables_null() {
         config.actionlint_config_variables_null = null;
     }
-    apply_release(config, generation.release())?;
+    apply_release(config, generation.release(), root)?;
     apply_renovate(config, generation.renovate(), root)?;
     apply_docs(config, generation.docs())?;
     apply_check_profiles(config, generation.check_profiles(), root)?;
@@ -2374,6 +2369,7 @@ fn apply_maintenance(
 fn apply_release(
     config: &mut ProjectConfig,
     release: &config::ReleaseSection,
+    root: &Path,
 ) -> Result<(), GeneratorError> {
     if let Some(enabled) = release.enabled() {
         config.release_enabled = enabled;
@@ -2392,14 +2388,6 @@ fn apply_release(
         || release.artifact_path().is_some()
         || release.description().is_some()
         || release.manifest_schema().is_some()
-        || !release.apt_arches().is_empty()
-        || release.signer_fingerprint().is_some()
-        || release.passphrase_secret().is_some()
-        || release.keyring_path().is_some()
-        || release.apt_origin().is_some()
-        || release.apt_identity_dir().is_some()
-        || release.apt_feed_url().is_some()
-        || release.retention().is_some()
         || release.dockerfile().is_some()
         || release.context().is_some()
         || !release.platforms().is_empty()
@@ -2413,7 +2401,8 @@ fn apply_release(
         || release.tag_pattern().is_some()
         || release.registry().is_some()
         || release.registry_username_secret().is_some()
-        || release.registry_password_secret().is_some();
+        || release.registry_password_secret().is_some()
+        || !release.jobs().is_empty();
     if !declared {
         return Ok(());
     }
@@ -2453,39 +2442,6 @@ fn apply_release(
     }
     if let Some(schema) = release.manifest_schema() {
         schema.clone_into(&mut spec.manifest_schema);
-    }
-    if !release.apt_arches().is_empty() {
-        spec.apt_arches = release.apt_arches().to_vec();
-    }
-    if let Some(signer) = release.signer_fingerprint() {
-        signer.clone_into(&mut spec.signer_fingerprint);
-    }
-    if let Some(secret) = release.passphrase_secret() {
-        secret.clone_into(&mut spec.passphrase_secret);
-    }
-    if let Some(keyring) = release.keyring_path() {
-        keyring.clone_into(&mut spec.keyring_path);
-    }
-    if let Some(origin) = release.apt_origin() {
-        origin.clone_into(&mut spec.apt_origin);
-    }
-    if let Some(identity) = release.apt_identity_dir() {
-        identity.clone_into(&mut spec.apt_identity_dir);
-    }
-    if let Some(feed) = release.apt_feed_url() {
-        feed.clone_into(&mut spec.apt_feed_url);
-    }
-    if let Some(retention) = release.retention() {
-        spec.retention = u32::try_from(retention).map_err(|_| {
-            GeneratorError::usage(format!(
-                "[release] retention must be a non-negative count, found `{retention}`"
-            ))
-        })?;
-    }
-    // A declared apt contract is validated now, not at render time: malformed
-    // values fail generation loudly instead of rendering a broken feed.
-    if spec.kind == "apt" && primitives::release::release_contract_complete(&spec) {
-        apt::AptContract::resolve(&spec)?;
     }
     if let Some(dockerfile) = release.dockerfile() {
         dockerfile.clone_into(&mut spec.dockerfile);
@@ -2536,6 +2492,39 @@ fn apply_release(
     }
     if let Some(secret) = release.registry_password_secret() {
         secret.clone_into(&mut spec.registry_password_secret);
+    }
+    if !release.jobs().is_empty() {
+        // Like every unit `mise run` command, a job task reference must name
+        // a task the repository's `mise.toml` declares.
+        let mise_tasks = parse_mise_task_names(root)?;
+        let mut jobs = Vec::new();
+        for row in release.jobs() {
+            let id = row.id().unwrap_or_default();
+            for task in row.tasks().unwrap_or_default() {
+                if !mise_tasks.iter().any(|name| name == task) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} names mise task `{task}`, which mise.toml does not declare"
+                    )));
+                }
+            }
+            jobs.push(ReleaseJobSpec {
+                id: id.to_owned(),
+                name: row.name().unwrap_or(id).to_owned(),
+                tasks: row.tasks().unwrap_or_default().to_vec(),
+                needs: row.needs().unwrap_or_default().to_vec(),
+                runner: row.runner().unwrap_or("github").to_owned(),
+                modes: row.modes().unwrap_or_default().to_vec(),
+                timeout_minutes: row
+                    .timeout_minutes()
+                    .and_then(|timeout| u32::try_from(timeout).ok())
+                    .unwrap_or(primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES),
+                environment: row.environment().unwrap_or_default().to_owned(),
+                attest_subjects: row.attest_subjects().unwrap_or_default().to_vec(),
+                permissions: row.permissions().clone(),
+                env: row.env().clone(),
+            });
+        }
+        spec.jobs = jobs;
     }
     config.release = Some(spec);
     Ok(())
@@ -2697,6 +2686,13 @@ fn apply_unit_row(
     Ok(())
 }
 
+/// Hosted image builds authenticate the Dockerfile's mise provisioning layer:
+/// the `github_token` build secret carries the checks step's `GITHUB_TOKEN`
+/// into the layer (the same secret id the release lane passes), so
+/// shared-runner unauthenticated GitHub API quota exhaustion cannot fail
+/// `mise install`.
+const DOCKER_BUILD_GITHUB_TOKEN_SECRET: &str = "--secret id=github_token,env=GITHUB_TOKEN";
+
 fn docker_pull_request_target(command: &str) -> String {
     if command.contains("--target ci") {
         command.to_owned()
@@ -2731,33 +2727,9 @@ fn docker_hosted_pull_request_command(command: &str, unit_id: &str) -> String {
         cmd.push(' ');
         cmd.push_str(&cache_to);
     }
-    cmd
-}
-
-/// The hosted full build runs the same image build as the pull-request lane,
-/// minus the `ci` target: buildx with the unit's GHA layer-cache scope, so a
-/// main run reuses (and refreshes) the generation pull requests read instead
-/// of cold-rebuilding the image on every merge.
-fn docker_hosted_full_command(command: &str, unit_id: &str) -> String {
-    let seed = format!(
-        "--build-context {}='{}/seed'",
-        primitives::MUTABLE_MOUNT_SEED_CONTEXT,
-        primitives::MUTABLE_MOUNT_HOST_DIR
-    );
-    let cache_from = format!("--cache-from type=gha,scope={unit_id},mode=max");
-    let cache_to = format!("--cache-to type=gha,scope={unit_id},mode=max");
-    let mut cmd = command.replace("docker build ", "docker buildx build --load ");
-    if !cmd.contains(&seed) {
+    if !cmd.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET) {
         cmd.push(' ');
-        cmd.push_str(&seed);
-    }
-    if !cmd.contains("--cache-from type=gha") {
-        cmd.push(' ');
-        cmd.push_str(&cache_from);
-    }
-    if !cmd.contains("--cache-to type=gha") {
-        cmd.push(' ');
-        cmd.push_str(&cache_to);
+        cmd.push_str(DOCKER_BUILD_GITHUB_TOKEN_SECRET);
     }
     cmd
 }
@@ -2831,8 +2803,9 @@ fn materialize_capability_commands(
                     unit.full_commands.clone()
                 };
                 for command in &mut github_full {
-                    if command.contains("docker") {
-                        *command = docker_hosted_full_command(command, scope);
+                    if command.contains("docker") && !command.contains(&seed) {
+                        command.push(' ');
+                        command.push_str(&seed);
                     }
                 }
                 github_full.push(format!(
@@ -2840,8 +2813,17 @@ fn materialize_capability_commands(
                     primitives::MUTABLE_MOUNT_EXPORT_TARGET,
                     primitives::MUTABLE_MOUNT_HOST_DIR
                 ));
+                for command in &mut github_full {
+                    if command.contains("docker")
+                        && !command.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET)
+                    {
+                        command.push(' ');
+                        command.push_str(DOCKER_BUILD_GITHUB_TOKEN_SECRET);
+                    }
+                }
                 unit.github_full_commands = Some(github_full);
             }
+            let _ = (scope, file, ctx);
         }
         for command in unit.pr_commands.iter().chain(unit.full_commands.iter()) {
             if let Some(task) = command.strip_prefix("mise run ")
@@ -4466,18 +4448,25 @@ fn audited_pin_script() -> &'static str {
 }
 
 /// Owner policy step acquiring the PR run's candidate generator product.
-/// When the audited pin shares the base validator's closure the step exits
-/// immediately (the Stage-0 validator renders). Otherwise the step waits for
-/// the same-repository PR run at the audited head to publish the candidate
-/// artifact the Rust unit job packaged, verifies its manifest bindings and
-/// digest, requires the manifest closure to equal the pin's candidate
-/// closure in full (not just the artifact-name prefix), and exports the
-/// binary as the pinned binary plus its manifest for the validator's
-/// manifest binding. The `--closure` probe runs with `GH_TOKEN` and
-/// `GITHUB_TOKEN` emptied: the probe needs no auth, so the exec point holds
-/// no token even though the API steps above it use the job token. Fork
-/// generator changes fail closed: only same-repository runs are even
-/// considered. The same-repository select compares the embedded
+/// When the audited pin shares the base validator's closure AND the tree
+/// matches the pin's render the step exits immediately (the Stage-0
+/// validator renders). A same-closure tree that differs from the pin's
+/// render falls through to the candidate path: that is a generator change
+/// in flight, and exiting early would strand the validator with no
+/// candidate binding (manifest cleared, pin leg red). Otherwise the step
+/// waits for the same-repository PR run at the audited head to publish the
+/// candidate artifact the Rust unit job packaged, verifies its manifest
+/// bindings and digest, requires the manifest closure to equal the audited
+/// head's candidate closure in full (not just the artifact-name prefix),
+/// and exports the binary as the pinned binary plus its manifest for the
+/// validator's manifest binding. The poll name and the manifest gate both
+/// key off the head closure — the same identity the publisher names the
+/// artifact by and the validator's `wanted` binding checks — so the three
+/// legs rendezvous on one digest. The `--closure` probe runs with
+/// `GH_TOKEN` and `GITHUB_TOKEN` emptied: the probe needs no auth, so the
+/// exec point holds no token even though the API steps above it use the job
+/// token. Fork generator changes fail closed: only same-repository runs
+/// are even considered. The same-repository select compares the embedded
 /// `.head_repository.id` object: the runs-list endpoint exposes no
 /// `.head_repository_id` scalar, and selecting on it matches nothing.
 /// The artifact check pipes the listing through real jq for the same
@@ -4497,13 +4486,26 @@ fn policy_candidate_step(revision: &str) -> String {
 {pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
           pin_closure="$(velnor-workflow closure --rev="$pin")"
           if [[ "$pin_closure" == "$base_closure" ]]; then
-            echo "pin $pin shares the base closure; the Stage-0 validator renders"
-            echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
-            exit 0
+            # Same closure means the running base validator IS the pin's
+            # renderer, so --check decides tree==pin-render with no extra
+            # provisioning. A match exits early; a differ falls through to
+            # the candidate path (a generator change in flight) instead of
+            # stranding the validator with a cleared manifest and a red pin
+            # leg. The check output stays visible: on a fall-through it is
+            # the diagnosis, on a match it is one line.
+            if velnor-workflow --plain --check; then
+              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
+              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
           fi
           [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
-          pin_candidate="$(velnor-workflow closure --rev="$pin" --candidate)"
-          name="velnor-workflow-candidate-${{pin_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
+          if ! git cat-file -e "$HEAD_SHA^{{commit}}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+          fi
+          head_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
+          name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
           deadline=$((SECONDS + 900))
           run_id=""
           while (( SECONDS < deadline )); do
@@ -4544,7 +4546,7 @@ fn policy_candidate_step(revision: &str) -> String {
           [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
-          [[ "$manifest_closure" == "$pin_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the pin's candidate $pin_candidate" >&2; exit 1; }}
+          [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
           reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
           [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
           echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
@@ -4642,7 +4644,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
             "      - name: Set up Velnor workflow runtime\n        uses: {setup_uses}\n        with:\n          rev: {revision}\n          checkout-path: ${{{{ github.workspace }}}}/policy-checkout\n"
         )
     } else {
-        workflow_pinned_policy_runtime_velnor("${{ github.workspace }}/policy-checkout")
+        workflow_pinned_policy_runtime_velnor(revision, "${{ github.workspace }}/policy-checkout")
     };
     // The owner runs the setup action from its own checkout (`./…`), but the
     // policy job checks the repository out only under `policy-checkout/`, so
@@ -4674,7 +4676,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         String::new()
     };
     format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited pin's closure differs from the\n    # base validator's, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
         actionlint_setup = actionlint_setup_step(cache_backend),
     )
@@ -5148,22 +5150,14 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workf
 /// generator's `--check` provisions the pinned binary itself. `$CARGO_HOME/bin`
 /// is the host-persistent (trust-scoped) executable store, so one download per
 /// slot per closure serves every later job. Nothing here compiles: the step
-/// resolves the pin's source-closure digest from the job checkout when it
-/// contains the pin, else over the product repository's trees API exactly
-/// like the setup action (never by fetching the pin from the consuming
-/// repository, which cannot contain a foreign generator commit), downloads and
+/// resolves the pin's source-closure digest from the job checkout (fetching
+/// the pin commit when a shallow checkout does not contain it), downloads and
 /// attests the manifest, and compares the slot binary's digest against the
 /// manifest before executing anything: a digest mismatch takes the slow path
 /// (download the asset, verify attestation and digest, install), and only
 /// then — against bytes the digest just proved — does the step execute the
-/// slot binary for its `--closure` and `--revision` self-report gates (closure
-/// against the resolved digest, revision against the manifest's `revision`).
-/// The slot is shared across same-host jobs, so the digest is re-hashed
-/// immediately before EACH exec (`check_slot`): a concurrent swap between
-/// install and exec fails closed instead of handing a planted binary the
-/// self-report gates and the export.
-/// Digest decides reuse; the self-reports only confirm. The step exports the
-/// slot for the guard
+/// slot binary for its `--closure` self-report gate. Digest decides reuse;
+/// the self-report only confirms. The step exports the slot for the guard
 /// (`VELNOR_WORKFLOW_PINNED_BINARY`) so the offline check never compiles.
 /// The reuse path stays online (one manifest download plus one attestation
 /// verification per run; the asset downloads only on mismatch): offline reuse
@@ -5185,15 +5179,9 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workf
 ///   becomes unacceptable, the fix is a new feature (provision and verify
 ///   `velnor-workflow` on Velnor per job, mirroring the GitHub
 ///   `Download`→`Verify`→`Add to PATH` triple), not a parity restoration.
-///
-/// The provisioned revision is the live declared pin, parsed at runtime from
-/// the audited checkout's `.github-gen/velnor-workflow.toml`: the single
-/// source of truth is the audited tree, never the revision baked in when the
-/// workflow was rendered.
-pub(crate) fn workflow_pinned_policy_runtime_velnor(checkout: &str) -> String {
-    let product_repository = workflow_setup_action_repository();
+pub(crate) fn workflow_pinned_policy_runtime_velnor(revision: &str, checkout: &str) -> String {
     format!(
-        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          CHECKOUT_PATH: {checkout}\n          PRODUCT_REPOSITORY: {product_repository}\n        run: |\n          set -euo pipefail\n          PINNED_REVISION=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' \"$CHECKOUT_PATH/.github-gen/velnor-workflow.toml\" | head -n 1)\"\n          test \"$PINNED_REVISION\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          listing=\"\"\n          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          else\n            tree=\"$(gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\")\" || {{ echo \"::error::unknown generator revision $PINNED_REVISION\" >&2; exit 1; }}\n            [[ \"$(jq -r '.truncated // false' <<<\"$tree\")\" != \"true\" ]] || {{ echo \"::error::tree API response is truncated; the closure cannot be proven\" >&2; exit 1; }}\n            listing=\"$(jq -r '[.tree[] | select(.type != \"tree\") | select(.path == \"Cargo.toml\" or .path == \"Cargo.lock\" or .path == \"rust-toolchain.toml\" or .path == \"rust-toolchain\" or (.path | startswith(\"crates/velnor-workflow/\")) or (.path | startswith(\".cargo/\"))) | \"\\(.mode) \\(.type) \\(.sha)\\t\\(.path)\"] | sort | join(\"\\n\")' <<<\"$tree\")\"\n          fi\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          check_slot() {{\n            if command -v sha256sum >/dev/null 2>&1; then\n              installed=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              installed=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$installed\" == \"$expected\" ]] || {{ echo \"::error::policy runtime slot changed after verification\" >&2; exit 1; }}\n          }}\n          check_slot\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\"\n          check_slot\n          reported_revision=\"$(\"$binary\" --revision)\"\n          [[ \"$reported_revision\" == \"$manifest_revision\" ]] || {{ echo \"::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
+        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n        run: |\n          set -euo pipefail\n          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
     )
 }
 
@@ -5384,6 +5372,11 @@ pub(crate) fn rendered_cache_values(cache: &CacheSpec) -> (String, String) {
 /// manually edited file unless explicit adoption was requested. Individual
 /// generated files are replaced atomically.
 pub fn run_from_env() -> Result<(), GeneratorError> {
+    // R2 bridge: schema-2 invocations render through the provider pipeline;
+    // everything else falls through to the schema-1 path below, unchanged.
+    if let Some(result) = s2::dispatch::run_if_s2() {
+        return result;
+    }
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if runtime::try_run(&arguments)? {
         return Ok(());
@@ -5450,10 +5443,29 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
         Some(path) => resolve_output_path(path)?,
         None => source.output_root(checkout.path())?,
     };
-    let rendered = render_tree(checkout.path(), cli.runners, &default_branch)?;
-    let config = rendered.config;
-    let files = rendered.files;
-    let inputs = rendered.inputs;
+    let scanned = scan_target(checkout.path(), cli.runners, &default_branch)?;
+    if scanned.config.units.is_empty() && scanned.config.workflow_templates.is_empty() {
+        return Err(GeneratorError::usage(
+            "scanner found no supported manifest or project shape; add project.toml manually only after defining a safe command",
+        ));
+    }
+    let mut config = scanned.config;
+    let surface = primitives::generate(
+        checkout.path(),
+        &scanned.shape,
+        &config,
+        scanned.generation.as_ref(),
+    )?;
+    config.units.clone_from(&surface.units);
+    // A declared release-side family can add a workflow file the scan did not
+    // own; declaring it is what makes it part of the owned surface.
+    for file in &surface.added_files {
+        if !config.workflow_files.contains(file) {
+            config.workflow_files.push(file.clone());
+        }
+    }
+    let files = generated_files_with_surface(&config, Some(&surface))?;
+    let inputs = scanned.inputs;
     let outcome = write_generated_with_options(
         &output_root,
         &files,
@@ -5478,46 +5490,6 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
     }
     print_report(&cli.target, &config, &files, &outcome, &output_root);
     Ok(())
-}
-
-/// One in-memory render of a repository root: the resolved config, the
-/// generated files, and the generation inputs the ownership state records.
-/// The generator CLI and `promote` share this path, so a promoted tree is
-/// byte-identical to a plain regeneration of the same stamped tree.
-pub(crate) struct RenderedTree {
-    pub(crate) config: ProjectConfig,
-    pub(crate) files: BTreeMap<PathBuf, String>,
-    pub(crate) inputs: GenerationInputs,
-}
-
-pub(crate) fn render_tree(
-    root: &Path,
-    runners: RunnerMode,
-    default_branch: &str,
-) -> Result<RenderedTree, GeneratorError> {
-    let scanned = scan_target(root, runners, default_branch)?;
-    if scanned.config.units.is_empty() && scanned.config.workflow_templates.is_empty() {
-        return Err(GeneratorError::usage(
-            "scanner found no supported manifest or project shape; add project.toml manually only after defining a safe command",
-        ));
-    }
-    let mut config = scanned.config;
-    let surface = primitives::generate(root, &scanned.shape, &config, scanned.generation.as_ref())?;
-    config.units.clone_from(&surface.units);
-    // A declared release-side family can add a workflow file the scan did not
-    // own; declaring it is what makes it part of the owned surface.
-    for file in &surface.added_files {
-        if !config.workflow_files.contains(file) {
-            config.workflow_files.push(file.clone());
-        }
-    }
-    let files = generated_files_with_surface(&config, Some(&surface))?;
-    let inputs = scanned.inputs;
-    Ok(RenderedTree {
-        config,
-        files,
-        inputs,
-    })
 }
 
 #[cfg(any(feature = "tui", test))]
@@ -8324,13 +8296,9 @@ mod tests {
         );
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the provisioner contract keeps all ordering assertions in one test"
-    )]
     #[test]
     fn velnor_provisioner_reuses_the_slot_only_on_manifest_digest_match() {
-        let step = workflow_pinned_policy_runtime_velnor("checkout");
+        let step = workflow_pinned_policy_runtime_velnor(FIXTURE_REVISION, "checkout");
         let repository = workflow_setup_action_repository();
         // Manifest-first: every run downloads and attests the manifest before
         // any reuse decision, so a planted slot binary cannot self-report its
@@ -8342,7 +8310,7 @@ mod tests {
             "the manifest is fetched fresh every run: {step}"
         );
         assert!(
-            step.contains("gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main"),
+            step.contains("gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml"),
             "the manifest attestation is verified before the manifest is trusted: {step}"
         );
         assert!(
@@ -8358,9 +8326,8 @@ mod tests {
             "the slot binary's digest is recomputed on both toolchains: {step}"
         );
         // Digest-before-exec: the digest comparison alone decides reuse, and
-        // the slot binary is executed exactly twice — the closure and
-        // revision self-report probes — after the digest has proven the
-        // bytes, never probed before the comparison.
+        // the slot binary is executed exactly once, after the digest has
+        // proven the bytes — never probed before the comparison.
         assert!(
             step.contains("if [[ \"$existing\" != \"$expected\" ]]; then"),
             "reuse requires the manifest digest, decided before any execution: {step}"
@@ -8372,12 +8339,7 @@ mod tests {
         assert_eq!(
             step.matches("\"$binary\" --closure").count(),
             1,
-            "the closure probe runs exactly once: {step}"
-        );
-        assert_eq!(
-            step.matches("\"$binary\" --revision").count(),
-            1,
-            "the revision probe runs exactly once: {step}"
+            "the slot binary is executed exactly once: {step}"
         );
         let attested = must_some(
             step.find("gh attestation verify \"$temporary/manifest.json\""),
@@ -8393,34 +8355,15 @@ mod tests {
         );
         let probe = must_some(
             step.find("reported=\"$(\"$binary\" --closure)\""),
-            "post-install closure probe renders",
+            "post-install self-report probe renders",
         );
         let confirmed = must_some(
             step.find("[[ \"$reported\" == \"$closure\" ]]"),
-            "closure gate renders",
-        );
-        let revision_probe = must_some(
-            step.find("reported_revision=\"$(\"$binary\" --revision)\""),
-            "post-install revision probe renders",
-        );
-        let revision_confirmed = must_some(
-            step.find("[[ \"$reported_revision\" == \"$manifest_revision\" ]]"),
-            "revision gate renders",
+            "final self-report gate renders",
         );
         assert!(
-            attested < gate
-                && gate < installed
-                && installed < probe
-                && probe < confirmed
-                && confirmed < revision_probe
-                && revision_probe < revision_confirmed,
-            "attest precedes the reuse gate precedes the install precedes the closure probe and gate precedes the revision probe and gate: {step}"
-        );
-        assert!(
-            step.contains(
-                "manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\""
-            ),
-            "the revision gate compares against the freshly downloaded manifest: {step}"
+            attested < gate && gate < installed && installed < probe && probe < confirmed,
+            "attest precedes the reuse gate precedes the install precedes the probe precedes the final gate: {step}"
         );
         assert!(
             step.contains(&format!(
@@ -8440,379 +8383,6 @@ mod tests {
             step.contains("mainline runtime-product publisher"),
             "the failure names the producer that publishes the product: {step}"
         );
-    }
-
-    #[test]
-    fn velnor_provisioner_rehashes_the_slot_before_each_exec() {
-        let step = workflow_pinned_policy_runtime_velnor("checkout");
-        // A concurrent same-host job that swaps the shared slot between
-        // install and exec must fail closed: the digest is re-hashed
-        // immediately before each exec of the slot binary.
-        assert!(
-            step.contains("check_slot() {"),
-            "the slot re-hash renders: {step}"
-        );
-        assert!(
-            step.contains("::error::policy runtime slot changed after verification"),
-            "a swapped slot fails closed: {step}"
-        );
-        // Both toolchain spellings hash the slot path (not the temp copy).
-        assert!(
-            step.contains("sha256sum \"$binary\"") && step.contains("shasum -a 256 \"$binary\""),
-            "the re-hash covers both toolchains: {step}"
-        );
-        let install = must_some(
-            step.find("install -Dm0755 \"$temporary/$asset\" \"$binary\""),
-            "install renders",
-        );
-        let closure_probe = must_some(
-            step.find("reported=\"$(\"$binary\" --closure)\""),
-            "closure probe renders",
-        );
-        let revision_probe = must_some(
-            step.find("reported_revision=\"$(\"$binary\" --revision)\""),
-            "revision probe renders",
-        );
-        let export = must_some(
-            step.find(&format!(
-                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\""
-            )),
-            "slot export renders",
-        );
-        let first_check = must_some(step.find("\n          check_slot\n"), "first check renders");
-        let last_check = must_some(
-            step.rfind("\n          check_slot\n"),
-            "second check renders",
-        );
-        assert!(first_check != last_check, "both execs are gated: {step}");
-        assert!(
-            install < first_check
-                && first_check < closure_probe
-                && closure_probe < last_check
-                && last_check < revision_probe
-                && revision_probe < export,
-            "each slot exec is immediately preceded by a re-hash: {step}"
-        );
-    }
-
-    #[test]
-    fn velnor_provisioner_reads_the_live_declared_pin() {
-        let step = workflow_pinned_policy_runtime_velnor("checkout");
-        assert!(
-            !step.contains("PINNED_REVISION: "),
-            "no baked revision in env: {step}"
-        );
-        assert!(
-            step.contains("sed -n -E 's/^[[:space:]]*revision"),
-            "the pin is parsed from the generation config at runtime: {step}"
-        );
-        assert!(
-            step.contains("\"$CHECKOUT_PATH/.github-gen/velnor-workflow.toml\""),
-            "the pin comes from the audited checkout: {step}"
-        );
-        assert!(
-            step.contains("D19 pin missing from .github-gen/velnor-workflow.toml"),
-            "a missing pin fails closed: {step}"
-        );
-        let parse = must_some(step.find("PINNED_REVISION=\"$(sed"), "pin parse renders");
-        let resolve = must_some(
-            step.find("cat-file -e \"$PINNED_REVISION^{commit}\""),
-            "pin resolution renders",
-        );
-        assert!(
-            parse < resolve,
-            "the live pin is parsed before it is resolved: {step}"
-        );
-    }
-
-    #[test]
-    fn velnor_provisioner_resolves_the_closure_from_the_product_repository() {
-        let step = workflow_pinned_policy_runtime_velnor("checkout");
-        assert!(
-            !step.contains("git fetch"),
-            "the pin is never fetched from the consuming repository: {step}"
-        );
-        assert!(
-            !step.contains("$GITHUB_REPOSITORY"),
-            "consumer identity never enters closure resolution: {step}"
-        );
-        assert!(
-            step.contains(&format!(
-                "PRODUCT_REPOSITORY: {}",
-                workflow_setup_action_repository()
-            )),
-            "the product repository is pinned in env: {step}"
-        );
-        // Byte-level conformance with the setup action's own fallback: the
-        // same canonical listing from the same product API, modulo the
-        // revision variable name and YAML indentation.
-        let action = declared_setup_action();
-        let normalize = |script: &str, from: &str, to: &str| {
-            let start = must_some(script.find("listing=\"\""), "the resolution block starts");
-            let end = must_some(
-                script.find("has no closure inputs"),
-                "the resolution block ends",
-            );
-            script[start..end]
-                .replace(from, to)
-                .lines()
-                .map(str::trim_start)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        assert_eq!(
-            normalize(&step, "PINNED_REVISION", "INSTALL_REV"),
-            normalize(&action, "INSTALL_REV", "INSTALL_REV"),
-            "the provisioner resolves exactly like the setup action"
-        );
-    }
-
-    /// Run the provisioner's `run:` script against a consumer checkout that
-    /// lacks the pin, with the network stubbed: `gh api` serves the product
-    /// tree, `gh release` serves the product bytes, and any `git fetch`
-    /// fails loudly. Success proves the closure resolves from the product
-    /// repository, never the consuming one.
-    #[cfg(unix)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one executable proof stages its whole stubbed network inline"
-    )]
-    #[test]
-    fn velnor_provisioner_executes_product_repo_resolution() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let pin = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12";
-        let root =
-            std::env::temp_dir().join(format!("velnor-provisioner-product-{}", unique_suffix()));
-        let _ = fs::remove_dir_all(&root);
-        let consumer = root.join("consumer");
-        let stubs = root.join("stubs");
-        let log = root.join("log");
-        let home = root.join("home");
-        for directory in [&consumer, &stubs, &log, &home] {
-            must(fs::create_dir_all(directory), "create fixture directory");
-        }
-        // A consumer checkout: it declares the pin but cannot contain the
-        // foreign generator commit.
-        must(
-            fs::create_dir_all(consumer.join(".github-gen")),
-            "create generation config directory",
-        );
-        must(
-            fs::write(
-                consumer.join(".github-gen/velnor-workflow.toml"),
-                format!(
-                    "schema = 1\n\n[generator]\nrepository = \"consumer/acme\"\nrevision = \"{pin}\"\n"
-                ),
-            ),
-            "write consumer pin",
-        );
-        git_fixture(&consumer, &["init", "--quiet", "-b", "main"]);
-        git_fixture(&consumer, &["config", "user.email", "provisioner@test"]);
-        git_fixture(&consumer, &["config", "user.name", "provisioner"]);
-        git_fixture(&consumer, &["add", "-A"]);
-        git_fixture(&consumer, &["commit", "--quiet", "--message", "consumer"]);
-        // The product tree the API serves: closure inputs, one tree entry,
-        // and decoys the filter must drop.
-        let listing = [
-            "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tCargo.toml",
-            "100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tCargo.lock",
-            "100644 blob cccccccccccccccccccccccccccccccccccccccc\trust-toolchain.toml",
-            "100644 blob dddddddddddddddddddddddddddddddddddddddd\tcrates/velnor-workflow/src/lib.rs",
-        ];
-        let tree_entries: Vec<String> = listing
-            .iter()
-            .map(|line| {
-                let (meta, path) = must_some(line.split_once('\t'), "fixture line shape");
-                let mut fields = meta.split(' ');
-                let mode = must_some(fields.next(), "mode");
-                let kind = must_some(fields.next(), "type");
-                let sha = must_some(fields.next(), "sha");
-                format!(
-                    "{{\"mode\":\"{mode}\",\"type\":\"{kind}\",\"sha\":\"{sha}\",\"path\":\"{path}\"}}"
-                )
-            })
-            .chain([
-                "{\"mode\":\"040000\",\"type\":\"tree\",\"sha\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"path\":\"crates/velnor-workflow/src\"}"
-                    .to_owned(),
-                "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"ffffffffffffffffffffffffffffffffffffffff\",\"path\":\"UNRELATED.md\"}"
-                    .to_owned(),
-                "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"0000000000000000000000000000000000000000\",\"path\":\"crates/other/escape.rs\"}"
-                    .to_owned(),
-            ])
-            .collect();
-        must(
-            fs::write(
-                log.join("trees.json"),
-                format!(
-                    "{{\"sha\":\"{pin}\",\"truncated\":false,\"tree\":[{}]}}",
-                    tree_entries.join(",")
-                ),
-            ),
-            "write stub trees response",
-        );
-        let closure = closure::canonical_digest(
-            &listing.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            closure::CI_FEATURES,
-            closure::PROFILE_RELEASE,
-        );
-        // The product asset is itself a script reporting the closure and
-        // the revision, so the installed slot passes the self-report gates
-        // like a real binary.
-        let asset = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--revision\" ]; then echo {pin}; else echo {closure}; fi\n"
-        );
-        let asset_name = "velnor-workflow-Linux-X64";
-        let asset_digest = {
-            use sha2::{Digest as _, Sha256};
-            use std::fmt::Write as _;
-            let digest = Sha256::digest(asset.as_bytes());
-            let mut output = String::new();
-            for byte in digest {
-                let _ = write!(output, "{byte:02x}");
-            }
-            output
-        };
-        must(
-            fs::write(log.join("asset-manifest.json"), format!(
-                "{{\"closure\":\"{closure}\",\"revision\":\"{pin}\",\"profile\":\"release\",\"features\":\"\",\"products\":{{\"Linux-X64\":{{\"binary\":\"{asset_digest}\",\"asset\":\"{asset_name}\"}}}}}}"
-            )),
-            "write stub manifest",
-        );
-        must(
-            fs::write(log.join(format!("asset-{asset_name}")), &asset),
-            "write stub asset",
-        );
-        must(
-            fs::write(
-                stubs.join("git"),
-                "#!/bin/sh\necho \"$@\" >> \"$STUB_LOG/git-args\"\nfor arg in \"$@\"; do\n  if [ \"$arg\" = fetch ]; then echo \"must not fetch the pin from the consuming repository\" >&2; exit 1; fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n",
-            ),
-            "write stub git",
-        );
-        must(
-            fs::write(
-                stubs.join("gh"),
-                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  cat \"$STUB_LOG/trees.json\"\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
-            ),
-            "write stub gh",
-        );
-        must(
-            fs::write(
-                stubs.join("install"),
-                "#!/bin/sh\nmode=\"0755\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -D) shift;;\n    -m) mode=\"$2\"; shift 2;;\n    -Dm*) mode=\"${1#-Dm}\"; shift;;\n    *) break;;\n  esac\ndone\nmkdir -p \"$(dirname \"$2\")\" && cp \"$1\" \"$2\" && chmod \"$mode\" \"$2\"\n",
-            ),
-            "write stub install",
-        );
-        for stub in ["git", "gh", "install"] {
-            must(
-                fs::set_permissions(stubs.join(stub), fs::Permissions::from_mode(0o755)),
-                "mark stub executable",
-            );
-        }
-        // The script under test, exactly as rendered.
-        let step = workflow_pinned_policy_runtime_velnor("checkout");
-        let script = must_some(step.split("run: |\n").nth(1), "the run script");
-        let script: Vec<&str> = script
-            .lines()
-            .map(|line| {
-                must_some(
-                    line.strip_prefix("          "),
-                    "the rendered script dedents",
-                )
-            })
-            .collect();
-        let real_git = must(
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg("command -v git")
-                .output(),
-            "resolve git",
-        );
-        assert!(real_git.status.success());
-        let real_git = String::from_utf8_lossy(&real_git.stdout).trim().to_owned();
-        assert!(real_git.contains('/'), "git resolves to a path: {real_git}");
-        let path = must_some(std::env::var_os("PATH"), "PATH renders");
-        let outcome = must(
-            std::process::Command::new("bash")
-                .arg("-c")
-                .arg(script.join("\n"))
-                .current_dir(&root)
-                .env(
-                    "PATH",
-                    format!("{}:{}", stubs.display(), path.to_string_lossy()),
-                )
-                .env("CHECKOUT_PATH", &consumer)
-                .env("PRODUCT_REPOSITORY", workflow_setup_action_repository())
-                .env("GH_TOKEN", "stub-token")
-                .env("GITHUB_SERVER_URL", "https://github.example")
-                .env("GITHUB_REPOSITORY", "consumer/acme")
-                .env("RUNNER_OS", "Linux")
-                .env("RUNNER_ARCH", "X64")
-                .env("CARGO_HOME", &home)
-                .env("GITHUB_ENV", log.join("github-env"))
-                .env("STUB_LOG", &log)
-                .env("REAL_GIT", &real_git)
-                .output(),
-            "execute the provisioner script",
-        );
-        let stderr = String::from_utf8_lossy(&outcome.stderr);
-        assert!(
-            outcome.status.success(),
-            "the provisioner resolves a foreign pin from the product repo: {stderr}"
-        );
-        assert!(
-            !stderr.contains("consumer/acme"),
-            "consumer identity is never consulted: {stderr}"
-        );
-        let api = must(fs::read_to_string(log.join("gh-api")), "read api log");
-        assert_eq!(
-            api.trim(),
-            format!(
-                "repos/{}/git/trees/{pin}?recursive=1",
-                workflow_setup_action_repository()
-            ),
-            "the closure resolves over the product repository API"
-        );
-        let git_args = must(fs::read_to_string(log.join("git-args")), "read git log");
-        assert!(
-            !git_args.split_whitespace().any(|word| word == "fetch"),
-            "no fetch is attempted: {git_args}"
-        );
-        let downloads = must(
-            fs::read_to_string(log.join("gh-download")),
-            "read download log",
-        );
-        assert_eq!(
-            downloads.lines().count(),
-            2,
-            "manifest and asset download from the release: {downloads}"
-        );
-        let env = must(
-            fs::read_to_string(log.join("github-env")),
-            "read github env",
-        );
-        assert!(
-            env.contains(&format!(
-                "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}={}/bin/velnor-workflow-policy",
-                home.display()
-            )),
-            "the verified slot is exported: {env}"
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[cfg(unix)]
-    fn git_fixture(root: &std::path::Path, arguments: &[&str]) {
-        let status = must(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(arguments)
-                .status(),
-            "git present",
-        );
-        assert!(status.success());
     }
 
     #[test]
@@ -8968,7 +8538,6 @@ mod tests {
         for flag in [
             "--owner tailrocks".to_owned(),
             format!("--signer-workflow {repository}/.github/workflows/ci-runtime-products.yml"),
-            "--source-ref refs/heads/main".to_owned(),
         ] {
             assert!(
                 action[manifest..filter].contains(flag.as_str()),
@@ -8978,11 +8547,10 @@ mod tests {
     }
 
     /// Both acquisition paths re-verify the digest and the installed binary
-    /// must self-report the resolved closure and the manifest revision: the
-    /// download path gates the install on the fresh bytes, the cache-restore
-    /// path re-verifies the restored bytes (the cache is a pure
-    /// acceleration), and the PATH step refuses a binary whose own
-    /// `--closure` or `--revision` report disagrees.
+    /// must self-report the resolved closure: the download path gates the
+    /// install on the fresh bytes, the cache-restore path re-verifies the
+    /// restored bytes (the cache is a pure acceleration), and the PATH step
+    /// refuses a binary whose own `--closure` report disagrees.
     #[test]
     fn setup_action_gates_both_paths_on_digest_and_self_report() {
         let action = declared_setup_action();
@@ -9001,36 +8569,11 @@ mod tests {
         );
         assert!(
             action.contains("reported=\"$(\"$runtime/bin/velnor-workflow\" --closure)\""),
-            "the PATH step probes the installed binary's closure report: {action}"
+            "the PATH step probes the installed binary's self-report: {action}"
         );
         assert!(
             action.contains("[[ \"$reported\" == \"$CLOSURE\" ]]"),
-            "the PATH step gates on the closure equality: {action}"
-        );
-        assert!(
-            action
-                .contains("manifest_revision=\"$(jq -er '.revision' \"$runtime/manifest.json\")\""),
-            "the PATH step reads the revision from the verified manifest: {action}"
-        );
-        assert!(
-            action.contains("reported_revision=\"$(\"$runtime/bin/velnor-workflow\" --revision)\""),
-            "the PATH step probes the installed binary's revision report: {action}"
-        );
-        assert!(
-            action.contains("[[ \"$reported_revision\" == \"$manifest_revision\" ]]"),
-            "the PATH step gates on the revision equality: {action}"
-        );
-    }
-
-    #[test]
-    fn setup_action_accept_filters_require_a_well_formed_manifest_revision() {
-        let action = declared_setup_action();
-        assert_eq!(
-            action
-                .matches("(.revision | test(\"^[0-9a-f]{40}$\"))")
-                .count(),
-            2,
-            "the download and verify filters both require a well-formed revision: {action}"
+            "the PATH step gates on the self-report equality: {action}"
         );
     }
 
@@ -9745,64 +9288,6 @@ mod tests {
     }
 
     #[test]
-    fn apt_release_contract_parses_and_validates_through_config() {
-        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nkind = \"apt\"\npackage = \"example\"\nbinary = \"example\"\nsource_repository = \"example/app\"\nconsumer_repository = \"example/feed\"\nmanifest_schema = \"example.test/apt-manifest-v1\"\nsigner_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"\npassphrase_secret = \"APT_PASSPHRASE\"\nkeyring_path = \"keys/feed.gpg\"\napt_origin = \"Example\"\napt_identity_dir = \"app\"\napt_feed_url = \"https://feed.example.test\"\napt_arches = [\"amd64\", \"arm64\"]\nretention = 1\n";
-        let root = configured_repository("apt-release-config", Some(config));
-        let scanned = must(
-            scan_target(&root, RunnerMode::Github, "main"),
-            "scan configured repository",
-        );
-        let release = must_some(scanned.config.release.as_ref(), "release contract");
-        assert_eq!(release.kind, "apt");
-        assert_eq!(
-            release.signer_fingerprint,
-            "0123456789ABCDEF0123456789ABCDEF01234567"
-        );
-        assert_eq!(release.passphrase_secret, "APT_PASSPHRASE");
-        assert_eq!(release.keyring_path, "keys/feed.gpg");
-        assert_eq!(release.apt_origin, "Example");
-        assert_eq!(release.apt_identity_dir, "app");
-        assert_eq!(release.apt_feed_url, "https://feed.example.test");
-        assert_eq!(
-            release.apt_arches,
-            vec!["amd64".to_owned(), "arm64".to_owned()]
-        );
-        assert_eq!(release.retention, 1);
-        // The new fields are generation-time only, like `manifest_schema`:
-        // pinned runtimes reject them as unknown fields. The match is on
-        // TOML field form: emitted commands legitimately mention
-        // `retention-days`.
-        let emitted = scanned.config.toml();
-        for field in [
-            "signer_fingerprint",
-            "passphrase_secret",
-            "keyring_path",
-            "apt_origin",
-            "apt_identity_dir",
-            "apt_feed_url",
-            "apt_arches",
-            "retention",
-        ] {
-            assert!(
-                !emitted.contains(&format!("\n{field} =")),
-                "pinned runtimes reject unknown field {field}: {emitted}"
-            );
-        }
-        let _ = fs::remove_dir_all(root);
-
-        // A malformed apt value fails the scan loudly, never rendering a
-        // feed around it.
-        let bad = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nkind = \"apt\"\npackage = \"example\"\nbinary = \"example\"\nsource_repository = \"example/app\"\nconsumer_repository = \"example/feed\"\nmanifest_schema = \"example.test/apt-manifest-v1\"\nsigner_fingerprint = \"short\"\npassphrase_secret = \"APT_PASSPHRASE\"\napt_feed_url = \"https://feed.example.test\"\n";
-        let root = configured_repository("apt-release-config-bad", Some(bad));
-        let error = must_fail(
-            scan_target(&root, RunnerMode::Github, "main"),
-            "a malformed apt contract must fail the scan",
-        );
-        assert!(error.to_string().contains("signer_fingerprint"), "{error}");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn workspace_check_metadata_round_trips_through_runtime_config() {
         let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"rust-fixture\"\nworkspace_check = true\n";
         let root = configured_repository("workspace-check-runtime-roundtrip", Some(config));
@@ -10288,7 +9773,10 @@ mod tests {
     /// `skipped`, check red) nor skips for one its callee needs.
     #[test]
     fn prepare_cargo_caller_and_callee_select_the_same_restricted_units() {
-        let files = rendered_repository_files();
+        let files = must(
+            generated_files(&restricted_fixture_config()),
+            "render restricted fixture",
+        );
         let pr = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
             "ci-pr.yml",
@@ -12437,38 +11925,67 @@ channel = "stable"
         );
     }
 
-    /// Every file the generator writes for this repository, rendered the way
-    /// `run` renders them: the declared surface first, then the generated
-    /// families over it.
-    fn rendered_repository_files() -> BTreeMap<PathBuf, String> {
-        let root = must(
-            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
-            "repository root",
-        );
-        let scanned = must(
-            scan_target(&root, RunnerMode::Both, "main"),
-            "scan this repository",
-        );
-        let mut config = scanned.config;
-        let surface = must(
-            crate::primitives::generate(
-                &root,
-                &scanned.shape,
-                &config,
-                scanned.generation.as_ref(),
-            ),
-            "render declared surface",
-        );
-        config.units.clone_from(&surface.units);
-        for file in &surface.added_files {
-            if !config.workflow_files.contains(file) {
-                config.workflow_files.push(file.clone());
-            }
-        }
+    /// Every file the generator writes for the schema-1 polyglot fixture.
+    /// The dogfood repository flipped to schema 2 (R2m), so fixture
+    /// renders — not repository renders — carry the surface-wide
+    /// assertions.
+    fn rendered_fixture_files() -> BTreeMap<PathBuf, String> {
         must(
-            generated_files_with_surface(&config, Some(&surface)),
-            "render this repository's generated files",
+            generated_files(&scanned_fixture(RunnerMode::Both)),
+            "render fixture files",
         )
+    }
+
+    /// The fixture configuration with two cargo-restricted Rust units: the
+    /// clones keep the scanned commands (which resolve no inputs of their
+    /// own) and pin their lockfiles, so the prepare-cargo aggregate and
+    /// the per-lane prep jobs render.
+    fn restricted_fixture_config() -> ProjectConfig {
+        let mut config = scanned_fixture(RunnerMode::Both);
+        let rust = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Rust)
+                .cloned(),
+            "fixture rust unit",
+        );
+        for index in 0..2 {
+            let mut unit = rust.clone();
+            unit.id = format!("rust-restricted-{index}");
+            unit.label = format!("Rust restricted {index}");
+            unit.pinned_lockfile = true;
+            config.units.push(unit);
+        }
+        if let Some(unit) = config
+            .units
+            .iter_mut()
+            .find(|unit| unit.kind == UnitKind::Rust && !unit.id.starts_with("rust-restricted-"))
+        {
+            unit.pinned_lockfile = true;
+        }
+        config
+    }
+
+    /// A scanned schema-1 repository declaring the rust-binary release
+    /// contract: the release-family renders (release, preview,
+    /// maintenance) for surface-wide assertions.
+    fn scanned_release_config() -> ProjectConfig {
+        let root = configured_repository(
+            "release-surface",
+            Some(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nrunners = \"github\"\n\n\
+                 [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
+                 binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
+            ),
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan release repository",
+        );
+        let _ = fs::remove_dir_all(root);
+        config
     }
 
     fn workflow_job_block(files: &BTreeMap<PathBuf, String>, file: &str, job: &str) -> String {
@@ -12499,7 +12016,7 @@ channel = "stable"
     #[test]
     fn github_backend_mr_boxington_jobs_export_the_hosted_store_budget() {
         let export = format!("{MR_BOXINGTON_STORE_BUDGET_ENV}={MR_BOXINGTON_HOSTED_STORE_BUDGET}");
-        let files = rendered_repository_files();
+        let files = rendered_fixture_files();
         must(
             validate_hosted_mr_boxington_store_budget(&files),
             "every rendered GitHub-backend Mr. Boxington job carries the store budget",
@@ -12541,8 +12058,8 @@ channel = "stable"
             }
         }
         assert!(
-            hosted_jobs > 1,
-            "the tree renders hosted Mr. Boxington jobs"
+            hosted_jobs >= 1,
+            "the fixture renders hosted Mr. Boxington jobs"
         );
     }
 
@@ -12604,7 +12121,17 @@ channel = "stable"
     /// pin and a shallow checkout holds neither.
     #[test]
     fn policy_running_jobs_check_out_full_history() {
-        let files = rendered_repository_files();
+        let mut files = rendered_fixture_files();
+        // The fixture declares no release contract, so the release-family
+        // validator jobs come from the release repository.
+        let release_config = scanned_release_config();
+        if let Some(release) = crate::primitives::release::release_content(&release_config) {
+            files.insert(PathBuf::from(".github/workflows/release.yml"), release);
+        }
+        files.insert(
+            PathBuf::from(".github/workflows/preview.yml"),
+            crate::primitives::release::preview_content(&release_config),
+        );
         must(
             validate_policy_jobs_check_out_full_history(&files),
             "every rendered validator-running job checks out full history",
@@ -12645,12 +12172,11 @@ channel = "stable"
                 validator_jobs.push(format!("{path}#{job}"));
             }
         }
-        // The preview identity job is the one that failed on `main`
-        // (`Preview · push · main` run 35051490706); the release verify and
-        // policy jobs are the other call sites (nightly dispatches ci-main
-        // and runs no validator of its own).
+        // The release-family validator jobs come from the rust-binary
+        // release repository (the fixture declares no release contract);
+        // nightly dispatches ci-main and runs no validator of its own.
         for expected in [
-            ".github/workflows/preview.yml#identity",
+            ".github/workflows/preview.yml#build",
             ".github/workflows/release.yml#verify",
             ".github/workflows/ci-policy.yml#policy",
             ".github/workflows/ci-main.yml#policy",
@@ -12712,7 +12238,7 @@ channel = "stable"
     /// layout is the one Planning and the unit jobs address.
     #[test]
     fn every_runtime_install_owns_a_revision_addressed_root() {
-        let files = rendered_repository_files();
+        let files = rendered_fixture_files();
         must(
             validate_workflow_runtime_install_roots(&files),
             "every rendered velnor-workflow install owns its root",
@@ -13019,13 +12545,59 @@ channel = "stable"
 
     #[test]
     fn preview_static_surface_saves_guest_seed_on_trusted_exact_miss() {
-        let root = must(
-            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
-            "repository root",
+        // A synthetic microvm repository: the guest-seed lifecycle needs a
+        // microvm-watching unit plus scanned guest-agent/guest-image bins,
+        // which the schema-2 dogfood tree can no longer lend this suite.
+        let root = temporary_repository("preview-guest-seed");
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n",
+            ),
+            "write toolchain pin with release targets",
+        );
+        must(
+            fs::create_dir_all(root.join("microvm/src/bin")),
+            "create microvm sources",
+        );
+        must(
+            fs::write(
+                root.join("microvm/Cargo.toml"),
+                "[package]\nname = \"example\"\nversion = \"0.1.0\"\n\n\
+                 [features]\nrelease-build = []\n\n\
+                 [[bin]]\nname = \"example-guest-agent\"\npath = \"src/bin/agent.rs\"\n\n\
+                 [[bin]]\nname = \"example-guest-image\"\npath = \"src/bin/image.rs\"\n",
+            ),
+            "write microvm manifest",
+        );
+        must(
+            fs::write(root.join("microvm/src/bin/agent.rs"), "fn main() {}\n"),
+            "write agent source",
+        );
+        must(
+            fs::write(root.join("microvm/src/bin/image.rs"), "fn main() {}\n"),
+            "write image source",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create config dir",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nrunners = \"both\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+                 files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\"]\n\n\
+                 [release]\nenabled = true\nkind = \"native\"\npackage = \"example\"\n\
+                 binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
+                 consumer_repository = \"example/consumer\"\n\n\
+                 [[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n",
+            ),
+            "write generation config",
         );
         let scanned = must(
             scan_target(&root, RunnerMode::Both, "main"),
-            "scan this repository",
+            "scan microvm repository",
         );
         let surface = must(
             crate::primitives::generate(
@@ -13056,8 +12628,8 @@ channel = "stable"
         assert!(preview.contains("guest-seed-${{ matrix.arch }}-"));
         assert!(preview.contains("hashFiles("));
         assert!(preview.contains("'microvm/**'"));
-        assert!(preview.contains("crates/velnor-model/**"));
-        assert!(preview.contains("crates/velnor-control/**"));
+        assert!(preview.contains("Cargo.lock"));
+        assert!(preview.contains("rust-toolchain.toml"));
         assert!(preview.contains("restored=false"));
         assert!(!preview.contains("guest-seed-${{ matrix.arch }}-${{ github.sha }}"));
         assert!(preview.contains("if: steps.guest-seed-reuse.outputs.restored != 'true'"));
@@ -13071,14 +12643,14 @@ channel = "stable"
         assert!(preview.contains("mmdebstrap"), "{preview}");
         assert!(preview.contains("gcc-aarch64-linux-gnu"), "{preview}");
         assert!(preview.contains("flex bison bc"), "{preview}");
-        assert!(preview.contains("--bin velnor-guest-agent"), "{preview}");
-        assert!(preview.contains("--bin velnor-guest-image"), "{preview}");
+        assert!(preview.contains("--bin example-guest-agent"), "{preview}");
+        assert!(preview.contains("--bin example-guest-image"), "{preview}");
         assert!(
-            preview.contains(
-                "mbx run --locked --release --package velnor-runner --bin velnor-guest-image"
-            ) || preview.contains(
-                "cargo run --locked --release --package velnor-runner --bin velnor-guest-image"
-            ),
+            preview
+                .contains("mbx run --locked --release --package example --bin example-guest-image")
+                || preview.contains(
+                    "cargo run --locked --release --package example --bin example-guest-image"
+                ),
             "guest image build must invoke the scanned guest-image bin: {preview}"
         );
         assert!(
@@ -13238,6 +12810,7 @@ channel = "stable"
             !release.contains("velnor-workflow release package-guest"),
             "{release}"
         );
+        let _ = fs::remove_dir_all(root);
     }
 
     /// The Docker mutable mount seed renders the whole lifecycle in order —
@@ -13581,66 +13154,6 @@ channel = "stable"
             .collect::<Vec<_>>();
         assert_eq!(docker_units.len(), 1);
         assert_eq!(docker_units[0].pr_commands.len(), 2);
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    /// The hosted full Docker build reuses the pull-request GHA layer cache:
-    /// buildx with the unit's cache scope on the image build, while the
-    /// cache-export build stays a plain local export.
-    #[test]
-    fn hosted_docker_full_build_reuses_the_pull_request_gha_layer_cache() {
-        let root = temporary_repository("docker-full-gha-cache");
-        must(
-            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
-            "write Dockerfile",
-        );
-        let directory = root.join(".github-gen");
-        must(fs::create_dir_all(&directory), "create config directory");
-        must(
-            fs::write(
-                directory.join("velnor-workflow.toml"),
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"docker\"\n\n[units.cache]\nkey_files = [\"Dockerfile\"]\npaths = [\".velnor-docker-cache\"]\nmutable_mount_seed = true\n",
-            ),
-            "write generation config",
-        );
-        let config = must(
-            scan_repository(&root, RunnerMode::Github),
-            "scan Docker repository",
-        );
-        let unit = must_some(
-            config
-                .units
-                .iter()
-                .find(|unit| unit.kind == UnitKind::Docker),
-            "scanned Docker unit",
-        );
-        let full = must_some(unit.github_full_commands.as_ref(), "hosted full commands");
-        assert_eq!(full.len(), 2, "{full:?}");
-        assert!(
-            full[0].starts_with("docker buildx build --load "),
-            "first full command must run through buildx: {full:?}"
-        );
-        assert!(
-            full[0].contains("--cache-from type=gha,scope=docker,mode=max"),
-            "first full command must reuse the unit GHA cache: {full:?}"
-        );
-        assert!(
-            full[0].contains("--cache-to type=gha,scope=docker,mode=max"),
-            "first full command must refresh the unit GHA cache: {full:?}"
-        );
-        assert!(
-            !full[0].contains("--target ci"),
-            "the full build keeps the default target: {full:?}"
-        );
-        assert!(
-            full[1].contains("velnor-cache-export"),
-            "second full command stays the cache export: {full:?}"
-        );
-        assert!(
-            !full[1].contains("--cache-from") && !full[1].contains("--cache-to"),
-            "the cache export takes no GHA cache flags: {full:?}"
-        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -15037,21 +14550,7 @@ channel = "stable"
         let velnor = velnor_policy_job("revision", "[self-hosted, velnor]");
         assert!(!velnor.contains("--pin-build"), "{velnor}");
         assert!(!velnor.contains("--ruleset-contexts"), "{velnor}");
-        assert!(
-            !velnor.contains("rulesets?"),
-            "the Velnor policy job performs no ruleset lookup: {velnor}"
-        );
-        assert_eq!(
-            velnor.matches("gh api").count(),
-            1,
-            "the only Velnor API call resolves the pin from the product repository: {velnor}"
-        );
-        assert!(
-            velnor.contains(
-                "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
-            ),
-            "the Velnor API call is the product-trees fallback: {velnor}"
-        );
+        assert!(!velnor.contains("gh api"), "{velnor}");
         let hosted = hosted_policy_job("revision");
         assert!(!hosted.contains("--pin-build"), "{hosted}");
         assert!(
@@ -15136,66 +14635,60 @@ channel = "stable"
         }
     }
 
-    /// The checked-in workflows are byte-identical to what the generator
-    /// renders for this repository: regeneration is a fixed point, so a
-    /// template change without its regen (or a hand-edit) fails here before
-    /// it fails in CI. The harness renders the repository's own surface the
-    /// way `run` renders it, which makes comparing every workflow trivial —
-    /// including the shared policy job in `ci-policy.yml` and `ci-main.yml`.
+    /// The dogfood repository flipped to schema 2 (R2m), so the schema-1
+    /// pipeline owns no checked-in tree anymore: it must fail closed on the
+    /// repository's config instead of rendering a mixed surface. (Render
+    /// identity over the schema-2 tree is proven by the schema-2
+    /// byte-for-byte test, not here: the pin inside every render moves with
+    /// each commit.)
     #[test]
-    fn checked_in_workflows_match_the_generator_byte_for_byte() {
+    fn schema1_pipeline_refuses_the_schema2_repository() {
         let root = must(
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
-        let files = rendered_repository_files();
-        let entries = must(
-            fs::read_dir(root.join(".github/workflows")),
-            "read checked-in workflows",
+        let error = must_fail(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scanning the schema-2 repository with the schema-1 pipeline must fail",
         );
-        let mut checked_in = 0;
-        for entry in entries {
-            let path = must(entry, "workflow entry").path();
-            if path.extension().is_none_or(|extension| extension != "yml") {
-                continue;
-            }
-            let name = must_some(
-                path.file_name().and_then(|name| name.to_str()),
-                "workflow file name",
-            )
-            .to_owned();
-            let disk = must(fs::read_to_string(&path), &format!("read {name}"));
-            let rendered = must_some(
-                files.get(&PathBuf::from(".github/workflows").join(&name)),
-                &format!("the generator renders {name}"),
-            );
-            assert_eq!(rendered, &disk, "{name} drifted from the generator");
-            checked_in += 1;
-        }
-        assert!(checked_in > 0, "the repository checks in workflows");
-        for path in files.keys() {
-            if path.starts_with(".github/workflows")
-                && path.extension().is_some_and(|extension| extension == "yml")
-            {
-                assert!(
-                    root.join(path).is_file(),
-                    "{} is rendered but not checked in",
-                    path.display()
-                );
-            }
-        }
+        assert!(
+            error.to_string().contains("invalid generation config"),
+            "the refusal must reject the schema-2 config: {error}"
+        );
     }
 
+    /// The acquire step, the unit-job publisher, and the validator's
+    /// `wanted` binding rendezvous on one digest: the audited head's
+    /// candidate closure. Polling by the pin's candidate closure while the
+    /// other two legs bind the head's is jointly satisfiable only when
+    /// pin..head is closure-clean, so no render-changing generator PR can
+    /// land green. The step therefore derives the poll name and the
+    /// manifest gate from `closure --rev $HEAD_SHA --candidate`, and no
+    /// `pin_candidate` derivation survives anywhere in the job.
     #[test]
-    fn policy_candidate_step_binds_manifest_to_pin_and_exports_it() {
+    fn policy_candidate_step_binds_manifest_to_head_and_exports_it() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
-            owner.contains("\"$manifest_closure\" == \"$pin_candidate\""),
-            "the acquire step requires the manifest closure to equal the pin's candidate in full: {owner}"
+            owner.contains(
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
+            ),
+            "the acquire step derives the candidate from the audited head: {owner}"
+        );
+        assert!(
+            owner.contains("name=\"velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""),
+            "the polled artifact name keys off the head candidate, as published: {owner}"
+        );
+        assert!(
+            !owner.contains("pin_candidate"),
+            "no pin-anchored candidate derivation survives the rendezvous: {owner}"
+        );
+        assert!(
+            owner.contains("\"$manifest_closure\" == \"$head_candidate\""),
+            "the acquire step requires the manifest closure to equal the head's candidate in full: {owner}"
         );
         assert!(
             owner.contains(
-                "candidate manifest closure $manifest_closure is not the pin's candidate $pin_candidate"
+                "candidate manifest closure $manifest_closure is not the head's candidate $head_candidate"
             ),
             "a closure mismatch fails closed with both digests: {owner}"
         );
@@ -15233,6 +14726,92 @@ channel = "stable"
                 "the manifest accept filter binds {clause}: {owner}"
             );
         }
+        assert!(
+            owner.contains("generator changes from forks cannot be verified here"),
+            "the fork gate still fails closed before any candidate fetch: {owner}"
+        );
+    }
+
+    /// The same-closure early exit fires only when the tree matches the
+    /// pin's render: same closure makes the running base validator the
+    /// pin's own renderer, so `--plain --check` decides tree==pin-render
+    /// with no extra provisioning. A same-closure tree that differs is a
+    /// generator change in flight and must fall through to the candidate
+    /// path — exiting early would clear the manifest and strand the
+    /// validator with a red pin leg and no candidate binding.
+    #[test]
+    fn policy_acquire_same_closure_exit_requires_pin_render_match() {
+        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        assert!(
+            owner.contains("if velnor-workflow --plain --check; then"),
+            "the same-closure branch proves tree==pin-render before exiting: {owner}"
+        );
+        assert!(
+            owner.contains(
+                "echo \"pin $pin shares the base closure and renders the tree; the Stage-0 validator renders\""
+            ),
+            "the early exit names both conditions it proved: {owner}"
+        );
+        assert!(
+            !owner.contains(
+                "echo \"pin $pin shares the base closure; the Stage-0 validator renders\""
+            ),
+            "no unconditional same-closure exit survives: {owner}"
+        );
+        assert!(
+            owner.contains("falling through to the candidate path"),
+            "a same-closure render differ falls through instead of exiting: {owner}"
+        );
+        let check = must_some(
+            owner.find("if velnor-workflow --plain --check; then"),
+            "the render gate is present",
+        );
+        let fork = must_some(
+            owner.find("generator changes from forks cannot be verified here"),
+            "the fork gate is present",
+        );
+        let head = must_some(
+            owner.find("head_candidate=\"$(velnor-workflow closure"),
+            "the head derivation is present",
+        );
+        assert!(
+            check < fork && fork < head,
+            "the render gate precedes the fork gate precedes the head derivation: {owner}"
+        );
+    }
+
+    /// `closure --rev $HEAD_SHA` reads git objects at the audited head,
+    /// which the checkout step normally already fetched — but the acquire
+    /// step must not assume that: a missing head commit fails closed as a
+    /// fetch, never as a closure error. The fetch line matches the
+    /// checkout step's exactly, so both occurrences are asserted together.
+    #[test]
+    fn policy_acquire_fetches_head_before_deriving_its_candidate() {
+        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        let fetch = "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"";
+        assert_eq!(
+            owner.matches(fetch).count(),
+            2,
+            "the checkout step and the acquire step both ensure the head commit: {owner}"
+        );
+        let acquire_fetch = must_some(
+            owner
+                .find("Acquire candidate generator product")
+                .and_then(|start| {
+                    owner[start..]
+                        .find("if ! git cat-file -e \"$HEAD_SHA^{commit}\"")
+                        .map(|offset| start + offset)
+                }),
+            "the acquire step guards its own head fetch",
+        );
+        let head = must_some(
+            owner.find("head_candidate=\"$(velnor-workflow closure"),
+            "the head derivation is present",
+        );
+        assert!(
+            acquire_fetch < head,
+            "the head commit is ensured before its candidate is derived: {owner}"
+        );
     }
 
     /// The acquire step finds the sibling PR run through the runs-list API,
@@ -16461,13 +16040,12 @@ channel = "stable"
 
     #[test]
     fn velnor_lane_yaml_omits_actions_cache_for_every_supported_unit_kind() {
-        let root = must(
-            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
-            "repository root",
-        );
+        // The dogfood repository flipped to schema 2 (R2m), so the audit
+        // runs over the schema-1 fixture's kinds instead of the
+        // repository's.
         let scanned = must(
-            scan_target(&root, RunnerMode::Both, "main"),
-            "scan repository",
+            scan_target(&fixture_root(), RunnerMode::Both, "main"),
+            "scan fixture",
         );
         let ir = WorkflowIr::from_config(&scanned.config);
         let mut covered_kinds = std::collections::BTreeSet::new();
@@ -16505,6 +16083,10 @@ channel = "stable"
                 );
             }
         }
+        assert!(
+            !covered_kinds.is_empty(),
+            "the fixture must lend the audit at least one Velnor-supported kind"
+        );
         for kind in scanned
             .config
             .units

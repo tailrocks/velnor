@@ -15,13 +15,7 @@
 # product no consumer would accept never reaches a release.
 #
 # The workflow never overwrites: when the tag already exists the run skips,
-# the publish job yields to a fresher same-closure run, serializes on the
-# tag across refs, re-checks immediately before creating, and converges when
-# a conflicting create loses instead of failing. The create carries no
-# target: the tag names the closure, never the commit, so the API tags the
-# default-branch tip when the tag is missing and never moves a tag. This
-# workflow is the sole writer of product tags — no pre-tagging, no second
-# path.
+# and the publish job re-checks immediately before creating the release.
 name: Velnor workflow runtime products
 run-name: Runtime products · ${{ github.event_name }} · ${{ github.ref_name }}
 
@@ -31,9 +25,7 @@ on:
   workflow_dispatch:
 
 # Same-ref runs serialize so two pushes can never race on one release; a
-# publish in flight is never cancelled. Same-closure runs across refs (a main
-# push and a dispatch name the same tag) serialize again on the tag in the
-# publish job, which owns the shared resource.
+# publish in flight is never cancelled.
 concurrency:
   group: runtime-products-${{ github.ref }}
   cancel-in-progress: false
@@ -212,50 +204,11 @@ jobs:
     if: needs.closure.outputs.exists != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # The true shared resource is the closure tag, not the ref: back-to-back
-    # pushes with an unchanged closure — and a main push beside a dispatch —
-    # name the same tag, so publishes serialize on it across refs. A publish
-    # in flight is never cancelled.
-    concurrency:
-      group: runtime-products-tag-${{ needs.closure.outputs.tag }}
-      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - name: Checkout default-branch tip
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          persist-credentials: false
-      - name: Prove publish freshness
-        shell: bash
-        env:
-          CLOSURE: ${{ needs.closure.outputs.closure }}
-          HEAD_SHA: ${{ needs.closure.outputs.head-sha }}
-          TAG: ${{ needs.closure.outputs.tag }}
-        run: |
-          set -euo pipefail
-          # The closure job resolved CLOSURE at HEAD_SHA, but the build took
-          # minutes and the default branch may have moved since. Re-resolve at
-          # the tip: when the closure is unchanged the fresher run owns this
-          # tag and this run yields. A resolve-time check cannot see this —
-          # staleness is born mid-build.
-          command -v sha256sum >/dev/null 2>&1 || { echo "::error::sha256sum is required on the publish runner" >&2; exit 1; }
-          tip="$(git rev-parse HEAD)"
-          [[ "$tip" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::HEAD is not a commit SHA: $tip" >&2; exit 1; }
-          if [[ "$tip" == "$HEAD_SHA" ]]; then
-            exit 0
-          fi
-          listing="$(git ls-tree -r HEAD -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
-          test "$listing" != '' || { echo "::error::HEAD has no closure inputs" >&2; exit 1; }
-          tip_closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
-          [[ "$tip_closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }
-          if [[ "$tip_closure" == "$CLOSURE" ]]; then
-            echo "::notice::the default branch moved to $tip with unchanged closure; the fresher run owns $TAG"
-            exit 0
-          fi
       - name: Download runtime assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -266,6 +219,7 @@ jobs:
         shell: bash
         env:
           CLOSURE: ${{ needs.closure.outputs.closure }}
+          HEAD_SHA: ${{ needs.closure.outputs.head-sha }}
         run: |
           set -euo pipefail
           # The build jobs proved each binary's identity on its native runner;
@@ -297,7 +251,7 @@ jobs:
             > dist/manifest.json
           for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
             jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
-              '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' dist/manifest.json >/dev/null
+              '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' dist/manifest.json >/dev/null
           done
           manifest_revision="$(jq -er '.revision' dist/manifest.json)"
           [[ "$manifest_revision" == "$HEAD_SHA" ]] || { echo "::error::assembled manifest names revision $manifest_revision, expected $HEAD_SHA" >&2; exit 1; }
@@ -321,7 +275,7 @@ jobs:
           gh attestation verify "dist/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
           gh attestation verify "dist/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
           jq -e --arg closure "$CLOSURE" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" \
-            '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "dist/manifest.json" >/dev/null
+            '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "dist/manifest.json" >/dev/null
           actual="$(sha256sum "dist/$asset" | awk '{print $1}')"
           expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "dist/manifest.json")"
           [[ "$actual" == "$expected" ]] || { echo "::error::smoke-test digest mismatch" >&2; exit 1; }
@@ -352,33 +306,6 @@ jobs:
             echo "::notice::release $TAG already exists; leaving it untouched"
             exit 0
           fi
-          # No target: the tag names the closure, never the commit, so the
-          # API tags the default-branch tip when the tag is missing and there
-          # is exactly one tag path — create-if-missing, never move. A stale
-          # target would diff target..HEAD and demand the workflows scope
-          # GITHUB_TOKEN can never hold whenever the range carries workflow
-          # files (cli/cli#9514).
-          if gh release create "$TAG" --repo tailrocks/velnor --title "$TAG" \
+          gh release create "$TAG" --repo tailrocks/velnor --target "$HEAD_SHA" --title "$TAG" \
             --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
-            dist/velnor-workflow-Linux-X64 dist/velnor-workflow-Linux-ARM64 dist/velnor-workflow-macOS-ARM64 dist/manifest.json; then
-            exit 0
-          fi
-          # Conflict converges, never fails: a concurrent run may have
-          # published between the re-check and the create. Re-view with
-          # backoff; the winner carries this same tag, hence this same
-          # closure, so its appearance is success. Fail only if nothing
-          # materializes.
-          converged=false
-          for delay in 5 10 15 30; do
-            sleep "$delay"
-            if gh release view "$TAG" --repo tailrocks/velnor >/dev/null 2>&1; then
-              converged=true
-              break
-            fi
-          done
-          if [[ "$converged" == true ]]; then
-            echo "::notice::release $TAG appeared after a conflicting create; converging"
-            exit 0
-          fi
-          echo "::error::release $TAG was not created and did not appear" >&2
-          exit 1
+            dist/velnor-workflow-Linux-X64 dist/velnor-workflow-Linux-ARM64 dist/velnor-workflow-macOS-ARM64 dist/manifest.json

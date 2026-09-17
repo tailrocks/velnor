@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn no_lane_fetches_pin_history_the_tool_self_fetches() {
+    fn github_lane_fetches_pin_history_for_check_running_units() {
         let owner = workflow_setup_action_repository().to_owned();
         let mut checker = rust_unit("rust-generator-crate", "crates/velnor-workflow");
         checker
@@ -764,16 +764,30 @@ mod tests {
             "both lane jobs render",
         );
         assert!(
-            !hosted.contains("Fetch D19 pin history"),
-            "the tool fetches the pin itself; the GitHub lane emits no fetch: {hosted}"
-        );
-        assert!(
             !velnor.contains("Fetch D19 pin history"),
-            "the tool fetches the pin itself; the Velnor lane emits no fetch: {velnor}"
+            "the Velnor lane provisions the pin through its pinned-renderer step: {velnor}"
+        );
+        let fetch = must_some(
+            hosted.find("      - name: Fetch D19 pin history"),
+            "fetch step renders on the GitHub lane: {hosted}",
+        );
+        let checks = must_some(hosted.find("- name: Run unit checks"), "checks render");
+        assert!(
+            fetch < checks,
+            "the pin is present before verification runs: {hosted}"
+        );
+        let step = &hosted[fetch..checks];
+        assert!(
+            step.contains("'rust-generator-crate') : ;;"),
+            "the check-running member proceeds to the fetch: {step}"
         );
         assert!(
-            hosted.contains("- name: Run unit checks"),
-            "verification still renders: {hosted}"
+            step.contains("'rust-sibling-crate') exit 0 ;;"),
+            "other members skip the fetch: {step}"
+        );
+        assert!(
+            step.contains("git fetch --no-tags --depth 1"),
+            "a shallow checkout gains the pin commit: {step}"
         );
     }
 
@@ -945,6 +959,12 @@ mod tests {
         assert!(
             candidate.contains("trap 'git worktree remove --force \"$worktree\"' EXIT"),
             "the worktree is cleaned up on failure: {candidate}"
+        );
+        assert!(
+            candidate.contains(
+                "git worktree remove --force \"$worktree\"\n            trap - EXIT"
+            ),
+            "the explicit worktree removal disarms the EXIT trap so the step cannot double-remove: {candidate}"
         );
         assert!(
             candidate.contains("binary=\"$worktree/target/debug/velnor-workflow\"")
@@ -1661,6 +1681,18 @@ fn checks_env_for_members(unit: &Unit, members: &[&Unit]) -> String {
     env
 }
 
+/// The checks-step token a GitHub-lane Docker job exports: its hosted image
+/// build commands pass `--secret id=github_token,env=GITHUB_TOKEN`, so the
+/// step must provide the automatic token. Other lanes and kinds run no such
+/// command and get no token.
+fn docker_build_token_env_for_members(lane: RunnerMode, members: &[&Unit]) -> &'static str {
+    if lane == RunnerMode::Github && members.iter().any(|unit| unit.kind == UnitKind::Docker) {
+        "\n          GITHUB_TOKEN: ${{ github.token }}"
+    } else {
+        ""
+    }
+}
+
 /// The checks env of a collapsed lane job. `CARGO_NET_OFFLINE` is a literal
 /// when every member agrees, and the `cargo_net_offline` input (which
 /// defaults to `false`, Cargo's own default) when members differ.
@@ -1735,7 +1767,7 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 /// identity the owner policy run waits for and verifies.
 ///
 /// The unit job checks out the merge commit, but the policy consumer waits
-/// for an artifact named by the audited pin's candidate closure and verifies
+/// for an artifact named by the audited head's candidate closure and verifies
 /// the audited PR-head tree's closure. Naming the artifact from the merge
 /// tree flakes whenever main advances in closure paths (rebase/merge-state
 /// decides pass/fail), so the prepare step fetches the PR head, the base,
@@ -1828,6 +1860,7 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
           if [[ "$worktree" != "" ]]; then
             git worktree remove --force "$worktree"
+            trap - EXIT
           fi
           echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
       - name: Publish candidate generator product
@@ -4687,7 +4720,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let policy_runtime = FeatureCoverage::over(&facts, |facts| facts.policy_runtime);
         if !github_lane && policy_runtime.any {
             output.push_str(&gated(
-                crate::workflow_pinned_policy_runtime_velnor("${{ github.workspace }}"),
+                crate::workflow_pinned_policy_runtime_velnor(
+                    &self.workflow_revision,
+                    "${{ github.workspace }}",
+                ),
                 policy_runtime,
                 lane_input::POLICY_RUNTIME,
             ));
@@ -4865,13 +4901,45 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_ci_cargo_fetch_end_marker(output);
         }
 
-        // Verification. No pin-fetch step: the tool fetches the declared pin
-        // itself before closure verification, so no lane needs its own.
+        // The generator's self-check (`--plain --check`) resolves the D19 pin's
+        // closures from local history, but unit checkouts are shallow. Fetch
+        // the pin commit for check-running members before verification. The
+        // Velnor lane provisions the pin through its pinned-renderer step, so
+        // only the GitHub lane needs this fetch.
+        let check_members: Vec<&&Unit> = members
+            .iter()
+            .filter(|unit| unit_runs_workflow_plain_check(unit))
+            .collect();
+        if github_lane && !check_members.is_empty() {
+            let mut cases = String::new();
+            for member in members {
+                if check_members.iter().any(|check| check.id == member.id) {
+                    let _ = writeln!(
+                        cases,
+                        "            {}) : ;;",
+                        crate::shell_quote(&member.id)
+                    );
+                } else {
+                    let _ = writeln!(
+                        cases,
+                        "            {}) exit 0 ;;",
+                        crate::shell_quote(&member.id)
+                    );
+                }
+            }
+            let _ = writeln!(
+                output,
+                "      - name: Fetch D19 pin history\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for pin fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          pin=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' .github-gen/velnor-workflow.toml | head -n 1)\"\n          test \"$pin\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          if ! git cat-file -e \"$pin^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\"\n          fi",
+            );
+        }
+
+        // Verification.
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+        let token_env = docker_build_token_env_for_members(lane, members);
         let _ = writeln!(
             output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
         );
 
         // Stage-1 candidate packaging, after the checks that build the
@@ -5234,6 +5302,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         } else {
             checks_env(unit)
         };
+        let token_env = if runtime_unit_id {
+            docker_build_token_env_for_members(lane, members)
+        } else {
+            docker_build_token_env_for_members(lane, &[unit])
+        };
         let offline_prelude = if runtime_unit_id {
             cargo_offline_run_prelude(members)
         } else {
@@ -5243,7 +5316,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{offline_prelude}{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n        run: |\n          set -o pipefail\n{offline_prelude}{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
             yaml_scalar(&unit.label),
             checks_env,
         );
@@ -5837,9 +5910,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let checks_started_marker =
                 render_epoch_marker_commands("CHECKS_STARTED", "          ");
             let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
+            let token_env = docker_build_token_env_for_members(lane, &[unit]);
             let _ = writeln!(
                 output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
                 verify_name,
                 yaml_scalar(&unit.id),
                 base_sha,

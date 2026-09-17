@@ -18,6 +18,8 @@ WatchdogSec=180
 # and large fleets provision slots before READY=1. The systemd default 90s
 # startup timeout can therefore kill a healthy daemon mid-registration.
 TimeoutStartSec=0
+Environment=VELNOR_JOB_CPUS=4
+Environment=VELNOR_JOB_MEMORY=12g
 Environment=VELNOR_STORAGE_ROOT=/var
 # Strict capability admission is the only supported mode. The daemon refuses to
 # start if this is set to anything else or if a removed bypass variable is

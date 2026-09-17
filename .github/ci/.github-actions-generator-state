@@ -1,27 +1,27 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	451bab571b716ed2
-scan	378ff9ae4bb0ad05
+config	21770dbc708a29c3
+scan	c444cafbb73df773
 generator	50
 [outputs]
-.github/actionlint.yaml	db8adc5ad96ed4df
+.github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/report-velnor-ci-outcomes/action.yml	238dbd0d0b802739
-.github/actions/setup-velnor-workflow/action.yml	da8fae1bb9e2226b
-.github/ci/project.toml	dfe40b0f36be70d0
+.github/actions/setup-velnor-workflow/action.yml	e091e9e1bd171bf2
+.github/ci/project.toml	6c8d9e073715b245
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	8a6405f1a229b66f
-.github/workflows/ci-policy.yml	db2308fc5f3aaafa
-.github/workflows/ci-pr.yml	440549235a8767c8
+.github/workflows/ci-main.yml	df48fd60b888dd7a
+.github/workflows/ci-policy.yml	5d2d38c2b10ad476
+.github/workflows/ci-pr.yml	54285d42d3b0cd72
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-.github/workflows/ci-runtime-products.yml	d1be5cf715bd4584
-.github/workflows/ci-unit-bun.yml	ba858d71224fa6d8
-.github/workflows/ci-unit-docker.yml	7b72a356fddee2dd
-.github/workflows/ci-unit-docs.yml	0d61d2525b6f0494
-.github/workflows/ci-unit-opentofu.yml	9e6233dfd54af928
-.github/workflows/ci-unit-rust.yml	a1abf06807ba596a
-.github/workflows/maintenance.yml	40fa65a2c0d83c79
-.github/workflows/nightly.yml	89ca7a50f4a4403b
-.github/workflows/preview.yml	fc718f7a5b2d2a82
-.github/workflows/release.yml	d1ffcf8740844eda
+.github/workflows/ci-runtime-products.yml	6050ae4a0b60bd31
+.github/workflows/ci-unit-bun.yml	812e0da17fb60834
+.github/workflows/ci-unit-docker.yml	90d47b28379a011c
+.github/workflows/ci-unit-docs.yml	83a6785e48c1b68e
+.github/workflows/ci-unit-opentofu.yml	46a216872dfdd544
+.github/workflows/ci-unit-rust.yml	3ec5276d9f179e9b
+.github/workflows/maintenance.yml	e41b53c0f3b83a17
+.github/workflows/nightly.yml	c333ad481145b60e
+.github/workflows/preview.yml	e37e17e8ec7500fe
+.github/workflows/release.yml	c4116fa76c69b302
 config/fleet/velnor-host.env	d14b419216449423

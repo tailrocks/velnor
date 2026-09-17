@@ -155,7 +155,6 @@ define_telemetry_contracts! {
         optional: [
             "job_trust" => String,
             "admitted_scope" => String,
-            "daemon_build" => String,
         ]
     },
     RunAdmitted => "run_admitted" {
