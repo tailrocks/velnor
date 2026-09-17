@@ -2325,8 +2325,8 @@ const RELEASE_KINDS: &[&str] = &[
 ];
 
 /// The modes a `[[release.job]]` row gates on. `validate` runs the job on
-/// dispatch drills only; `publish` runs it on tag pushes (and admitted
-/// producers) only. An empty list runs the job on every release event.
+/// dispatch drills only; `publish` runs it on tag pushes only. An empty
+/// list runs the job on every release event.
 pub(crate) const RELEASE_JOB_MODES: &[&str] = &["validate", "publish"];
 
 /// The OCI platforms the `docker` publisher builds. Native builders exist

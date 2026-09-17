@@ -295,6 +295,13 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt" | "docker") => {
             args.string("kind")?.unwrap_or_default()
         }
+        // Job tables cannot travel in declare-row arguments: the tasks
+        // publisher is config-only by construction.
+        Some("tasks") => {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` kind `tasks` needs `[release]` with `[[release.job]]` rows; declare rows carry no job tables"
+            )));
+        }
         Some(other) => {
             return Err(GeneratorError::usage(format!(
                 "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, `apt`, or `docker`, found `{other}`"
@@ -3142,8 +3149,8 @@ fn tasks_job_runs_on(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
 }
 
 /// The event gate for one tasks-publisher job: dispatch drills run
-/// `validate` jobs, tag pushes (and admitted producers) run `publish` jobs,
-/// and a job declaring both or neither runs on every release event.
+/// `validate` jobs, tag pushes run `publish` jobs, and a job declaring both
+/// or neither runs on every release event.
 fn tasks_job_gate(job: &ReleaseJobSpec) -> Option<&'static str> {
     let validate = job.modes.iter().any(|mode| mode == "validate");
     let publish = job.modes.iter().any(|mode| mode == "publish");
@@ -3209,7 +3216,7 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
             && release.credentials.is_empty());
     if has_tarball_bindings(release) && !bindings_supported {
         return format!(
-            "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers.\n"
+            "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers (`tasks` renders dispatch modes only).\n"
         );
     }
     match release.kind.as_str() {

@@ -232,6 +232,23 @@ fn tasks_release_rejects_undeclared_mise_tasks() {
 }
 
 #[test]
+fn tasks_release_rejects_declare_row_kind() {
+    let workspace = tempfile();
+    let root = copy_release_fixture(&workspace.join("fixture"));
+    write_config(
+        &root,
+        "schema = 1\n\n[generator]\nrepository = \"example/synthetic-release\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\n[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n[declare.args]\nkind = \"tasks\"\n",
+    );
+    write_mise_tasks(&root);
+    let error = generate_failure(&root, &workspace.join("out"));
+    assert!(
+        error.contains("declare rows carry no job tables"),
+        "the error must point tasks at the config table: {error}"
+    );
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
 fn tasks_release_rejects_jobs_on_other_publishers() {
     let workspace = tempfile();
     let root = copy_release_fixture(&workspace.join("fixture"));
