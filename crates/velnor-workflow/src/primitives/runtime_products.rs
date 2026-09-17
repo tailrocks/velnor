@@ -17,13 +17,15 @@
 //! coordinate, never spelled out); every other repository gets no file, and a
 //! declared row on a non-owner fails closed.
 //!
-//! Layout: a `closure` job resolves the source closure of `HEAD` and checks
-//! whether its tag already exists (unchanged closure, no rebuild); a `build`
-//! matrix compiles natively on one runner per consumer platform, proves each
-//! binary reports the tag closure, attests it, and uploads it; a `publish`
-//! job proves transport integrity, assembles the manifest, creates the
-//! release without ever overwriting, and smoke-tests the exact consumer flow
-//! before finishing.
+//! Layout: a `closure` job first proves the run targets the default branch
+//! (a dispatch from anywhere else fails instead of publishing), then resolves
+//! the source closure of `HEAD` and checks whether its tag already exists
+//! (unchanged closure, no rebuild); a `build` matrix compiles natively on one
+//! runner per consumer platform, proves each binary reports the tag closure,
+//! attests it, and uploads it; a `publish` job proves transport integrity,
+//! assembles the manifest, attests it, smoke-tests the exact consumer flow
+//! against those same bytes, and only then creates the release without ever
+//! overwriting — no consumer can see a product whose verification failed.
 
 use std::fmt::Write as _;
 
@@ -260,9 +262,10 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
 # own `--closure` report equals the tag closure and its `--revision` report
 # equals the build commit, attests the asset, and uploads it; the publish
 # job proves transport integrity, assembles `manifest.json` (naming the
-# source revision it built from), creates the release, and smoke-tests the
-# exact consumer flow (download, attestation, manifest, digest, self-report)
-# before finishing.
+# source revision it built from), attests it, smoke-tests the exact consumer
+# flow (attestation, manifest, digest, self-report) against those same bytes,
+# and only then creates the release. Verification precedes exposure: a
+# product no consumer would accept never reaches a release.
 #
 # The workflow never overwrites: when the tag already exists the run skips,
 # and the publish job re-checks immediately before creating the release.
@@ -294,6 +297,13 @@ jobs:
       head-sha: ${{{{ steps.closure.outputs.head-sha }}}}
       exists: ${{{{ steps.exists.outputs.exists }}}}
     steps:
+      - name: Prove the default-branch ref
+        shell: bash
+        env:
+          REF: ${{{{ github.ref }}}}
+        run: |
+          set -euo pipefail
+          [[ "$REF" == "{branch_ref}" ]] || {{ echo "::error::the producer publishes only from {branch_ref}, got $REF" >&2; exit 1; }}
       - name: Checkout
         uses: {checkout}
         with:
@@ -426,14 +436,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Assemble and publish the release
+      - name: Assemble and verify the release
         id: assemble
         shell: bash
         env:
-          GH_TOKEN: ${{{{ github.token }}}}
           CLOSURE: ${{{{ needs.closure.outputs.closure }}}}
-          TAG: ${{{{ needs.closure.outputs.tag }}}}
-          HEAD_SHA: ${{{{ needs.closure.outputs.head-sha }}}}
         run: |
           set -euo pipefail
           # The build jobs proved each binary's identity on its native runner;
@@ -466,58 +473,65 @@ jobs:
           done
           manifest_revision="$(jq -er '.revision' dist/manifest.json)"
           [[ "$manifest_revision" == "$HEAD_SHA" ]] || {{ echo "::error::assembled manifest names revision $manifest_revision, expected $HEAD_SHA" >&2; exit 1; }}
-          if gh release view "$TAG" --repo {repository} >/dev/null 2>&1; then
-            echo "::notice::release $TAG already exists; leaving it untouched"
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gh release create "$TAG" --repo {repository} --target "$HEAD_SHA" --title "$TAG" \
-            --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
-            {release_assets} dist/manifest.json
       - name: Attest release manifest
-        if: steps.assemble.outputs.skipped != 'true'
         uses: {attest}
         with:
           subject-path: dist/manifest.json
-      - name: Smoke-test the published release
-        if: steps.assemble.outputs.skipped != 'true'
+      - name: Smoke-test the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{{{ github.token }}}}
+          CLOSURE: ${{{{ needs.closure.outputs.closure }}}}
+        run: |
+          set -euo pipefail
+          # The exact consumer flow, against the local bytes the release will
+          # publish: attestation, manifest, digest, and the self-report from
+          # the install layout the setup action uses. The release is created
+          # only after this flow passes, so a product no consumer would
+          # accept fails the publish instead of shipping silently.
+          asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
+          gh attestation verify "dist/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
+          gh attestation verify "dist/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file} --source-ref {branch_ref}
+          jq -e --arg closure "$CLOSURE" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
+            '{accept_filter}' "dist/manifest.json" >/dev/null
+          actual="$(sha256sum "dist/$asset" | awk '{{print $1}}')"
+          expected="$(jq -er --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" '.products[$platform].binary' "dist/manifest.json")"
+          [[ "$actual" == "$expected" ]] || {{ echo "::error::smoke-test digest mismatch" >&2; exit 1; }}
+          runtime="{runtime_home}/$CLOSURE"
+          mkdir -p "$runtime/bin"
+          cp "dist/$asset" "$runtime/bin/velnor-workflow"
+          chmod 0755 "$runtime/bin/velnor-workflow"
+          cp "dist/manifest.json" "$runtime/manifest.json"
+          chmod 0644 "$runtime/manifest.json"
+          reported="$("$runtime/bin/velnor-workflow" --closure)"
+          [[ "$reported" == "$CLOSURE" ]] || {{ echo "::error::installed runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }}
+          manifest_revision="$(jq -er '.revision' "dist/manifest.json")"
+          reported_revision="$("$runtime/bin/velnor-workflow" --revision)"
+          [[ "$reported_revision" == "$manifest_revision" ]] || {{ echo "::error::installed runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }}
+      - name: Create the release
         shell: bash
         env:
           GH_TOKEN: ${{{{ github.token }}}}
           CLOSURE: ${{{{ needs.closure.outputs.closure }}}}
           TAG: ${{{{ needs.closure.outputs.tag }}}}
+          HEAD_SHA: ${{{{ needs.closure.outputs.head-sha }}}}
         run: |
           set -euo pipefail
-          # The exact consumer flow, against the release just created: download,
-          # attestation, manifest, digest, and the self-report from the install
-          # layout the setup action uses. A product no consumer would accept
-          # fails the publish instead of shipping silently.
-          asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
-          temporary="$(mktemp -d)"
-          trap 'rm -rf "$temporary"' EXIT
-          gh release download "$TAG" --repo {repository} --pattern "$asset" --pattern manifest.json --dir "$temporary"
-          gh attestation verify "$temporary/$asset" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file}
-          gh attestation verify "$temporary/manifest.json" --owner {owner} --signer-workflow {repository}/.github/workflows/{workflow_file}
-          jq -e --arg closure "$CLOSURE" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg asset "$asset" \
-            '{accept_filter}' "$temporary/manifest.json" >/dev/null
-          actual="$(sha256sum "$temporary/$asset" | awk '{{print $1}}')"
-          expected="$(jq -er --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" '.products[$platform].binary' "$temporary/manifest.json")"
-          [[ "$actual" == "$expected" ]] || {{ echo "::error::smoke-test digest mismatch" >&2; exit 1; }}
-          runtime="{runtime_home}/$CLOSURE"
-          mkdir -p "$runtime/bin"
-          cp "$temporary/$asset" "$runtime/bin/velnor-workflow"
-          chmod 0755 "$runtime/bin/velnor-workflow"
-          cp "$temporary/manifest.json" "$runtime/manifest.json"
-          chmod 0644 "$runtime/manifest.json"
-          reported="$("$runtime/bin/velnor-workflow" --closure)"
-          [[ "$reported" == "$CLOSURE" ]] || {{ echo "::error::installed runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }}
-          manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
-          reported_revision="$("$runtime/bin/velnor-workflow" --revision)"
-          [[ "$reported_revision" == "$manifest_revision" ]] || {{ echo "::error::installed runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }}
+          # Every verification above passed on exactly these bytes; the
+          # re-check immediately before creating keeps the never-overwrite
+          # promise against a concurrent run that published first.
+          if gh release view "$TAG" --repo {repository} >/dev/null 2>&1; then
+            echo "::notice::release $TAG already exists; leaving it untouched"
+            exit 0
+          fi
+          gh release create "$TAG" --repo {repository} --target "$HEAD_SHA" --title "$TAG" \
+            --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
+            {release_assets} dist/manifest.json
 "#,
         header = GENERATED_HEADER,
         example_tag = example_tag(),
         default_branch = yaml_scalar(&config.default_branch),
+        branch_ref = format!("refs/heads/{}", config.default_branch),
         closure_runner = yaml_scalar(&config.github_runner),
         publish_runner = yaml_scalar(&config.github_runner),
         checkout = ActionPin::Checkout.reference(),
@@ -1137,14 +1151,17 @@ mod tests {
         let signer =
             format!("--signer-workflow {repository}/.github/workflows/{RUNTIME_PRODUCTS_FILE}");
         let owner_flag = format!("--owner {}", product_owner(repository));
-        for flag in [&signer, &owner_flag] {
+        // `--signer-ref` does not exist in gh: `--source-ref` is the flag
+        // that pins the producer run to the default branch.
+        let source_ref = "--source-ref refs/heads/main";
+        for flag in [signer.as_str(), owner_flag.as_str(), source_ref] {
             assert!(
                 content.contains(flag),
                 "the smoke test verifies {flag}: {content}"
             );
         }
         let action = setup_action_source();
-        for flag in [&signer, &owner_flag] {
+        for flag in [signer.as_str(), owner_flag.as_str(), source_ref] {
             assert!(
                 action.contains(flag),
                 "the setup action verifies the same {flag}"
@@ -1167,6 +1184,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn all_consumers_pin_the_same_producer_ref() {
+        // The setup action, the Velnor provisioner, and the producer smoke
+        // test verify the same two subjects under the same ref pin: an
+        // attestation minted anywhere but the default branch verifies
+        // nowhere.
+        let action = setup_action_source();
+        assert_eq!(
+            action.matches("--source-ref refs/heads/main").count(),
+            2,
+            "the setup action pins the ref on the asset and the manifest"
+        );
+        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
+        assert_eq!(
+            velnor.matches("--source-ref refs/heads/main").count(),
+            2,
+            "the Velnor provisioner pins the ref on the asset and the manifest"
+        );
+        let content = owner_content(&[]);
+        assert_eq!(
+            content.matches("--source-ref refs/heads/main").count(),
+            2,
+            "the producer smoke test pins the ref on the asset and the manifest: {content}"
+        );
     }
 
     #[test]
@@ -1403,10 +1446,8 @@ mod tests {
             "the smoke test self-reports from the install layout: {content}"
         );
         assert!(
-            content.contains(
-                "manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\""
-            ),
-            "the smoke test reads the revision from the downloaded manifest: {content}"
+            content.contains("manifest_revision=\"$(jq -er '.revision' \"dist/manifest.json\")\""),
+            "the smoke test reads the revision from the local manifest: {content}"
         );
         assert!(
             content.contains("\"$runtime/bin/velnor-workflow\" --revision"),
@@ -1420,6 +1461,225 @@ mod tests {
         );
     }
 
+    #[test]
+    fn producer_runs_only_on_the_default_branch() {
+        let content = owner_content(&[]);
+        let closure = must_some(content.split("  closure:\n").nth(1), "the closure job");
+        let closure = must_some(closure.split("\n  build:\n").next(), "the closure job body");
+        // The guard is the first step: a dispatch from anywhere else fails
+        // before the checkout, the closure resolution, or any build.
+        let first = must_some(
+            closure.split("      - name: ").nth(1),
+            "the first closure step",
+        );
+        let name = must_some(first.split('\n').next(), "the first step name");
+        assert_eq!(name, "Prove the default-branch ref", "{closure}");
+        assert!(
+            first.contains("REF: ${{ github.ref }}"),
+            "the guard reads the run ref: {first}"
+        );
+        assert!(
+            first.contains("[[ \"$REF\" == \"refs/heads/main\" ]]"),
+            "the guard compares against the default-branch ref: {first}"
+        );
+        assert!(
+            first.contains("the producer publishes only from refs/heads/main"),
+            "the failure names the expected ref: {first}"
+        );
+        let mut config = owner_config(&[]);
+        config.default_branch = "trunk".to_owned();
+        let content = must_some(
+            runtime_products_content(&config),
+            "the owner renders the producer",
+        );
+        assert!(
+            content.contains("[[ \"$REF\" == \"refs/heads/trunk\" ]]"),
+            "the guard follows the configured default branch: {content}"
+        );
+        assert!(
+            content.contains("the producer publishes only from refs/heads/trunk"),
+            "the failure names the configured ref: {content}"
+        );
+    }
+
+    #[test]
+    fn publish_verifies_before_creating_the_release() {
+        let content = owner_content(&[]);
+        let publish = must_some(content.split("\n  publish:\n").nth(1), "the publish job");
+        let assemble = must_some(
+            publish.find("Assemble and verify the release"),
+            "the assemble step",
+        );
+        let attest = must_some(
+            publish.find("Attest release manifest"),
+            "the manifest attestation step",
+        );
+        let smoke = must_some(
+            publish.find("Smoke-test the release"),
+            "the smoke-test step",
+        );
+        let create = must_some(publish.find("gh release create"), "the release creation");
+        assert!(
+            assemble < attest && attest < smoke && smoke < create,
+            "assemble precedes manifest attestation precedes the smoke test precedes release creation: {publish}"
+        );
+        assert_eq!(
+            publish.matches("gh release create").count(),
+            1,
+            "exactly one creation, after every verification: {publish}"
+        );
+        assert!(
+            !publish.contains("gh release download"),
+            "the smoke test proves the local bytes; nothing is downloaded from an exposed release: {publish}"
+        );
+        assert!(
+            !content.contains("skipped"),
+            "no skipped output remains: verification gates the create directly: {content}"
+        );
+        let recheck = must_some(
+            publish.find("already exists; leaving it untouched"),
+            "the pre-create re-check",
+        );
+        assert!(
+            recheck < create,
+            "the re-check fires immediately before creating: {publish}"
+        );
+    }
+
+    #[test]
+    fn smoke_test_pins_the_producer_ref() {
+        let content = owner_content(&[]);
+        assert_eq!(
+            content.matches("--source-ref refs/heads/main").count(),
+            2,
+            "the smoke test pins the default-branch ref on the asset and the manifest: {content}"
+        );
+        let mut config = owner_config(&[]);
+        config.default_branch = "trunk".to_owned();
+        let content = must_some(
+            runtime_products_content(&config),
+            "the owner renders the producer",
+        );
+        assert_eq!(
+            content.matches("--source-ref refs/heads/trunk").count(),
+            2,
+            "the smoke-test pin follows the configured default branch: {content}"
+        );
+    }
+
+    /// Every `run: |` shell body in the rendered producer, keyed by step
+    /// name and de-indented. The template is string-built, so these bodies
+    /// are what actually executes in CI: parsing and running them here
+    /// catches template escaping bugs that string assertions cannot see.
+    fn step_bodies(content: &str) -> Vec<(String, String)> {
+        let mut bodies = Vec::new();
+        let mut name = String::new();
+        let mut current: Option<Vec<String>> = None;
+        for line in content.lines() {
+            if let Some(body) = current.as_mut() {
+                if line.trim().is_empty() || line.starts_with("          ") {
+                    body.push(line.strip_prefix("          ").unwrap_or("").to_owned());
+                    continue;
+                }
+                bodies.push((std::mem::take(&mut name), body.join("\n")));
+                current = None;
+            }
+            if let Some(step) = line.strip_prefix("      - name: ") {
+                name = step.to_owned();
+            } else if line.trim() == "run: |" {
+                current = Some(Vec::new());
+            }
+        }
+        if let Some(body) = current {
+            bodies.push((name, body.join("\n")));
+        }
+        bodies
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_shell_parses() {
+        let content = owner_content(&[]);
+        let bodies = step_bodies(&content);
+        for owned in [
+            "Prove the default-branch ref",
+            "Resolve source closure",
+            "Check for an existing product",
+            "Prove a hermetic build environment",
+            "Prove the product closure",
+            "Assemble and verify the release",
+            "Smoke-test the release",
+            "Create the release",
+        ] {
+            assert!(
+                bodies
+                    .iter()
+                    .any(|(name, body)| name == owned && !body.is_empty()),
+                "the `{owned}` shell body is extracted for parsing"
+            );
+        }
+        for (index, (name, body)) in bodies.iter().enumerate() {
+            let path = std::env::temp_dir().join(format!(
+                "velnor-workflow-producer-shell-{index}-{}",
+                crate::unique_suffix()
+            ));
+            must(fs::write(&path, body), "write the shell body");
+            let output = must(
+                std::process::Command::new("bash")
+                    .arg("-n")
+                    .arg(&path)
+                    .output(),
+                "parse the shell body",
+            );
+            let _ = fs::remove_file(&path);
+            assert!(
+                output.status.success(),
+                "the `{name}` shell body parses: {body}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_branch_guard_accepts_only_the_default_ref() {
+        let content = owner_content(&[]);
+        let bodies = step_bodies(&content);
+        let guard = must_some(
+            bodies
+                .iter()
+                .find_map(|(name, body)| (name == "Prove the default-branch ref").then_some(body)),
+            "the rendered guard body",
+        );
+        for (reference, accepted) in [
+            ("refs/heads/main", true),
+            ("refs/heads/trunk", false),
+            ("refs/tags/v1.2.3", false),
+            ("", false),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "velnor-workflow-producer-guard-{}",
+                crate::unique_suffix()
+            ));
+            must(fs::write(&path, guard), "write the guard body");
+            let output = must(
+                std::process::Command::new("bash")
+                    .arg(&path)
+                    .env("REF", reference)
+                    .output(),
+                "run the guard body",
+            );
+            let _ = fs::remove_file(&path);
+            assert_eq!(
+                output.status.success(),
+                accepted,
+                "ref `{reference}` is {}: {}",
+                if accepted { "accepted" } else { "rejected" },
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     /// The rendered bytes, pinned to the digest of the reviewed render. The
     /// digest is the expectation, not a second call into the same code, so a
     /// renderer change shows up here and has to be carried into the pin
@@ -1427,7 +1687,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "f80fa05d7251c6c8d9ad2433a24fa97fe07cd6d613827fe8f2ef624403fab523";
+        const PINNED: &str = "e3224ae82935c03707cb7060f7a5b242cdd71356dcbe1e891c7c2bd2fdcaeab5";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

@@ -704,7 +704,7 @@ jobs:
             echo "::error::no policy runtime product for revision $PINNED_REVISION (closure ${closure:0:16}); the mainline runtime-product publisher builds it after merge" >&2
             exit 1
           fi
-          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
           jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
           expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
           existing=""
@@ -717,7 +717,7 @@ jobs:
           fi
           if [[ "$existing" != "$expected" ]]; then
             gh release download "$tag" --repo tailrocks/velnor --pattern "$asset" --dir "$temporary"
-            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
             if command -v sha256sum >/dev/null 2>&1; then
               actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
             else
