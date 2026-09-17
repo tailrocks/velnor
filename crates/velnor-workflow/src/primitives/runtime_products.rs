@@ -4,7 +4,8 @@
 //! Consumers never compile: the setup action and the Velnor policy provisioner
 //! download `velnor-workflow-<RUNNER_OS>-<RUNNER_ARCH>` plus `manifest.json`
 //! from the immutable release the closure names, then prove attestation,
-//! manifest, digest, and the binary's own `--closure` report. This module
+//! manifest, digest, and the binary's own `--closure` and `--revision`
+//! reports. This module
 //! renders the workflow that publishes those releases. The consumer contract
 //! is the specification: the tag scheme, the manifest shape, the attestation
 //! subject, and the acceptance filter below mirror the setup action byte for
@@ -69,11 +70,19 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
-/// full closure, release profile, empty features, a 64-hex digest for the
-/// platform, and the asset name the platform expects. The publish job
-/// evaluates this same filter over the assembled manifest, so a manifest no
-/// consumer would accept never reaches a release.
-const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
+/// full closure, a well-formed source revision, release profile, empty
+/// features, a 64-hex digest for the platform, and the asset name the
+/// platform expects. The publish job evaluates this same filter over the
+/// assembled manifest, so a manifest no consumer would accept never reaches
+/// a release.
+///
+/// The revision clause is well-formedness, not equality with the requested
+/// revision: several commits can share one closure (and therefore one
+/// product), so the manifest names the commit the producer built from while
+/// the consumer requested another. Both consumers bind the binary to the
+/// manifest instead, requiring its `--revision` report to equal the
+/// manifest's `revision`.
+const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
 
 /// The isolated Cargo home the producer steps build under, as a rendered
 /// step-level `env:` value. The `runner` context is unavailable in job-level
@@ -1062,6 +1071,10 @@ mod tests {
             "assemble and smoke-test evaluate the consumer filter: {content}"
         );
         assert!(
+            MANIFEST_ACCEPT_FILTER.contains("(.revision | test(\"^[0-9a-f]{40}$\"))"),
+            "the consumer filter requires a well-formed source revision"
+        );
+        assert!(
             content.contains("--arg revision \"$HEAD_SHA\""),
             "the manifest names the commit the producer built from: {content}"
         );
@@ -1134,6 +1147,14 @@ mod tests {
         assert!(
             velnor.contains("\"$existing\" != \"$expected\""),
             "the Velnor consumer reuses its slot only on a manifest digest match"
+        );
+        assert!(
+            velnor.contains("reported_revision=\"$(\"$binary\" --revision)\""),
+            "the Velnor consumer probes the slot binary's revision stamp"
+        );
+        assert!(
+            velnor.contains("[[ \"$reported_revision\" == \"$manifest_revision\" ]]"),
+            "the Velnor consumer binds the stamp to the manifest revision"
         );
     }
 
@@ -1664,7 +1685,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "b26ff11de799ac1c438ef7a988181499e7e1d3a1b5f785de4fcec427862001b3";
+        const PINNED: &str = "dc9c5d95a00c193a7c2332e348398ccd15f05df64252c863fa14558197b2843b";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

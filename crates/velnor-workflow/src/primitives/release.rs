@@ -5791,6 +5791,147 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Daemon and runtime delivery resolve exact identities, never a rolling
+    /// `latest`: the daemon ships through the APT feed off immutable `v*`
+    /// releases, the runtime through closure-pinned product releases. A
+    /// `latest` selector in any rendered surface would reintroduce the
+    /// mutable identity both schemes exist to exclude, so every `latest`
+    /// token in the rendered release, preview, maintenance, signer,
+    /// producer, and consumer surfaces fails — except the one error-message
+    /// prose line that tells the operator to re-run the newest preview run.
+    #[test]
+    fn rendered_surfaces_never_select_latest() {
+        let root = scanned_root("no-latest-legacy");
+        let legacy = generate(
+            &root,
+            &config(
+                &[
+                    "release.yml",
+                    "preview.yml",
+                    "maintenance.yml",
+                    "ci-release-package-signer.yml",
+                ],
+                Some(binary_spec()),
+            ),
+            None,
+        );
+        let identity_root = scanned_root("no-latest-identity");
+        let identity = generate(
+            &identity_root,
+            &native_identity_config(&["release.yml", "preview.yml"]),
+            None,
+        );
+        let mut owner = config(&["maintenance.yml"], Some(binary_spec()));
+        owner.repository = crate::workflow_setup_action_repository().to_owned();
+        let producer = must_some(
+            super::super::runtime_products::runtime_products_content(&owner),
+            "the owner renders the runtime producer",
+        );
+        let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
+        let action = must(
+            fs::read_to_string(&action_path),
+            "read the setup action source",
+        );
+        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
+        let mut surfaces: Vec<(&str, &str)> = Vec::new();
+        for (path, content) in legacy.files.iter().chain(identity.files.iter()) {
+            surfaces.push((path.to_str().unwrap_or("surface"), content.as_str()));
+        }
+        surfaces.push(("ci-runtime-products.yml", producer.as_str()));
+        surfaces.push(("setup-velnor-workflow/action.yml", action.as_str()));
+        surfaces.push(("velnor-provisioner", velnor.as_str()));
+        assert_eq!(
+            surfaces.len(),
+            9,
+            "the legacy, identity, producer, and consumer surfaces all render"
+        );
+        let mut scanned_lines = 0;
+        for (name, content) in &surfaces {
+            for (index, line) in content.lines().enumerate() {
+                scanned_lines += 1;
+                if line.to_lowercase().contains("latest") {
+                    assert!(
+                        line.contains("re-run the LATEST preview run instead"),
+                        "unexpected `latest` in {name}:{}: {line}",
+                        index + 1
+                    );
+                }
+            }
+        }
+        assert!(
+            scanned_lines > 1_000,
+            "the scan covered {scanned_lines} lines"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(identity_root);
+    }
+
+    /// The runtime product tags (`velnor-workflow-runtime-v1-*`) and the
+    /// daemon release tags (`v*`) are disjoint identities: the release
+    /// version gate admits `v[0-9]*`, and the product prefix's second byte
+    /// is a fixed non-digit, so no product tag — whatever the closure —
+    /// can ever match the gate, and no release tag carries the product
+    /// prefix.
+    #[test]
+    fn runtime_product_tags_are_disjoint_from_release_tags() {
+        let root = scanned_root("tag-disjointness");
+        let surface = generate(
+            &root,
+            &native_identity_config(&["release.yml", "preview.yml"]),
+            None,
+        );
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("tags: [\"v*\"]"),
+            "the release workflow triggers on v* tags"
+        );
+        assert!(
+            release.contains("v[0-9]*)"),
+            "the release version gate admits v[0-9]*"
+        );
+        let prefix = crate::closure::PRODUCT_TAG_PREFIX;
+        assert_eq!(
+            prefix.as_bytes()[0],
+            b'v',
+            "the disjointness proof starts from the shared leading v: {prefix}"
+        );
+        assert!(
+            !prefix.as_bytes()[1].is_ascii_digit(),
+            "the product prefix's second byte is a fixed non-digit, so no product tag matches v[0-9]*: {prefix}"
+        );
+        for tag in ["v0.0.1", "v1.2.3", "v10.0.0-rc.1"] {
+            assert!(
+                !tag.starts_with(prefix),
+                "release tag {tag} carries no product prefix"
+            );
+            assert!(
+                tag.strip_prefix('v').is_some_and(|rest| rest
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_digit())),
+                "release tag {tag} matches the version gate"
+            );
+        }
+        for closure in ["0".repeat(64), "9".repeat(64), "f".repeat(64)] {
+            let tag = crate::closure::product_tag(&closure);
+            assert!(
+                tag.starts_with(prefix),
+                "the product tag carries the product prefix: {tag}"
+            );
+            let matches_gate = tag.strip_prefix('v').is_some_and(|rest| {
+                rest.bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_digit())
+            });
+            assert!(
+                !matches_gate,
+                "product tag {tag} must not match the release gate"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     #[expect(
         clippy::panic,
