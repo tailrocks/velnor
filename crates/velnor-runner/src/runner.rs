@@ -3355,7 +3355,12 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // The lifecycle ledger slug (hostname-derived daemon identity) differs
     // from the controller scope (slot-id prefix): map both explicitly.
     let lifecycle = controller_lifecycle_for_daemon(&resolved_args, sink);
-    let result = crate::node::controller::supervise_from_daemon(
+    // Scale-set lane network startup runs BEFORE slot supervision: a lane
+    // that cannot register/adopt fails the pass fast (supervised retry),
+    // never beside already-polling slots.
+    let scaleset_lane =
+        ScaleSetLaneHandle::start_if_configured(&resolved_args, &config_base).await?;
+    let mut result = crate::node::controller::supervise_from_daemon(
         config_base.clone(),
         scope,
         slots as u32,
@@ -3363,6 +3368,20 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         lifecycle,
     )
     .await;
+    // The lane stops after supervision returns (its drain watcher already
+    // stopped the poll on SIGTERM). A supervision error wins for
+    // reporting; a lane-only error fails the pass so retry re-adopts.
+    if let Some(lane) = scaleset_lane {
+        let lane_result = lane.shutdown_and_join().await;
+        if result.is_ok() {
+            result = lane_result;
+        } else if let Err(error) = lane_result {
+            daemon_forensic_log(
+                &config_base,
+                &format!("scale-set lane shutdown also failed: {error:#}"),
+            );
+        }
+    }
     if let Some(sink) = crate::ops::global()
         && sink.degraded()
     {
@@ -4769,6 +4788,128 @@ async fn configure_daemon_slots(
 /// epoch, reconcile durable occupancy against this daemon's in-flight
 /// markers, and sweep dead attempts. Fail-closed: no daemon pass may
 /// supervise slots without the capacity authority.
+/// Attested scale-set holders for the startup reconcile: every demand
+/// row in a permit state, read from the lane's state db. Unconfigured
+/// lane attests nothing. A corrupt demand store fails the pass loudly —
+/// the lane could not run against it either.
+fn attest_scaleset_demand_holders(
+    args: &DaemonArgs,
+) -> Result<Vec<(String, velnor_control::permit_ledger::PermitState)>> {
+    let Some(config_path) = args.scale_set_config.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let file = crate::scaleset::load_file_config(config_path)?;
+    let state_db = file
+        .state_db
+        .clone()
+        .unwrap_or_else(|| daemon_state_db_path(args));
+    crate::scaleset::reconcile::attest_demand_holders(&state_db)
+        .map_err(|error| anyhow::anyhow!("attest scale-set demand holders: {error:#}"))
+}
+
+/// The daemon's operational state db: the explicit flag wins, otherwise
+/// the shared `VELNOR_STATE_DB` resolution.
+fn daemon_state_db_path(args: &DaemonArgs) -> PathBuf {
+    args.state_db
+        .clone()
+        .unwrap_or_else(crate::ops::state_db_path)
+}
+
+/// The supervised Scale Set lane: network startup runs before slot
+/// supervision (fail fast), the loop runs beside it, and shutdown joins
+/// it after supervision returns. `None` when unconfigured — the native
+/// path is then exactly as before.
+struct ScaleSetLaneHandle {
+    shutdown: Arc<AtomicBool>,
+    task: JoinHandle<Result<crate::scaleset::AdapterReport>>,
+    watcher: JoinHandle<()>,
+}
+
+impl ScaleSetLaneHandle {
+    async fn start_if_configured(args: &DaemonArgs, config_base: &Path) -> Result<Option<Self>> {
+        let Some(config_path) = args.scale_set_config.as_deref() else {
+            return Ok(None);
+        };
+        if !crate::scaleset::lane_configured(Some(config_path)) {
+            return Ok(None);
+        }
+        let defaults = crate::scaleset::DaemonDefaults {
+            state_db: daemon_state_db_path(args),
+            ledger_path: crate::permit_guard::resolve_permit_ledger_path(
+                args.permit_ledger.as_deref(),
+            ),
+            config_dir: config_base.to_path_buf(),
+        };
+        let mut daemon = crate::scaleset::ScaleSetDaemon::open_production(config_path, &defaults)?;
+        let started = daemon.start().await?;
+        let adopt = &started.adopt_report;
+        println!(
+            "Scale-set lane: serving set {} (session {}; adopted={} failed={} resumed_cleanup={} awaiting_provision={} skipped_released={}).",
+            started.scale_set_id,
+            started.session_id,
+            adopt.adopted,
+            adopt.failed,
+            adopt.resumed_cleanup,
+            adopt.awaiting_provision,
+            adopt.skipped_released,
+        );
+        crate::sd_notify::status(&format!(
+            "scale-set lane serving set {}",
+            started.scale_set_id
+        ));
+        daemon_forensic_log(
+            config_base,
+            &format!(
+                "scale-set lane started set={} adopted={} failed={}",
+                started.scale_set_id, adopt.adopted, adopt.failed,
+            ),
+        );
+        let shutdown = Arc::new(AtomicBool::new(false));
+        // Drain mapping: the lane stops polling promptly on SIGTERM/drain
+        // instead of acquiring until slot supervision returns. Worst-case
+        // stop latency is one in-flight long poll (the lane config bounds
+        // it) plus the shutdown triage below.
+        let drain_journal = config_base.join("journal.db");
+        let flag = Arc::clone(&shutdown);
+        let watcher = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if effective_draining(Some(drain_journal.as_path())) {
+                    flag.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+        });
+        let run_flag = Arc::clone(&shutdown);
+        let task = tokio::spawn(async move { daemon.run(&run_flag).await });
+        Ok(Some(Self {
+            shutdown,
+            task,
+            watcher,
+        }))
+    }
+
+    /// Stop the loop, join the lane task, and report the shutdown triage.
+    /// No timeout: systemd bounds the stop and crash recovery converges
+    /// anything a SIGKILL interrupts; cutting the triage short here would
+    /// only strand permits that retention reclaims anyway.
+    async fn shutdown_and_join(self) -> Result<()> {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.watcher.abort();
+        let _ = self.watcher.await;
+        let report = self.task.await??;
+        let shutdown = &report.shutdown_report;
+        println!(
+            "Scale-set lane stopped: set {} adopted_across_restart={} failed={} recorded_total={}.",
+            report.scale_set_id,
+            shutdown.adopted_across_restart,
+            shutdown.failed,
+            shutdown.recorded_total,
+        );
+        Ok(())
+    }
+}
+
 fn init_host_permit_ledger(args: &DaemonArgs, config_base: &Path, slots: usize) -> Result<()> {
     use velnor_control::permit_ledger::PermitLedger;
     let ledger_path =
@@ -4801,9 +4942,24 @@ fn init_host_permit_ledger(args: &DaemonArgs, config_base: &Path, slots: usize) 
             }
         }
     }
+    // Scale-set lane (D1): attest recorded scale-set holders from the
+    // demand store so the ONE startup reconcile covers both lanes. Two
+    // separate reconciles would mark the other lane's live rows
+    // uncertain; unattested rows are still only marked, never deleted.
+    let scaleset_alive = attest_scaleset_demand_holders(args)?;
     drop(ledger);
-    let (report, swept) = crate::permit_guard::reconcile_and_sweep(&ledger_path, &alive)
-        .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    let scaleset_refs: Vec<(&str, velnor_control::permit_ledger::PermitState)> = scaleset_alive
+        .iter()
+        .map(|(holder, state)| (holder.as_str(), *state))
+        .collect();
+    let native_refs: Vec<&str> = alive.iter().map(String::as_str).collect();
+    let (report, swept) = crate::scaleset::allocator::startup_reconcile(
+        &ledger_path,
+        &scaleset_refs,
+        &native_refs,
+        &crate::permit_guard::pid_alive,
+    )
+    .map_err(|error| anyhow::anyhow!("{error:#}"))?;
     println!(
         "Host permit ledger {}: max_jobs={max_jobs} generation={generation} confirmed={} adopted={} uncertain={} swept={}.",
         ledger_path.display(),
@@ -19818,6 +19974,7 @@ jobs:
             docker_image: "ubuntu:24.04".into(),
             max_jobs: None,
             permit_ledger: None,
+            scale_set_config: None,
             trust_scope: "trusted".into(),
             emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
             job_peak_bytes: 30 * 1024 * 1024 * 1024,

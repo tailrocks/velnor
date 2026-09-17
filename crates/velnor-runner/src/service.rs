@@ -200,6 +200,12 @@ pub struct DaemonArgs {
     #[arg(long, env = "VELNOR_PERMIT_LEDGER")]
     pub permit_ledger: Option<PathBuf>,
 
+    /// Scale-set lane config file (TOML). When set, the daemon supervises
+    /// the Scale Set adapter next to its native slots on the shared
+    /// host-wide permit ledger. Unset disables the lane entirely.
+    #[arg(long, env = "VELNOR_SCALE_SET_CONFIG")]
+    pub scale_set_config: Option<PathBuf>,
+
     /// Pool trust boundary. Declared once in [`crate::trust_scope`] and
     /// flattened here so this binary and `velnorctl` cannot disagree about a
     /// security gate.
@@ -453,6 +459,7 @@ impl From<DaemonArgs> for crate::args::DaemonArgs {
             docker_image: a.docker_image,
             max_jobs: a.max_jobs,
             permit_ledger: a.permit_ledger,
+            scale_set_config: a.scale_set_config,
             // The one resolution point of the pool trust boundary: the ceiling
             // every job on this pool runs under. Admission narrows it by the
             // job's trust class, and everything downstream — the capability

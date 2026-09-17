@@ -13,7 +13,9 @@ use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::Serialize;
 
 /// GitHub App credentials (`GitHubAppAuth`). All fields required.
-#[derive(Debug, Clone)]
+/// `Debug` never prints the private key: presence-only, mirroring
+/// [`ActionsAuth`].
+#[derive(Clone)]
 pub struct GitHubAppAuth {
     /// Client ID of the application (app ID also works).
     pub client_id: String,
@@ -21,6 +23,16 @@ pub struct GitHubAppAuth {
     pub installation_id: i64,
     /// App private key in PEM format.
     pub private_key_pem: String,
+}
+
+impl std::fmt::Debug for GitHubAppAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubAppAuth")
+            .field("client_id", &self.client_id)
+            .field("installation_id", &self.installation_id)
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 impl GitHubAppAuth {
@@ -66,10 +78,20 @@ where
 }
 
 /// PEM-key JWT signer (`pemJWTProvider`).
-#[derive(Debug, Clone)]
+/// `Debug` is presence-only: key material never formats.
+#[derive(Clone)]
 pub struct PemJwtProvider {
     client_id: String,
     private_key_pem: String,
+}
+
+impl std::fmt::Debug for PemJwtProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PemJwtProvider")
+            .field("client_id", &self.client_id)
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 impl PemJwtProvider {
@@ -189,7 +211,8 @@ impl ActionsAuth {
 }
 
 /// Installation access-token response (`accessToken`).
-#[derive(Debug, Clone, serde::Deserialize)]
+/// `Debug` never prints the token: presence-only.
+#[derive(Clone, serde::Deserialize)]
 pub struct InstallationAccessToken {
     pub token: String,
     #[allow(
@@ -197,6 +220,15 @@ pub struct InstallationAccessToken {
         reason = "wire shape mirrors upstream; expiry tracked by admin token"
     )]
     pub expires_at: String,
+}
+
+impl std::fmt::Debug for InstallationAccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstallationAccessToken")
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +311,28 @@ mod tests {
     #[test]
     fn bad_pem_fails_at_construction() {
         assert!(PemJwtProvider::new("client", "not-a-key").is_err());
+    }
+
+    #[test]
+    fn debug_impls_redact_key_material() {
+        let pem = test_key_pem();
+        let provider = PemJwtProvider::new("client", &pem).unwrap();
+        let rendered = format!("{provider:?}");
+        assert!(rendered.contains("client"));
+        assert!(
+            !rendered.contains("PRIVATE KEY"),
+            "provider Debug leaked key: {rendered}"
+        );
+        let token = InstallationAccessToken {
+            token: "live-installation-token".into(),
+            expires_at: "2026-09-17T00:05:00Z".into(),
+        };
+        let rendered = format!("{token:?}");
+        assert!(
+            !rendered.contains("live-installation-token"),
+            "token Debug leaked: {rendered}"
+        );
+        assert!(rendered.contains("2026-09-17"));
     }
 
     #[tokio::test]

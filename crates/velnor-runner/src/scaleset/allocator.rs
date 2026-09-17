@@ -33,13 +33,6 @@ use velnor_control::permit_ledger::{
     AcquireOutcome, LedgerError, PermitLane, PermitLedger, PermitState, ReconcileReport,
 };
 
-/// Holder namespace for scale-set acquisitions:
-/// `scaleset/<scale-set-id>/<runner-request-id>`.
-#[must_use]
-pub fn scaleset_permit_holder(scale_set_id: i32, request_id: i64) -> String {
-    format!("scaleset/{scale_set_id}/{request_id}")
-}
-
 /// Scale-set lane allocator over the shared host-wide ledger.
 ///
 /// Cheap to clone; every method opens the ledger file fresh (the ledger
@@ -353,6 +346,7 @@ impl std::error::Error for AllocatorError {}
 )]
 mod tests {
     use super::*;
+    use crate::scaleset::intents::permit_holder;
 
     fn temp_ledger_path(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -376,11 +370,8 @@ mod tests {
 
     #[test]
     fn holder_namespaces_set_and_request() {
-        assert_eq!(scaleset_permit_holder(7, 4242), "scaleset/7/4242");
-        assert_ne!(
-            scaleset_permit_holder(7, 4242),
-            scaleset_permit_holder(9, 4242)
-        );
+        assert_eq!(permit_holder(7, 4242), "scaleset/7/4242");
+        assert_ne!(permit_holder(7, 4242), permit_holder(9, 4242));
     }
 
     #[test]
@@ -390,7 +381,7 @@ mod tests {
         let allocator = ScaleSetAllocator::open(&path);
 
         let guard = allocator
-            .acquire(&scaleset_permit_holder(7, 4242))
+            .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("first acquire grants");
         assert_eq!(allocator.occupied().unwrap(), 1);
@@ -407,13 +398,10 @@ mod tests {
         let allocator = ScaleSetAllocator::open(&path);
 
         let _guard = allocator
-            .acquire(&scaleset_permit_holder(7, 1))
+            .acquire(&permit_holder(7, 1))
             .unwrap()
             .expect("grants");
-        assert!(allocator
-            .acquire(&scaleset_permit_holder(7, 2))
-            .unwrap()
-            .is_none());
+        assert!(allocator.acquire(&permit_holder(7, 2)).unwrap().is_none());
         assert_eq!(allocator.occupied().unwrap(), 1);
     }
 
@@ -424,11 +412,11 @@ mod tests {
         let allocator = ScaleSetAllocator::open(&path);
 
         let guard = allocator
-            .acquire(&scaleset_permit_holder(7, 4242))
+            .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("grants");
         let duplicate = allocator
-            .acquire(&scaleset_permit_holder(7, 4242))
+            .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("duplicate proceeds");
         assert_eq!(allocator.occupied().unwrap(), 1);
@@ -445,9 +433,7 @@ mod tests {
         PermitLedger::open(&path).unwrap();
         let allocator = ScaleSetAllocator::open(&path);
         assert!(matches!(
-            allocator
-                .acquire(&scaleset_permit_holder(7, 1))
-                .unwrap_err(),
+            allocator.acquire(&permit_holder(7, 1)).unwrap_err(),
             AllocatorError::NotConfigured
         ));
         assert_eq!(allocator.advertised_free().unwrap(), None);
@@ -469,7 +455,7 @@ mod tests {
         assert_eq!(allocator.advertised_free().unwrap(), Some(4));
 
         let _guard = allocator
-            .acquire(&scaleset_permit_holder(7, 1))
+            .acquire(&permit_holder(7, 1))
             .unwrap()
             .expect("grants");
         assert_eq!(allocator.advertised_free().unwrap(), Some(3));
@@ -482,7 +468,7 @@ mod tests {
         let allocator = ScaleSetAllocator::open(&path);
 
         let guard = allocator
-            .acquire(&scaleset_permit_holder(7, 4242))
+            .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("grants");
         guard.mark_uncertain_and_disarm();
@@ -490,13 +476,11 @@ mod tests {
         assert_eq!(allocator.occupied().unwrap(), 1);
         let ledger = PermitLedger::open(&path).unwrap();
         assert_eq!(
-            ledger
-                .holder_state(&scaleset_permit_holder(7, 4242))
-                .unwrap(),
+            ledger.holder_state(&permit_holder(7, 4242)).unwrap(),
             Some(PermitState::Uncertain)
         );
         // Recovery converges it once the residue is gone.
-        release_permit_best_effort(&path, &scaleset_permit_holder(7, 4242));
+        release_permit_best_effort(&path, &permit_holder(7, 4242));
         assert_eq!(allocator.occupied().unwrap(), 0);
     }
 
@@ -508,23 +492,17 @@ mod tests {
 
         // Set 7 spends the whole N; set 9 is refused (no per-set reserve).
         let _a = allocator
-            .acquire(&scaleset_permit_holder(7, 1))
+            .acquire(&permit_holder(7, 1))
             .unwrap()
             .expect("grants");
         let _b = allocator
-            .acquire(&scaleset_permit_holder(7, 2))
+            .acquire(&permit_holder(7, 2))
             .unwrap()
             .expect("grants");
-        assert!(allocator
-            .acquire(&scaleset_permit_holder(9, 3))
-            .unwrap()
-            .is_none());
+        assert!(allocator.acquire(&permit_holder(9, 3)).unwrap().is_none());
         drop(_a);
         // One freed permit is spendable by the other set.
-        assert!(allocator
-            .acquire(&scaleset_permit_holder(9, 3))
-            .unwrap()
-            .is_some());
+        assert!(allocator.acquire(&permit_holder(9, 3)).unwrap().is_some());
     }
 
     #[test]
@@ -533,7 +511,7 @@ mod tests {
         configure(&path, 4);
         let allocator = ScaleSetAllocator::open(&path);
         let _guard = allocator
-            .acquire(&scaleset_permit_holder(7, 4242))
+            .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("grants");
         // A native row from the sibling lane (mocked via the ledger API).

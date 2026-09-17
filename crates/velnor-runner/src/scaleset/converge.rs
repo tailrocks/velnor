@@ -33,7 +33,11 @@ pub trait WorkerLane {
     /// for a persisted intent. On success the lane records the JIT
     /// fingerprint via
     /// [`ProvisionIntentStore::record_jit_fingerprint`].
-    fn provision(&mut self, intent: &ProvisionIntent) -> Result<(), Self::Error>;
+    ///
+    /// Async by construction: the JIT fetch is network I/O, and driving
+    /// it with `block_on` from a worker self-deadlocks the runtime's
+    /// driver whenever no other thread keeps driving I/O.
+    async fn provision(&mut self, intent: &ProvisionIntent) -> Result<(), Self::Error>;
 
     /// Observe `JobAssigned` for tracked work (idempotent replay).
     fn note_assigned(
@@ -68,7 +72,7 @@ pub struct ProvisionImages {
 /// Persist the provision intent (idempotent on `operation_id`) and then run
 /// the worker lane. Returns the durable intent row.
 #[allow(clippy::too_many_arguments, reason = "single step-5 call site")]
-pub fn ensure_provision_intent<W: WorkerLane>(
+pub async fn ensure_provision_intent<W: WorkerLane>(
     intents: &mut ProvisionIntentStore,
     lane: &mut W,
     scale_set_id: i32,
@@ -91,6 +95,7 @@ pub fn ensure_provision_intent<W: WorkerLane>(
     )?;
     metrics.inc_provision_intents();
     lane.provision(&intent)
+        .await
         .map_err(|error| anyhow::anyhow!("worker provision for request {request_id}: {error}"))?;
     Ok(intent)
 }
@@ -183,7 +188,7 @@ mod tests {
     impl WorkerLane for StubLane {
         type Error = StubError;
 
-        fn provision(&mut self, intent: &ProvisionIntent) -> Result<(), Self::Error> {
+        async fn provision(&mut self, intent: &ProvisionIntent) -> Result<(), Self::Error> {
             self.provisioned.push(intent.operation_id.clone());
             Ok(())
         }
@@ -227,14 +232,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn provision_intent_persists_before_lane_runs() {
+    #[tokio::test]
+    async fn provision_intent_persists_before_lane_runs() {
         let path = temp_path("intent");
         let mut intents = ProvisionIntentStore::open(&path).unwrap();
         let mut lane = StubLane::default();
         let metrics = crate::scaleset::metrics::Metrics::new();
         let intent =
             ensure_provision_intent(&mut intents, &mut lane, 7, 4242, 0, &images(), 2, &metrics)
+                .await
                 .unwrap();
         assert_eq!(intent.runner_name, "velnor-7-4242");
         assert_eq!(lane.provisioned, vec!["prov-op-7-4242-0".to_owned()]);
@@ -242,6 +248,7 @@ mod tests {
         // Retry adopts the same row.
         let again =
             ensure_provision_intent(&mut intents, &mut lane, 7, 4242, 0, &images(), 2, &metrics)
+                .await
                 .unwrap();
         assert_eq!(again, intent);
     }

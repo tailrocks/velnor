@@ -162,7 +162,7 @@ impl std::error::Error for LaneError {}
 impl WorkerLane for RecordedLane {
     type Error = LaneError;
 
-    fn provision(
+    async fn provision(
         &mut self,
         intent: &velnor_runner::scaleset::ProvisionIntent,
     ) -> Result<(), Self::Error> {
@@ -778,7 +778,7 @@ async fn reordered_batch_folds_order_independently() {
         listener
             .processor()
             .ledger_ref()
-            .holder_state("scaleset:7:4250")
+            .holder_state("scaleset/7/4250")
             .unwrap(),
         Some(velnor_runner::scaleset::LedgerPermitState::Cleaning)
     );

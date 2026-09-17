@@ -133,6 +133,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         docker_image,
         max_jobs: None,
         permit_ledger: None,
+        scale_set_config: None,
         trust: velnor_runner::trust_scope::TrustScopeArg { trust_scope },
         emergency_reserve_bytes: 10_737_418_240,
         job_peak_bytes: 32_212_254_720,

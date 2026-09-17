@@ -13,6 +13,7 @@
 //! * [`unknown_event`]: future server message types are counted and logged,
 //!   never fatal.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -22,6 +23,7 @@ use crate::scaleset::demand::{DemandState, DemandStore};
 use crate::scaleset::intents::{permit_holder, reconcile_returned_ids, AcquireBatchStore};
 use crate::scaleset::metrics::Metrics;
 use crate::scaleset::scale::QueueSession;
+use crate::scaleset::shared_ledger::to_control_state;
 
 /// How long an uncertain batch waits for `JobAssigned`/`JobCompleted`
 /// observations before idle reconcile re-acquires it.
@@ -33,7 +35,7 @@ pub const UNCERTAIN_REACQUIRE_AFTER: Duration = Duration::from_secs(60);
 /// row holding a permit, and unattested-but-granted rows adopt their
 /// about-to-reserve permit early — retention direction), while step-7
 /// convergence excludes `granted` (it is the acquire pass's input).
-const PERMIT_STATES: [DemandState; 5] = [
+pub(crate) const PERMIT_STATES: [DemandState; 5] = [
     DemandState::Granted,
     DemandState::AcquireIntent,
     DemandState::Acquired,
@@ -41,7 +43,7 @@ const PERMIT_STATES: [DemandState; 5] = [
     DemandState::ProvisionIntent,
 ];
 
-fn permit_state_for_demand(state: DemandState) -> LedgerPermitState {
+pub(crate) fn permit_state_for_demand(state: DemandState) -> LedgerPermitState {
     match state {
         DemandState::Granted => LedgerPermitState::Reserved,
         DemandState::AcquireIntent | DemandState::Acquired => LedgerPermitState::Acquiring,
@@ -63,6 +65,24 @@ pub struct StartupReport {
     pub marked_uncertain: Vec<String>,
     pub confirmed: Vec<String>,
     pub batches_orphaned: u64,
+}
+
+/// Daemon-startup attestation input: every scale-set demand row in a
+/// permit state, across all sets, as `(holder, control permit state)`.
+/// The daemon feeds this plus its native markers into the ONE startup
+/// reconcile so neither lane's live rows go uncertain spuriously.
+pub(crate) fn attest_demand_holders(
+    state_db: &Path,
+) -> Result<Vec<(String, velnor_control::permit_ledger::PermitState)>> {
+    let demand = DemandStore::open(state_db)?;
+    let mut attested = Vec::new();
+    for (scale_set_id, request_id, state) in demand.list_in_states_all(&PERMIT_STATES)? {
+        attested.push((
+            permit_holder(scale_set_id, request_id),
+            to_control_state(permit_state_for_demand(state)),
+        ));
+    }
+    Ok(attested)
 }
 
 /// Reconcile-before-advertise: run once at adapter start (and after every
@@ -456,7 +476,7 @@ mod tests {
             .unwrap();
         let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
         // No row existed for the attested holder: adopted as counted occupancy.
-        assert_eq!(report.adopted, vec!["scaleset:7:11".to_owned()]);
+        assert_eq!(report.adopted, vec!["scaleset/7/11".to_owned()]);
         assert_eq!(ledger.advertised_free().unwrap(), Some(3));
         assert_eq!(metrics.snapshot().reconcile_runs, 1);
     }

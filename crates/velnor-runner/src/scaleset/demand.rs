@@ -464,6 +464,46 @@ impl DemandStore {
         Ok(count.max(0) as u64)
     }
 
+    /// `(scale_set_id, request_id, state)` of every set's rows in any of
+    /// `states`, ordered by set then request. Feeds daemon-startup
+    /// attestation, which is host-global (the ledger holds every set).
+    pub fn list_in_states_all(
+        &self,
+        states: &[DemandState],
+    ) -> Result<Vec<(i32, i64, DemandState)>> {
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = states.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT scale_set_id, request_id, state FROM scaleset_demand
+             WHERE state IN ({placeholders}) ORDER BY scale_set_id, request_id"
+        );
+        let state_names: Vec<&str> = states.iter().map(|state| state.as_str()).collect();
+        let mut refs: Vec<&dyn ToSql> = Vec::with_capacity(states.len());
+        for name in &state_names {
+            refs.push(name);
+        }
+        let mut stmt = self.conn.prepare(&sql).context("prepare demand list")?;
+        let rows = stmt
+            .query_map(refs.as_slice(), |row| {
+                let scale_set_id: i32 = row.get(0)?;
+                let request_id: i64 = row.get(1)?;
+                let state_raw: String = row.get(2)?;
+                let state = DemandState::parse(&state_raw).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?;
+                Ok((scale_set_id, request_id, state))
+            })
+            .context("query demand list")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("read demand list")
+    }
+
     /// `(request_id, state)` of one set's rows in any of `states`, ordered
     /// by request ID. Feeds the reconcile alive-set.
     pub fn list_in_states(

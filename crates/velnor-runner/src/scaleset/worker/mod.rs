@@ -281,7 +281,8 @@ impl ScaleSetWorker {
 }
 
 /// What to provision: identity + profile + secrets + readiness budget.
-#[derive(Debug, Clone)]
+/// `Debug` never prints the JIT blob: presence-only.
+#[derive(Clone)]
 pub struct ProvisionPlan {
     /// Recorded worker identity (stable names + labels).
     pub identity: WorkerIdentity,
@@ -293,6 +294,18 @@ pub struct ProvisionPlan {
     pub jit_config: String,
     /// DinD readiness probes before giving up (× [`DIND_READY_POLL_INTERVAL`]).
     pub ready_attempts: u32,
+}
+
+impl std::fmt::Debug for ProvisionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionPlan")
+            .field("identity", &self.identity)
+            .field("profile", &self.profile)
+            .field("state_dir", &self.state_dir)
+            .field("jit_config", &"<redacted>")
+            .field("ready_attempts", &self.ready_attempts)
+            .finish()
+    }
 }
 
 /// What provisioning produced.
@@ -666,6 +679,24 @@ mod tests {
             script.seen
         );
         std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn provision_plan_debug_redacts_jit_blob() {
+        let profile = runner::HomogeneousProfile::for_arch("x86_64").unwrap();
+        let plan = ProvisionPlan {
+            identity: WorkerIdentity::new(OwnershipId::bind(7, "velnor-7-4244")),
+            profile,
+            state_dir: std::path::PathBuf::from("/tmp/velnor-plan-redact"),
+            jit_config: "live-jit-config-blob".to_owned(),
+            ready_attempts: 2,
+        };
+        let rendered = format!("{plan:?}");
+        assert!(
+            !rendered.contains("live-jit-config-blob"),
+            "ProvisionPlan Debug leaked JIT: {rendered}"
+        );
+        assert!(rendered.contains("velnor-7-4244"));
     }
 
     #[test]

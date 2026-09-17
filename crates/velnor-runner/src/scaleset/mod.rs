@@ -1,4 +1,5 @@
-//! Scale-set adapter (D1 parts A + B + C): protocol + worker lane + §5.1 loop.
+//! Scale-set adapter (D1 parts A + B + C + D): protocol + worker lane +
+//! §5.1 loop + daemon wiring.
 //!
 //! Rust port of the `actions/scaleset` wire protocol at
 //! [`upstream_pin::UPSTREAM_COMMIT`]: admin-plane client, message-session
@@ -6,11 +7,14 @@
 //! recorded fixtures (part A), the homogeneous worker lane
 //! ([`worker`]: pinned official runner + private DinD, supervision, owned
 //! cleanup) and the shared [`allocator`] binding to the ONE host-wide
-//! `max_jobs=N` ledger (part B), plus the poll→Scale→ACK loop with its
-//! durable demand queue, intent stores, shared-grant capacity port,
-//! population convergence, and reconcile paths (part C).
-//! The worker lane (`worker/`) implements [`converge::WorkerLane`];
-//! daemon wiring follows at integration.
+//! `max_jobs=N` ledger (part B), the poll→Scale→ACK loop with its durable
+//! demand queue, intent stores, shared-grant capacity port, population
+//! convergence, and reconcile paths (part C), and the daemon wiring (part
+//! D): key material ([`key_material`]), registration reconciliation
+//! ([`registration`]), the production [`WorkerLane`][converge::WorkerLane]
+//! ([`lane`]), the shared-ledger adapter ([`shared_ledger`]), and the
+//! [`ScaleSetDaemon`][daemon::ScaleSetDaemon] the `velnor-runner` daemon
+//! supervises next to its native slots.
 
 pub mod allocator;
 pub mod backoff;
@@ -19,21 +23,24 @@ pub mod client;
 pub mod config;
 pub mod converge;
 pub mod credentials;
+pub mod daemon;
 pub mod demand;
 pub mod errors;
 pub mod fixtures;
 pub mod intents;
+pub mod key_material;
+pub mod lane;
 pub mod listener;
 pub mod metrics;
 pub mod reconcile;
+pub mod registration;
 pub mod scale;
 pub mod session;
+pub mod shared_ledger;
 pub mod upstream_pin;
 pub mod worker;
 
-pub use allocator::{
-    scaleset_permit_holder, AllocatorError, ScaleSetAllocator, ScaleSetPermitGuard,
-};
+pub use allocator::{AllocatorError, ScaleSetAllocator, ScaleSetPermitGuard};
 pub use backoff::{IdlePolicy, PollOutcomeClass, RetryPolicy};
 pub use capacity::{
     advertise_free, reserve_for_offer, AcquireOutcome as LedgerAcquireOutcome, CapacityLedger,
@@ -44,6 +51,10 @@ pub use client::{ScaleSetClient, SystemInfo};
 pub use config::{GitHubConfig, GitHubScope};
 pub use converge::{PopulationDecision, ProvisionImages, WorkerLane};
 pub use credentials::{ActionsAuth, FnJwtProvider, GitHubAppAuth, JwtProvider, PemJwtProvider};
+pub use daemon::{
+    lane_configured, load_file_config, AdapterReport, AuthFileConfig, DaemonDefaults,
+    ScaleSetDaemon, ScaleSetFileConfig, StartReport,
+};
 pub use demand::{
     classify_offer, grant_oldest, DemandState, DemandStore, OfferTrust, SubmitOutcome,
 };
@@ -53,9 +64,13 @@ pub use fixtures::{
     TranscriptPoll, FIXTURE_HOST, REDACTED,
 };
 pub use intents::{
-    jit_fingerprint, labels_hash, mint_batch_id, permit_holder, provision_operation_id,
-    provision_ownership_id, reconcile_returned_ids, runner_name, stable_i64, AcquireBatch,
-    AcquireBatchStore, BatchState, ProvisionIntent, ProvisionIntentStore,
+    jit_fingerprint, labels_hash, mint_batch_id, parse_permit_holder, permit_holder,
+    provision_operation_id, provision_ownership_id, reconcile_returned_ids, runner_name,
+    stable_i64, AcquireBatch, AcquireBatchStore, BatchState, ProvisionIntent, ProvisionIntentStore,
+};
+pub use key_material::{load_app_auth, load_pat, AppKeyConfig, KeySource, ScaleSetAuthConfig};
+pub use lane::{
+    AdoptReport, DaemonWorkerLane, LaneConfig, LaneError, ShutdownReport, WorkerRegistry,
 };
 pub use listener::{ClientSession, Listener, ListenerError, LoopConfig, LoopSession, SessionStore};
 pub use listener::{SessionCursor, INITIAL_MESSAGE_ID};
@@ -63,11 +78,13 @@ pub use metrics::{MetricSnapshot, Metrics};
 pub use reconcile::{
     idle_poll, startup, unknown_event, IdleReport, StartupReport, UNCERTAIN_REACQUIRE_AFTER,
 };
+pub use registration::{reconcile_registration, ReconciledSet, RegistrationPlan};
 pub use scale::ScaleOutcome;
 pub use scale::{
     Processor, ProcessorConfig, QueueSession, ScaleError, ScaleKind, MAX_ACQUIRE_BATCH,
 };
 pub use session::{parse_message_response, MessageSessionClient, ParsedMessage};
+pub use shared_ledger::SharedLedger;
 pub use upstream_pin::{require_pin, UPSTREAM_COMMIT, UPSTREAM_REPO};
 
 use anyhow::Result;

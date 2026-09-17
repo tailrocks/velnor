@@ -324,6 +324,12 @@ impl<S, L, W> Listener<S, L, W> {
     pub fn processor(&self) -> &Processor<S, L, W> {
         &self.processor
     }
+
+    /// Mutable processor access for daemon lifecycle passes (shutdown
+    /// triage runs through the lane; the loop owns every other call).
+    pub fn processor_mut(&mut self) -> &mut Processor<S, L, W> {
+        &mut self.processor
+    }
 }
 
 impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
@@ -616,7 +622,7 @@ mod tests {
     impl WorkerLane for StubLane {
         type Error = LaneError;
 
-        fn provision(
+        async fn provision(
             &mut self,
             _intent: &crate::scaleset::intents::ProvisionIntent,
         ) -> Result<(), Self::Error> {

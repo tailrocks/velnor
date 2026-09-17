@@ -26,18 +26,21 @@ use sha2::{Digest, Sha256};
 
 /// Ledger holder for one scale-set acquisition. Deterministic: every retry
 /// and the post-cleanup release resolve to this exact string.
+///
+/// The slash form matches the native lane's `native/<id>` namespace: one
+/// ledger, one separator convention, no per-lane parsing.
 #[must_use]
 pub fn permit_holder(scale_set_id: i32, request_id: i64) -> String {
-    format!("scaleset:{scale_set_id}:{request_id}")
+    format!("scaleset/{scale_set_id}/{request_id}")
 }
 
 /// Parse a [`permit_holder`] back into `(scale_set_id, request_id)`.
 pub fn parse_permit_holder(holder: &str) -> Result<(i32, i64)> {
     let rest = holder
-        .strip_prefix("scaleset:")
+        .strip_prefix("scaleset/")
         .with_context(|| format!("permit holder {holder:?} is not a scale-set holder"))?;
     let (set, request) = rest
-        .split_once(':')
+        .split_once('/')
         .with_context(|| format!("permit holder {holder:?} has no request part"))?;
     Ok((
         set.parse()
@@ -458,6 +461,24 @@ impl ProvisionIntentStore {
             .context("fetch provision intent by request")
     }
 
+    /// List every intent for one scale set, oldest first. Crash recovery
+    /// adopts or fails each recorded worker from this list.
+    pub fn list_for_set(&self, scale_set_id: i32) -> Result<Vec<ProvisionIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT operation_id, ownership_id, scale_set_id, request_id, runner_name,
+                        runner_digest, dind_digest, jit_fingerprint, generation, created_at, updated_at
+                 FROM scaleset_provision_intents
+                 WHERE scale_set_id = ?1 ORDER BY created_at ASC",
+            )
+            .context("list provision intents")?;
+        stmt.query_map(params![scale_set_id], Self::row_to_intent)
+            .context("list provision intents")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("list provision intents")
+    }
+
     /// Record the JIT fingerprint after the worker lane fetches the config.
     /// The blob itself is never persisted — only this fingerprint.
     pub fn record_jit_fingerprint(&mut self, operation_id: &str, fingerprint: &str) -> Result<()> {
@@ -505,10 +526,10 @@ mod tests {
     #[test]
     fn holder_round_trips() {
         let holder = permit_holder(7, 4242);
-        assert_eq!(holder, "scaleset:7:4242");
+        assert_eq!(holder, "scaleset/7/4242");
         assert_eq!(parse_permit_holder(&holder).unwrap(), (7, 4242));
         assert!(parse_permit_holder("native:abc").is_err());
-        assert!(parse_permit_holder("scaleset:7").is_err());
+        assert!(parse_permit_holder("scaleset/7").is_err());
     }
 
     #[test]
@@ -553,7 +574,7 @@ mod tests {
     fn acquire_intent_round_trips_and_resolves() {
         let path = temp_path("batch");
         let mut store = AcquireBatchStore::open(&path).unwrap();
-        let holders = vec!["scaleset:7:1".to_owned(), "scaleset:7:2".to_owned()];
+        let holders = vec!["scaleset/7/1".to_owned(), "scaleset/7/2".to_owned()];
         let batch = store
             .record_intended("acq-1", 7, &[1, 2], &holders, 4)
             .unwrap();

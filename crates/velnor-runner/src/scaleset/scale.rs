@@ -289,7 +289,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         outcome.uncertain = uncertain;
 
         // Step 5: provision every acquired row still missing its intent.
-        outcome.provisioned = self.provision_pass()?;
+        outcome.provisioned = self.provision_pass().await?;
 
         // Offer-validity guard: every offer in this batch must have a
         // durable row before `Ok` licenses the ACK.
@@ -576,23 +576,21 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         Ok((acquired, missing, Vec::new()))
     }
 
-    /// Step 5: provision every `acquired` row still missing its intent —
-    /// fresh grants and redelivered retries alike.
-    fn provision_pass(&mut self) -> Result<Vec<i64>, ScaleError<Q::Error, W::Error>> {
+    /// Step 5: provision every `acquired` row — fresh grants and
+    /// redelivered retries alike. There is deliberately no
+    /// intent-exists skip: [`ensure_provision_intent`] is idempotent on
+    /// the stable operation id, and the lane call must re-run after a
+    /// failed provision or a crash between intent and provision (the
+    /// demand row stays `acquired` in both windows, so the skip would
+    /// strand the worker forever with its permit held). Success moves
+    /// the row to `provision_intent`, which is what stops the retries.
+    async fn provision_pass(&mut self) -> Result<Vec<i64>, ScaleError<Q::Error, W::Error>> {
         let acquired = self
             .demand
             .list_in_states(self.config.scale_set_id, &[DemandState::Acquired])
             .map_err(ScaleError::Store)?;
         let mut provisioned = Vec::new();
         for (request_id, _) in acquired.into_iter().take(self.config.max_acquire_batch) {
-            let exists = self
-                .provision
-                .get_by_request(self.config.scale_set_id, request_id)
-                .map_err(ScaleError::Store)?
-                .is_some();
-            if exists {
-                continue;
-            }
             let generation = self.generation()?;
             ensure_provision_intent(
                 &mut self.provision,
@@ -604,6 +602,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 generation,
                 &self.metrics,
             )
+            .await
             .map_err(ScaleError::Store)?;
             self.demand
                 .set_state(request_id, DemandState::ProvisionIntent, None, generation)
@@ -761,7 +760,7 @@ mod tests {
     impl WorkerLane for StubLane {
         type Error = LaneError;
 
-        fn provision(
+        async fn provision(
             &mut self,
             intent: &crate::scaleset::intents::ProvisionIntent,
         ) -> Result<(), Self::Error> {

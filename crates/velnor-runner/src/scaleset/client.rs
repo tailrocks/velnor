@@ -56,11 +56,22 @@ pub struct SystemInfo {
 }
 
 /// Cached Actions Service admin token (`actionsServiceAdminToken`).
-#[derive(Debug, Clone)]
+/// `Debug` never prints the authorization header: presence-only.
+#[derive(Clone)]
 struct AdminToken {
     authorization_header: String,
     expires_at_epoch: u64,
     url: String,
+}
+
+impl std::fmt::Debug for AdminToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminToken")
+            .field("authorization_header", &"<redacted>")
+            .field("expires_at_epoch", &self.expires_at_epoch)
+            .field("url", &self.url)
+            .finish()
+    }
 }
 
 /// Raw HTTP response: status + headers + BOM-stripped body (`sendRequest`).
@@ -1096,6 +1107,21 @@ mod tests {
         assert_eq!(admin_token_expires_at(jwt).unwrap(), 2_000_000_000);
         assert!(admin_token_expires_at("not-a-jwt").is_err());
         assert!(admin_token_expires_at("a.eyJub2V4cCI6MX0.c").is_err());
+    }
+
+    #[test]
+    fn admin_token_debug_redacts_authorization_header() {
+        let token = AdminToken {
+            authorization_header: "Bearer live-admin-token".into(),
+            expires_at_epoch: 2_000_000_000,
+            url: "https://actions.invalid/tenant".into(),
+        };
+        let rendered = format!("{token:?}");
+        assert!(
+            !rendered.contains("live-admin-token"),
+            "admin token Debug leaked: {rendered}"
+        );
+        assert!(rendered.contains("https://actions.invalid/tenant"));
     }
 
     #[test]
