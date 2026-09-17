@@ -731,9 +731,19 @@ jobs:
             [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
             install -Dm0755 "$temporary/$asset" "$binary"
           fi
+          check_slot() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              installed="$(sha256sum "$binary" | awk '{print $1}')"
+            else
+              installed="$(shasum -a 256 "$binary" | awk '{print $1}')"
+            fi
+            [[ "$installed" == "$expected" ]] || { echo "::error::policy runtime slot changed after verification" >&2; exit 1; }
+          }
+          check_slot
           reported="$("$binary" --closure)"
           [[ "$reported" == "$closure" ]] || { echo "::error::pinned workflow policy runtime reports closure $reported, expected $closure" >&2; exit 1; }
           manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+          check_slot
           reported_revision="$("$binary" --revision)"
           [[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }
           echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"

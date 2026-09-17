@@ -67,6 +67,16 @@ fn is_docker_control_env(name: &str) -> bool {
 /// admission; this is the emission backstop. `--shm-size` is deliberately
 /// absent: shared-memory sizing is not a CPU/RAM ceiling, and browsers
 /// need it larger than Docker's default, not smaller.
+///
+/// Accepted risk (security audit F4; spec §4.3 mandates unbounded): host
+/// capacity is count-capped via the permit ledger, never ceiling-capped,
+/// so any admitted job can starve co-tenants or OOM the host (fork bomb,
+/// malloc loop, OOM-heavy build) with no host access needed — one
+/// malicious or buggy same-repo PR job suffices. Same-repo PRs are
+/// therefore untrusted for capacity. Throughput-neutral backstops
+/// (`--pids-limit`, oomd, `MemoryHigh`) were considered and rejected:
+/// the spec forbids ceilings, and the installer fails closed on any
+/// surviving one (postinst + preflight assert infinity).
 const QUOTA_FLAGS: [&str; 11] = [
     "--cpus",
     "--cpu-period",
@@ -2223,6 +2233,38 @@ mod tests {
                 .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]),
             "{args:?}"
         );
+    }
+
+    /// The emission strip list covers every Docker CPU/RAM/PID ceiling
+    /// flag, however spelled: shrinking this list would silently admit a
+    /// ceiling, so the list itself is pinned, not just the stripping
+    /// behavior. (Accepted risk, audit F4: no ceilings by spec §4.3.)
+    #[test]
+    fn quota_strip_list_covers_every_ceiling_flag() {
+        const CEILINGS: [&str; 11] = [
+            "--cpus",
+            "--cpu-period",
+            "--cpu-quota",
+            "--cpu-shares",
+            "--cpuset-cpus",
+            "--cpuset-mems",
+            "--memory",
+            "--memory-reservation",
+            "--memory-swap",
+            "--memory-swappiness",
+            "--pids-limit",
+        ];
+        assert_eq!(QUOTA_FLAGS, CEILINGS);
+        for flag in CEILINGS {
+            assert!(is_quota_flag(flag), "{flag} must be stripped");
+            assert!(
+                is_quota_flag(&format!("{flag}=1")),
+                "{flag}=1 must be stripped"
+            );
+        }
+        // `--shm-size` is deliberately not a ceiling (see `QUOTA_FLAGS`).
+        assert!(!is_quota_flag("--shm-size"));
+        assert!(!is_quota_flag("--shm-size=256m"));
     }
 
     /// No disguised resource partition is injected into the build

@@ -201,6 +201,14 @@ pub struct DiagnosticExport {
 /// deletion. Every capture is attempted even when an earlier one fails;
 /// failures are collected, not raised, so one missing container cannot
 /// hide the surviving container's evidence.
+///
+/// Secrecy: inspect output is redacted before it touches disk (labels,
+/// `State`, and `NetworkSettings` only — `Config.Env`, which carries the
+/// JIT blob, is dropped), and every file is owner-only (`0600`, dir
+/// `0700`). Logs stay byte-identical — this layer owns no mask registry
+/// — so the state dir itself is deleted once the permit releases (see
+/// [`Supervision::release_state`]); raw logs never rest on shared disk
+/// past the worker's lifetime.
 pub(crate) fn export_diagnostics(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
@@ -209,6 +217,8 @@ pub(crate) fn export_diagnostics(
     let dir = state_dir.join("diagnostics");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create diagnostics dir {}", dir.display()))?;
+    restrict_diagnostic_dir(&dir)
+        .with_context(|| format!("restrict diagnostics dir {}", dir.display()))?;
     let mut failures = Vec::new();
 
     let runner_log = dir.join("runner.log");
@@ -259,7 +269,7 @@ fn capture_logs(
         Ok(output) if output.code == 0 => {
             // `docker logs` splits streams; both are evidence.
             let combined = format!("{}{}", output.stdout, output.stderr);
-            if let Err(error) = std::fs::write(dest, combined) {
+            if let Err(error) = write_diagnostic(dest, combined.as_bytes()) {
                 failures.push(format!("write {}: {error}", dest.display()));
             }
         }
@@ -287,17 +297,71 @@ fn capture_inspect(
         ],
     );
     match inspect {
-        Ok(output) if output.code == 0 => {
-            if let Err(error) = std::fs::write(dest, &output.stdout) {
-                failures.push(format!("write {}: {error}", dest.display()));
+        Ok(output) if output.code == 0 => match redact_inspect(&output.stdout) {
+            Some(redacted) => {
+                if let Err(error) = write_diagnostic(dest, redacted.as_bytes()) {
+                    failures.push(format!("write {}: {error}", dest.display()));
+                }
             }
-        }
+            // Fail closed: unparseable inspect output is withheld, never
+            // persisted raw — raw bytes may carry `Config.Env`.
+            None => failures.push(format!(
+                "inspect {container}: output withheld (unparseable; refusing to persist unredacted bytes)"
+            )),
+        },
         Ok(output) => failures.push(format!(
             "inspect {container} exited {}: {}",
             output.code,
             output.stderr.trim()
         )),
         Err(error) => failures.push(format!("inspect {container}: {error:#}")),
+    }
+}
+
+/// Redact a `docker inspect` array before it touches disk: keep the
+/// container identity, labels, `State`, and `NetworkSettings`; drop
+/// everything else, notably `Config.Env` (which carries the JIT blob).
+/// `None` means the output is not an inspect array — withheld, never
+/// persisted raw.
+fn redact_inspect(raw: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mut redacted = Vec::new();
+    for object in parsed.as_array()? {
+        let map = object.as_object()?;
+        let mut kept = serde_json::Map::new();
+        for key in ["Id", "Name", "State", "NetworkSettings"] {
+            if let Some(value) = map.get(key) {
+                kept.insert(key.to_string(), value.clone());
+            }
+        }
+        if let Some(labels) = map.get("Config").and_then(|config| config.get("Labels")) {
+            kept.insert(
+                "Config".to_string(),
+                serde_json::json!({ "Labels": labels }),
+            );
+        }
+        redacted.push(serde_json::Value::Object(kept));
+    }
+    serde_json::to_string_pretty(&redacted).ok()
+}
+
+/// Write one diagnostic file with owner-only permissions.
+fn write_diagnostic(dest: &Path, contents: &[u8]) -> std::io::Result<()> {
+    super::write_owner_only(dest, contents)
+}
+
+/// Restrict the diagnostics dir to the owner. Best-effort on non-unix,
+/// where no permission primitive exists.
+fn restrict_diagnostic_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
     }
 }
 
@@ -456,6 +520,26 @@ impl Supervision {
     pub fn cleanup(&self, runner: &mut dyn WorkerRunner) -> Result<CleanupReport> {
         owned_cleanup(runner, &self.identity, &self.state_dir)
     }
+
+    /// Delete the worker's state dir. Call once, after the permit
+    /// releases: the dir holds the raw job logs, which must not rest on
+    /// shared disk past the worker's lifetime. Fails closed on a dir this
+    /// worker's export did not create (no `diagnostics/` child) rather
+    /// than deleting an unrelated tree.
+    pub fn release_state(&self) -> Result<()> {
+        if !self.state_dir.join("diagnostics").is_dir() {
+            anyhow::bail!(
+                "refusing to delete {}: no diagnostics dir (not a released worker state dir)",
+                self.state_dir.display()
+            );
+        }
+        std::fs::remove_dir_all(&self.state_dir).with_context(|| {
+            format!(
+                "delete released worker state dir {}",
+                self.state_dir.display()
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -546,7 +630,7 @@ mod tests {
             ScriptRunner::ok("false\n"),               // dind stopped
             ScriptRunner::ok("true\n"),                // runner running
             ScriptRunner::ok("Connected to GitHub\n"), // runner logs
-            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007\n"), // start dind
+            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"), // start dind
         ]);
         let mut supervision = Supervision::new(identity(), Path::new("/tmp/velnor-test-sup"));
         let outcome = supervision.tick(&mut runner, S::Running).unwrap();
@@ -632,8 +716,8 @@ mod tests {
             ScriptRunner::ok("runner\n"),  // stop runner
             ScriptRunner::ok("LOGS-R\n"),  // logs runner
             ScriptRunner::ok("LOGS-D\n"),  // logs dind
-            ScriptRunner::ok("{}\n"),      // inspect runner
-            ScriptRunner::ok("{}\n"),      // inspect dind
+            ScriptRunner::ok("[{}]\n"),    // inspect runner
+            ScriptRunner::ok("[{}]\n"),    // inspect dind
             ScriptRunner::ok("runner\n"),  // rm runner
             ScriptRunner::ok("dind\n"),    // stop dind
             ScriptRunner::ok("dind\n"),    // rm dind
@@ -677,8 +761,8 @@ mod tests {
             ScriptRunner::fail(1, "boom"), // stop runner fails
             ScriptRunner::ok("LOGS-R\n"),
             ScriptRunner::fail(1, "gone"), // logs dind fails
-            ScriptRunner::ok("{}\n"),
-            ScriptRunner::ok("{}\n"),
+            ScriptRunner::ok("[{}]\n"),
+            ScriptRunner::ok("[{}]\n"),
             ScriptRunner::ok("runner\n"),
             ScriptRunner::ok("dind\n"),
             ScriptRunner::fail(1, "boom"), // rm dind fails
@@ -696,6 +780,110 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_redact_container_env_before_writing() {
+        let state = temp_state("redact");
+        let inspect = r#"[{
+            "Id": "abc123", "Name": "/velnor-scaleset-runner-x",
+            "Config": {
+                "Labels": {"velnor.scaleset.ownership": "7/velnor-set-0007"},
+                "Env": ["ACTIONS_RUNNER_INPUT_JITCONFIG=live-jit-blob-bytes", "PATH=/usr/bin"]
+            },
+            "State": {"Status": "exited", "ExitCode": 0},
+            "NetworkSettings": {"Networks": {}},
+            "HostConfig": {"Binds": []}
+        }]"#;
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("LOGS-R\n"),
+            ScriptRunner::ok("LOGS-D\n"),
+            ScriptRunner::ok(inspect),
+            ScriptRunner::ok("[{}]\n"),
+        ]);
+        let export = export_diagnostics(&mut runner, &identity(), &state).unwrap();
+        assert!(export.failures.is_empty(), "{export:?}");
+        let persisted = std::fs::read_to_string(&export.runner_inspect).unwrap();
+        assert!(
+            !persisted.contains("live-jit-blob-bytes"),
+            "JIT blob must not reach disk: {persisted}"
+        );
+        assert!(!persisted.contains("\"Env\""), "{persisted}");
+        assert!(!persisted.contains("HostConfig"), "{persisted}");
+        // Evidence survives: identity, labels, state, networks.
+        assert!(persisted.contains("abc123"), "{persisted}");
+        assert!(
+            persisted.contains("velnor.scaleset.ownership"),
+            "{persisted}"
+        );
+        assert!(persisted.contains("\"State\""), "{persisted}");
+        assert!(persisted.contains("\"NetworkSettings\""), "{persisted}");
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostics_land_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = temp_state("perms");
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("LOGS-R\n"),
+            ScriptRunner::ok("LOGS-D\n"),
+            ScriptRunner::ok("[{}]\n"),
+            ScriptRunner::ok("[{}]\n"),
+        ]);
+        let export = export_diagnostics(&mut runner, &identity(), &state).unwrap();
+        assert!(export.failures.is_empty(), "{export:?}");
+        for file in [
+            &export.runner_log,
+            &export.dind_log,
+            &export.runner_inspect,
+            &export.dind_inspect,
+        ] {
+            let mode = std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} has mode {mode:o}", file.display());
+        }
+        let dir_mode = std::fs::metadata(&export.dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "diagnostics dir has mode {dir_mode:o}");
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn unparseable_inspect_is_withheld_never_persisted_raw() {
+        let state = temp_state("withhold");
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("LOGS-R\n"),
+            ScriptRunner::ok("LOGS-D\n"),
+            ScriptRunner::ok("NOT-JSON ACTIONS_RUNNER_INPUT_JITCONFIG=live-jit-blob-bytes\n"),
+            ScriptRunner::ok("[{}]\n"),
+        ]);
+        let export = export_diagnostics(&mut runner, &identity(), &state).unwrap();
+        assert_eq!(export.failures.len(), 1);
+        assert!(export.failures[0].contains("withheld"), "{export:?}");
+        assert!(!export.runner_inspect.exists());
+        // The raw bytes exist nowhere under the state dir.
+        let mut raw_survived = false;
+        for entry in std::fs::read_dir(state.join("diagnostics")).unwrap() {
+            let body = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            raw_survived |= body.contains("live-jit-blob-bytes");
+        }
+        assert!(!raw_survived);
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn release_state_deletes_only_exported_dirs() {
+        let state = temp_state("release");
+        let supervision = Supervision::new(identity(), &state);
+        // No export ran here: deletion refuses rather than removing an
+        // unrelated tree.
+        assert!(supervision.release_state().is_err());
+        assert!(state.is_dir());
+
+        std::fs::create_dir_all(state.join("diagnostics")).unwrap();
+        std::fs::write(state.join("diagnostics/runner.log"), "LOGS\n").unwrap();
+        supervision.release_state().unwrap();
+        assert!(!state.exists());
+    }
+
+    #[test]
     fn missing_objects_read_as_already_cleaned() {
         let state = temp_state("missing");
         let missing = || ScriptRunner::fail(1, "Error: No such container");
@@ -704,7 +892,7 @@ mod tests {
             missing(), // logs runner: gone → export failure (evidence gap is real)
             ScriptRunner::ok("LOGS-D\n"),
             missing(), // inspect runner: gone → export failure
-            ScriptRunner::ok("{}\n"),
+            ScriptRunner::ok("[{}]\n"),
             missing(), // rm runner: already gone → fine
             ScriptRunner::ok("dind\n"),
             ScriptRunner::ok("dind\n"),

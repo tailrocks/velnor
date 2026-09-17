@@ -190,11 +190,11 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         ScriptRunner::ok("netid\n"),
         ScriptRunner::ok(""),
         ScriptRunner::ok("dindid\n"),
-        ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007\n"),
+        ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
         ScriptRunner::ok("28.5.2\n"),
         ScriptRunner::ok(""),
         ScriptRunner::ok("runnerid\n"),
-        ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007\n"),
+        ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
         ScriptRunner::ok("true\n"),
         ScriptRunner::ok("Connected to GitHub\n"),
         // Supervision tick: healthy.
@@ -208,8 +208,8 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("RUNNER-LOGS\n"),
         ScriptRunner::ok("DIND-LOGS\n"),
-        ScriptRunner::ok("{}\n"),
-        ScriptRunner::ok("{}\n"),
+        ScriptRunner::ok("[{}]\n"),
+        ScriptRunner::ok("[{}]\n"),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("dind\n"),
         ScriptRunner::ok("dind\n"),
@@ -268,6 +268,9 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         .transition(&mut sink, ScaleSetWorkerState::PermitReleased)
         .unwrap();
     guard.release();
+    // The permit is gone: the state dir (raw job logs) is deleted with it.
+    supervision.release_state().unwrap();
+    assert!(!state_dir.exists());
 
     // The ledger is empty again and the freed N grants immediately.
     assert_eq!(allocator.occupied().unwrap(), 0);
@@ -300,8 +303,8 @@ fn cleanup_failure_retains_permit_uncertain() {
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("RUNNER-LOGS\n"),
         ScriptRunner::ok("DIND-LOGS\n"),
-        ScriptRunner::ok("{}\n"),
-        ScriptRunner::ok("{}\n"),
+        ScriptRunner::ok("[{}]\n"),
+        ScriptRunner::ok("[{}]\n"),
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("dind\n"),
         ScriptRunner::fail(1, "device or resource busy"), // rm dind fails
