@@ -76,6 +76,7 @@ const DENY_LIST: &[&str] = &[
 /// what it forbids.
 const ADMITTED_FILES: &[&str] = &[
     "src/estate.rs",
+    "src/s2/estate.rs",
     "tests/generic_surface_literals.rs",
     "AGENTS.md",
     "CLAUDE.md",
@@ -90,8 +91,9 @@ const ADMITTED_CARGO_LINE_MARKERS: &[&str] = &["termrock = { git"];
 /// The generator's own distribution paths (`tailrocks/velnor/.github/...`) and
 /// the regeneration marker are generator identity, not consumer knowledge. The
 /// bare slug may appear exactly `BARE_GENERATOR_SLUG_OCCURRENCES` times: the
-/// pinned install URL and the regeneration marker constant.
-const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 2;
+/// pinned install URL and the regeneration marker constant in each of the
+/// schema-1 engine and the schema-2 fork.
+const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 4;
 
 /// Everything the deny list applies to: the crate's Rust sources, its
 /// templates, its tests and fixtures, its build scripts, benches, examples,
