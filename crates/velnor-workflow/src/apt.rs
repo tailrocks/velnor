@@ -1078,6 +1078,27 @@ fn scratch_dir(kind: &str) -> Result<PathBuf, GeneratorError> {
     Ok(dir)
 }
 
+/// Decompression flag for `tar` from the archive's magic bytes.
+///
+/// GNU tar — unlike bsdtar — refuses a compressed payload without an
+/// explicit flag (`Archive is compressed. Use -z option`), and `.deb`
+/// members arrive gzip/xz/zstd-compressed depending on the producer, so
+/// the shared extractor sniffs the payload instead of trusting the
+/// member name. Returns `None` for an uncompressed tar stream.
+fn tar_decompress_flag(payload: &[u8]) -> Option<&'static str> {
+    if payload.starts_with(&[0x1f, 0x8b]) {
+        Some("-z") // gzip
+    } else if payload.starts_with(&[0x42, 0x5a]) {
+        Some("-j") // bzip2
+    } else if payload.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
+        Some("-J") // xz
+    } else if payload.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        Some("--zstd")
+    } else {
+        None // uncompressed tar
+    }
+}
+
 /// Run `tar` with fixed arguments and a piped archive payload.
 fn run_tar_stdin(
     args: &[&str],
@@ -1085,7 +1106,15 @@ fn run_tar_stdin(
     path_overlay: Option<&Path>,
 ) -> Result<(), GeneratorError> {
     let mut extract = Command::new("tar");
-    extract.args(args);
+    let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    if let Some((first, rest)) = args.split_first() {
+        full_args.push(*first);
+        if let Some(flag) = tar_decompress_flag(payload) {
+            full_args.push(flag);
+        }
+        full_args.extend(rest.iter().copied());
+    }
+    extract.args(&full_args);
     if let Some(dir) = path_overlay {
         let overlay = dir.as_os_str();
         let path = std::env::var_os("PATH").map_or_else(
@@ -3487,6 +3516,26 @@ mod tests {
             AptContract::resolve(&apt_spec()),
             "resolve the fixture contract",
         )
+    }
+
+    #[test]
+    fn tar_decompression_flags_follow_payload_magic() {
+        // GNU tar refuses compressed payloads without an explicit flag
+        // while bsdtar sniffs them, so the shared extractor must name
+        // the codec for every `.deb` member compression.
+        assert_eq!(tar_decompress_flag(&[0x1f, 0x8b, 0x08, 0x00]), Some("-z"));
+        assert_eq!(tar_decompress_flag(&[0x42, 0x5a, 0x68]), Some("-j"));
+        assert_eq!(
+            tar_decompress_flag(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]),
+            Some("-J")
+        );
+        assert_eq!(
+            tar_decompress_flag(&[0x28, 0xb5, 0x2f, 0xfd]),
+            Some("--zstd")
+        );
+        assert_eq!(tar_decompress_flag(b"ustar payload"), None);
+        assert_eq!(tar_decompress_flag(&[]), None);
+        assert_eq!(tar_decompress_flag(&[0x1f]), None);
     }
 
     #[test]
