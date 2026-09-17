@@ -388,6 +388,7 @@ pub(crate) struct ReleaseJobSection {
     timeout_minutes: Option<i64>,
     /// The GitHub environment the job runs in (protection rules, scoped
     /// secrets). Empty runs outside any environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     environment: Option<String>,
     /// Build-provenance attestation subjects: artifact paths the job
     /// attests after its tasks succeed. Empty attests nothing.
@@ -2372,6 +2373,7 @@ pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
     "discussions",
     "id-token",
     "issues",
+    "models",
     "packages",
     "pages",
     "pull-requests",
