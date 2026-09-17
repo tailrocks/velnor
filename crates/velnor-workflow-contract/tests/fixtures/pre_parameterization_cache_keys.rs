@@ -49,10 +49,10 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
             CacheKey {
                 layer: "docker_seed",
                 paths: &[".velnor-docker-cache"],
-                primary: "velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}",
+                primary: "velnor-docker-seed-v3-8a4ee3c72d39-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}",
                 restore_keys: &[
-                    "velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-",
-                    "velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-",
+                    "velnor-docker-seed-v3-8a4ee3c72d39-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-",
+                    "velnor-docker-seed-v3-8a4ee3c72d39-${{ runner.os }}-${{ runner.arch }}-docker-",
                 ],
             },
         ],
