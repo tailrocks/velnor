@@ -510,25 +510,19 @@ mod tests {
                         "{{.CgroupDriver}} {{.CgroupVersion}}".to_string(),
                     ] {
                 "systemd 2\n"
-            } else if program == "getconf" && args == ["_NPROCESSORS_ONLN".to_string()] {
-                "1\n"
-            } else if program == "systemctl"
-                && args
-                    == [
-                        "cat".to_string(),
-                        crate::docker_lease::JOB_CGROUP_PARENT.to_string(),
-                    ]
-            {
-                "[Slice]\nCPUQuota=95%\n"
             } else if program == "systemctl"
                 && args.first().is_some_and(|arg| arg == "show")
-                && args.len() == 4
+                && args.len() == 6
                 && args.get(1).is_some_and(|arg| arg == "--property=LoadState")
                 && args
                     .get(2)
                     .is_some_and(|arg| arg == "--property=CPUQuotaPerSecUSec")
+                && args.get(3).is_some_and(|arg| arg == "--property=MemoryMax")
+                && args
+                    .get(4)
+                    .is_some_and(|arg| arg == "--property=MemoryHigh")
             {
-                "CPUQuotaPerSecUSec=950ms\nLoadState=loaded\n"
+                "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryMax=infinity\nMemoryHigh=infinity\n"
             } else {
                 ""
             };

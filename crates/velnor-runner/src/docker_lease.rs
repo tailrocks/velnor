@@ -1475,10 +1475,46 @@ fn validate_empty_network_ipam(value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Force every job-created Docker container into the runner-owned aggregate
-/// cgroup. The lease proxy is the only Docker socket exposed to a job, so this
-/// also covers BuildKit and nested Testcontainers creates. Runner policy wins
-/// over a workflow-supplied `HostConfig.CgroupParent`.
+/// HostConfig fields that would impose a CPU/RAM/PID ceiling on a
+/// job-created container. Nested creates run unbounded like the outer job:
+/// these are stripped (whatever their value — absent and zero are the same
+/// to Docker), never passed through. `ShmSize` is deliberately absent:
+/// shared-memory sizing is not a CPU/RAM ceiling.
+const NESTED_QUOTA_HOST_CONFIG_KEYS: [&str; 16] = [
+    "cpushares",
+    "nanocpus",
+    "cpuperiod",
+    "cpuquota",
+    "cpurealtimeperiod",
+    "cpurealtimeruntime",
+    "cpucount",
+    "cpupercent",
+    "cpusetcpus",
+    "cpusetmems",
+    "memory",
+    "memoryreservation",
+    "memoryswap",
+    "memoryswappiness",
+    "oomkilldisable",
+    "pidslimit",
+];
+
+/// Remove every CPU/RAM/PID ceiling field from a nested container create's
+/// `HostConfig`. Case-insensitive like the rest of the lease gate: Docker
+/// sends canonical casing, but a guest that misspells the case must not
+/// smuggle a ceiling past the strip.
+fn strip_nested_quota_controls(host_config: &mut Map<String, Value>) {
+    host_config.retain(|key, _| {
+        !NESTED_QUOTA_HOST_CONFIG_KEYS.contains(&key.to_ascii_lowercase().as_str())
+    });
+}
+
+/// Force every job-created Docker container into the runner-owned identity
+/// cgroup and strip any CPU/RAM/PID ceiling it requested. The lease proxy
+/// is the only Docker socket exposed to a job, so this also covers BuildKit
+/// and nested Testcontainers creates. Runner policy wins over a
+/// workflow-supplied `HostConfig.CgroupParent`, and unbounded wins over a
+/// workflow-supplied ceiling.
 fn inject_job_cgroup_parent_value(
     value: &mut Value,
     owned_volume_names: &BTreeSet<String>,
@@ -1506,6 +1542,7 @@ fn inject_job_cgroup_parent_value(
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("Image"))
         .and_then(|(_, value)| value.as_str());
+    strip_nested_quota_controls(&mut host_config);
     reject_unsafe_nested_host_controls(&host_config, owned_volume_names, image)?;
     if let Some(alias) = host_config
         .keys()
@@ -1596,13 +1633,15 @@ fn reject_unsafe_nested_host_controls(
             // (live preview.63 probe/backend-parity). That is "no TTY
             // size", not host control. A nonzero size stays denied.
             "consolesize" => !is_default_console_size(value),
-            "autoremove" | "cgroupparent" | "cpucount" | "cpupercent" | "cpushares"
-            | "cpuquota" | "cpuperiod" | "cpurealtimeperiod" | "cpurealtimeruntime"
-            | "cpusetcpus" | "cpusetmems" | "memory" | "memoryreservation" | "memoryswap"
-            | "memoryswappiness" | "nanocpus" | "oomkilldisable" | "pidslimit"
-            | "readonlyrootfs" | "shmsize" | "init" | "stopsignal" | "stoptimeout" | "dns"
-            | "dnsoptions" | "dnssearch" | "extrahosts" | "groupadd" | "ulimits"
-            | "maskedpaths" | "readonlypaths" => false,
+            // Quota fields (CpuShares/NanoCpus/CpuPeriod/CpuQuota/
+            // CpuRealtime*/CpuCount/CpuPercent/Cpuset*/Memory*/
+            // OomKillDisable/PidsLimit) are stripped before this gate runs;
+            // any that reach it fall into the strict unknown-field default
+            // below instead of passing through. ShmSize stays allowed:
+            // shared-memory sizing is not a CPU/RAM ceiling.
+            "autoremove" | "cgroupparent" | "readonlyrootfs" | "shmsize" | "init"
+            | "stopsignal" | "stoptimeout" | "dns" | "dnsoptions" | "dnssearch" | "extrahosts"
+            | "groupadd" | "ulimits" | "maskedpaths" | "readonlypaths" => false,
             // Testcontainers publishes ephemeral host ports (`-P` /
             // PortBindings) so the guest can reach Postgres/Redis/RabbitMQ.
             // The lease still labels every create and reclaims by
@@ -4657,10 +4696,20 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_injects_cgroup_parent_and_overrides_nested_container_policy() {
+    fn rewrite_injects_cgroup_parent_and_strips_nested_ceiling_policy() {
         let body = br#"{
             "Image":"postgres:18-alpine",
-            "HostConfig":{"CgroupParent":"untrusted.slice","Memory":123}
+            "HostConfig":{
+                "CgroupParent":"untrusted.slice",
+                "Memory":123,
+                "NanoCpus":500000000,
+                "CpuQuota":50000,
+                "CpusetCpus":"0-1",
+                "MemorySwap":456,
+                "PidsLimit":512,
+                "OomKillDisable":true,
+                "ShmSize":268435456
+            }
         }"#;
         let request = format!(
             "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
@@ -4673,7 +4722,23 @@ mod tests {
         let body = text.split("\r\n\r\n").nth(1).unwrap();
         let value: Value = serde_json::from_str(body).unwrap();
         assert_eq!(value["HostConfig"]["CgroupParent"], JOB_CGROUP_PARENT);
-        assert_eq!(value["HostConfig"]["Memory"], 123);
+        // Nested creates run unbounded: every ceiling field is stripped.
+        for key in [
+            "Memory",
+            "NanoCpus",
+            "CpuQuota",
+            "CpusetCpus",
+            "MemorySwap",
+            "PidsLimit",
+            "OomKillDisable",
+        ] {
+            assert!(
+                value["HostConfig"].get(key).is_none(),
+                "nested HostConfig must not carry {key}: {value}"
+            );
+        }
+        // ShmSize is shared-memory sizing, not a ceiling: it survives.
+        assert_eq!(value["HostConfig"]["ShmSize"], 268435456);
     }
 
     #[test]
