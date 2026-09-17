@@ -2,17 +2,17 @@
 schema = 2
 [inputs]
 config	951b0f534335b78c
-scan	3d1e08f74d7b649b
+scan	5fc04182098c3e1d
 generator	49
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
 .github/actions/report-velnor-ci-outcomes/action.yml	238dbd0d0b802739
 .github/actions/setup-velnor-workflow/action.yml	da8fae1bb9e2226b
-.github/ci/project.toml	66d5af0f28309fd0
+.github/ci/project.toml	cfde776b93beaf97
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	7bb096218bad1460
+.github/workflows/ci-main.yml	72e16aad5d76a730
 .github/workflows/ci-policy.yml	0091351886dd3f00
-.github/workflows/ci-pr.yml	cf9be5df6a545f3f
+.github/workflows/ci-pr.yml	3e0558a219bdb797
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-runtime-products.yml	062164275859eb69
 .github/workflows/ci-unit-bun.yml	a94fb7c6789be6e8
