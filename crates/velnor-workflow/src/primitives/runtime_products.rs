@@ -67,12 +67,16 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
         .map(|(file, _)| *file)
 }
 
-/// The Linux ARM64 builder. The generation config names no ARM lane (its Linux
-/// lane is `github_runner`, its Apple lane is `macos_runner`), so the label is
-/// fixed to the hosted ARM runner the release family's guest matrix already
-/// builds on. The setup action's cache key and the Velnor provisioner both
-/// address `Linux-ARM64`, so the product must exist whatever the config says.
+/// The platform→builder mapping: which runner natively compiles each
+/// consumer platform's product. These labels are product infrastructure fixed
+/// in generator source — a closure-covered path — not lane configuration: a
+/// mapping change is a generator source change, so it alters the closure and
+/// mints a new product tag instead of reusing the stale tag's binaries. Owner
+/// lane labels (`github_runner`, `macos_runner`) move freely without
+/// affecting the builders, and can never silently reselect them.
+const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
+const MACOS_ARM64_RUNNER: &str = "macos-15";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
@@ -97,15 +101,15 @@ const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test
 const PRODUCER_CARGO_HOME_VALUE: &str = "${{ runner.temp }}/velnor-producer-cargo-home";
 
 /// One natively built consumer platform: the `RUNNER_OS`-`RUNNER_ARCH` pair
-/// the setup action resolves its asset name from, and the runner that builds
-/// it. Linux X64 serves the `github_runner` lane and the Velnor hosts, Linux
+/// the setup action resolves its asset name from, and the fixed runner that
+/// builds it. Linux X64 serves the Linux lane and the Velnor hosts, Linux
 /// ARM64 serves ARM consumers of both, and macOS ARM64 serves the Apple lane
-/// (`macos_runner` defaults to an ARM label, and no lane in the repository
-/// selects an Intel Mac, so there is no macOS X64 consumer to build for).
+/// (no lane in the repository selects an Intel Mac, so there is no macOS X64
+/// consumer to build for).
 struct Platform {
     os: &'static str,
     arch: &'static str,
-    runner: String,
+    runner: &'static str,
 }
 
 impl Platform {
@@ -121,25 +125,24 @@ impl Platform {
     }
 }
 
-/// The consumer platforms, in manifest order. The Linux X64 and macOS ARM64
-/// builders follow the owner's configured lanes; Linux ARM64 has no
-/// configured lane and builds on the fixed hosted ARM runner.
-fn platforms(config: &ProjectConfig) -> [Platform; 3] {
+/// The consumer platforms, in manifest order. All three builders are the
+/// fixed product-infrastructure mapping, independent of lane configuration.
+fn platforms() -> [Platform; 3] {
     [
         Platform {
             os: "Linux",
             arch: "X64",
-            runner: config.github_runner.clone(),
+            runner: LINUX_X64_RUNNER,
         },
         Platform {
             os: "Linux",
             arch: "ARM64",
-            runner: LINUX_ARM64_RUNNER.to_owned(),
+            runner: LINUX_ARM64_RUNNER,
         },
         Platform {
             os: "macOS",
             arch: "ARM64",
-            runner: config.macos_runner.clone(),
+            runner: MACOS_ARM64_RUNNER,
         },
     ]
 }
@@ -207,7 +210,7 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
             "      - name: Provision Rust toolchain\n        shell: bash\n        env:\n          CARGO_HOME: {PRODUCER_CARGO_HOME_VALUE}\n"
         ),
     );
-    let platforms = platforms(config);
+    let platforms = platforms();
     let mut matrix = String::new();
     for platform in &platforms {
         let _ = writeln!(
@@ -215,7 +218,7 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
             "          - os: {}\n            arch: {}\n            runner: {}",
             platform.os,
             platform.arch,
-            yaml_scalar(&platform.runner),
+            yaml_scalar(platform.runner),
         );
     }
     let mut manifest_products = String::new();
@@ -697,7 +700,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fmt::Display;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use sha2::{Digest, Sha256};
 
@@ -1319,24 +1322,41 @@ mod tests {
     }
 
     #[test]
-    fn platforms_cover_the_consumer_lanes() {
+    fn producer_builders_are_fixed_closure_covered_infrastructure() {
+        // Hostile lane labels must not move the builders: the matrix is the
+        // fixed product-infrastructure mapping, so a label change can never
+        // reuse a stale tag's binaries, and a mapping change is a generator
+        // source change that mints a new closure and a new tag.
         let mut config = owner_config(&[]);
-        config.github_runner = "ubuntu-22.04".to_owned();
-        config.macos_runner = "macos-26".to_owned();
+        config.github_runner = "self-hosted-spoof-x64".to_owned();
+        config.macos_runner = "self-hosted-spoof-macos".to_owned();
         let content = must_some(
             runtime_products_content(&config),
             "the owner renders the producer",
         );
+        let matrix = must_some(
+            content
+                .split("      matrix:\n        include:\n")
+                .nth(1)
+                .and_then(|tail| tail.split("\n    runs-on: ${{ matrix.runner }}").next()),
+            "the build matrix renders",
+        );
         for (os, arch, runner) in [
-            ("Linux", "X64", "ubuntu-22.04"),
+            ("Linux", "X64", LINUX_X64_RUNNER),
             ("Linux", "ARM64", LINUX_ARM64_RUNNER),
-            ("macOS", "ARM64", "macos-26"),
+            ("macOS", "ARM64", MACOS_ARM64_RUNNER),
         ] {
             assert!(
-                content.contains(&format!(
+                matrix.contains(&format!(
                     "- os: {os}\n            arch: {arch}\n            runner: {runner}"
                 )),
-                "the matrix builds {os}-{arch} on {runner}: {content}"
+                "the matrix builds {os}-{arch} on the fixed {runner}: {matrix}"
+            );
+        }
+        for spoof in ["self-hosted-spoof-x64", "self-hosted-spoof-macos"] {
+            assert!(
+                !matrix.contains(spoof),
+                "lane labels never reselect the builders ({spoof}): {matrix}"
             );
         }
         assert!(
@@ -1346,6 +1366,54 @@ mod tests {
         assert!(
             content.contains("runs-on: ${{ matrix.runner }}"),
             "one job per platform: {content}"
+        );
+        // The mapping must live under a closure path: only then does a
+        // builder change alter the digest and mint a new tag.
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mapping_file = manifest_dir.join("src/primitives/runtime_products.rs");
+        let mapping_source = must(
+            fs::read_to_string(&mapping_file),
+            "read the producer renderer",
+        );
+        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER, MACOS_ARM64_RUNNER] {
+            assert!(
+                mapping_source.contains(&format!("\"{runner}\"")),
+                "the fixed mapping lives in the producer renderer: {runner}"
+            );
+        }
+        let root = must(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&manifest_dir)
+                .args(["rev-parse", "--show-toplevel"])
+                .output(),
+            "git present",
+        );
+        assert!(root.status.success());
+        let root = must(
+            PathBuf::from(String::from_utf8_lossy(&root.stdout).trim().to_owned())
+                .canonicalize()
+                .map_err(|error| format!("canonicalize repository root: {error}")),
+            "canonicalize the repository root",
+        );
+        let relative = must(
+            mapping_file
+                .canonicalize()
+                .map_err(|error| format!("canonicalize renderer: {error}"))
+                .and_then(|absolute| {
+                    absolute
+                        .strip_prefix(&root)
+                        .map(Path::to_path_buf)
+                        .map_err(|_| "the renderer is outside the repository".to_owned())
+                }),
+            "locate the renderer under the repository root",
+        );
+        assert!(
+            CLOSURE_PATHS
+                .iter()
+                .any(|covered| { relative == Path::new(covered) || relative.starts_with(covered) }),
+            "the builder mapping is closure-covered ({}): {relative:?}",
+            CLOSURE_PATHS.join(", ")
         );
     }
 
