@@ -48,6 +48,10 @@ fn swift_package_unit(package_root: &str) -> Unit {
     } else {
         format!("Swift package ({package_root})")
     };
+    // A SwiftPM package is portable: it verifies wherever its toolchain
+    // provisions, on the lane's default executor. Only Xcode scheme work
+    // below carries an Apple need.
+    result.platform = crate::platform::PlatformRequirement::swift_package();
     result
 }
 
@@ -165,6 +169,12 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::apple_xcode(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
         };
         unit.watch.sort();
         unit.watch.dedup();
@@ -173,10 +183,24 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
     units
 }
 
+/// Whether the package manifest consumes an `XCFramework` binary target: the
+/// bundle only resolves where the Apple SDK exists, so the unit is
+/// Apple-bound even without an Xcode project. A remote (URL) binary target
+/// without an `.xcframework` reference carries no such need.
+fn package_manifest_needs_xcframework(root: &Path, package_root: &str) -> bool {
+    let manifest = root.join(join_repo_path(package_root, "Package.swift"));
+    let contents = fs::read_to_string(manifest).unwrap_or_default();
+    contents.contains(".binaryTarget") && contents.contains(".xcframework")
+}
+
 pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
     for package_root in roots_for_manifests(&files_named(context.files, "Package.swift")) {
         shape.detected.push(format!("swift-package:{package_root}"));
-        shape.units.push(swift_package_unit(&package_root));
+        let mut unit = swift_package_unit(&package_root);
+        if package_manifest_needs_xcframework(context.root, &package_root) {
+            unit.platform = crate::platform::PlatformRequirement::apple_xcframework();
+        }
+        shape.units.push(unit);
     }
     let mut xcode_units = xcode_scheme_units(context.root, context.files);
     let has_xcode_schemes = !xcode_units.is_empty();

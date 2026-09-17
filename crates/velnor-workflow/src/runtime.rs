@@ -22,6 +22,11 @@ use serde::Deserialize;
 
 use sha2::{Digest, Sha256};
 
+use super::primitives::prepared_tools::{
+    classify_and_verify, fetch_producer_conclusion, format_failure_output, format_install_outputs,
+    format_save_check_output, save_is_legal, ApiResponse, HandoffFailure, OutcomeFetchError,
+    Resolution, ToolManifest, ToolRequest, TransferBounds, VerifiedBundle,
+};
 use super::primitives::snapshot::{
     budget_report, plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
@@ -109,10 +114,6 @@ struct Cache {
     paths: Vec<String>,
 }
 
-#[expect(
-    dead_code,
-    reason = "runtime preserves the complete generated unit contract while execution consumes selected fields"
-)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CiUnit {
@@ -391,6 +392,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             print_closure(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
+        "prepared-tool-install" => {
+            prepared_tool_install(&arguments[1..])?;
+            Ok(true)
+        }
         "cache-plan" => {
             let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
             let mode = options.get("mode").map_or("plan", String::as_str);
@@ -411,6 +416,82 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 options.get("entries").map(String::as_str),
                 options.get("now").map(String::as_str),
             )?;
+            Ok(true)
+        }
+        _ => try_run_reuse(command, arguments),
+    }
+}
+
+/// Dispatch the slice-C subcommands (`aggregate`, `select`, `fingerprint`,
+/// `reuse-decision`). `false` means the arguments belong to the workflow
+/// generator CLI proper.
+fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    match command {
+        "aggregate" => {
+            let options = parse_options(&arguments[1..], &["expected", "results"])?;
+            let expected = options.get("expected").ok_or_else(|| {
+                GeneratorError::usage("aggregate requires --expected PATH".to_owned())
+            })?;
+            let results = options.get("results").ok_or_else(|| {
+                GeneratorError::usage("aggregate requires --results PATH".to_owned())
+            })?;
+            aggregate_command(Path::new(expected), Path::new(results))?;
+            Ok(true)
+        }
+        "select" => {
+            let options = parse_options(&arguments[1..], &["config", "base", "head", "scope"])?;
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            let config = resolve_config_path(options.get("config"));
+            let scope = options
+                .get("scope")
+                .map_or(Ok(Scope::Affected), |value| Scope::parse(value))?;
+            let base = options.get("base").cloned().unwrap_or_default();
+            let head = options
+                .get("head")
+                .cloned()
+                .unwrap_or_else(|| "HEAD".to_owned());
+            select_command(&root, &config, scope, &base, &head)?;
+            Ok(true)
+        }
+        "fingerprint" => {
+            let options = parse_options(&arguments[1..], &["config", "unit", "rev", "live"])?;
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            let config = resolve_config_path(options.get("config"));
+            let rev = options
+                .get("rev")
+                .cloned()
+                .unwrap_or_else(|| "HEAD".to_owned());
+            fingerprint_command(
+                &root,
+                &config,
+                options.get("unit").map(String::as_str),
+                options.get("live").map(String::as_str),
+                &rev,
+            )?;
+            Ok(true)
+        }
+        "reuse-decision" => {
+            let options = parse_options(&arguments[1..], &["evidence", "request", "now"])?;
+            let evidence = options.get("evidence").ok_or_else(|| {
+                GeneratorError::usage("reuse-decision requires --evidence PATH".to_owned())
+            })?;
+            let request = options.get("request").ok_or_else(|| {
+                GeneratorError::usage("reuse-decision requires --request PATH".to_owned())
+            })?;
+            let now = options
+                .get("now")
+                .map(String::as_str)
+                .map(|pinned| {
+                    pinned.parse::<u64>().map_err(|_| {
+                        GeneratorError::usage(format!(
+                            "unsupported --now value {pinned}: name seconds since the epoch"
+                        ))
+                    })
+                })
+                .transpose()?;
+            reuse_decision_command(Path::new(evidence), Path::new(request), now)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -496,12 +577,355 @@ fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, Gen
 /// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
 /// when present, otherwise the generator default.
 fn retention_policy_for_plan() -> RetentionPolicy {
-    std::env::current_dir()
+    let discovered = std::env::current_dir()
         .ok()
-        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten())
+        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten());
+    let policy = discovered
+        .as_ref()
         .map_or_else(RetentionPolicy::default_policy, |config| {
             RetentionPolicy::from_config(config.cache_github())
-        })
+        });
+    retention_policy_with_declared_tools(policy, discovered.as_ref())
+}
+
+/// Extend a retention policy with the prepared-tools class when the
+/// discovered generation config declares a `prepared-tool` row. Factored
+/// from the current-directory lookup so tests pin the conditional without
+/// changing the process directory. Undeclared repositories keep the exact
+/// default policy.
+fn retention_policy_with_declared_tools(
+    policy: RetentionPolicy,
+    discovered: Option<&crate::config::RepoGenerationConfig>,
+) -> RetentionPolicy {
+    let declares = discovered.is_some_and(|config| {
+        config
+            .declare()
+            .iter()
+            .any(|row| row.primitive() == super::primitives::PREPARED_TOOL)
+    });
+    if declares {
+        policy.with_prepared_tools()
+    } else {
+        policy
+    }
+}
+
+/// Verify and install one restored prepared-tool bundle: the consumer half
+/// of the handoff, running in CI. The rendered consumer steps pass the
+/// request as literals (`--tool`, `--inputs`, `--abi`, `--producers`,
+/// `--run-id`) and the restore layout (`--manifest`, `--dir`, `--dest`);
+/// `--repo` authorizes the producer-outcome check and `--curl` names the
+/// HTTP client (a test seam; CI uses `curl`). Exact current-run hits skip
+/// the outcome check — the producing job is this run — while historical
+/// bundles must prove their producer run concluded `success`.
+///
+/// Every exit records the taxonomy `outcome` beside the human message: a
+/// later producer step tells a miss (build) from a refusal (fail) without
+/// parsing text.
+fn prepared_tool_install(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let output = env::var_os("GITHUB_OUTPUT").map(PathBuf::from);
+    prepared_tool_install_to(arguments, output.as_deref(), &mut |wait| {
+        thread::sleep(wait);
+    })
+}
+
+/// The install with its step-output path and sleeper injected: the process
+/// environment stays at the boundary so tests pin behavior without touching
+/// it.
+fn prepared_tool_install_to(
+    arguments: &[OsString],
+    output: Option<&Path>,
+    sleeper: &mut dyn FnMut(Duration),
+) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "manifest",
+            "dir",
+            "dest",
+            "tool",
+            "inputs",
+            "abi",
+            "producers",
+            "run-id",
+            "repo",
+            "curl",
+            "check-save-key",
+        ],
+    )?;
+    let get = |name: &str| {
+        options
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| GeneratorError::usage(format!("prepared-tool-install needs --{name}")))
+    };
+    let (manifest_path, dir, dest, tool, inputs, abi, producers, run_id, repo) = (
+        get("manifest")?,
+        get("dir")?,
+        get("dest")?,
+        get("tool")?,
+        get("inputs")?,
+        get("abi")?,
+        get("producers")?,
+        get("run-id")?,
+        get("repo")?,
+    );
+    let curl = options.get("curl").map_or("curl", String::as_str);
+    let request = ToolRequest {
+        tool_id: tool.to_owned(),
+        inputs_digest: inputs.to_owned(),
+        platform_abi: abi.to_owned(),
+        authorized_producers: producers.split(',').map(str::to_owned).collect(),
+        run_id: run_id.to_owned(),
+    };
+    let (resolution, verified) = classify_restored_bundle(manifest_path, dir, &request, output)?;
+    if let Some(candidate) = options.get("check-save-key") {
+        return check_save_key(output, tool, candidate, &verified);
+    }
+    if !resolution.is_exact {
+        let token = env::var("GH_TOKEN").map_err(|_| {
+            GeneratorError::usage(
+                "prepared-tool-install needs GH_TOKEN to validate the producer run outcome",
+            )
+        })?;
+        let producer_run = verified.manifest().producer.run_id.clone();
+        check_historical_outcome(
+            &producer_run,
+            &mut || curl_producer_run(curl, repo, &producer_run, &token),
+            sleeper,
+            output,
+        )?;
+    }
+    verified
+        .install_to(Path::new(dest))
+        .map_err(|error| GeneratorError::io("install prepared tool", Path::new(dest), &error))?;
+    for (path, sha256, executable) in verified.install_plan() {
+        println!(
+            "prepared-tool installed {path} {sha256} {}",
+            if executable { "executable" } else { "data" }
+        );
+    }
+    if let Some(path) = output {
+        append_step_output(path, &format_install_outputs(&resolution))
+            .map_err(|error| GeneratorError::io("record prepared-tool outputs", path, &error))?;
+    }
+    println!(
+        "prepared-tool installed {tool} ({} -> {})",
+        resolution.requested.as_str(),
+        resolution.resolved.as_str()
+    );
+    Ok(())
+}
+
+/// Read one restored bundle and prove it against its request: the manifest
+/// must exist and parse, the arrived files are read, and classification
+/// yields the requested/resolved key pair with the verified bytes.
+fn classify_restored_bundle(
+    manifest_path: &str,
+    dir: &str,
+    request: &ToolRequest,
+    output: Option<&Path>,
+) -> Result<(Resolution, VerifiedBundle), GeneratorError> {
+    let manifest_bytes = match fs::read(manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(fail_install(
+                output,
+                &HandoffFailure::Miss {
+                    detail: format!(
+                        "no bundle restored for tool `{}` at `{manifest_path}`",
+                        request.tool_id
+                    ),
+                },
+            ));
+        }
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "read tool manifest",
+                Path::new(manifest_path),
+                &error,
+            ));
+        }
+    };
+    let manifest = match ToolManifest::from_json(&manifest_bytes) {
+        Ok(manifest) => manifest,
+        Err(failure) => return Err(fail_install(output, &failure)),
+    };
+    let files = read_arrived_files(dir, &manifest)?;
+    match classify_and_verify(request, &manifest, &files) {
+        Ok(resolved) => Ok(resolved),
+        Err(failure) => Err(fail_install(output, &failure)),
+    }
+}
+
+/// Gate a save step: prove the verified bytes may be saved under the
+/// candidate key. The check answers key-vs-manifest identity only — no
+/// install, no outcome fetch — so a save step calls it before writing any
+/// cache entry. Fallback bytes under the requested exact key fail here, at
+/// save time, instead of shadowing the exact entry.
+fn check_save_key(
+    output: Option<&Path>,
+    tool: &str,
+    candidate: &str,
+    verified: &VerifiedBundle,
+) -> Result<(), GeneratorError> {
+    let manifest = verified.manifest();
+    if save_is_legal(candidate, manifest) {
+        if let Some(path) = output {
+            append_step_output(path, &format_save_check_output(candidate)).map_err(|error| {
+                GeneratorError::io("record prepared-tool save check", path, &error)
+            })?;
+        }
+        println!("prepared-tool save allowed for {tool} under {candidate}");
+        return Ok(());
+    }
+    Err(fail_install(
+        output,
+        &HandoffFailure::Corrupt {
+            detail: format!(
+                "refusing to save tool `{tool}` bytes from run {} under `{candidate}`, which names another run",
+                manifest.producer.run_id
+            ),
+        },
+    ))
+}
+
+/// Prove a historical bundle's producer run concluded `success` through the
+/// Actions API: the outcome half of historical validation. Anything but a
+/// proven `success` fails closed as denied — an unprovable bundle is a
+/// policy refusal, never an install.
+fn check_historical_outcome(
+    producer_run_id: &str,
+    executor: &mut dyn FnMut() -> Result<ApiResponse, String>,
+    sleeper: &mut dyn FnMut(Duration),
+    output: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let started = Instant::now();
+    let mut elapsed = || started.elapsed();
+    match fetch_producer_conclusion(
+        &TransferBounds::DEFAULT,
+        producer_run_id,
+        executor,
+        sleeper,
+        &mut elapsed,
+    ) {
+        Ok(conclusion) if conclusion == "success" => Ok(()),
+        Ok(conclusion) => Err(fail_install(
+            output,
+            &HandoffFailure::Denied {
+                detail: format!(
+                    "producer run {producer_run_id} concluded `{conclusion}`, not `success`"
+                ),
+            },
+        )),
+        Err(OutcomeFetchError::Failure(failure)) => Err(fail_install(output, &failure)),
+        Err(OutcomeFetchError::Transport(detail)) => Err(GeneratorError::usage(detail)),
+    }
+}
+
+/// Record a taxonomy failure as the step's `outcome` and return it as the
+/// verb's error: the message names the failure, the output names it for
+/// machines.
+fn fail_install(output: Option<&Path>, failure: &HandoffFailure) -> GeneratorError {
+    if let Some(path) = output
+        && let Err(error) = append_step_output(path, &format_failure_output(failure))
+    {
+        return GeneratorError::io("record prepared-tool outcome", path, &error);
+    }
+    GeneratorError::usage(failure.to_string())
+}
+
+/// Read the restored bytes for every file the manifest lists. A file the
+/// restore did not bring is left absent for [`classify_and_verify`] to
+/// report precisely; an unreadable file is an environment failure.
+fn read_arrived_files(
+    dir: &str,
+    manifest: &ToolManifest,
+) -> Result<BTreeMap<String, Vec<u8>>, GeneratorError> {
+    let mut files = BTreeMap::new();
+    for file in &manifest.files {
+        let path = Path::new(dir).join(&file.path);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                files.insert(file.path.clone(), bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GeneratorError::io("read restored tool file", &path, &error));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Fetch one producer workflow run through the Actions API: status, headers,
+/// and body for the taxonomy to classify. `curl` owns no retries here —
+/// `--retry 0` keeps the bounded Rust loop the only retry authority — and
+/// `--max-time` ceilings one attempt inside the total wait budget. `GH_TOKEN`
+/// authorizes the call, as the rendered consumer step provides it.
+fn curl_producer_run(
+    curl: &str,
+    repo: &str,
+    run_id: &str,
+    token: &str,
+) -> Result<ApiResponse, String> {
+    let endpoint = format!("https://api.github.com/repos/{repo}/actions/runs/{run_id}");
+    let output = Command::new(curl)
+        .args([
+            "-sS",
+            "--max-time",
+            "30",
+            "--retry",
+            "0",
+            "--dump-header",
+            "-",
+            "--output",
+            "-",
+            "--write-out",
+            "\n__PREPARED_TOOL_STATUS:%{http_code}\n",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            &format!("Authorization: Bearer {token}"),
+            &endpoint,
+        ])
+        .env("GH_TOKEN", token)
+        .output()
+        .map_err(|error| format!("run {curl}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{curl} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| format!("{curl} answered non-UTF-8: {error}"))?;
+    split_curl_response(&text).ok_or_else(|| format!("{curl} answered an unreadable response"))
+}
+
+/// Split a `--dump-header - --output - --write-out` capture into status,
+/// headers, and body. The status trailer is split from the right, so a body
+/// containing the marker cannot shift the parse.
+fn split_curl_response(text: &str) -> Option<ApiResponse> {
+    let (head, status_text) = text.rsplit_once("__PREPARED_TOOL_STATUS:")?;
+    let status: u16 = status_text.trim().parse().ok()?;
+    let (headers, body) = head
+        .split_once("\r\n\r\n")
+        .or_else(|| head.split_once("\n\n"))?;
+    Some(ApiResponse {
+        status,
+        headers: headers.to_owned(),
+        body: body.to_owned(),
+    })
+}
+
+/// Append `text` to a step-output file (`GITHUB_OUTPUT` in CI).
+fn append_step_output(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())
 }
 
 /// Emit per-class totals and headroom for the maintenance budget step.
@@ -563,6 +987,303 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
     writeln!(handle)
         .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
     Ok(())
+}
+
+/// Score reported results against the planner's expected work: the same
+/// [`crate::reuse::aggregate`] the generator's tests exercise, run against
+/// the expected-work file the plan wrote and the results file the unit jobs
+/// collected. Prints the audit report and fails when the aggregate rejects.
+fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorError> {
+    let expected_text = fs::read_to_string(expected)
+        .map_err(|error| GeneratorError::io("read expected work", expected, &error))?;
+    let results_text = fs::read_to_string(results)
+        .map_err(|error| GeneratorError::io("read reported results", results, &error))?;
+    let verdict = crate::reuse::aggregate_files(&expected_text, &results_text)
+        .map_err(GeneratorError::usage)?;
+    print!("{}", crate::reuse::render_report(&verdict));
+    if verdict.passed {
+        Ok(())
+    } else {
+        Err(GeneratorError::usage(
+            "aggregate: expected work did not complete",
+        ))
+    }
+}
+
+/// Print the affected selection for a diff as JSON: the auditable
+/// [`crate::reuse::select_affected`] core over the runtime's own unit table.
+/// Unlike `plan`, this command answers one question only — which units a
+/// change list affects — without lane filtering, workspace gates, or outputs.
+fn select_command(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    let watched: Vec<crate::reuse::WatchedUnit> = config
+        .unit
+        .iter()
+        .map(|unit| crate::reuse::WatchedUnit {
+            id: unit.id.clone(),
+            watch: unit.watch.clone(),
+            depends_on: unit.depends_on.clone(),
+        })
+        .collect();
+    if scope == Scope::Full {
+        return print_selection(&crate::reuse::AffectedSelection {
+            required: watched.iter().map(|unit| unit.id.clone()).collect(),
+            full_units: watched.iter().map(|unit| unit.id.clone()).collect(),
+            fallback_full: false,
+            explanations: watched
+                .iter()
+                .map(|unit| (unit.id.clone(), "full scope requested".to_owned()))
+                .collect(),
+        });
+    }
+    if base.is_empty() || base.chars().all(|character| character == '0') {
+        return print_selection(&crate::reuse::fallback_selection(
+            &watched,
+            "no affected base; fell back to full",
+        ));
+    }
+    let Some(lines) = git_name_status(root, base, head)? else {
+        return print_selection(&crate::reuse::fallback_selection(
+            &watched,
+            "git diff unavailable; fell back to full",
+        ));
+    };
+    let mut changes = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let Some(change) = crate::reuse::parse_name_status_line(line) else {
+            return print_selection(&crate::reuse::fallback_selection(
+                &watched,
+                "unparseable change entry; fell back to full",
+            ));
+        };
+        changes.push(change);
+    }
+    print_selection(&crate::reuse::select_affected(
+        &watched,
+        &changes,
+        crate::reuse::FULL_SELECTION_PREFIXES,
+    )?)
+}
+
+fn print_selection(selection: &crate::reuse::AffectedSelection) -> Result<(), GeneratorError> {
+    let mut json = serde_json::to_string(selection)
+        .map_err(|error| GeneratorError::usage(format!("serialize affected selection: {error}")))?;
+    json.push('\n');
+    print!("{json}");
+    Ok(())
+}
+
+fn git_name_status(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Option<Vec<String>>, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-status", "-M"])
+        .arg(format!("{base}...{head}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    ))
+}
+
+/// One `fingerprint` report: the revision fingerprinted and the per-unit
+/// identities in dependency order.
+#[derive(serde::Serialize)]
+struct FingerprintOutput {
+    rev: String,
+    units: Vec<crate::reuse::FingerprintReport>,
+}
+
+/// Print per-unit fingerprints as JSON: the canonical [`crate::reuse`]
+/// artifact identity over the runtime's own unit table at one revision.
+/// `--unit` reports one unit; `--live` names the live-state units explicitly,
+/// since the runtime table cannot observe that property.
+fn fingerprint_command(
+    root: &Path,
+    config_path: &Path,
+    only_unit: Option<&str>,
+    live: Option<&str>,
+    rev: &str,
+) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    let known: BTreeSet<&str> = config.unit.iter().map(|unit| unit.id.as_str()).collect();
+    if let Some(id) = only_unit
+        && !known.contains(id)
+    {
+        return Err(GeneratorError::usage(format!("unknown unit: {id}")));
+    }
+    let live_ids = resolve_live_ids(live, &known)?;
+    let tree = git_ls_tree(root, rev)?;
+    let ordered = ordered_units(&config.unit, None)?;
+    let check_impl = crate::reuse::current_check_impl();
+    let mut fingerprints: BTreeMap<String, String> = BTreeMap::new();
+    let mut reports = Vec::new();
+    for unit in ordered {
+        let commands = BTreeMap::from([
+            (
+                "github/affected".to_owned(),
+                unit.github_pr_commands.clone(),
+            ),
+            ("github/full".to_owned(), unit.github_full_commands.clone()),
+            (
+                "velnor/affected".to_owned(),
+                unit.velnor_pr_commands.clone(),
+            ),
+            ("velnor/full".to_owned(), unit.velnor_full_commands.clone()),
+        ]);
+        let recipe = crate::reuse::recipe_digest(&commands, crate::GENERATOR_REVISION, &check_impl);
+        let pinned: BTreeSet<String> = unit.cache.as_ref().map_or_else(BTreeSet::new, |cache| {
+            cache.key_files.iter().cloned().collect()
+        });
+        let source = crate::reuse::source_digests(&tree, &unit.watch, &pinned)?;
+        let view = crate::reuse::UnitConfigView {
+            id: unit.id.clone(),
+            kind: unit.kind.clone(),
+            root: unit.root.clone(),
+            watch: unit.watch.clone(),
+            commands,
+            depends_on: unit.depends_on.clone(),
+            tool_version: unit.tool_version.clone(),
+            cache_key_files: unit
+                .cache
+                .as_ref()
+                .map_or_else(Vec::new, |cache| cache.key_files.clone()),
+            cache_paths: unit
+                .cache
+                .as_ref()
+                .map_or_else(Vec::new, |cache| cache.paths.clone()),
+        };
+        let config_digest = crate::reuse::config_digest(&view);
+        let mut tool_pins = BTreeMap::new();
+        if let Some(version) = &unit.tool_version {
+            tool_pins.insert("tool_version".to_owned(), version.clone());
+        }
+        let pins = crate::reuse::unit_pin_set(&tool_pins);
+        let mut transitive = BTreeMap::new();
+        for dependency in &unit.depends_on {
+            let Some(digest) = fingerprints.get(dependency) else {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` depends on unknown unit `{dependency}`",
+                    unit.id
+                )));
+            };
+            transitive.insert(dependency.clone(), digest.clone());
+        }
+        let input = crate::reuse::FingerprintInput {
+            unit_id: unit.id.clone(),
+            kind: unit.kind.clone(),
+            root: unit.root.clone(),
+            source,
+            config_digest,
+            recipe_digest: recipe.clone(),
+            pins,
+            transitive,
+            live_state: live_ids.contains(unit.id.as_str()),
+        };
+        let fingerprint = crate::reuse::canonical_fingerprint(&input);
+        fingerprints.insert(unit.id.clone(), fingerprint.clone());
+        if only_unit.is_none_or(|id| id == unit.id) {
+            reports.push(crate::reuse::FingerprintReport {
+                unit: unit.id.clone(),
+                locator: crate::reuse::artifact_locator(&unit.id, &fingerprint),
+                fingerprint,
+                recipe,
+                live: input.live_state,
+            });
+        }
+    }
+    let output = FingerprintOutput {
+        rev: rev.to_owned(),
+        units: reports,
+    };
+    let mut json = serde_json::to_string(&output)
+        .map_err(|error| GeneratorError::usage(format!("serialize fingerprints: {error}")))?;
+    json.push('\n');
+    print!("{json}");
+    Ok(())
+}
+
+/// Resolve the `--live` unit list against the known unit ids. Every named id
+/// must exist: a live-state marker for an unknown unit would silently leave
+/// the real unit content-addressed.
+fn resolve_live_ids<'a>(
+    live: Option<&'a str>,
+    known: &BTreeSet<&str>,
+) -> Result<BTreeSet<&'a str>, GeneratorError> {
+    let ids: BTreeSet<&'a str> = live.map_or_else(BTreeSet::new, |list| {
+        list.split(',').filter(|id| !id.is_empty()).collect()
+    });
+    for id in &ids {
+        if !known.contains(id) {
+            return Err(GeneratorError::usage(format!(
+                "unknown live-state unit: {id}"
+            )));
+        }
+    }
+    Ok(ids)
+}
+
+fn git_ls_tree(root: &Path, rev: &str) -> Result<String, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-tree", "-r", rev])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run git ls-tree: {error}")))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "revision {rev} is not available for fingerprinting"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Decide whether a prior successful result may back the current verdict and
+/// print the decision: `reuse <run>` or `execute`, then one audit reason per
+/// line. A refused reuse is a normal decision, so the command always exits
+/// success once the files parse. `--now` pins the freshness clock; a live run
+/// without it uses the system clock.
+fn reuse_decision_command(
+    evidence: &Path,
+    request: &Path,
+    now: Option<u64>,
+) -> Result<(), GeneratorError> {
+    let evidence_text = fs::read_to_string(evidence)
+        .map_err(|error| GeneratorError::io("read producing evidence", evidence, &error))?;
+    let request_text = fs::read_to_string(request)
+        .map_err(|error| GeneratorError::io("read reuse request", request, &error))?;
+    let now = match now {
+        Some(pinned) => Some(pinned),
+        None => Some(system_now_secs()?),
+    };
+    let decision = crate::reuse::reuse_decision_files(&evidence_text, &request_text, now)
+        .map_err(GeneratorError::usage)?;
+    print!("{}", crate::reuse::render_decision(&decision));
+    Ok(())
+}
+
+fn system_now_secs() -> Result<u64, GeneratorError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| GeneratorError::usage(format!("resolve current time: {error}")))
+        .map(|duration| duration.as_secs())
 }
 
 /// Parse the pinned `--now` clock as seconds since the epoch, so a test run
@@ -1148,6 +1869,77 @@ mod runner_lane_tests {
         assert_eq!(
             selected,
             ["base", "changed", "leaf"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn affected_closure_follows_cross_kind_depends_on_edges() {
+        let unit = |id: &str, kind: &str, depends_on: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: kind.to_owned(),
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        // A Swift consumer of a Rust FFI producer: the closure is kind-blind,
+        // so an FFI change selects the Swift unit without naming its kind.
+        let units = [
+            unit("rust-ffi", "rust", &[]),
+            unit("swift-app", "swift", &["rust-ffi"]),
+            unit("unrelated", "rust", &[]),
+        ];
+        let selected = expand_affected_units(&units, ["rust-ffi".to_owned()].into_iter().collect());
+        assert_eq!(
+            selected,
+            ["rust-ffi", "swift-app"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn ffi_transitive_inputs_select_the_cross_language_consumer() {
+        // Generation compiles a prerequisite edge into `depends_on`, so the
+        // existing transitive closure carries producer changes to the
+        // consumer: a change to the FFI crate's own dependency selects the
+        // FFI crate and, through it, the Swift consumer.
+        let unit = |id: &str, kind: &str, depends_on: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: kind.to_owned(),
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            github_pr_commands: vec![id.to_owned()],
+            github_full_commands: vec![id.to_owned()],
+            velnor_pr_commands: vec![id.to_owned()],
+            velnor_full_commands: vec![id.to_owned()],
+            depends_on: depends_on.iter().map(|name| (*name).to_owned()).collect(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        let units = vec![
+            unit("rust-base", "rust", &[]),
+            unit("rust-ffi", "rust", &["rust-base"]),
+            unit("swift-app", "swift", &["rust-ffi"]),
+        ];
+        let selected =
+            expand_affected_units(&units, ["rust-base".to_owned()].into_iter().collect());
+        assert_eq!(
+            selected,
+            ["rust-base", "rust-ffi", "swift-app"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect()
@@ -2108,7 +2900,7 @@ fn collect_manifests(
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
         ));
     };
     match command {
@@ -2118,6 +2910,11 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
         "package-guest" => package_guest(&arguments[1..]),
         "verify-feed" => verify_feed(&arguments[1..]),
         "update-feed" => update_feed(&arguments[1..]),
+        "verify-digests" => verify_digests(&arguments[1..]),
+        "resolve-mode" => resolve_mode(&arguments[1..]),
+        "resolve-source" => resolve_source(&arguments[1..]),
+        "admit-producer" => admit_producer(&arguments[1..]),
+        "assemble-manifest" => assemble_manifest(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -2178,7 +2975,17 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["target", "version", "package", "binary"])?;
+    let options = parse_options(
+        arguments,
+        &[
+            "target",
+            "version",
+            "package",
+            "binary",
+            "members",
+            "deterministic",
+        ],
+    )?;
     let target = required_option(&options, "target")?;
     let version = required_option(&options, "version")?;
     let package = required_option(&options, "package")?;
@@ -2192,6 +2999,8 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "invalid target, version, package, or binary",
         ));
     }
+    let members = package_archive_members(&options, binary)?;
+    let deterministic = package_deterministic(&options)?;
     let root = env::current_dir()
         .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
     let source = root
@@ -2205,20 +3014,41 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
             source.display()
         )));
     }
+    let directory = source
+        .parent()
+        .map_or_else(|| root.clone(), Path::to_path_buf);
+    for member in &members {
+        if !directory.join(member).is_file() {
+            return Err(GeneratorError::usage(format!(
+                "declared archive member is missing: {member}"
+            )));
+        }
+    }
     let dist = root.join("dist");
     fs::create_dir_all(&dist)
         .map_err(|error| GeneratorError::io("create release directory", &dist, &error))?;
     let archive = dist.join(format!("{binary}-{version}-{target}.tar.gz"));
-    let status = Command::new("tar")
-        .arg("-C")
-        .arg(source.parent().unwrap_or(&root))
-        .arg("-czf")
-        .arg(&archive)
-        .arg(binary)
-        .status()
-        .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
-    if !status.success() {
-        return Err(GeneratorError::usage("tar failed while packaging binary"));
+    // A deterministic archive is byte-reproducible: sorted entries, a fixed
+    // mtime, normalized ownership, and a timestamp-free gzip stream. Without
+    // the flag the lane keeps its historical `tar -czf` bytes exactly. The
+    // normalizing flags are GNU tar's; any other tar fails closed with
+    // guidance instead of shipping a silently skewed archive.
+    if deterministic {
+        require_gnu_tar()?;
+        write_deterministic_archive(&directory, binary, &members, &archive)?;
+    } else {
+        let status = Command::new("tar")
+            .arg("-C")
+            .arg(&directory)
+            .arg("-czf")
+            .arg(&archive)
+            .arg(binary)
+            .args(&members)
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("tar failed while packaging binary"));
+        }
     }
     let digest = sha256_file(&archive)?;
     // Append, never `with_extension`: the sidecar sits next to its subject
@@ -2242,6 +3072,82 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     )
     .map_err(|error| GeneratorError::io("write release checksum", &checksum, &error))?;
     println!("{}", archive.display());
+    Ok(())
+}
+
+/// The declared archive members: portable names that must exist beside the
+/// built binary, never the binary itself and never a path.
+fn package_archive_members(
+    options: &BTreeMap<String, String>,
+    binary: &str,
+) -> Result<Vec<String>, GeneratorError> {
+    match options.get("members").map(String::as_str) {
+        None | Some("") => Ok(Vec::new()),
+        Some(list) => {
+            let mut members = Vec::new();
+            for member in list.split(',') {
+                if !valid_archive_member(member) || member == binary {
+                    return Err(GeneratorError::usage(format!(
+                        "invalid archive member: {member}"
+                    )));
+                }
+                members.push(member.to_owned());
+            }
+            Ok(members)
+        }
+    }
+}
+
+/// Whether the lane packages reproducibly. Rendered lanes pass an explicit
+/// `true` or `false` per target row; anything else fails closed.
+fn package_deterministic(options: &BTreeMap<String, String>) -> Result<bool, GeneratorError> {
+    match options.get("deterministic").map(String::as_str) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(other) => Err(GeneratorError::usage(format!(
+            "invalid --deterministic value: {other}"
+        ))),
+    }
+}
+
+/// Write one reproducible archive: GNU tar normalizes entry order, mtime,
+/// and ownership onto stdout, and `gzip -n` strips the timestamp. The
+/// caller probes for GNU tar first.
+fn write_deterministic_archive(
+    directory: &Path,
+    binary: &str,
+    members: &[String],
+    archive: &Path,
+) -> Result<(), GeneratorError> {
+    let mut command = Command::new("tar");
+    command.arg("-C").arg(directory).args([
+        "--sort=name",
+        "--mtime=@0",
+        "--owner=0",
+        "--group=0",
+        "--numeric-owner",
+        "-cf",
+        "-",
+        binary,
+    ]);
+    command.args(members);
+    let tar = command
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
+    let Some(tar_stdout) = tar.stdout else {
+        return Err(GeneratorError::usage("tar produced no archive stream"));
+    };
+    let output = Command::new("gzip")
+        .arg("-n")
+        .stdin(tar_stdout)
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage("gzip failed while packaging binary"));
+    }
+    fs::write(archive, output.stdout)
+        .map_err(|error| GeneratorError::io("write release archive", archive, &error))?;
     Ok(())
 }
 
@@ -2447,6 +3353,32 @@ fn write_bare_digest_sidecar(artifact: &Path) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// The canonical artifact-download flags: fail closed on HTTP errors,
+/// resume partial files, retry transient failures with backoff inside a
+/// bounded window, and bound connect and total time. Every artifact fetch
+/// the generator emits or the runtime runs carries exactly this set, so one
+/// audit covers all of them. Two deliberate exceptions keep their own
+/// bounds: the producer-outcome fetch (`--retry 0` under a bounded Rust
+/// loop, so retries stay countable) and the docs live-probe (a bounded
+/// shell loop around a single-shot `--max-time` check).
+pub(crate) const CURL_DOWNLOAD_FLAGS: &str = "--fail --show-error --silent --location --http1.1 --continue-at - --retry 20 --retry-all-errors --retry-delay 5 --retry-max-time 1800 --connect-timeout 30 --max-time 900";
+
+/// The guest kernel download script: fetch the pinned tarball with the
+/// canonical bounded-download flags and verify its digest before the build
+/// consumes it. Extracted so tests pin the flags without network.
+fn guest_kernel_download_script() -> String {
+    format!(
+        r#"
+set -euo pipefail
+url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+curl {CURL_DOWNLOAD_FLAGS} \
+  -o linux.tar.xz "$url"
+echo "$sha  linux.tar.xz" | sha256sum -c -
+"#,
+    )
+}
+
 fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["arch", "package", "bin", "agent"])?;
     let arch = required_option(&options, "arch")?;
@@ -2467,17 +3399,7 @@ fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
         }
         let status = Command::new("bash")
             .arg("-c")
-            .arg(
-                r#"
-set -euo pipefail
-url="$(jq -er '.kernel_tarball' microvm/pins.json)"
-sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
-curl --fail --show-error --silent --location --http1.1 \
-  --connect-timeout 30 --max-time 900 \
-  -o linux.tar.xz "$url"
-echo "$sha  linux.tar.xz" | sha256sum -c -
-"#,
-            )
+            .arg(guest_kernel_download_script())
             .status()
             .map_err(|error| GeneratorError::usage(format!("download guest kernel: {error}")))?;
         if !status.success() {
@@ -2527,6 +3449,114 @@ echo "$sha  linux.tar.xz" | sha256sum -c -
         return Err(GeneratorError::usage("guest image build failed"));
     }
     Ok(())
+}
+
+/// `release verify-digests --dir <dir> --archs <csv>`: validate the complete
+/// platform digest set a manifest job assembles. Every declared arch must
+/// carry exactly one `image-<arch>.digest` file holding a single `sha256:`
+/// digest, and no extra digest file may ride along: a partial matrix can
+/// never publish a partial tag. Prints `<arch> <digest>` per verified row.
+fn verify_digests(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["dir", "archs"])?;
+    let dir = required_option(&options, "dir")?;
+    let archs = required_option(&options, "archs")?;
+    let archs: Vec<&str> = archs
+        .split(',')
+        .map(str::trim)
+        .filter(|arch| !arch.is_empty())
+        .collect();
+    if archs.is_empty() {
+        return Err(GeneratorError::usage("--archs names no architecture"));
+    }
+    for arch in &archs {
+        if !valid_arch(arch) {
+            return Err(GeneratorError::usage(format!(
+                "invalid digest architecture: {arch}"
+            )));
+        }
+    }
+    let dir = Path::new(dir);
+    let mut found = BTreeSet::new();
+    let entries = fs::read_dir(dir)
+        .map_err(|error| GeneratorError::io("read digest directory", dir, &error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| GeneratorError::io("read digest entry", dir, &error))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".digest") {
+            found.insert(name);
+        }
+    }
+    for arch in &archs {
+        let expected = format!("image-{arch}.digest");
+        if !found.contains(&expected) {
+            return Err(GeneratorError::usage(format!(
+                "platform digest is missing: {expected}"
+            )));
+        }
+    }
+    for name in &found {
+        let expected = archs
+            .iter()
+            .any(|arch| name == &format!("image-{arch}.digest"));
+        if !expected {
+            return Err(GeneratorError::usage(format!(
+                "unexpected platform digest file: {name}"
+            )));
+        }
+    }
+    for arch in &archs {
+        let path = dir.join(format!("image-{arch}.digest"));
+        let digest = read_digest_file(&path)?;
+        println!("{arch} {digest}");
+    }
+    Ok(())
+}
+
+/// Read one platform digest file: it must fit in 4 KiB and hold exactly one
+/// `sha256:` digest with 64 lowercase hex digits.
+fn read_digest_file(path: &Path) -> Result<String, GeneratorError> {
+    let bytes =
+        fs::read(path).map_err(|error| GeneratorError::io("read platform digest", path, &error))?;
+    if bytes.len() > 4096 {
+        return Err(GeneratorError::usage(format!(
+            "platform digest exceeds 4096 bytes: {}",
+            path.display()
+        )));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        GeneratorError::usage(format!("platform digest is not UTF-8: {}", path.display()))
+    })?;
+    let mut tokens = text.split_whitespace();
+    let (Some(token), None) = (tokens.next(), tokens.next()) else {
+        return Err(GeneratorError::usage(format!(
+            "platform digest must contain one token: {}",
+            path.display()
+        )));
+    };
+    let Some(hex) = token.strip_prefix("sha256:") else {
+        return Err(GeneratorError::usage(format!(
+            "platform digest is not a sha256 digest: {}",
+            path.display()
+        )));
+    };
+    let canonical = hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    if !canonical {
+        return Err(GeneratorError::usage(format!(
+            "platform digest is not 64 lowercase hex digits: {}",
+            path.display()
+        )));
+    }
+    Ok(token.to_owned())
+}
+
+fn valid_arch(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
 fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
@@ -2579,6 +3609,346 @@ fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "unsupported feed kind: {other}"
         ))),
     }
+}
+
+/// Resolve the release mode for one event: the total event×mode matrix.
+/// Prints the mode and refuses anything that would write externally from an
+/// untrusted context. `publish` is reachable only from a version tag push
+/// (stable) or an admitted producer run (rolling); `rehearse` finishes on
+/// its feature branch and never waits for default-branch CI — the rendered
+/// gate encodes that by resolving here, not by polling.
+fn resolve_mode(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    println!("{}", resolve_mode_token(arguments)?);
+    Ok(())
+}
+
+/// Map a validated `--input` to its static drill token: `publish` requests
+/// reaching here were already refused, so only the three drill tokens remain.
+fn input_token(input: &str) -> &'static str {
+    match input {
+        "build" => "build",
+        "rehearse" => "rehearse",
+        _ => "validate",
+    }
+}
+
+/// The pure event→mode decision behind `resolve-mode`: exactly one
+/// whitespace-free token (`publish`, `validate`, `build`, `rehearse`) the
+/// caller prints to stdout for `GITHUB_OUTPUT`. Separated from the print
+/// so tests assert the token itself, not just success.
+fn resolve_mode_token(arguments: &[OsString]) -> Result<&'static str, GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "event",
+            "ref",
+            "input",
+            "producer",
+            "expected",
+            "conclusion",
+            "rolling",
+            "branch",
+        ],
+    )?;
+    let event = required_option(&options, "event")?;
+    let reference = options.get("ref").map_or("", String::as_str);
+    let input = options.get("input").map_or("validate", String::as_str);
+    if !matches!(input, "validate" | "build" | "rehearse" | "publish") {
+        return Err(GeneratorError::usage(format!(
+            "unsupported release mode: {input}"
+        )));
+    }
+    let rolling = match options.get("rolling").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(other) => {
+            return Err(GeneratorError::usage(format!(
+                "invalid --rolling value: {other}"
+            )));
+        }
+    };
+    match event {
+        // Untrusted pull-request code never publishes, builds for release,
+        // or rehearses with secrets: every PR resolves to secret-free
+        // validation, and a publish request from a PR is a hard refusal.
+        "pull_request" | "pull_request_target" => {
+            if input == "publish" {
+                return Err(GeneratorError::usage(
+                    "release publish refused: pull requests resolve to validate only",
+                ));
+            }
+            Ok("validate")
+        }
+        "schedule" => {
+            if input == "publish" {
+                return Err(GeneratorError::usage(
+                    "release publish refused: scheduled runs resolve to validate only",
+                ));
+            }
+            Ok("validate")
+        }
+        "push" => {
+            if is_version_tag_ref(reference)
+                || rolling && is_default_branch_ref(reference, &options)
+            {
+                Ok("publish")
+            } else if input == "publish" {
+                Err(GeneratorError::usage(
+                    "release publish refused: branch pushes publish only on the rolling lane's default branch",
+                ))
+            } else {
+                Ok(input_token(input))
+            }
+        }
+        // Dispatch carries the declared mode, defaulting to validation.
+        // Publication is tag-triggered (or admitted-producer) only: a
+        // dispatch can rehearse the whole assembly but never publish it.
+        "workflow_dispatch" => {
+            if input == "publish" {
+                return Err(GeneratorError::usage(
+                    "release publish refused: publication is tag-triggered, never dispatched",
+                ));
+            }
+            Ok(input_token(input))
+        }
+        // A producer run publishes only when its workflow name equals the
+        // declared trusted producer at `success` — the same admission
+        // `admit-producer` enforces, so no caller can publish off any
+        // successful run by name alone.
+        "workflow_run" => {
+            let producer = options.get("producer").map_or("", String::as_str);
+            let expected = options.get("expected").map_or("", String::as_str);
+            let conclusion = options.get("conclusion").map_or("", String::as_str);
+            if producer.is_empty() {
+                return Err(GeneratorError::usage(
+                    "release publish refused: workflow_run without an admitted producer",
+                ));
+            }
+            if expected.is_empty() {
+                return Err(GeneratorError::usage(
+                    "release publish refused: workflow_run without a trusted producer to admit against",
+                ));
+            }
+            if producer != expected {
+                return Err(GeneratorError::usage(format!(
+                    "release publish refused: producer `{producer}` is not the trusted `{expected}`"
+                )));
+            }
+            if conclusion != "success" {
+                return Err(GeneratorError::usage(format!(
+                    "release publish refused: producer concluded {conclusion}, not success"
+                )));
+            }
+            Ok("publish")
+        }
+        other => Err(GeneratorError::usage(format!(
+            "unsupported release event: {other}"
+        ))),
+    }
+}
+
+/// Whether `reference` is a version tag push (`refs/tags/v[0-9]*`).
+fn is_version_tag_ref(reference: &str) -> bool {
+    reference.starts_with("refs/tags/v")
+        && reference["refs/tags/v".len()..]
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_digit())
+}
+
+/// Whether `reference` is the default branch the lane rolls on. The branch
+/// arrives as `--branch`; without it only the tag and rolling-default
+/// shape can resolve, never an arbitrary branch.
+fn is_default_branch_ref(reference: &str, options: &BTreeMap<String, String>) -> bool {
+    let branch = options.get("branch").map_or("main", String::as_str);
+    reference == format!("refs/heads/{branch}")
+}
+
+/// Resolve the source revision the lane builds: a `workflow_run` event
+/// builds the producer run's head SHA, every other event builds its own
+/// SHA. Both must be full 40-hex revisions; anything else fails closed
+/// instead of building an unidentified tree.
+fn resolve_source(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["event", "sha", "run-sha"])?;
+    let event = required_option(&options, "event")?;
+    let sha = if event == "workflow_run" {
+        required_option(&options, "run-sha")?
+    } else {
+        required_option(&options, "sha")?
+    };
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(format!(
+            "release source must be a 40-hex revision, found `{sha}`"
+        )));
+    }
+    println!("{sha}");
+    Ok(())
+}
+
+/// Admit a `workflow_run` producer: the run's workflow name must equal the
+/// declared trusted producer and its conclusion must be `success`. A name
+/// or conclusion mismatch is a hard refusal, never a warning.
+fn admit_producer(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["producer", "expected", "conclusion"])?;
+    let producer = required_option(&options, "producer")?;
+    let expected = required_option(&options, "expected")?;
+    let conclusion = required_option(&options, "conclusion")?;
+    if producer != expected {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer `{producer}` is not the trusted `{expected}`"
+        )));
+    }
+    if conclusion != "success" {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer `{producer}` concluded {conclusion}, not success"
+        )));
+    }
+    println!("admitted");
+    Ok(())
+}
+
+/// Assemble the consumer release manifest and the independent checksum
+/// corpus from declared subjects: every `--subjects` entry must exist in
+/// `--dir`, the corpus re-hashes each subject independently, and the
+/// manifest binds the schema URN, source, version, and digests. The corpus
+/// is verified strictly before anything prints success.
+fn assemble_manifest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "dir",
+            "subjects",
+            "schema",
+            "repository",
+            "ref",
+            "commit",
+            "version",
+        ],
+    )?;
+    let dir = Path::new(required_option(&options, "dir")?);
+    let schema = required_option(&options, "schema")?;
+    let repository = required_option(&options, "repository")?;
+    let source_ref = required_option(&options, "ref")?;
+    let commit = required_option(&options, "commit")?;
+    let version = required_option(&options, "version")?;
+    if schema.is_empty() || !schema.contains('/') {
+        return Err(GeneratorError::usage(
+            "release manifest needs a schema URN of the form <domain>/<name>",
+        ));
+    }
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(
+            "release manifest needs a 40-hex source commit",
+        ));
+    }
+    if !is_artifact_version(version) {
+        return Err(GeneratorError::usage(format!(
+            "invalid release manifest version: {version}"
+        )));
+    }
+    let subjects = required_option(&options, "subjects")?;
+    let mut names: Vec<&str> = subjects.split(',').collect();
+    if names.is_empty() || names.iter().any(|name| !valid_subject_name(name)) {
+        return Err(GeneratorError::usage(
+            "release manifest needs declared subject file names",
+        ));
+    }
+    names.sort_unstable();
+    let mut corpus = String::new();
+    let mut assets = Vec::new();
+    for name in &names {
+        let path = dir.join(name);
+        if !path.is_file() {
+            return Err(GeneratorError::usage(format!(
+                "declared manifest subject is missing: {name}"
+            )));
+        }
+        let digest = sha256_file(&path)?;
+        corpus.push_str(&digest);
+        corpus.push_str("  ");
+        corpus.push_str(name);
+        corpus.push('\n');
+        assets.push(serde_json::json!({"name": name, "sha256": digest}));
+    }
+    let document = serde_json::json!({
+        "schema": schema,
+        "source_repository": repository,
+        "source_ref": source_ref,
+        "source_commit": commit,
+        "version": version,
+        "assets": assets,
+    });
+    let Some(manifest) = serde_json::to_string_pretty(&document)
+        .ok()
+        .map(|mut text| {
+            text.push('\n');
+            text
+        })
+    else {
+        return Err(GeneratorError::usage("release manifest is not encodable"));
+    };
+    let corpus_path = dir.join("SHA256SUMS");
+    fs::write(&corpus_path, &corpus)
+        .map_err(|error| GeneratorError::io("write checksum corpus", &corpus_path, &error))?;
+    // The corpus is re-verified strictly from disk before the manifest is
+    // written: a subject that changed mid-assembly fails here, not in a
+    // consumer that trusted the manifest.
+    verify_checksum_corpus(dir, &corpus)?;
+    let manifest_path = dir.join("release-manifest.json");
+    fs::write(&manifest_path, &manifest)
+        .map_err(|error| GeneratorError::io("write release manifest", &manifest_path, &error))?;
+    println!("{}", manifest_path.display());
+    Ok(())
+}
+
+/// Re-verify a checksum corpus strictly: every line re-hashes its subject
+/// from disk and any mismatch, miss, or malformed line fails.
+fn verify_checksum_corpus(dir: &Path, corpus: &str) -> Result<(), GeneratorError> {
+    for line in corpus.lines() {
+        let (digest, name) = line.split_once("  ").ok_or_else(|| {
+            GeneratorError::usage(format!("malformed checksum corpus line: {line}"))
+        })?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(GeneratorError::usage(format!(
+                "malformed checksum corpus digest: {line}"
+            )));
+        }
+        let actual = sha256_file(&dir.join(name))?;
+        if actual != digest {
+            return Err(GeneratorError::usage(format!(
+                "checksum corpus mismatch for {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is a portable manifest subject: a bare file name over the
+/// portable asset alphabet, never a path.
+fn valid_subject_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// The deterministic archive flags are GNU tar's. Any other tar fails
+/// closed here, before it writes a silently skewed archive.
+fn require_gnu_tar() -> Result<(), GeneratorError> {
+    let output = Command::new("tar")
+        .arg("--version")
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("probe tar: {error}")))?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout)
+            .to_lowercase()
+            .contains("gnu tar")
+    {
+        return Err(GeneratorError::usage(
+            "deterministic archives need GNU tar; refusing to package on this runner",
+        ));
+    }
+    Ok(())
 }
 
 fn required_option<'a>(
@@ -2695,25 +4065,66 @@ pub(crate) fn valid_branch(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-'))
 }
 
-fn valid_target(value: &str) -> bool {
+pub(crate) fn valid_target(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn valid_package(value: &str) -> bool {
+pub(crate) fn valid_package(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn valid_binary(value: &str) -> bool {
+pub(crate) fn valid_binary(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Whether `value` is a portable archive member: a bare file name over the
+/// portable asset alphabet, never a path or traversal.
+fn valid_archive_member(value: &str) -> bool {
+    valid_binary(value) && value != "." && value != ".."
+}
+
+/// Whether `value` is a usable tag-trigger filter: one non-empty line with
+/// no whitespace or control bytes. GitHub interprets `*?[]!` as glob syntax
+/// and `/` as a tag path separator, so both stay legal here; the renderer
+/// quotes the filter for YAML.
+pub(crate) fn valid_tag_pattern(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
+}
+
+/// Whether `value` is a usable OCI registry host: lowercase dot-separated
+/// labels with an optional `:port`. The renderer interpolates the host into
+/// a login step and a step name, so anything outside the hostname alphabet
+/// — uppercase, whitespace, slashes, credentials — fails here, never in YAML.
+pub(crate) fn valid_registry_host(value: &str) -> bool {
+    let host = value.split(':').next().unwrap_or_default();
+    let port = value.split(':').nth(1);
+    if value.split(':').nth(2).is_some() {
+        return false;
+    }
+    if let Some(port) = port
+        && (port.is_empty() || port.len() > 5 || !port.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return false;
+    }
+    !host.is_empty()
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && !host.contains("..")
+        && host.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
 }
 
 #[cfg(test)]
@@ -2722,6 +4133,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::primitives::prepared_tools::{ProducerIdentity, ToolFile, ToolOutcome};
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}: missing value"),
+        }
+    }
 
     #[expect(
         clippy::panic,
@@ -2743,6 +4166,147 @@ mod tests {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
         }
+    }
+
+    /// A throwaway digest directory: the only way to feed `verify-digests`
+    /// a real artifact set.
+    fn digest_fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-digests-{name}-{}",
+            crate::unique_suffix()
+        ));
+        must(std::fs::create_dir_all(&root), "create digest fixture");
+        root
+    }
+
+    fn write_digest(dir: &Path, arch: &str, digest: &str) {
+        must(
+            std::fs::write(dir.join(format!("image-{arch}.digest")), digest),
+            "write platform digest",
+        );
+    }
+
+    #[test]
+    fn verify_digests_accepts_the_complete_multi_arch_set() {
+        let dir = digest_fixture("complete");
+        let amd64 = format!("sha256:{}", "a".repeat(64));
+        let arm64 = format!("sha256:{}", "b".repeat(64));
+        write_digest(&dir, "amd64", &format!("{amd64}\n"));
+        write_digest(&dir, "arm64", &format!("{arm64}\n"));
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        must(
+            verify_digests(&args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--archs",
+                "amd64,arm64",
+            ])),
+            "a complete digest set must verify",
+        );
+        assert_eq!(
+            must(
+                read_digest_file(&dir.join("image-amd64.digest")),
+                "read amd64 digest"
+            ),
+            amd64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_digests_rejects_missing_extra_and_malformed_rows() {
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        // A missing arch fails: a partial matrix can never publish.
+        let dir = digest_fixture("missing");
+        write_digest(&dir, "amd64", &format!("sha256:{}\n", "a".repeat(64)));
+        let error = must_fail(
+            verify_digests(&args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--archs",
+                "amd64,arm64",
+            ])),
+            "a missing arch must fail",
+        );
+        assert!(
+            error.to_string().contains("platform digest is missing"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // An extra digest file fails: only the declared set assembles.
+        let dir = digest_fixture("extra");
+        write_digest(&dir, "amd64", &format!("sha256:{}\n", "a".repeat(64)));
+        write_digest(&dir, "arm64", &format!("sha256:{}\n", "b".repeat(64)));
+        write_digest(&dir, "riscv64", &format!("sha256:{}\n", "c".repeat(64)));
+        let error = must_fail(
+            verify_digests(&args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--archs",
+                "amd64,arm64",
+            ])),
+            "an extra digest must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected platform digest file"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // Malformed rows fail: not a digest, two tokens, short hex.
+        for (name, body, marker) in [
+            ("scheme", "md5:abc\n".to_owned(), "not a sha256 digest"),
+            (
+                "tokens",
+                "sha256:aaa sha256:bbb\n".to_owned(),
+                "must contain one token",
+            ),
+            (
+                "length",
+                format!("sha256:{}\n", "a".repeat(63)),
+                "not 64 lowercase hex digits",
+            ),
+            (
+                "case",
+                format!("sha256:{}\n", "A".repeat(64)),
+                "not 64 lowercase hex digits",
+            ),
+        ] {
+            let dir = digest_fixture(name);
+            write_digest(&dir, "amd64", &body);
+            let error = must_fail(
+                verify_digests(&args(&[
+                    "--dir",
+                    dir.to_str().unwrap_or_default(),
+                    "--archs",
+                    "amd64",
+                ])),
+                "a malformed digest must fail",
+            );
+            assert!(
+                error.to_string().contains(marker),
+                "unexpected error for {name}: {error}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // Empty and hostile arch lists fail before any read.
+        let error = must_fail(
+            verify_digests(&args(&["--dir", "image-artifacts", "--archs", " , "])),
+            "an empty arch list must fail",
+        );
+        assert!(
+            error.to_string().contains("--archs names no architecture"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            verify_digests(&args(&["--dir", "image-artifacts", "--archs", "../x"])),
+            "a hostile arch must fail",
+        );
+        assert!(
+            error.to_string().contains("invalid digest architecture"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -3621,6 +5185,69 @@ workspace_check = true
     }
 
     #[test]
+    fn slice_c_selection_agrees_with_runtime_selection() -> Result<(), Box<dyn Error>> {
+        // The auditable core and the runtime planner share one selection
+        // model: the same change list selects the same required and full sets
+        // on both paths. The fixture carries no workspace gates or version
+        // bumps, so the planner's refinements stay out of the comparison.
+        let config = selection_config();
+        let watched: Vec<crate::reuse::WatchedUnit> = config
+            .unit
+            .iter()
+            .map(|unit| crate::reuse::WatchedUnit {
+                id: unit.id.clone(),
+                watch: unit.watch.clone(),
+                depends_on: unit.depends_on.clone(),
+            })
+            .collect();
+        for changed in [
+            "crates/base/src/lib.rs",
+            "crates/app/src/lib.rs",
+            "crates/consumer/src/lib.rs",
+            "docs/index.md",
+            "README.md",
+            ".github/workflows/ci.yml",
+        ] {
+            let (root, base, head) = selection_git_fixture("slice-c", changed)?;
+            let runtime_selection =
+                selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+            let changed_files =
+                git_changed_files(&root, &base, &head)?.ok_or("the diff must resolve")?;
+            let changes: Vec<crate::reuse::ChangedPath> = changed_files
+                .into_iter()
+                .map(|path| crate::reuse::ChangedPath {
+                    path,
+                    previous: None,
+                    status: crate::reuse::ChangeKind::Modified,
+                })
+                .collect();
+            let model = crate::reuse::select_affected(
+                &watched,
+                &changes,
+                crate::reuse::FULL_SELECTION_PREFIXES,
+            )?;
+            assert_eq!(
+                selected_id_set(&runtime_selection),
+                model.required,
+                "required set for {changed}"
+            );
+            assert_eq!(
+                runtime_selection.full_units, model.full_units,
+                "full set for {changed}"
+            );
+            std::fs::remove_dir_all(root)?;
+        }
+        let (root, base, _) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
+        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let model =
+            crate::reuse::select_affected(&watched, &[], crate::reuse::FULL_SELECTION_PREFIXES)?;
+        assert!(selected_id_set(&runtime_selection).is_empty());
+        assert!(model.required.is_empty() && !model.fallback_full);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn affected_selection_falls_back_to_full_for_global_or_unmatched_changes(
     ) -> Result<(), Box<dyn Error>> {
         for (name, changed) in [
@@ -4233,5 +5860,1044 @@ workspace_check = true
             .any(|unit| unit.id == "rust-root-workspace"));
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+    fn release_args(options: &[&str]) -> Vec<OsString> {
+        options.iter().map(OsString::from).collect()
+    }
+
+    /// Every event resolves to exactly one mode token: tag pushes and
+    /// admitted producer runs publish, dispatches drill, and everything else
+    /// validates. The token is the whole point (callers print it for
+    /// `GITHUB_OUTPUT`), so every case asserts the exact token, and every
+    /// token must be a single whitespace-free word.
+    #[test]
+    fn resolve_mode_resolves_each_event() {
+        let cases: Vec<(Vec<&str>, &str)> = vec![
+            // Tag pushes publish.
+            (
+                vec!["--event", "push", "--ref", "refs/tags/v1.2.3"],
+                "publish",
+            ),
+            // A rolling push to the default branch publishes; anywhere else
+            // a branch push drills or validates.
+            (
+                vec![
+                    "--event",
+                    "push",
+                    "--ref",
+                    "refs/heads/main",
+                    "--rolling",
+                    "true",
+                    "--branch",
+                    "main",
+                ],
+                "publish",
+            ),
+            (
+                vec!["--event", "push", "--ref", "refs/heads/main"],
+                "validate",
+            ),
+            (
+                vec![
+                    "--event",
+                    "push",
+                    "--ref",
+                    "refs/heads/feature",
+                    "--input",
+                    "rehearse",
+                ],
+                "rehearse",
+            ),
+            // Dispatch carries the declared drill mode, defaulting to
+            // validation.
+            (
+                vec!["--event", "workflow_dispatch", "--input", "validate"],
+                "validate",
+            ),
+            (
+                vec!["--event", "workflow_dispatch", "--input", "build"],
+                "build",
+            ),
+            (
+                vec!["--event", "workflow_dispatch", "--input", "rehearse"],
+                "rehearse",
+            ),
+            (vec!["--event", "workflow_dispatch"], "validate"),
+            // Scheduled runs and pull requests validate.
+            (vec!["--event", "schedule"], "validate"),
+            (vec!["--event", "pull_request"], "validate"),
+            (vec!["--event", "pull_request_target"], "validate"),
+            // A producer run at success publishes only when its name equals
+            // the declared trusted producer.
+            (
+                vec![
+                    "--event",
+                    "workflow_run",
+                    "--producer",
+                    "CI",
+                    "--expected",
+                    "CI",
+                    "--conclusion",
+                    "success",
+                ],
+                "publish",
+            ),
+        ];
+        for (args, expected) in cases {
+            let token = must(resolve_mode_token(&release_args(&args)), "mode resolves");
+            assert_eq!(token, expected, "args: {args:?}");
+            assert!(
+                !token.chars().any(char::is_whitespace),
+                "mode token must be a single word: {token:?}"
+            );
+        }
+    }
+
+    /// Anything that would write externally from an untrusted context is a
+    /// hard refusal, and unknown events and modes fail closed.
+    #[test]
+    fn resolve_mode_refuses_untrusted_publish() {
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "push",
+                "--ref",
+                "refs/heads/feature",
+                "--input",
+                "publish",
+            ])),
+            "feature push must not publish",
+        );
+        assert!(
+            error.to_string().contains("publish refused"),
+            "unexpected error: {error}"
+        );
+        // Publication is tag-triggered, never dispatched.
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_dispatch",
+                "--input",
+                "publish",
+            ])),
+            "dispatch must not publish",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("tag-triggered, never dispatched"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event", "schedule", "--input", "publish",
+            ])),
+            "schedule must not publish",
+        );
+        assert!(
+            error.to_string().contains("publish refused"),
+            "unexpected error: {error}"
+        );
+        // Untrusted pull-request code validates only.
+        for event in ["pull_request", "pull_request_target"] {
+            let error = must_fail(
+                resolve_mode(&release_args(&["--event", event, "--input", "publish"])),
+                "pull request must not publish",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("pull requests resolve to validate only"),
+                "unexpected error: {error}"
+            );
+        }
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--conclusion",
+                "success",
+            ])),
+            "producer-less run must not publish",
+        );
+        assert!(
+            error.to_string().contains("without an admitted producer"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--producer",
+                "CI",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "failure",
+            ])),
+            "failed producer must not publish",
+        );
+        assert!(
+            error.to_string().contains("not success"),
+            "unexpected error: {error}"
+        );
+        // Unknown events and modes fail closed.
+        let error = must_fail(
+            resolve_mode(&release_args(&["--event", "merge_group"])),
+            "unknown event",
+        );
+        assert!(
+            error.to_string().contains("unsupported release event"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_mode(&release_args(&["--event", "push", "--input", "ship"])),
+            "unknown mode",
+        );
+        assert!(
+            error.to_string().contains("unsupported release mode"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A successful run under any other name is not the trusted producer,
+    /// and without a name to admit against there is no admission: the
+    /// `workflow_run` arm admits exactly like `admit-producer`.
+    #[test]
+    fn resolve_mode_workflow_run_admits_only_the_trusted_producer() {
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--producer",
+                "EVIL",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "success",
+            ])),
+            "wrong-name producer must not publish",
+        );
+        assert!(
+            error.to_string().contains("is not the trusted `CI`"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--producer",
+                "CI",
+                "--conclusion",
+                "success",
+            ])),
+            "producer without a trusted name must not publish",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("without a trusted producer to admit against"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A `workflow_run` builds the producer run's head SHA; every other
+    /// event builds its own SHA. Both must be full revisions.
+    #[test]
+    fn resolve_source_binds_the_producer_revision() {
+        let run = "0123456789abcdef0123456789abcdef01234567";
+        let own = "89abcdef0123456789abcdef0123456789abcdef";
+        must(
+            resolve_source(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--sha",
+                own,
+                "--run-sha",
+                run,
+            ])),
+            "producer revision resolves",
+        );
+        must(
+            resolve_source(&release_args(&["--event", "push", "--sha", own])),
+            "own revision resolves",
+        );
+        let error = must_fail(
+            resolve_source(&release_args(&["--event", "push", "--sha", "short"])),
+            "short revision",
+        );
+        assert!(
+            error.to_string().contains("40-hex revision"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_source(&release_args(&["--event", "workflow_run", "--sha", own])),
+            "producer run without a run SHA",
+        );
+        assert!(
+            error.to_string().contains("--run-sha needs a value"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The producer name must equal the trusted producer and its conclusion
+    /// must be `success`; a mismatch is a refusal, never a warning.
+    #[test]
+    fn admit_producer_refuses_name_and_conclusion_mismatch() {
+        must(
+            admit_producer(&release_args(&[
+                "--producer",
+                "CI",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "success",
+            ])),
+            "trusted producer admits",
+        );
+        let error = must_fail(
+            admit_producer(&release_args(&[
+                "--producer",
+                "Other",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "success",
+            ])),
+            "untrusted producer",
+        );
+        assert!(
+            error.to_string().contains("is not the trusted"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            admit_producer(&release_args(&[
+                "--producer",
+                "CI",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "cancelled",
+            ])),
+            "cancelled producer",
+        );
+        assert!(
+            error.to_string().contains("not success"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The canonical download flags fail closed, resume, retry inside a
+    /// bounded window, and bound connect and total time — no site may
+    /// download with retries but no bounds, or bounds but no retries.
+    #[test]
+    fn canonical_download_flags_retry_inside_time_bounds() {
+        for flag in [
+            "--fail",
+            "--continue-at -",
+            "--retry 20",
+            "--retry-all-errors",
+            "--retry-delay 5",
+            "--retry-max-time 1800",
+            "--connect-timeout 30",
+            "--max-time 900",
+        ] {
+            assert!(
+                CURL_DOWNLOAD_FLAGS.contains(flag),
+                "the canonical set must carry {flag}"
+            );
+        }
+    }
+
+    /// The guest kernel download carries the canonical flags and still
+    /// verifies the pinned digest before the build consumes the tarball.
+    #[test]
+    fn guest_kernel_download_uses_the_canonical_bounded_flags() {
+        let script = guest_kernel_download_script();
+        assert!(
+            script.contains(CURL_DOWNLOAD_FLAGS),
+            "the kernel must download with the canonical flags: {script}"
+        );
+        assert!(
+            script.contains("sha256sum -c -"),
+            "the kernel must verify its digest: {script}"
+        );
+    }
+
+    fn manifest_fixture(name: &str) -> std::path::PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-workflow-manifest-{name}-{pid}-{id}",
+            pid = std::process::id()
+        ));
+        must(std::fs::create_dir_all(&dir), "create manifest fixture");
+        must(
+            std::fs::write(dir.join("b.tar.gz"), "second-subject"),
+            "write second subject",
+        );
+        must(
+            std::fs::write(dir.join("a.tar.gz"), "first-subject"),
+            "write first subject",
+        );
+        dir
+    }
+
+    /// The manifest binds the declared subjects with independently
+    /// re-hashed digests, and the corpus is strictly re-verified from disk
+    /// before the manifest is written.
+    #[test]
+    fn assemble_manifest_writes_and_verifies_the_corpus() {
+        let dir = manifest_fixture("corpus");
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        must(
+            assemble_manifest(&release_args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--subjects",
+                "b.tar.gz,a.tar.gz",
+                "--schema",
+                "example.test/release-manifest-v1",
+                "--repository",
+                "example/app",
+                "--ref",
+                "refs/tags/v1.2.3",
+                "--commit",
+                commit,
+                "--version",
+                "1.2.3",
+            ])),
+            "assemble manifest",
+        );
+        let corpus = must(
+            std::fs::read_to_string(dir.join("SHA256SUMS")),
+            "read checksum corpus",
+        );
+        let lines: Vec<&str> = corpus.lines().collect();
+        assert_eq!(lines.len(), 2, "unexpected corpus: {corpus}");
+        assert!(
+            lines[0].ends_with("  a.tar.gz") && lines[1].ends_with("  b.tar.gz"),
+            "subjects must be sorted: {corpus}"
+        );
+        let manifest = must(
+            std::fs::read_to_string(dir.join("release-manifest.json")),
+            "read release manifest",
+        );
+        let document: serde_json::Value =
+            must(serde_json::from_str(&manifest), "parse release manifest");
+        assert_eq!(document["schema"], "example.test/release-manifest-v1");
+        assert_eq!(document["source_commit"], commit);
+        assert_eq!(document["version"], "1.2.3");
+        let assets = must(
+            document["assets"].as_array().ok_or("manifest assets"),
+            "manifest assets",
+        );
+        assert_eq!(assets.len(), 2);
+        for (line, asset) in lines.iter().zip(assets.iter()) {
+            let digest = line.split_once("  ").unwrap_or_default().0;
+            assert_eq!(asset["sha256"], digest);
+        }
+        must(std::fs::remove_dir_all(&dir), "remove manifest fixture");
+    }
+
+    /// A corpus line that no longer matches its subject fails strictly:
+    /// conflicting bytes are never papered over.
+    #[test]
+    fn checksum_corpus_mismatch_fails_strict_verification() {
+        let dir = manifest_fixture("conflict");
+        let digest = "0".repeat(64);
+        let error = must_fail(
+            verify_checksum_corpus(&dir, &format!("{digest}  a.tar.gz\n")),
+            "conflicting corpus digest",
+        );
+        assert!(
+            error.to_string().contains("corpus mismatch"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            verify_checksum_corpus(&dir, "not-a-corpus-line\n"),
+            "malformed corpus line",
+        );
+        assert!(
+            error.to_string().contains("malformed checksum corpus"),
+            "unexpected error: {error}"
+        );
+        must(std::fs::remove_dir_all(&dir), "remove manifest fixture");
+    }
+
+    /// Missing and traversing subjects fail before anything is written.
+    #[test]
+    fn assemble_manifest_refuses_bad_subjects() {
+        let dir = manifest_fixture("refuse");
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let error = must_fail(
+            assemble_manifest(&release_args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--subjects",
+                "missing.tar.gz",
+                "--schema",
+                "example.test/release-manifest-v1",
+                "--repository",
+                "example/app",
+                "--ref",
+                "refs/tags/v1.2.3",
+                "--commit",
+                commit,
+                "--version",
+                "1.2.3",
+            ])),
+            "missing subject",
+        );
+        assert!(
+            error.to_string().contains("subject is missing"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            assemble_manifest(&release_args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--subjects",
+                "../escape.tar.gz",
+                "--schema",
+                "example.test/release-manifest-v1",
+                "--repository",
+                "example/app",
+                "--ref",
+                "refs/tags/v1.2.3",
+                "--commit",
+                commit,
+                "--version",
+                "1.2.3",
+            ])),
+            "traversal subject",
+        );
+        assert!(
+            error.to_string().contains("declared subject file names"),
+            "unexpected error: {error}"
+        );
+        must(std::fs::remove_dir_all(&dir), "remove manifest fixture");
+    }
+
+    /// Archive members validate before any tar call: no traversal, no
+    /// duplicates of the binary, no bad deterministic flag.
+    #[test]
+    fn package_binary_validates_members_before_any_tar_call() {
+        let error = must_fail(
+            package_binary(&release_args(&[
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--version",
+                "1.2.3",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--members",
+                "../escape",
+            ])),
+            "traversal member",
+        );
+        assert!(
+            error.to_string().contains("invalid archive member"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_binary(&release_args(&[
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--version",
+                "1.2.3",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--members",
+                "example",
+            ])),
+            "member duplicating the binary",
+        );
+        assert!(
+            error.to_string().contains("invalid archive member"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_binary(&release_args(&[
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--version",
+                "1.2.3",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--deterministic",
+                "sometimes",
+            ])),
+            "bad deterministic flag",
+        );
+        assert!(
+            error.to_string().contains("invalid --deterministic value"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The GNU tar probe reports exactly what `tar --version` says: GNU
+    /// tar admits deterministic packaging, anything else refuses it.
+    #[test]
+    fn deterministic_packaging_needs_gnu_tar() {
+        let output = must(
+            std::process::Command::new("tar").arg("--version").output(),
+            "probe tar",
+        );
+        let gnu = output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .to_lowercase()
+                .contains("gnu tar");
+        assert_eq!(require_gnu_tar().is_ok(), gnu);
+    }
+
+    const INSTALL_TOOL: &str = "test-runner";
+    const INSTALL_PRODUCER: &str = "producer-job";
+    const INSTALL_ABI: &str = "Linux-X64";
+    const INSTALL_INPUTS: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn hex_bytes(data: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let digest = Sha256::digest(data);
+        let mut output = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            let _ = write!(output, "{byte:02x}");
+        }
+        output
+    }
+
+    fn install_manifest(run_id: &str) -> ToolManifest {
+        let files = vec![
+            ToolFile {
+                path: "bin/test-runner".to_owned(),
+                sha256: hex_bytes(b"runner-bytes"),
+                executable: true,
+            },
+            ToolFile {
+                path: "share/policy.json".to_owned(),
+                sha256: hex_bytes(b"{\"deny\":[]}"),
+                executable: false,
+            },
+        ];
+        let mut manifest = ToolManifest {
+            tool_id: INSTALL_TOOL.to_owned(),
+            inputs_digest: INSTALL_INPUTS.to_owned(),
+            platform_abi: INSTALL_ABI.to_owned(),
+            producer: ProducerIdentity {
+                producer: INSTALL_PRODUCER.to_owned(),
+                run_id: run_id.to_owned(),
+            },
+            outcome: ToolOutcome::Success,
+            files,
+            manifest_sha256: String::new(),
+        };
+        manifest.manifest_sha256 = manifest.canonical_digest();
+        manifest
+    }
+
+    /// A restored bundle on disk: `bundle/` holds the manifest and the
+    /// files, `dest/` is the uncreated install target, `outputs` collects
+    /// the step outputs.
+    struct InstallFixture {
+        root: PathBuf,
+        manifest: PathBuf,
+        dir: PathBuf,
+        dest: PathBuf,
+        outputs: PathBuf,
+    }
+
+    fn install_fixture(name: &str, manifest: &ToolManifest) -> InstallFixture {
+        static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-prepared-tool-install-{name}-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dir = root.join("bundle");
+        must(
+            fs::create_dir_all(dir.join("bin")),
+            "create bundle binary directory",
+        );
+        must(
+            fs::create_dir_all(dir.join("share")),
+            "create bundle data directory",
+        );
+        let bytes = must(serde_json::to_vec(manifest), "serialize fixture manifest");
+        must(
+            fs::write(dir.join("manifest.json"), bytes),
+            "write manifest",
+        );
+        must(
+            fs::write(dir.join("bin/test-runner"), b"runner-bytes"),
+            "write fixture binary",
+        );
+        must(
+            fs::write(dir.join("share/policy.json"), b"{\"deny\":[]}"),
+            "write fixture data",
+        );
+        InstallFixture {
+            manifest: dir.join("manifest.json"),
+            dir,
+            dest: root.join("dest").join("tool"),
+            outputs: root.join("outputs"),
+            root,
+        }
+    }
+
+    fn install_args(fixture: &InstallFixture, current_run: &str, extra: &[&str]) -> Vec<OsString> {
+        let lossy = |path: &Path| path.to_string_lossy().into_owned();
+        let mut args = vec![
+            OsString::from("--manifest"),
+            OsString::from(lossy(&fixture.manifest)),
+            OsString::from("--dir"),
+            OsString::from(lossy(&fixture.dir)),
+            OsString::from("--dest"),
+            OsString::from(lossy(&fixture.dest)),
+            OsString::from("--tool"),
+            OsString::from(INSTALL_TOOL),
+            OsString::from("--inputs"),
+            OsString::from(INSTALL_INPUTS),
+            OsString::from("--abi"),
+            OsString::from(INSTALL_ABI),
+            OsString::from("--producers"),
+            OsString::from(INSTALL_PRODUCER),
+            OsString::from("--run-id"),
+            OsString::from(current_run),
+            OsString::from("--repo"),
+            OsString::from("example/fixture"),
+        ];
+        args.extend(extra.iter().map(OsString::from));
+        args
+    }
+
+    fn read_outputs(fixture: &InstallFixture) -> String {
+        must(
+            fs::read_to_string(&fixture.outputs),
+            "read recorded step outputs",
+        )
+    }
+
+    #[test]
+    fn prepared_tool_install_verifies_and_installs_exact_hits() {
+        let fixture = install_fixture("exact", &install_manifest("42"));
+        let mut sleeps = Vec::new();
+        must(
+            prepared_tool_install_to(
+                &install_args(&fixture, "42", &[]),
+                Some(&fixture.outputs),
+                &mut |wait| sleeps.push(wait),
+            ),
+            "exact install lands",
+        );
+        // An exact hit never touches the network: no sleeps, no executor.
+        assert!(sleeps.is_empty());
+        assert_eq!(
+            must(
+                fs::read(fixture.dest.join("bin/test-runner")),
+                "read installed binary"
+            ),
+            b"runner-bytes"
+        );
+        let outputs = read_outputs(&fixture);
+        assert!(outputs.contains("is-exact=true\n"), "{outputs}");
+        assert!(outputs.contains("outcome=installed\n"), "{outputs}");
+        let requested = outputs
+            .lines()
+            .find_map(|line| line.strip_prefix("requested-key="));
+        let resolved = outputs
+            .lines()
+            .find_map(|line| line.strip_prefix("resolved-key="));
+        let save = outputs
+            .lines()
+            .find_map(|line| line.strip_prefix("save-key="));
+        assert_eq!(requested, resolved);
+        assert_eq!(save, resolved);
+        let _ = fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn prepared_tool_install_refuses_precise_verdicts() {
+        // Each invalid bundle fails with its taxonomy outcome recorded: the
+        // message names the break, the output names it for machines.
+        let mut foreign = install_manifest("42");
+        foreign.producer.producer = "intruder-job".to_owned();
+        foreign.manifest_sha256 = foreign.canonical_digest();
+        let mut abi = install_manifest("42");
+        abi.platform_abi = "Linux-ARM64".to_owned();
+        abi.manifest_sha256 = abi.canonical_digest();
+        for (name, manifest, outcome) in [
+            ("foreign-producer", foreign, "denied"),
+            ("wrong-abi", abi, "corrupt"),
+        ] {
+            let fixture = install_fixture(name, &manifest);
+            let error = must_fail(
+                prepared_tool_install_to(
+                    &install_args(&fixture, "42", &[]),
+                    Some(&fixture.outputs),
+                    &mut |_| {},
+                ),
+                "an invalid bundle never installs",
+            );
+            assert!(error.to_string().contains(outcome), "{error}");
+            assert!(read_outputs(&fixture).contains(&format!("outcome={outcome}\n")));
+            assert!(!fixture.dest.exists());
+            let _ = fs::remove_dir_all(&fixture.root);
+        }
+        // Incomplete and tampered restores are corrupt, whatever the
+        // manifest claims.
+        let manifest = install_manifest("42");
+        let fixture = install_fixture("incomplete", &manifest);
+        must(
+            fs::remove_file(fixture.dir.join("share/policy.json")),
+            "drop a restored file",
+        );
+        let error = must_fail(
+            prepared_tool_install_to(
+                &install_args(&fixture, "42", &[]),
+                Some(&fixture.outputs),
+                &mut |_| {},
+            ),
+            "an incomplete restore never installs",
+        );
+        assert!(read_outputs(&fixture).contains("outcome=corrupt\n"));
+        assert!(error.to_string().contains("corrupt"), "{error}");
+        let _ = fs::remove_dir_all(&fixture.root);
+        let fixture = install_fixture("tampered", &manifest);
+        must(
+            fs::write(fixture.dir.join("bin/test-runner"), b"forged-bytes"),
+            "tamper with restored bytes",
+        );
+        let error = must_fail(
+            prepared_tool_install_to(
+                &install_args(&fixture, "42", &[]),
+                Some(&fixture.outputs),
+                &mut |_| {},
+            ),
+            "tampered bytes never install",
+        );
+        assert!(read_outputs(&fixture).contains("outcome=corrupt\n"));
+        assert!(error.to_string().contains("corrupt"), "{error}");
+        let _ = fs::remove_dir_all(&fixture.root);
+        // No manifest at all is a miss: nothing to prove, the signal to
+        // build.
+        let fixture = install_fixture("miss", &manifest);
+        must(
+            fs::remove_file(&fixture.manifest),
+            "drop the restored manifest",
+        );
+        let error = must_fail(
+            prepared_tool_install_to(
+                &install_args(&fixture, "42", &[]),
+                Some(&fixture.outputs),
+                &mut |_| {},
+            ),
+            "a missing manifest is a miss",
+        );
+        assert!(read_outputs(&fixture).contains("outcome=miss\n"));
+        assert!(error.to_string().contains("miss"), "{error}");
+        let _ = fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn prepared_tool_check_save_key_gates_fallback_saves() {
+        use crate::primitives::prepared_tools::{requested_key, resolved_key, ToolRequest};
+        let manifest = install_manifest("42");
+        let request = ToolRequest {
+            tool_id: INSTALL_TOOL.to_owned(),
+            inputs_digest: INSTALL_INPUTS.to_owned(),
+            platform_abi: INSTALL_ABI.to_owned(),
+            authorized_producers: BTreeSet::from([INSTALL_PRODUCER.to_owned()]),
+            run_id: "99".to_owned(),
+        };
+        let requested = requested_key(&request);
+        let resolved = resolved_key(&manifest);
+        assert_ne!(requested.as_str(), resolved.as_str());
+        // The historical bug, gated at save time: fallback bytes under the
+        // requested exact key are refused.
+        let fixture = install_fixture("save-refused", &manifest);
+        let error = must_fail(
+            prepared_tool_install_to(
+                &install_args(&fixture, "99", &["--check-save-key", requested.as_str()]),
+                Some(&fixture.outputs),
+                &mut |_| {},
+            ),
+            "fallback bytes under the requested key are refused",
+        );
+        assert!(error.to_string().contains("refusing to save"), "{error}");
+        assert!(read_outputs(&fixture).contains("outcome=corrupt\n"));
+        assert!(!fixture.dest.exists());
+        let _ = fs::remove_dir_all(&fixture.root);
+        // The resolved key — the bundle's own producer run — is allowed,
+        // and the check records it for the save step to consume.
+        let fixture = install_fixture("save-allowed", &manifest);
+        must(
+            prepared_tool_install_to(
+                &install_args(&fixture, "99", &["--check-save-key", resolved.as_str()]),
+                Some(&fixture.outputs),
+                &mut |_| {},
+            ),
+            "the resolved key is allowed",
+        );
+        let outputs = read_outputs(&fixture);
+        assert!(outputs.contains(&format!("save-key={}\n", resolved.as_str())));
+        assert!(outputs.contains("outcome=save-allowed\n"));
+        let _ = fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn historical_outcome_validates_success_and_refuses_the_rest() {
+        let run = |body: &str, status: u16| ApiResponse {
+            status,
+            headers: String::new(),
+            body: body.to_owned(),
+        };
+        // A proven success passes silently.
+        let root = std::env::temp_dir().join(format!(
+            "velnor-prepared-tool-outcome-{}",
+            std::process::id()
+        ));
+        let outputs = root.join("outputs");
+        must(fs::create_dir_all(&root), "create outcome directory");
+        let mut executor =
+            || -> Result<ApiResponse, String> { Ok(run(r#"{"conclusion":"success"}"#, 200)) };
+        must(
+            check_historical_outcome("42", &mut executor, &mut |_| {}, Some(&outputs)),
+            "a successful producer run passes",
+        );
+        // Anything else fails closed with its taxonomy recorded.
+        for (body, status, headers, outcome) in [
+            (r#"{"conclusion":"failure"}"#, 200_u16, "", "denied"),
+            (r#"{"conclusion":null}"#, 200_u16, "", "denied"),
+            ("{}", 403_u16, "", "denied"),
+            ("{}", 404_u16, "", "miss"),
+        ] {
+            let _ = fs::remove_file(&outputs);
+            let mut executor = || -> Result<ApiResponse, String> {
+                Ok(ApiResponse {
+                    status,
+                    headers: headers.to_owned(),
+                    body: body.to_owned(),
+                })
+            };
+            let error = must_fail(
+                check_historical_outcome("42", &mut executor, &mut |_| {}, Some(&outputs)),
+                "an unproven outcome never passes",
+            );
+            assert!(error.to_string().contains(outcome), "{error}");
+            assert_eq!(
+                must(fs::read_to_string(&outputs), "read recorded outcome"),
+                format!("outcome={outcome}\n")
+            );
+        }
+        // A flapping API exhausts its bounds as transient, fast: the fake
+        // sleeper records instead of sleeping.
+        let _ = fs::remove_file(&outputs);
+        let mut sleeps = Vec::new();
+        let mut executor = || -> Result<ApiResponse, String> { Ok(run("flaked", 500)) };
+        let error = must_fail(
+            check_historical_outcome(
+                "42",
+                &mut executor,
+                &mut |wait| sleeps.push(wait),
+                Some(&outputs),
+            ),
+            "a flapping api exhausts as transient",
+        );
+        assert!(error.to_string().contains("transient"), "{error}");
+        assert_eq!(
+            must(fs::read_to_string(&outputs), "read recorded outcome"),
+            "outcome=transient\n"
+        );
+        assert_eq!(sleeps.len(), 2);
+        // A broken executor is a usage error, never taxonomy.
+        let mut executor = || -> Result<ApiResponse, String> { Err("curl is missing".to_owned()) };
+        let error = must_fail(
+            check_historical_outcome("42", &mut executor, &mut |_| {}, Some(&outputs)),
+            "a broken executor is a usage error",
+        );
+        assert!(error.to_string().contains("curl is missing"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn retention_policy_extends_only_for_declared_tools() {
+        let parse = |config: &str| {
+            must(
+                crate::config::parse(Path::new("velnor-workflow.toml"), config.as_bytes()),
+                "parse generation config",
+            )
+        };
+        assert_eq!(
+            retention_policy_with_declared_tools(RetentionPolicy::default_policy(), None),
+            RetentionPolicy::default_policy()
+        );
+        let bare = parse("schema = 1\n");
+        assert_eq!(
+            retention_policy_with_declared_tools(RetentionPolicy::default_policy(), Some(&bare)),
+            RetentionPolicy::default_policy()
+        );
+        let declared = parse(
+            "schema = 1\n\n[[declare]]\nprimitive = \"prepared-tool\"\n\n[declare.args.tools]\ntest-runner = [\"producer-job\"]\n",
+        );
+        let policy = retention_policy_with_declared_tools(
+            RetentionPolicy::default_policy(),
+            Some(&declared),
+        );
+        assert!(
+            policy
+                .classes
+                .iter()
+                .any(|class| class.id == "prepared-tools"),
+            "a declared repository carries the prepared-tools class"
+        );
+        assert_eq!(
+            policy.classes.len(),
+            RetentionPolicy::default_policy().classes.len() + 1
+        );
+    }
+
+    #[test]
+    fn curl_producer_run_reports_spawn_failures() {
+        let error = must_some(
+            curl_producer_run(
+                "/nonexistent-velnor-curl-binary",
+                "example/fixture",
+                "42",
+                "fixture-token",
+            )
+            .err(),
+            "a missing http client must fail",
+        );
+        assert!(error.contains("nonexistent-velnor-curl-binary"), "{error}");
+    }
+
+    #[test]
+    fn split_curl_response_splits_status_headers_and_body() {
+        let response = must_some(
+            split_curl_response(
+                "HTTP/2 200\r\nx-ratelimit-remaining: 42\r\n\r\n{\"conclusion\":\"success\"}\n__PREPARED_TOOL_STATUS:200\n",
+            ),
+            "a header capture must split",
+        );
+        assert_eq!(response.status, 200);
+        assert!(response.headers.contains("x-ratelimit-remaining: 42"));
+        assert!(response.body.contains("success"));
+        // LF-only captures split too, and a body containing the marker
+        // cannot shift the parse: the trailer splits from the right.
+        let response = must_some(
+            split_curl_response(
+                "HTTP/1.1 403\nx: y\n\n__PREPARED_TOOL_STATUS:200\n__PREPARED_TOOL_STATUS:403\n",
+            ),
+            "an lf capture must split",
+        );
+        assert_eq!(response.status, 403);
+        assert!(split_curl_response("no trailer here").is_none());
+        assert!(split_curl_response("body\n__PREPARED_TOOL_STATUS:banana\n").is_none());
     }
 }

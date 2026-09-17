@@ -58,6 +58,11 @@ const DENY_LIST: &[&str] = &[
     "velnor-trusted",
     "velnor-target-mvp",
     "velnor-host-docker",
+    // The self-consumer's own job image and Dockerfile. They live in the
+    // unscanned `.github-gen/` tree and reach generated output only as
+    // consumer-declared data; the engine must never spell them.
+    "velnor-job-ubuntu",
+    "job-ubuntu.Dockerfile",
     // Estate unit ids and template families.
     "rust-velnor",
     "bun-velnor",

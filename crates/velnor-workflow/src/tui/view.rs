@@ -692,6 +692,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     fn configured_app() -> super::super::App {
         let mut app = app();
         app.inputs = Some(crate::GenerationInputs::parts(0, 0));
@@ -725,6 +726,12 @@ mod tests {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::portable(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
         };
         let config = crate::ProjectConfig {
             repository: "example/project".to_owned(),
@@ -751,6 +758,11 @@ mod tests {
             renovate_enabled: false,
             renovate_reason: String::new(),
             renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
+            check_profiles: Vec::new(),
+            maintenance: crate::MaintenanceSpec::default(),
             units: vec![unit],
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
