@@ -405,9 +405,7 @@ fn render_checks_file(
         output,
         "  group: {stem}-${{{{ github.repository }}}}-${{{{ github.ref }}}}"
     );
-    if events.is_empty() {
-        output.push_str("  cancel-in-progress: true\n\njobs:\n");
-    } else {
+    if events.iter().any(|event| event == "pull_request") {
         // PR-only cancel, like the docs-site and Renovate files:
         // pull-request runs supersede each other for fast feedback, while
         // push, schedule, and dispatch runs — the compliance signal on the
@@ -416,6 +414,11 @@ fn render_checks_file(
         output.push_str(
             "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n",
         );
+    } else {
+        // No pull_request trigger: the PR expression would be constant-false,
+        // so stale runs would queue per-ref instead of superseding. Cancel
+        // like the cron-only files.
+        output.push_str("  cancel-in-progress: true\n\njobs:\n");
     }
     for profile in profiles {
         render_profile_job(
@@ -1369,6 +1372,43 @@ branches = []"#,
             evented.contains("group: scheduled-daily-${{ github.repository }}-${{ github.ref }}"),
             "{evented}"
         );
+    }
+
+    #[test]
+    fn push_without_pr_cancels_like_cron_only() {
+        let smoke = profile("smoke");
+        let config = profile_config(vec![smoke]);
+        for events_toml in [
+            r#"events = ["push"]"#,
+            r#"events = ["push"]
+branches = ["main"]"#,
+            r#"events = ["push", "workflow_dispatch"]"#,
+        ] {
+            let map = args_for(events_toml);
+            let args = Args(&map);
+            let selected = must(
+                select_profiles(&config.check_profiles, &args, "scheduled-daily.yml"),
+                "select every profile",
+            );
+            let events = must(
+                select_events(&args, "scheduled-daily.yml"),
+                "select the declared events",
+            );
+            let branches = must(
+                select_branches(&args, "scheduled-daily.yml", &events),
+                "select the declared branches",
+            );
+            let rendered =
+                render_with_events_and_branches(&config, None, &selected, &events, &branches);
+            assert!(
+                rendered.contains("cancel-in-progress: true"),
+                "a file without a pull_request trigger cancels stale runs: {events_toml}\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("cancel-in-progress: ${{"),
+                "the PR expression would be constant-false without the trigger: {events_toml}\n{rendered}"
+            );
+        }
     }
 
     #[test]
