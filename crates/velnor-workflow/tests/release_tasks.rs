@@ -173,6 +173,13 @@ fn tasks_release_renders_end_to_end() {
         "run: mise run verify-release",
         "run: mise run sign-release",
         "runs-on: macos-15",
+        "environment: example-signing",
+        "id-token: write",
+        "DEVELOPER_DIR:",
+        "SIGNING_KEY_ID:",
+        "Attest release artifacts",
+        "actions/attest-build-provenance@",
+        "dist/example-app.zip",
     ] {
         assert!(
             workflow.contains(expected),

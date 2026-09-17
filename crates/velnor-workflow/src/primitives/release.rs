@@ -3162,7 +3162,9 @@ fn tasks_job_gate(job: &ReleaseJobSpec) -> Option<&'static str> {
 }
 
 /// One tasks-publisher job: the lane it runs on, the mode gate it carries,
-/// and the steps that check out, provision mise, and run the named tasks.
+/// the environment and permission overrides it declares, and the steps that
+/// check out, provision mise, run the named tasks, and attest the declared
+/// subjects.
 fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
     let mut output = format!("  {}:\n    name: {}\n", job.id, yaml_scalar(&job.name));
     if !job.needs.is_empty() {
@@ -3173,6 +3175,21 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
     }
     let _ = writeln!(output, "    runs-on: {}", tasks_job_runs_on(config, job));
     let _ = writeln!(output, "    timeout-minutes: {}", job.timeout_minutes);
+    if !job.environment.is_empty() {
+        let _ = writeln!(output, "    environment: {}", yaml_scalar(&job.environment));
+    }
+    if !job.permissions.is_empty() {
+        output.push_str("    permissions:\n");
+        for (scope, level) in &job.permissions {
+            let _ = writeln!(output, "      {scope}: {level}");
+        }
+    }
+    if !job.env.is_empty() {
+        output.push_str("    env:\n");
+        for (key, value) in &job.env {
+            let _ = writeln!(output, "      {key}: {}", yaml_scalar(value));
+        }
+    }
     let _ = writeln!(
         output,
         "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
@@ -3180,6 +3197,17 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         render_versioned_tool_mise_setup(config),
     );
     output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
+    if !job.attest_subjects.is_empty() {
+        let mut subjects = String::new();
+        for subject in &job.attest_subjects {
+            let _ = writeln!(subjects, "            {subject}");
+        }
+        let _ = writeln!(
+            output,
+            "      - name: Attest release artifacts\n        uses: {}\n        with:\n          subject-path: |\n{subjects}",
+            ActionPin::Attest.reference(),
+        );
+    }
     output
 }
 
@@ -5395,6 +5423,10 @@ mod tests {
             modes: Vec::new(),
             timeout_minutes:
                 crate::primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES,
+            environment: String::new(),
+            attest_subjects: Vec::new(),
+            permissions: std::collections::BTreeMap::new(),
+            env: std::collections::BTreeMap::new(),
         }
     }
 
@@ -6168,6 +6200,46 @@ mod tests {
             sign.contains("runs-on: macos-15"),
             "the sign job runs on the macos lane: {sign}"
         );
+    }
+
+    #[test]
+    fn tasks_release_renders_job_shape() {
+        let mut job = tasks_job("sign", &["sign-release"]);
+        job.environment = "example-signing".to_owned();
+        job.attest_subjects = vec!["dist/example-app.zip".to_owned()];
+        job.permissions = [("id-token".to_owned(), "write".to_owned())]
+            .into_iter()
+            .collect();
+        job.env = [
+            (
+                "DEVELOPER_DIR".to_owned(),
+                "/Applications/Xcode.app/Contents/Developer".to_owned(),
+            ),
+            (
+                "SIGNING_KEY_ID".to_owned(),
+                "${{ secrets.EXAMPLE_SIGNING_KEY_ID }}".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut spec = tasks_spec();
+        spec.jobs = vec![job];
+        let config = config(&["release.yml"], Some(spec.clone()));
+        let workflow = super::render_release(&config, &spec);
+        for expected in [
+            "    environment: example-signing\n",
+            "    permissions:\n      id-token: write\n",
+            "    env:\n      DEVELOPER_DIR: \"/Applications/Xcode.app/Contents/Developer\"\n",
+            "      SIGNING_KEY_ID: \"${{ secrets.EXAMPLE_SIGNING_KEY_ID }}\"\n",
+            "      - name: Attest release artifacts\n",
+            "actions/attest-build-provenance@",
+            "          subject-path: |\n            dist/example-app.zip\n",
+        ] {
+            assert!(
+                workflow.contains(expected),
+                "tasks release must render {expected:?}: {workflow}"
+            );
+        }
     }
 
     #[test]
