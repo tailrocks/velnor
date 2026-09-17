@@ -68,17 +68,16 @@ pub struct DaemonArgs {
     pub dump_job_message: Option<PathBuf>,
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
-    /// Docker `--cpus` limit appended to every job container. Empty leaves the
-    /// per-job cap to the derived host budget, which divides the machine
-    /// between the provisioned slots; a value here is an operator cap that
-    /// only ever narrows that share. Must match `velnor_runner::service`.
-    #[arg(long, env = "VELNOR_JOB_CPUS", default_value = "")]
-    pub job_cpus: String,
-    /// Docker `--memory` limit appended to every job container. Empty leaves
-    /// the job uncapped by the daemon; the derived budget still sizes the
-    /// compile scheduler. Must match `velnor_runner::service`.
-    #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
-    pub job_memory: String,
+    /// Host-wide maximum concurrent jobs. Native and Scale Set lanes share
+    /// one permit ledger capped at this N. Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_MAX_JOBS")]
+    pub max_jobs: Option<u32>,
+    /// Host-wide permit ledger database. Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_PERMIT_LEDGER")]
+    pub permit_ledger: Option<PathBuf>,
+    /// Scale-set lane config file (TOML). Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_SCALE_SET_CONFIG")]
+    pub scale_set_config: Option<PathBuf>,
     /// Pool trust boundary. Flattened from the single declaration in
     /// `velnor_runner::trust_scope`, so this binary and `velnor-runner` cannot
     /// disagree about a security gate.
@@ -373,8 +372,9 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             dry_run_jobs: args.dry_run_jobs,
             dump_job_message: args.dump_job_message,
             docker_image: args.docker_image,
-            job_cpus: args.job_cpus,
-            job_memory: args.job_memory,
+            max_jobs: args.max_jobs,
+            permit_ledger: args.permit_ledger,
+            scale_set_config: args.scale_set_config,
             trust_scope: args.trust.resolve().into_string(),
             emergency_reserve_bytes: args.emergency_reserve_bytes,
             job_peak_bytes: args.job_peak_bytes,
