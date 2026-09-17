@@ -446,7 +446,14 @@ pub fn parse_message_response(body: &[u8]) -> Result<ParsedMessage, String> {
             }
             // Upstream `default:` is empty: future message types are ignored
             // here and surfaced through the unknown-event reconcile path.
-            BatchedMessageType::Unknown => {}
+            BatchedMessageType::Unknown => {
+                let name = raw
+                    .get("messageType")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?")
+                    .to_string();
+                message.unknown_message_types.push(name);
+            }
         }
     }
     Ok(message)

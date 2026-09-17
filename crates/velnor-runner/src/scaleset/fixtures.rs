@@ -3,23 +3,35 @@
 //! Layout (`crates/velnor-runner/tests/fixtures/scaleset/`):
 //!
 //! ```text
-//! manifest.json            {upstream_commit, files: {name: sha256}}
-//! session_created.json     RunnerScaleSetSession (tokens REDACTED)
-//! message_batch.json       RunnerScaleSetJobMessages envelope, one of each kind
-//! message_stats_only.json  envelope with empty body + statistics
-//! acquire_jobs.json        acquireJobsResponse subset
-//! jit_runner_config.json   JIT config (encoded blob REDACTED)
-//! registration_token.json  registration-token response (token REDACTED)
-//! installation_token.json  installation access-token response (REDACTED)
-//! admin_connection.json    admin connection (URL host + token REDACTED)
-//! runner_scale_set.json    RunnerScaleSet get-by-id response
-//! runner_reference.json    RunnerReference get response
+//! manifest.json               {upstream_commit, files: {name: sha256}}
+//! session_created.json        RunnerScaleSetSession (tokens REDACTED)
+//! session_refreshed.json      PATCH refresh answer (new session, REDACTED)
+//! message_batch.json          RunnerScaleSetJobMessages envelope, one of each kind
+//! message_stats_only.json     envelope with empty body + statistics
+//! message_deferred_offer.json two JobAvailable (push + PR), desired=2
+//! message_redelivered.json    byte-identical redelivery of the deferred batch
+//! message_reordered.json      completed/started/assigned scrambled per request
+//! message_unknown_kind.json   live offer + unknown future batched type
+//! message_high_water.json     stats-only batch, messageId 41 (cursor probe)
+//! acquire_jobs.json           acquireJobsResponse subset
+//! acquire_partial.json        acquireJobsResponse for a partial grant
+//! jit_runner_config.json      JIT config (encoded blob REDACTED)
+//! registration_token.json     registration-token response (token REDACTED)
+//! installation_token.json     installation access-token response (REDACTED)
+//! admin_connection.json       admin connection (URL host + token REDACTED)
+//! runner_scale_set.json       RunnerScaleSet get-by-id response
+//! runner_reference.json       RunnerReference get response
 //! error_agent_not_found.json  Actions exception body
+//! transcript_nil_polls.json   scripted poll outcomes: 202, 202, stats-only
+//! transcript_redelivery.json  scripted poll outcomes: batch, redelivery, probe
+//! seed_stale_generation.json  stale-epoch demand scenario (drives the test)
 //! ```
 //!
 //! Every load verifies the manifest pin ([`crate::scaleset::upstream_pin`])
 //! and every file hash, then runs the redaction verifier: no live tokens,
-//! PEM blocks, or real hosts may hide in a recorded fixture.
+//! PEM blocks, or real hosts may hide in a recorded fixture. Transcripts
+//! and seeds are scenario scripts, not wire recordings: they reference
+//! payload fixtures by manifest name and carry no secrets at all.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -89,6 +101,43 @@ impl Fixtures {
         serde_json::from_str(&text).with_context(|| format!("parse fixture {name}"))
     }
 
+    /// Load + validate a poll transcript: every 200 references a manifest
+    /// payload, every non-200 carries no payload.
+    pub fn transcript(&self, name: &str) -> Result<PollTranscript> {
+        let transcript: PollTranscript = self.parse(name)?;
+        if transcript.polls.is_empty() {
+            anyhow::bail!("transcript {name} has no polls");
+        }
+        for (index, poll) in transcript.polls.iter().enumerate() {
+            match (&poll.fixture, poll.status) {
+                (Some(fixture), 200) => {
+                    if !self.manifest.files.contains_key(fixture) {
+                        anyhow::bail!(
+                            "transcript {name} poll {index} references unmanifested {fixture}"
+                        );
+                    }
+                }
+                (None, 202 | 401 | 500) => {}
+                (fixture, status) => {
+                    anyhow::bail!(
+                        "transcript {name} poll {index} pairs status {status} with {fixture:?}"
+                    );
+                }
+            }
+        }
+        Ok(transcript)
+    }
+
+    /// Load a demand-seed scenario: offers the test submits under the prior
+    /// epoch before the generation bump.
+    pub fn demand_seed(&self, name: &str) -> Result<DemandSeed> {
+        let seed: DemandSeed = self.parse(name)?;
+        if seed.demand.is_empty() {
+            anyhow::bail!("seed {name} has no demand rows");
+        }
+        Ok(seed)
+    }
+
     #[must_use]
     pub fn manifest(&self) -> &FixtureManifest {
         &self.manifest
@@ -135,6 +184,36 @@ fn extract_urls(text: &str) -> Vec<url::Url> {
         }
     }
     urls
+}
+
+/// One scripted poll outcome: a bare status, or a 200 with its payload
+/// fixture name.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct TranscriptPoll {
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<String>,
+}
+
+/// Scripted poll-outcome sequence driving a loop conformance test.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct PollTranscript {
+    pub polls: Vec<TranscriptPoll>,
+}
+
+/// One demand row of a [`DemandSeed`] scenario.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct DemandSeedRow {
+    pub request_id: i64,
+    pub event_name: String,
+}
+
+/// Stale-generation scenario: offers to submit + grant under the prior
+/// epoch, then re-grant after the bump.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct DemandSeed {
+    pub scale_set_id: i32,
+    pub demand: Vec<DemandSeedRow>,
 }
 
 /// Compute the manifest `files` map for a directory (recording helper;

@@ -1,21 +1,32 @@
-//! Scale-set protocol foundation (D1 part A) + worker lane (D1 part B).
+//! Scale-set adapter (D1 parts A + B + C): protocol + worker lane + §5.1 loop.
 //!
 //! Rust port of the `actions/scaleset` wire protocol at
 //! [`upstream_pin::UPSTREAM_COMMIT`]: admin-plane client, message-session
 //! client (long poll, ACK, AcquireJobs, JIT config), credential chain, and
-//! recorded fixtures. Part B adds the homogeneous worker lane
+//! recorded fixtures (part A), the homogeneous worker lane
 //! ([`worker`]: pinned official runner + private DinD, supervision, owned
 //! cleanup) and the shared [`allocator`] binding to the ONE host-wide
-//! `max_jobs=N` ledger. The poll→Scale→ACK loop (listener) lands later;
-//! this module owns the protocol surface + worker lane only.
+//! `max_jobs=N` ledger (part B), plus the poll→Scale→ACK loop with its
+//! durable demand queue, intent stores, shared-grant capacity port,
+//! population convergence, and reconcile paths (part C).
+//! The worker lane (`worker/`) implements [`converge::WorkerLane`];
+//! daemon wiring follows at integration.
 
 pub mod allocator;
 pub mod backoff;
+pub mod capacity;
 pub mod client;
 pub mod config;
+pub mod converge;
 pub mod credentials;
+pub mod demand;
 pub mod errors;
 pub mod fixtures;
+pub mod intents;
+pub mod listener;
+pub mod metrics;
+pub mod reconcile;
+pub mod scale;
 pub mod session;
 pub mod upstream_pin;
 pub mod worker;
@@ -23,12 +34,39 @@ pub mod worker;
 pub use allocator::{
     scaleset_permit_holder, AllocatorError, ScaleSetAllocator, ScaleSetPermitGuard,
 };
-pub use backoff::RetryPolicy;
+pub use backoff::{IdlePolicy, PollOutcomeClass, RetryPolicy};
+pub use capacity::{
+    advertise_free, reserve_for_offer, AcquireOutcome as LedgerAcquireOutcome, CapacityLedger,
+    LedgerError, LedgerHolder, LedgerLane, LedgerPermitState, MemLedger, ReconcileReport,
+    ReserveError, ReserveOutcome,
+};
 pub use client::{ScaleSetClient, SystemInfo};
 pub use config::{GitHubConfig, GitHubScope};
+pub use converge::{PopulationDecision, ProvisionImages, WorkerLane};
 pub use credentials::{ActionsAuth, FnJwtProvider, GitHubAppAuth, JwtProvider, PemJwtProvider};
+pub use demand::{
+    classify_offer, grant_oldest, DemandState, DemandStore, OfferTrust, SubmitOutcome,
+};
 pub use errors::{RequestFailure, ScaleSetError, ScaleSetFault};
-pub use fixtures::{verify_redaction, FixtureManifest, Fixtures, FIXTURE_HOST, REDACTED};
+pub use fixtures::{
+    verify_redaction, DemandSeed, DemandSeedRow, FixtureManifest, Fixtures, PollTranscript,
+    TranscriptPoll, FIXTURE_HOST, REDACTED,
+};
+pub use intents::{
+    jit_fingerprint, labels_hash, mint_batch_id, permit_holder, provision_operation_id,
+    provision_ownership_id, reconcile_returned_ids, runner_name, stable_i64, AcquireBatch,
+    AcquireBatchStore, BatchState, ProvisionIntent, ProvisionIntentStore,
+};
+pub use listener::{ClientSession, Listener, ListenerError, LoopConfig, LoopSession, SessionStore};
+pub use listener::{SessionCursor, INITIAL_MESSAGE_ID};
+pub use metrics::{MetricSnapshot, Metrics};
+pub use reconcile::{
+    idle_poll, startup, unknown_event, IdleReport, StartupReport, UNCERTAIN_REACQUIRE_AFTER,
+};
+pub use scale::ScaleOutcome;
+pub use scale::{
+    Processor, ProcessorConfig, QueueSession, ScaleError, ScaleKind, MAX_ACQUIRE_BATCH,
+};
 pub use session::{parse_message_response, MessageSessionClient, ParsedMessage};
 pub use upstream_pin::{require_pin, UPSTREAM_COMMIT, UPSTREAM_REPO};
 

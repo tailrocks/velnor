@@ -196,6 +196,12 @@ pub struct RunnerScaleSetMessage {
     pub job_started_messages: Vec<ScaleSetJobStarted>,
     #[serde(default)]
     pub job_completed_messages: Vec<ScaleSetJobCompleted>,
+    /// Batched `messageType` values the parser did not recognize (upstream
+    /// `default:` ignores them). Recorded so the loop's unknown-event
+    /// reconcile path sees what dispatch dropped; never empty-checked for
+    /// ACK gating.
+    #[serde(default)]
+    pub unknown_message_types: Vec<String>,
 }
 
 /// `acquireJobsResponse` from `types.go`: the acquired subset, not an echo.
