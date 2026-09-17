@@ -1,0 +1,476 @@
+//! Unit execution needs, prerequisite products, and the agreed job environment.
+//!
+//! Providers are deployment detail: a unit never names a runner label. It
+//! declares a typed platform, a trust tier, and a capability set, and
+//! generation maps each need onto the eligible providers. A need no enabled
+//! provider can serve is a generation error that names the unit, the need,
+//! and the remedy, never a silently skipped job.
+//!
+//! The same module carries the prerequisite contract: a unit produces named
+//! products through named tasks, and a consumer declares which producer
+//! products it needs. Generation compiles each edge into the selection graph
+//! (`depends_on`, so producer changes select the consumer transitively) and
+//! into prepare commands (so the consumer rebuilds the product locally before
+//! its own checks), with environment flowing from task inputs to job outputs.
+
+use std::collections::BTreeMap;
+
+use serde::Serialize;
+
+use crate::s2::{GeneratorError, ProjectConfig, Unit, UnitKind};
+
+/// A named build product one unit produces for others: an `XCFramework`
+/// bundle, a generated header set, a packed archive. `task` is the repository
+/// task that rebuilds it (run through the task runner, never a shell string),
+/// and `env` carries the task's outputs — the paths and flags consumers need
+/// once the product exists.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub(crate) struct NamedProduct {
+    pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) env: BTreeMap<String, String>,
+}
+
+/// One prerequisite edge: `producer` builds `product` for this consumer.
+/// `task` overrides the product's own task for this consumer, and `env`
+/// carries the task inputs the consumer's prepare step exports.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub(crate) struct Prerequisite {
+    pub(crate) producer: String,
+    pub(crate) product: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) env: BTreeMap<String, String>,
+}
+
+impl Prerequisite {
+    /// The task the consumer's prepare step runs: the edge override when the
+    /// consumer declares one, the product's own task otherwise.
+    pub(crate) fn effective_task<'a>(&'a self, product: &'a NamedProduct) -> Option<&'a str> {
+        self.task.as_deref().or(product.task.as_deref())
+    }
+}
+
+/// A product or capability name: lowercase, short, shell-safe.
+pub(crate) fn valid_product_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+/// A repository task name, as the task runner resolves it: no whitespace, no
+/// shell metacharacters, so the prepare step can invoke it without quoting.
+pub(crate) fn valid_task_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 200
+        && !value.starts_with('-')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'/' | b'-')
+        })
+}
+
+/// An environment variable name for unit and task env.
+pub(crate) fn valid_env_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// An environment value: anything without control characters, so it renders
+/// into YAML and shell prefixes verbatim.
+pub(crate) fn valid_env_value(value: &str) -> bool {
+    value.len() <= 4096 && !value.chars().any(char::is_control)
+}
+
+/// Validate one env map.
+///
+/// # Errors
+/// Returns a usage error naming the offending entry.
+pub(crate) fn validate_env(
+    env: &BTreeMap<String, String>,
+    context: &str,
+) -> Result<(), GeneratorError> {
+    for (name, value) in env {
+        if !valid_env_name(name) {
+            return Err(GeneratorError::usage(format!(
+                "{context} declares env `{name}`, which is not an environment variable name; use letters, digits, and underscores starting with a letter or underscore"
+            )));
+        }
+        if !valid_env_value(value) {
+            return Err(GeneratorError::usage(format!(
+                "{context} declares env `{name}` with control characters; keep values to printable text"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a Cargo `[lib] crate-type` list marks an FFI crate: it builds a
+/// native static library others link against.
+pub(crate) fn is_ffi_crate_type(crate_types: &[String]) -> bool {
+    crate_types
+        .iter()
+        .any(|crate_type| crate_type == "staticlib" || crate_type == "cdylib")
+}
+
+/// The task-runner invocation that rebuilds a prerequisite product, with the
+/// edge's task inputs exported ahead of it.
+pub(crate) fn prepare_command(task: &str, env: &BTreeMap<String, String>) -> String {
+    let mut command = String::new();
+    for (name, value) in env {
+        command.push_str(name);
+        command.push('=');
+        command.push_str(&crate::s2::shell_quote(value));
+        command.push(' ');
+    }
+    command.push_str("mise run ");
+    command.push_str(task);
+    command
+}
+
+/// Resolve the platform surface over `config`: validate every prerequisite
+/// edge and object-transport toggle, compile edges into the selection graph
+/// and prepare commands, merge product outputs into consumer env, and reject
+/// any placement no enabled lane can serve.
+///
+/// # Errors
+/// Returns a usage error for an edge that names an unknown producer or a
+/// product the producer does not declare, for an object-transport toggle on a
+/// unit that cannot use it, and for a unit no enabled lane can execute.
+pub(crate) fn resolve(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+    validate_mbx_toggles(config)?;
+    materialize_prerequisites(config)?;
+    Ok(())
+}
+
+fn validate_mbx_toggles(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for unit in &config.units {
+        if unit.kind != UnitKind::Rust && unit.mbx == Some(true) {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` is a {} unit, which never runs under the object transport; `mbx` applies to Rust units only",
+                unit.id,
+                unit.kind.label(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn find_product<'a>(
+    config: &'a ProjectConfig,
+    unit_id: &str,
+    name: &str,
+) -> Option<&'a NamedProduct> {
+    config
+        .units
+        .iter()
+        .find(|unit| unit.id == unit_id)
+        .and_then(|unit| unit.products.iter().find(|product| product.name == name))
+}
+
+/// Compile prerequisite edges into `depends_on` (so producer changes select
+/// the consumer through the existing transitive closure), prepare commands
+/// (so the consumer rebuilds each product before its own checks on every
+/// provider), and consumer env (so product outputs reach the checks).
+fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+    for unit in &config.units {
+        for prerequisite in &unit.prerequisites {
+            let Some(producer) = config
+                .units
+                .iter()
+                .find(|unit| unit.id == prerequisite.producer)
+            else {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` requires product `{}` from `{}`, a unit the repository does not declare; known units: {}",
+                    unit.id,
+                    prerequisite.product,
+                    prerequisite.producer,
+                    config
+                        .units
+                        .iter()
+                        .map(|unit| unit.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            };
+            if !producer
+                .products
+                .iter()
+                .any(|product| product.name == prerequisite.product)
+            {
+                let offered = producer
+                    .products
+                    .iter()
+                    .map(|product| product.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let offered = if offered.is_empty() {
+                    "it declares no products".to_owned()
+                } else {
+                    format!("it declares: {offered}")
+                };
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` requires product `{}` from `{}`, which does not produce it; {}",
+                    unit.id, prerequisite.product, prerequisite.producer, offered
+                )));
+            }
+        }
+    }
+    let mut prepared: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut inherited_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for unit in &config.units {
+        for prerequisite in &unit.prerequisites {
+            let Some(product) = find_product(config, &prerequisite.producer, &prerequisite.product)
+            else {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` requires product `{}` from `{}`, which does not produce it",
+                    unit.id, prerequisite.product, prerequisite.producer
+                )));
+            };
+            edges
+                .entry(unit.id.clone())
+                .or_default()
+                .push(prerequisite.producer.clone());
+            for (name, value) in &product.env {
+                inherited_env
+                    .entry(unit.id.clone())
+                    .or_default()
+                    .entry(name.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            if let Some(task) = prerequisite.effective_task(product) {
+                prepared
+                    .entry(unit.id.clone())
+                    .or_default()
+                    .push(prepare_command(task, &prerequisite.env));
+            }
+        }
+    }
+    for unit in &mut config.units {
+        if let Some(producers) = edges.remove(&unit.id) {
+            for producer in producers {
+                if !unit.depends_on.contains(&producer) {
+                    unit.depends_on.push(producer);
+                }
+            }
+        }
+        if let Some(env) = inherited_env.remove(&unit.id) {
+            for (name, value) in env {
+                unit.env.entry(name).or_insert(value);
+            }
+        }
+        if let Some(commands) = prepared.remove(&unit.id) {
+            prepend_prepare_commands(unit, &commands);
+        }
+    }
+    Ok(())
+}
+
+/// Prepend prepare commands ahead of every command vector the unit runs, so
+/// the product rebuilds before the unit's own checks on every provider and in
+/// local runs, which read the same serialized vectors.
+fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
+    let mut pr_commands = commands.to_vec();
+    pr_commands.extend(unit.pr_commands.iter().cloned());
+    unit.pr_commands = pr_commands;
+    let mut full_commands = commands.to_vec();
+    full_commands.extend(unit.full_commands.iter().cloned());
+    unit.full_commands = full_commands;
+    unit.watch.sort();
+    unit.watch.dedup();
+}
+
+/// The job-level env a collapsed kind workflow agrees on: every member's env
+/// merged, failing closed when two members export different values for one
+/// name, since the shared job can carry only one.
+///
+/// # Errors
+/// Returns a usage error when members of one kind disagree on a value.
+pub(crate) fn agreed_env(
+    members: &[&Unit],
+    kind: UnitKind,
+) -> Result<BTreeMap<String, String>, GeneratorError> {
+    let mut agreed = BTreeMap::new();
+    for member in members {
+        for (name, value) in &member.env {
+            match agreed.get(name) {
+                None => {
+                    agreed.insert(name.clone(), value.clone());
+                }
+                Some(current) if current == value => {}
+                Some(_) => {
+                    return Err(GeneratorError::usage(format!(
+                        "collapsed {} job cannot render one env block: members disagree on `{name}`; keep per-unit env identical within a kind or split the kind",
+                        kind.label(),
+                    )));
+                }
+            }
+        }
+    }
+    Ok(agreed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        agreed_env, is_ffi_crate_type, prepare_command, valid_env_name, valid_env_value,
+        valid_product_name, valid_task_name, NamedProduct, Prerequisite,
+    };
+    use crate::s2::provider::{Capabilities, Platform, TrustReq};
+    use crate::s2::{Unit, UnitKind};
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_err<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(_) => panic!("{context}: expected a failure, got success"),
+            Err(error) => error,
+        }
+    }
+
+    fn unit(id: &str, kind: UnitKind) -> Unit {
+        Unit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind,
+            root: ".".to_owned(),
+            pinned_lockfile: false,
+            watch: Vec::new(),
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            depends_on: Vec::new(),
+            cache: None,
+            tool_version: None,
+            mise_tools: Vec::new(),
+            toolchain: None,
+            services: Vec::new(),
+            trust: TrustReq::UntrustedOk,
+            platform: Platform::LinuxX64,
+            capabilities: Capabilities::default(),
+            workspace_check: false,
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn names_reject_shell_metacharacters() {
+        assert!(valid_product_name("xcframework"));
+        assert!(valid_product_name("sys-headers_v2"));
+        assert!(!valid_product_name(""));
+        assert!(!valid_product_name("XCFramework"));
+        assert!(!valid_product_name("xcode build"));
+        assert!(!valid_product_name("x;rm"));
+        assert!(valid_task_name("build-xcframework"));
+        assert!(valid_task_name("ffi:headers"));
+        assert!(!valid_task_name("build xcframework"));
+        assert!(!valid_task_name("build;test"));
+        assert!(valid_env_name("XCFRAMEWORK_PATH"));
+        assert!(!valid_env_name("2FAST"));
+        assert!(!valid_env_name("HAS-DASH"));
+        assert!(valid_env_value("-C link-arg=-fuse-ld=mold"));
+        assert!(!valid_env_value("line\nbreak"));
+    }
+
+    #[test]
+    fn ffi_detection_follows_crate_types() {
+        assert!(is_ffi_crate_type(&["staticlib".to_owned()]));
+        assert!(is_ffi_crate_type(&["rlib".to_owned(), "cdylib".to_owned()]));
+        assert!(!is_ffi_crate_type(&["rlib".to_owned()]));
+        assert!(!is_ffi_crate_type(&[]));
+    }
+
+    #[test]
+    fn prepare_exports_task_inputs() {
+        let env = std::collections::BTreeMap::from([
+            ("B_KEY".to_owned(), "b".to_owned()),
+            ("A_KEY".to_owned(), "a b".to_owned()),
+        ]);
+        assert_eq!(
+            prepare_command("build-xcframework", &env),
+            "A_KEY='a b' B_KEY='b' mise run build-xcframework"
+        );
+        assert_eq!(
+            prepare_command("build-xcframework", &std::collections::BTreeMap::new()),
+            "mise run build-xcframework"
+        );
+    }
+
+    #[test]
+    fn prerequisite_prefers_its_own_task() {
+        let product = NamedProduct {
+            name: "xcframework".to_owned(),
+            task: Some("build-xcframework".to_owned()),
+            env: std::collections::BTreeMap::new(),
+        };
+        let plain = Prerequisite {
+            producer: "rust-ffi".to_owned(),
+            product: "xcframework".to_owned(),
+            task: None,
+            env: std::collections::BTreeMap::new(),
+        };
+        assert_eq!(plain.effective_task(&product), Some("build-xcframework"));
+        let overridden = Prerequisite {
+            task: Some("build-xcframework-device".to_owned()),
+            ..plain
+        };
+        assert_eq!(
+            overridden.effective_task(&product),
+            Some("build-xcframework-device")
+        );
+    }
+
+    #[test]
+    fn agreed_env_fails_closed_on_conflict() {
+        let mut left = unit("left", UnitKind::Swift);
+        left.env.insert("KEY".to_owned(), "one".to_owned());
+        let mut right = unit("right", UnitKind::Swift);
+        right.env.insert("KEY".to_owned(), "two".to_owned());
+        let error = must_err(
+            agreed_env(&[&left, &right], UnitKind::Swift),
+            "conflicting env fails closed",
+        );
+        assert!(
+            error.to_string().contains("`KEY`"),
+            "unexpected error: {error}"
+        );
+        right.env.insert("KEY".to_owned(), "one".to_owned());
+        let agreed = must_ok(
+            agreed_env(&[&left, &right], UnitKind::Swift),
+            "agreeing env merges",
+        );
+        assert_eq!(agreed.get("KEY").map(String::as_str), Some("one"));
+    }
+}
