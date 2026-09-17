@@ -2427,9 +2427,9 @@ fn run_in(
     Ok(output.stdout)
 }
 
-/// Unlock and cache the exact signing key with one discarded signature
-/// before any mutation, so the publisher fails on a locked key before it
-/// writes.
+/// Unlock and cache the exact signing key with one discarded signature after
+/// validation and before signing, so the publisher fails on a locked key
+/// before it signs — but never masks an input defect with a key error.
 fn prime_signer_agent(
     signer: &str,
     passphrase: &str,
@@ -2570,7 +2570,10 @@ fn build_strict_indexes(
 fn publish_stable(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     let tag = parse_stable_tag(&inputs.version)?;
-    prime_signer_agent(&contract.signer, passphrase, inputs.path_overlay)?;
+    // Malformed pointers are rejected before any mutation or signing: only
+    // the tag-agreement half waits for the retained rollback, which the
+    // strict index build below computes.
+    check_stable_pointer_shape(inputs.previous_pointer)?;
     if inputs.staging.exists() {
         std::fs::remove_dir_all(inputs.staging)
             .map_err(|error| GeneratorError::io("wipe", inputs.staging, &error))?;
@@ -2623,6 +2626,8 @@ fn publish_stable(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), Ge
         contract.retention,
         inputs.path_overlay,
     )?;
+    check_stable_pointer(inputs.previous_pointer, &format!("v{rollback}"))?;
+    prime_signer_agent(&contract.signer, passphrase, inputs.path_overlay)?;
     sign_suite_release(
         inputs.staging,
         Suite::Stable,
@@ -2630,7 +2635,6 @@ fn publish_stable(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), Ge
         passphrase,
         inputs.path_overlay,
     )?;
-    check_stable_pointer(inputs.previous_pointer, &format!("v{rollback}"))?;
     let source_record = sidecar_digest(&inputs.incoming.join(RECORD_SIDECAR))?;
     emit_publication_record(
         inputs.staging,
@@ -2661,7 +2665,9 @@ fn publish_preview(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), G
             "publish: --prev-dir is required for the preview suite (the retained preview rollback pair; use --bootstrap to initialize the suite)",
         ));
     }
-    prime_signer_agent(&contract.signer, passphrase, inputs.path_overlay)?;
+    // The preview pointer needs no computed values, so it is rejected before
+    // any mutation or signing.
+    check_preview_pointer(inputs.previous_pointer, inputs.bootstrap)?;
     let pool = pool_root(inputs.staging, Suite::Preview, contract);
     std::fs::create_dir_all(inputs.staging.join("conf"))
         .map_err(|error| GeneratorError::io("create", inputs.staging, &error))?;
@@ -2709,6 +2715,7 @@ fn publish_preview(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), G
             )));
         }
     }
+    prime_signer_agent(&contract.signer, passphrase, inputs.path_overlay)?;
     sign_suite_release(
         inputs.staging,
         Suite::Preview,
@@ -2716,7 +2723,6 @@ fn publish_preview(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), G
         passphrase,
         inputs.path_overlay,
     )?;
-    check_preview_pointer(inputs.previous_pointer, inputs.bootstrap)?;
     let source_manifest = sha256_file(&inputs.incoming.join(PREVIEW_MANIFEST_FILE))?;
     emit_publication_record(
         inputs.staging,
@@ -2924,11 +2930,12 @@ fn sign_suite_release(
     Ok(())
 }
 
-/// Check the stable previous pointer: the final schema only — an object with
-/// exactly `tag` and a 64-hex `source_record_sha256` — naming the retained
-/// rollback tag. The legacy string bridge is gone: breaking changes are
-/// preferred over compat branches.
-fn check_stable_pointer(path: &Path, rollback_tag: &str) -> Result<(), GeneratorError> {
+/// Check the stable previous pointer shape: the final schema only — an object
+/// with exactly `tag` and a 64-hex `source_record_sha256`. Shape needs no
+/// computed values, so the publisher runs it before any mutation or signing.
+/// The legacy string bridge is gone: breaking changes are preferred over
+/// compat branches.
+fn check_stable_pointer_shape(path: &Path) -> Result<(), GeneratorError> {
     let pointer = read_json(path)?;
     let object = pointer.as_object().ok_or_else(|| {
         GeneratorError::usage("publish: stable previous pointer must be an object")
@@ -2940,14 +2947,23 @@ fn check_stable_pointer(path: &Path, rollback_tag: &str) -> Result<(), Generator
             "publish: coherent previous pointer is malformed",
         ));
     }
-    if field(&pointer, "tag")? != rollback_tag {
-        return Err(GeneratorError::usage(
-            "publish: previous pointer disagrees with retained rollback version",
-        ));
-    }
     if !valid_digest(field(&pointer, "source_record_sha256")?) {
         return Err(GeneratorError::usage(
             "publish: coherent previous pointer is malformed",
+        ));
+    }
+    Ok(())
+}
+
+/// Check the stable previous pointer names the retained rollback tag. The
+/// tag agreement needs the rollback only the strict index build computes, so
+/// the publisher runs it right after indexing but still before any signing.
+fn check_stable_pointer(path: &Path, rollback_tag: &str) -> Result<(), GeneratorError> {
+    check_stable_pointer_shape(path)?;
+    let pointer = read_json(path)?;
+    if field(&pointer, "tag")? != rollback_tag {
+        return Err(GeneratorError::usage(
+            "publish: previous pointer disagrees with retained rollback version",
         ));
     }
     Ok(())
@@ -5669,6 +5685,132 @@ mod tests {
             must_fail(publish_suite(&inputs), "pointer keys")
         });
         assert!(error.contains("previous pointer is malformed"), "{error}");
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stable_publish_disagreement_rejected_before_any_signing() {
+        // The strict index build must run to learn the retained rollback,
+        // but no signature may precede the rejection.
+        let incoming = stable_incoming("pub-order-stable");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify first",
+        );
+        let stubs = tool_stubs("pub-order-stable-tools");
+        let root = fixture_dir("pub-order-stable-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        stable_pointer_file(&root, "v9.9.9");
+        can_both_arches(&stubs, &["1.2.3", "1.2.2"]);
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &incoming.dir,
+                Some(&prev),
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must_fail(publish_suite(&inputs), "pointer disagreement")
+        });
+        assert!(
+            error.contains("disagrees with retained rollback"),
+            "{error}"
+        );
+        assert!(!stubs.log.join("gpg.log").exists(), "no signing attempted");
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stable_publish_malformed_pointer_rejected_pre_mutation() {
+        // Rejected before any mutation or signing: the staging tree the
+        // publisher would wipe is untouched.
+        let incoming = stable_incoming("pub-order-keys");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify first",
+        );
+        let stubs = tool_stubs("pub-order-keys-tools");
+        let root = fixture_dir("pub-order-keys-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        write_bytes(
+            &root.join("previous-pointer.json"),
+            b"{\"tag\": \"v1.2.2\", \"extra\": 1}\n",
+        );
+        write_bytes(&root.join("public/junk"), b"junk");
+        can_both_arches(&stubs, &["1.2.3", "1.2.2"]);
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &incoming.dir,
+                Some(&prev),
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must_fail(publish_suite(&inputs), "pointer keys")
+        });
+        assert!(error.contains("previous pointer is malformed"), "{error}");
+        assert!(!stubs.log.join("gpg.log").exists(), "no signing attempted");
+        assert!(
+            root.join("public/junk").is_file(),
+            "malformed pointer rejected pre-mutation"
+        );
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preview_publish_wrong_pointer_rejected_pre_mutation() {
+        // Rejected before any mutation or signing: the staging tree is never
+        // even created.
+        let incoming = preview_incoming("pub-order-preview");
+        must(
+            verify_suite(&preview_verify_inputs(&incoming)),
+            "verify first",
+        );
+        let stubs = tool_stubs("pub-order-preview-tools");
+        let root = fixture_dir("pub-order-preview-root");
+        let prev = preview_prev_dir(&root);
+        write_bytes(&root.join("previous-pointer.json"), b"\"stable\"\n");
+        can_both_arches(&stubs, &[PREVIEW_CANDIDATE, PREVIEW_ROLLBACK]);
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Preview,
+                contract,
+                PREVIEW_CANDIDATE,
+                &incoming.dir,
+                Some(&prev),
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must_fail(publish_suite(&inputs), "preview pointer")
+        });
+        assert!(
+            error.contains("preview previous pointer must be"),
+            "{error}"
+        );
+        assert!(!stubs.log.join("gpg.log").exists(), "no signing attempted");
+        assert!(
+            !root.join("public").exists(),
+            "preview pointer rejected pre-mutation"
+        );
         let _ = std::fs::remove_dir_all(&incoming.dir);
         let _ = std::fs::remove_dir_all(&root);
     }
