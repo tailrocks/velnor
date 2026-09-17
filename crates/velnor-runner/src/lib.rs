@@ -74,6 +74,7 @@ mod release;
 pub use release::{embedded as embedded_build_identity, EmbeddedIdentity};
 pub mod runner;
 mod runtime_env;
+pub mod scaleset;
 mod sccache_compat;
 mod script_step;
 mod sd_notify;
