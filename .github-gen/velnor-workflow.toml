@@ -6,7 +6,7 @@ repository = "tailrocks/velnor"
 # validator regenerates the tree with the generator built at this commit and
 # requires a byte-identical result; bump it in a single pin commit after the
 # last generator change (see the plan ledger).
-revision = "7341ef4bdf750c1fbe419e94fb3848c5b8dde718"
+revision = "dc150d2f9f431b2efab350005f32cbd50576c197"
 
 [scan]
 exclude = ["migrations/**"]
@@ -80,8 +80,6 @@ packages = []
 binary = "velnor-runner"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 image = "ghcr.io/tailrocks/velnor-job-ubuntu"
-image_package = "velnor-workflow"
-dockerfile = "docker/job-ubuntu.Dockerfile"
 source_repository = "tailrocks/velnor"
 consumer_repository = "tailrocks/velnor-apt"
 description = "Native high-performance GitHub Actions runner"
