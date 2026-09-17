@@ -4494,8 +4494,10 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workf
 /// manifest before executing anything: a digest mismatch takes the slow path
 /// (download the asset, verify attestation and digest, install), and only
 /// then — against bytes the digest just proved — does the step execute the
-/// slot binary for its `--closure` self-report gate. Digest decides reuse;
-/// the self-report only confirms. The step exports the slot for the guard
+/// slot binary for its `--closure` and `--revision` self-report gates (closure
+/// against the resolved digest, revision against the manifest's `revision`).
+/// Digest decides reuse; the self-reports only confirm. The step exports the
+/// slot for the guard
 /// (`VELNOR_WORKFLOW_PINNED_BINARY`) so the offline check never compiles.
 /// The reuse path stays online (one manifest download plus one attestation
 /// verification per run; the asset downloads only on mismatch): offline reuse
@@ -4519,7 +4521,7 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workf
 ///   `Download`→`Verify`→`Add to PATH` triple), not a parity restoration.
 pub(crate) fn workflow_pinned_policy_runtime_velnor(revision: &str, checkout: &str) -> String {
     format!(
-        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n        run: |\n          set -euo pipefail\n          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
+        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          PINNED_REVISION: {revision}\n          CHECKOUT_PATH: {checkout}\n        run: |\n          set -euo pipefail\n          if ! git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$PINNED_REVISION\"\n          fi\n          listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\"\n          reported_revision=\"$(\"$binary\" --revision)\"\n          [[ \"$reported_revision\" == \"$manifest_revision\" ]] || {{ echo \"::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
     )
 }
 
@@ -7593,6 +7595,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the provisioner contract keeps all ordering assertions in one test"
+    )]
     #[test]
     fn velnor_provisioner_reuses_the_slot_only_on_manifest_digest_match() {
         let step = workflow_pinned_policy_runtime_velnor(FIXTURE_REVISION, "checkout");
@@ -7623,8 +7629,9 @@ mod tests {
             "the slot binary's digest is recomputed on both toolchains: {step}"
         );
         // Digest-before-exec: the digest comparison alone decides reuse, and
-        // the slot binary is executed exactly once, after the digest has
-        // proven the bytes — never probed before the comparison.
+        // the slot binary is executed exactly twice — the closure and
+        // revision self-report probes — after the digest has proven the
+        // bytes, never probed before the comparison.
         assert!(
             step.contains("if [[ \"$existing\" != \"$expected\" ]]; then"),
             "reuse requires the manifest digest, decided before any execution: {step}"
@@ -7636,7 +7643,12 @@ mod tests {
         assert_eq!(
             step.matches("\"$binary\" --closure").count(),
             1,
-            "the slot binary is executed exactly once: {step}"
+            "the closure probe runs exactly once: {step}"
+        );
+        assert_eq!(
+            step.matches("\"$binary\" --revision").count(),
+            1,
+            "the revision probe runs exactly once: {step}"
         );
         let attested = must_some(
             step.find("gh attestation verify \"$temporary/manifest.json\""),
@@ -7652,15 +7664,34 @@ mod tests {
         );
         let probe = must_some(
             step.find("reported=\"$(\"$binary\" --closure)\""),
-            "post-install self-report probe renders",
+            "post-install closure probe renders",
         );
         let confirmed = must_some(
             step.find("[[ \"$reported\" == \"$closure\" ]]"),
-            "final self-report gate renders",
+            "closure gate renders",
+        );
+        let revision_probe = must_some(
+            step.find("reported_revision=\"$(\"$binary\" --revision)\""),
+            "post-install revision probe renders",
+        );
+        let revision_confirmed = must_some(
+            step.find("[[ \"$reported_revision\" == \"$manifest_revision\" ]]"),
+            "revision gate renders",
         );
         assert!(
-            attested < gate && gate < installed && installed < probe && probe < confirmed,
-            "attest precedes the reuse gate precedes the install precedes the probe precedes the final gate: {step}"
+            attested < gate
+                && gate < installed
+                && installed < probe
+                && probe < confirmed
+                && confirmed < revision_probe
+                && revision_probe < revision_confirmed,
+            "attest precedes the reuse gate precedes the install precedes the closure probe and gate precedes the revision probe and gate: {step}"
+        );
+        assert!(
+            step.contains(
+                "manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\""
+            ),
+            "the revision gate compares against the freshly downloaded manifest: {step}"
         );
         assert!(
             step.contains(&format!(
@@ -7844,10 +7875,11 @@ mod tests {
     }
 
     /// Both acquisition paths re-verify the digest and the installed binary
-    /// must self-report the resolved closure: the download path gates the
-    /// install on the fresh bytes, the cache-restore path re-verifies the
-    /// restored bytes (the cache is a pure acceleration), and the PATH step
-    /// refuses a binary whose own `--closure` report disagrees.
+    /// must self-report the resolved closure and the manifest revision: the
+    /// download path gates the install on the fresh bytes, the cache-restore
+    /// path re-verifies the restored bytes (the cache is a pure
+    /// acceleration), and the PATH step refuses a binary whose own
+    /// `--closure` or `--revision` report disagrees.
     #[test]
     fn setup_action_gates_both_paths_on_digest_and_self_report() {
         let action = declared_setup_action();
@@ -7866,11 +7898,36 @@ mod tests {
         );
         assert!(
             action.contains("reported=\"$(\"$runtime/bin/velnor-workflow\" --closure)\""),
-            "the PATH step probes the installed binary's self-report: {action}"
+            "the PATH step probes the installed binary's closure report: {action}"
         );
         assert!(
             action.contains("[[ \"$reported\" == \"$CLOSURE\" ]]"),
-            "the PATH step gates on the self-report equality: {action}"
+            "the PATH step gates on the closure equality: {action}"
+        );
+        assert!(
+            action
+                .contains("manifest_revision=\"$(jq -er '.revision' \"$runtime/manifest.json\")\""),
+            "the PATH step reads the revision from the verified manifest: {action}"
+        );
+        assert!(
+            action.contains("reported_revision=\"$(\"$runtime/bin/velnor-workflow\" --revision)\""),
+            "the PATH step probes the installed binary's revision report: {action}"
+        );
+        assert!(
+            action.contains("[[ \"$reported_revision\" == \"$manifest_revision\" ]]"),
+            "the PATH step gates on the revision equality: {action}"
+        );
+    }
+
+    #[test]
+    fn setup_action_accept_filters_require_a_well_formed_manifest_revision() {
+        let action = declared_setup_action();
+        assert_eq!(
+            action
+                .matches("(.revision | test(\"^[0-9a-f]{40}$\"))")
+                .count(),
+            2,
+            "the download and verify filters both require a well-formed revision: {action}"
         );
     }
 
