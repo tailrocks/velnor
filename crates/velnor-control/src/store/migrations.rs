@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 20;
+pub const LATEST_SCHEMA_VERSION: u32 = 23;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -525,6 +525,108 @@ const SCHEMA_V20: &str = "
 ALTER TABLE jobs ADD COLUMN execution_backend TEXT;
 ";
 
+/// Scale-set protocol projections (D1 part A, design §2.3). Query tables only:
+/// the journal stays the source of truth and these rows are rebuilt from it.
+/// Secrets rule: hashes/fingerprints only — never queue URLs, tokens, labels,
+/// or JIT blobs.
+const SCHEMA_V21: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_demand (
+    request_id INTEGER PRIMARY KEY,
+    scale_set_id INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    sequence INTEGER NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    decline_reason TEXT,
+    repo_owner TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    job_id INTEGER NOT NULL,
+    labels_hash TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_demand_order ON scaleset_demand (state, first_seen_at, sequence);
+CREATE TABLE IF NOT EXISTS job_permits (
+    permit_id TEXT PRIMARY KEY,
+    lane TEXT NOT NULL,
+    state TEXT NOT NULL,
+    owner_ref TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scaleset_sessions (
+    scale_set_id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    last_message_id INTEGER NOT NULL DEFAULT 0,
+    stats_json TEXT,
+    generation INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scaleset_workers (
+    ownership_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL UNIQUE,
+    request_id INTEGER,
+    runner_name TEXT NOT NULL UNIQUE,
+    runner_container_id TEXT,
+    dind_container_id TEXT,
+    network_name TEXT,
+    workspace_path TEXT,
+    dind_data_path TEXT,
+    runner_digest TEXT NOT NULL,
+    dind_digest TEXT NOT NULL,
+    worker_state TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
+/// Scale-set loop intents (D1 part C, design §2.2 durable-intent home).
+/// Acquire batches persist BEFORE the `acquirejobs` call so a crash between
+/// intent and response replays against the recorded batch instead of
+/// minting a second one; provision intents persist BEFORE Docker calls so
+/// retries adopt by `(operation_id, ownership_id)`. Hashes/fingerprints
+/// only — never JIT blobs, tokens, or URLs.
+const SCHEMA_V22: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_acquire_batches (
+    batch_id TEXT PRIMARY KEY,
+    scale_set_id INTEGER NOT NULL,
+    request_ids_json TEXT NOT NULL,
+    holders_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    uncertain INTEGER NOT NULL DEFAULT 0,
+    generation INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_acquire_batches_open
+    ON scaleset_acquire_batches (scale_set_id, state);
+CREATE TABLE IF NOT EXISTS scaleset_provision_intents (
+    operation_id TEXT PRIMARY KEY,
+    ownership_id TEXT NOT NULL UNIQUE,
+    scale_set_id INTEGER NOT NULL,
+    request_id INTEGER NOT NULL,
+    runner_name TEXT NOT NULL UNIQUE,
+    runner_digest TEXT NOT NULL,
+    dind_digest TEXT NOT NULL,
+    jit_fingerprint TEXT NOT NULL DEFAULT '',
+    generation INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_provision_intents_request
+    ON scaleset_provision_intents (scale_set_id, request_id);
+";
+
+/// Scale-set demand event name (D1 part C). The grant pass re-runs the
+/// trust gate over stored offer fields, so the deciding `event_name` must
+/// be durable — not just the submit-time verdict. Pre-v23 rows predate the
+/// loop and keep the empty (ungrantable) sentinel.
+const SCHEMA_V23: &str = "
+ALTER TABLE scaleset_demand ADD COLUMN event_name TEXT NOT NULL DEFAULT '';
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -656,6 +758,21 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "job-execution-backend-on-admission-row",
         sql: SCHEMA_V20,
     },
+    Migration {
+        version: 21,
+        name: "scaleset-protocol-projections",
+        sql: SCHEMA_V21,
+    },
+    Migration {
+        version: 22,
+        name: "scaleset-loop-intents",
+        sql: SCHEMA_V22,
+    },
+    Migration {
+        version: 23,
+        name: "scaleset-demand-event",
+        sql: SCHEMA_V23,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -706,13 +823,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
             "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
         )));
     }
-    if version >= LATEST_SCHEMA_VERSION && !v20_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v23_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 20 is recorded but its job execution-backend column or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 23 is recorded but its scale-set demand event column or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -912,6 +1029,8 @@ pub(crate) fn apply_pending(
             && has_column(&transaction, "lifecycle_operations", "expected_version")?;
         let execution_backend_column_exists =
             migration.version == 20 && has_column(&transaction, "jobs", "execution_backend")?;
+        let demand_event_column_exists =
+            migration.version == 23 && has_column(&transaction, "scaleset_demand", "event_name")?;
         if migration.version == 16
             && slot_lifecycle_columns.iter().any(|exists| *exists)
             && !slot_lifecycle_columns.iter().all(|exists| *exists)
@@ -945,7 +1064,8 @@ pub(crate) fn apply_pending(
                 && !slot_lifecycle_columns.iter().all(|exists| *exists)
                 && !trust_class_column_exists
                 && !lifecycle_expected_version_exists
-                && !execution_backend_column_exists)
+                && !execution_backend_column_exists
+                && !demand_event_column_exists)
         {
             let sql = if lifecycle_columns_exist {
                 SCHEMA_V6_REPLAY
@@ -1041,6 +1161,33 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v20 job execution-backend column did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 21 && !v21_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v21 scale-set projection tables did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 22 && !v22_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v22 scale-set loop-intent tables did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 23 && !v23_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v23 scale-set demand event column did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1327,6 +1474,77 @@ fn v20_schema_complete(conn: &Connection) -> StoreResult<bool> {
         return Ok(false);
     }
     column_definition_matches(conn, "jobs", "execution_backend", "TEXT", false, None)
+}
+
+fn v21_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v20_schema_complete(conn)? {
+        return Ok(false);
+    }
+    for table in [
+        "scaleset_demand",
+        "job_permits",
+        "scaleset_sessions",
+        "scaleset_workers",
+    ] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    has_index_columns(
+        conn,
+        "idx_scaleset_demand_order",
+        "scaleset_demand",
+        &["state", "first_seen_at", "sequence"],
+    )
+}
+
+fn v23_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v22_schema_complete(conn)? {
+        return Ok(false);
+    }
+    column_definition_matches(
+        conn,
+        "scaleset_demand",
+        "event_name",
+        "TEXT",
+        true,
+        Some("''"),
+    )
+}
+
+fn v22_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v21_schema_complete(conn)? {
+        return Ok(false);
+    }
+    for table in ["scaleset_acquire_batches", "scaleset_provision_intents"] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    if !has_index_columns(
+        conn,
+        "idx_scaleset_acquire_batches_open",
+        "scaleset_acquire_batches",
+        &["scale_set_id", "state"],
+    )? {
+        return Ok(false);
+    }
+    has_index_columns(
+        conn,
+        "idx_scaleset_provision_intents_request",
+        "scaleset_provision_intents",
+        &["scale_set_id", "request_id"],
+    )
 }
 
 fn v16_schema_complete(conn: &Connection) -> StoreResult<bool> {
@@ -2158,5 +2376,155 @@ mod tests {
 
         let error = current_version(&connection).unwrap_err();
         assert_eq!(error.envelope.reason, "store.schema.incomplete");
+    }
+
+    #[test]
+    fn upgrades_v20_to_v21_adding_scaleset_projections() {
+        let temp = TempDb::new("v20-v21-scaleset");
+        let mut conn = Connection::open(&temp.path).expect("open legacy database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+
+        for migration in MIGRATIONS.iter().take(20) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+
+        acquire_lock(&conn, "v20-v21-test", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v20-v21-test", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v20-v21-test").unwrap();
+
+        assert!(v21_schema_complete(&conn).unwrap());
+        assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+        for table in [
+            "scaleset_demand",
+            "job_permits",
+            "scaleset_sessions",
+            "scaleset_workers",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn recorded_v21_without_scaleset_tables_fails_closed() {
+        let temp = TempDb::new("incomplete-v21-tables");
+        let store = Store::open(&temp.path).expect("initial migration");
+        let connection = store.lock_conn().expect("store lock");
+        connection
+            .execute("DROP TABLE scaleset_demand", [])
+            .unwrap();
+
+        let error = current_version(&connection).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+    }
+
+    #[test]
+    fn upgrades_v21_to_v22_adding_loop_intent_tables() {
+        let temp = TempDb::new("v21-v22-scaleset");
+        let mut conn = Connection::open(&temp.path).expect("open legacy database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+
+        for migration in MIGRATIONS.iter().take(21) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+
+        acquire_lock(&conn, "v21-v22-test", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v21-v22-test", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v21-v22-test").unwrap();
+
+        assert!(v22_schema_complete(&conn).unwrap());
+        assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+        for table in ["scaleset_acquire_batches", "scaleset_provision_intents"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn recorded_v22_without_loop_intent_tables_fails_closed() {
+        let temp = TempDb::new("incomplete-v22-tables");
+        let store = Store::open(&temp.path).expect("initial migration");
+        assert_eq!(
+            current_version(&store.lock_conn().expect("store lock")).unwrap(),
+            23
+        );
+        let connection = store.lock_conn().expect("store lock");
+        connection
+            .execute("DROP TABLE scaleset_acquire_batches", [])
+            .unwrap();
+
+        let error = current_version(&connection).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+    }
+
+    #[test]
+    fn upgrades_v22_to_v23_adding_demand_event_column() {
+        let temp = TempDb::new("v22-v23-scaleset");
+        let mut conn = Connection::open(&temp.path).expect("open legacy database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+
+        for migration in MIGRATIONS.iter().take(22) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        // A pre-loop demand row keeps the empty (ungrantable) event sentinel.
+        conn.execute(
+            "INSERT INTO scaleset_demand
+             (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+              repo_owner, repo_name, job_id, labels_hash, generation, updated_at)
+             VALUES (1, 7, '2026-09-17T00:00:00Z', 1, 'eligible', NULL,
+                     'tailrocks', 'velnor', 0, 'hash', 1, '2026-09-17T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "v22-v23-test", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v22-v23-test", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v22-v23-test").unwrap();
+
+        assert!(v23_schema_complete(&conn).unwrap());
+        assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+        let event: String = conn
+            .query_row(
+                "SELECT event_name FROM scaleset_demand WHERE request_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event, "");
     }
 }
