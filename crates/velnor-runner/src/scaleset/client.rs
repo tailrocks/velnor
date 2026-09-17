@@ -56,11 +56,24 @@ pub struct SystemInfo {
 }
 
 /// Cached Actions Service admin token (`actionsServiceAdminToken`).
-#[derive(Debug, Clone)]
+///
+/// `Debug` never prints the credential: the header renders redacted,
+/// mirroring [`ActionsAuth`].
+#[derive(Clone)]
 struct AdminToken {
     authorization_header: String,
     expires_at_epoch: u64,
     url: String,
+}
+
+impl std::fmt::Debug for AdminToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminToken")
+            .field("authorization_header", &"<redacted>")
+            .field("expires_at_epoch", &self.expires_at_epoch)
+            .field("url", &self.url)
+            .finish()
+    }
 }
 
 /// Raw HTTP response: status + headers + BOM-stripped body (`sendRequest`).
@@ -1166,5 +1179,17 @@ mod tests {
             RetryPolicy::default()
         )
         .is_err());
+    }
+
+    #[test]
+    fn admin_token_debug_redacts_the_header() {
+        let token = AdminToken {
+            authorization_header: "Bearer live-admin-token-bytes".into(),
+            expires_at_epoch: 1_000_000,
+            url: "https://actions.example/endpoint".into(),
+        };
+        let rendered = format!("{token:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains("live-admin-token-bytes"), "{rendered}");
     }
 }

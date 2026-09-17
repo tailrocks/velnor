@@ -848,7 +848,8 @@ fn filter_privileged_container_options(
 /// No HostConfig ceiling may arrive via workflow `container.options` on any
 /// trust path: these are stripped at admission (and again at emission).
 /// `--shm-size` stays allowed: shared-memory sizing is not a CPU/RAM
-/// ceiling, and browsers need it larger than Docker's default.
+/// ceiling, and browsers need it larger than Docker's default. (Accepted
+/// risk, audit F4: unbounded is spec-mandated; see `QUOTA_FLAGS`.)
 const QUOTA_CONTAINER_OPTIONS: [&str; 11] = [
     "--cpus",
     "--cpu-period",

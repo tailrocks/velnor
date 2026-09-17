@@ -574,7 +574,7 @@ mod tests {
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok(""),           // inspect: missing
             ScriptRunner::ok("deadbeef\n"), // create
-            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007\n"), // start
+            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"), // start
         ]);
         let provision = ensure_dind(&mut runner, &spec).unwrap();
         assert_eq!(provision, DindProvision::Created);
@@ -592,7 +592,7 @@ mod tests {
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok("deadbeef\n"), // inspect: present
             ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"), // labels
-            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007\n"), // start
+            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"), // start
         ]);
         let provision = ensure_dind(&mut runner, &spec).unwrap();
         assert_eq!(provision, DindProvision::Adopted);
@@ -636,7 +636,7 @@ mod tests {
         let args = network_create_args(&identity);
         assert_eq!(args[0], "network");
         assert_eq!(args[1], "create");
-        assert!(args.contains(&"velnor-scaleset-net-s7-velnor-set-0007".to_string()));
+        assert!(args.contains(&"velnor-scaleset-net-s7-velnor-set-0007-2ad92676".to_string()));
         assert!(args
             .iter()
             .any(|arg| arg.contains("velnor.scaleset.ownership=7/velnor-set-0007")));

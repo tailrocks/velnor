@@ -51,6 +51,8 @@ pub use runner::{
 };
 pub use supervise::{CleanupReport, DiagnosticExport, Supervision, SupervisionOutcome};
 
+use std::path::Path;
+
 use velnor_model::ScaleSetWorkerState;
 
 /// One finished process: exit code + captured streams.
@@ -84,6 +86,31 @@ where
             stderr: output.stderr,
         })
     }
+}
+
+/// Write secret-adjacent bytes with owner-only permissions. The mode is
+/// set at creation (a `0600` open mode can only lose bits to the umask,
+/// never gain group/other) and enforced again after the write so a
+/// pre-existing wider file cannot survive.
+pub(crate) fn write_owner_only(dest: &Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dest)?;
+        file.write_all(contents)?;
+        file.flush()?;
+        drop(file);
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::write(dest, contents)
 }
 
 /// A recorded lifecycle edge: `from → to` for one ownership id.
@@ -281,7 +308,10 @@ impl ScaleSetWorker {
 }
 
 /// What to provision: identity + profile + secrets + readiness budget.
-#[derive(Debug, Clone)]
+///
+/// `Debug` never prints the JIT blob: presence-only, mirroring
+/// [`ActionsAuth`][crate::scaleset::ActionsAuth].
+#[derive(Clone)]
 pub struct ProvisionPlan {
     /// Recorded worker identity (stable names + labels).
     pub identity: WorkerIdentity,
@@ -289,10 +319,23 @@ pub struct ProvisionPlan {
     pub profile: runner::HomogeneousProfile,
     /// Host state dir for this worker.
     pub state_dir: std::path::PathBuf,
-    /// Encoded JIT config blob (env-only into the runner; never logged).
+    /// Encoded JIT config blob (`--env-file` into the runner, deleted
+    /// after create; never logged).
     pub jit_config: String,
     /// DinD readiness probes before giving up (× [`DIND_READY_POLL_INTERVAL`]).
     pub ready_attempts: u32,
+}
+
+impl std::fmt::Debug for ProvisionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionPlan")
+            .field("identity", &self.identity)
+            .field("profile", &self.profile)
+            .field("state_dir", &self.state_dir)
+            .field("jit_config", &"<redacted>")
+            .field("ready_attempts", &self.ready_attempts)
+            .finish()
+    }
 }
 
 /// What provisioning produced.
@@ -400,6 +443,20 @@ mod tests {
             WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007")),
             "op-1",
         )
+    }
+
+    #[test]
+    fn provision_plan_debug_redacts_the_jit_blob() {
+        let plan = ProvisionPlan {
+            identity: WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007")),
+            profile: runner::HomogeneousProfile::for_arch("x86_64").unwrap(),
+            state_dir: std::path::PathBuf::from("/tmp/velnor-test-worker-state"),
+            jit_config: "live-jit-blob-bytes".to_string(),
+            ready_attempts: 3,
+        };
+        let rendered = format!("{plan:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains("live-jit-blob-bytes"), "{rendered}");
     }
 
     #[test]
@@ -587,14 +644,14 @@ mod tests {
             // DinD: missing → create → start.
             ScriptRunner::ok(""),
             ScriptRunner::ok("dindid\n"),
-            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007\n"),
+            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
             // Readiness: one miss, then ready.
             ScriptRunner::fail(1, "Cannot connect"),
             ScriptRunner::ok("28.5.2\n"),
             // Runner: missing → create → start.
             ScriptRunner::ok(""),
             ScriptRunner::ok("runnerid\n"),
-            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007\n"),
+            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
             // Connection: running + marker.
             ScriptRunner::ok("true\n"),
             ScriptRunner::ok("Connected to GitHub\n"),
@@ -650,7 +707,7 @@ mod tests {
             ScriptRunner::ok("netid\n"),
             ScriptRunner::ok(""),
             ScriptRunner::ok("dindid\n"),
-            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007\n"),
+            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
             ScriptRunner::fail(1, "Cannot connect"),
             ScriptRunner::fail(1, "Cannot connect"),
         ]);

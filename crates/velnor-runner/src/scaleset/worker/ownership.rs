@@ -73,10 +73,16 @@ impl OwnershipId {
         &self.runner_name
     }
 
-    /// Filesystem/Docker-safe slug: `s<set>-<sanitized-runner-name>`.
+    /// Filesystem/Docker-safe slug: `s<set>-<sanitized-runner-name>-<hash>`.
     ///
     /// Docker object names and host paths cannot carry `/`, so the slug —
-    /// not the canonical id — seeds every derived name.
+    /// not the canonical id — seeds every derived name. Sanitization alone
+    /// collides (`a/b` vs `a b` → `a-b`), so a short stable hash of the
+    /// canonical id disambiguates: distinct ids never share Docker object
+    /// names, and the adoption gate keeps failing closed on top. The hash
+    /// is sha256 (first 32 bits, hex), never `DefaultHasher`: slug
+    /// derivation must be stable across processes and restarts because the
+    /// recorded identity is the provisioning idempotency key.
     #[must_use]
     pub fn slug(&self) -> String {
         let sanitized: String = self
@@ -90,7 +96,10 @@ impl OwnershipId {
                 }
             })
             .collect();
-        format!("s{}-{sanitized}", self.scale_set_id)
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.as_str().as_bytes());
+        let hash = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        format!("s{}-{sanitized}-{hash:08x}", self.scale_set_id)
     }
 }
 
@@ -212,20 +221,23 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             first.dind_container(),
-            "velnor-scaleset-dind-s7-velnor-set-0007"
+            "velnor-scaleset-dind-s7-velnor-set-0007-2ad92676"
         );
         assert_eq!(
             first.runner_container(),
-            "velnor-scaleset-runner-s7-velnor-set-0007"
+            "velnor-scaleset-runner-s7-velnor-set-0007-2ad92676"
         );
-        assert_eq!(first.network(), "velnor-scaleset-net-s7-velnor-set-0007");
+        assert_eq!(
+            first.network(),
+            "velnor-scaleset-net-s7-velnor-set-0007-2ad92676"
+        );
         assert_eq!(
             first.workspace_volume(),
-            "velnor-scaleset-work-s7-velnor-set-0007"
+            "velnor-scaleset-work-s7-velnor-set-0007-2ad92676"
         );
         assert_eq!(
             first.dind_data_volume(),
-            "velnor-scaleset-dindata-s7-velnor-set-0007"
+            "velnor-scaleset-dindata-s7-velnor-set-0007-2ad92676"
         );
     }
 
@@ -246,8 +258,44 @@ mod tests {
     #[test]
     fn slug_sanitizes_unsafe_characters() {
         let id = OwnershipId::bind(7, "we/ird name!");
-        assert_eq!(id.slug(), "s7-we-ird-name-");
+        assert_eq!(id.slug(), "s7-we-ird-name--8ef91d72");
         assert_eq!(id.as_str(), "7/we/ird name!");
+    }
+
+    #[test]
+    fn slug_hash_disambiguates_colliding_sanitizations() {
+        // `a/b` and `a b` sanitize identically; the canonical-id hash
+        // keeps their Docker object names apart.
+        let slash = OwnershipId::bind(7, "a/b");
+        let space = OwnershipId::bind(7, "a b");
+        assert_ne!(slash.slug(), space.slug());
+        let slash_identity = WorkerIdentity::new(slash);
+        let space_identity = WorkerIdentity::new(space);
+        assert_ne!(
+            slash_identity.runner_container(),
+            space_identity.runner_container()
+        );
+        assert_ne!(
+            slash_identity.dind_container(),
+            space_identity.dind_container()
+        );
+        assert_ne!(slash_identity.network(), space_identity.network());
+        assert_ne!(
+            slash_identity.workspace_volume(),
+            space_identity.workspace_volume()
+        );
+        // And derivation is stable: the same id re-derives the same slug
+        // on every call, so retries converge instead of leaking.
+        assert_eq!(
+            slash_identity.runner_container(),
+            slash_identity.runner_container()
+        );
+        assert_eq!(
+            WorkerIdentity::new(OwnershipId::bind(7, "a/b"))
+                .ownership()
+                .slug(),
+            slash_identity.ownership().slug()
+        );
     }
 
     #[test]

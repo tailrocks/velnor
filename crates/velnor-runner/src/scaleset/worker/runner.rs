@@ -15,9 +15,13 @@
 //!   at IDENTICAL absolute paths to the DinD side (same bind sources,
 //!   same guest paths), so a path minted inside one container names the
 //!   same file in the other;
-//! * receives the JIT config blob via the `ACTIONS_RUNNER_INPUT_JITCONFIG`
-//!   env var (the image's own input contract). GitHub App keys never
-//!   enter the container: only the single-job JIT blob.
+//! * receives the JIT config blob via a `0600` `--env-file` carrying the
+//!   image's own `ACTIONS_RUNNER_INPUT_JITCONFIG` input, deleted
+//!   immediately after `docker create`. The blob never appears in host
+//!   argv (no process-list exposure), and GitHub App keys never enter the
+//!   container: only the single-job JIT blob. The copy Docker keeps in
+//!   the container config is unavoidable (same as ARC) and lives only
+//!   until teardown removes the container first.
 //!
 //! Before any provision, the [`ToolContentHook`] proves the pulled bytes
 //! are exactly the pinned content: `RepoDigests` must contain the pinned
@@ -427,19 +431,41 @@ fn config_labels_args(reference: &str) -> Vec<String> {
 }
 
 /// Fully-derived runner provision spec.
-#[derive(Debug, Clone)]
+///
+/// `Debug` never prints the JIT blob: presence-only, mirroring
+/// [`ActionsAuth`][crate::scaleset::ActionsAuth].
+#[derive(Clone)]
 pub struct RunnerSpec {
     identity: WorkerIdentity,
     image: PinnedImage,
     state_dir: PathBuf,
     /// Encoded JIT config blob (secret-adjacent: never logged, never
-    /// recorded — passed to `docker create -e` only).
+    /// recorded — passed to `docker create --env-file` only).
     jit_config: String,
 }
 
+impl std::fmt::Debug for RunnerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunnerSpec")
+            .field("identity", &self.identity)
+            .field("image", &self.image)
+            .field("state_dir", &self.state_dir)
+            .field("jit_config", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Name of the JIT env file inside the worker state dir. Written `0600`
+/// just before `docker create`, deleted right after: the blob's disk
+/// lifetime is one create call.
+const JIT_ENV_FILE: &str = "jit.env";
+
 impl RunnerSpec {
-    /// Derive the spec. The JIT blob travels env-only into the container;
-    /// it is never written to disk or the journal (fingerprints only).
+    /// Derive the spec. The JIT blob travels into the container via a
+    /// `0600` `--env-file` deleted right after `docker create`; it never
+    /// appears in host argv or the journal (fingerprints only). The copy
+    /// Docker keeps in the container config is unavoidable and lives only
+    /// until teardown removes the container.
     #[must_use]
     pub fn new(
         identity: WorkerIdentity,
@@ -465,6 +491,30 @@ impl RunnerSpec {
         &self.image
     }
 
+    #[must_use]
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
+    /// Write the JIT blob to a `0600` env file for `--env-file`.
+    ///
+    /// The blob is line-oriented secret material: a value containing
+    /// `\n` or `\r` fails closed instead of corrupting the file or
+    /// injecting variables. The caller deletes the file immediately
+    /// after `docker create` (see [`ensure_runner`]).
+    pub fn write_env_file(&self, dir: &Path) -> Result<PathBuf> {
+        if self.jit_config.bytes().any(|b| b == b'\n' || b == b'\r') {
+            anyhow::bail!("JIT config blob must be a single line for --env-file");
+        }
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create JIT env file dir {}", dir.display()))?;
+        let path = dir.join(JIT_ENV_FILE);
+        let contents = format!("{JIT_CONFIG_ENV}={}\n", self.jit_config);
+        super::write_owner_only(&path, contents.as_bytes())
+            .with_context(|| format!("write JIT env file {}", path.display()))?;
+        Ok(path)
+    }
+
     /// `docker create` argv for the runner container.
     ///
     /// Invariants (proven by unit tests on this vector):
@@ -474,17 +524,18 @@ impl RunnerSpec {
     /// * state dir, workspace, tool cache, and file-command dirs mount
     ///   at identical absolute paths to the DinD side;
     /// * the host Docker socket is never mounted;
-    /// * App keys never appear: only the JIT blob env var.
+    /// * App keys never appear, and the JIT blob never appears in argv:
+    ///   it travels via `--env-file` only.
     #[must_use]
-    pub fn create_args(&self) -> Vec<String> {
+    pub fn create_args_with_env_file(&self, env_file: &Path) -> Vec<String> {
         let mut args = vec![
             "create".to_string(),
             "--name".to_string(),
             self.identity.runner_container(),
             "--network".to_string(),
             format!("container:{}", self.identity.dind_container()),
-            "--env".to_string(),
-            format!("{JIT_CONFIG_ENV}={}", self.jit_config),
+            "--env-file".to_string(),
+            env_file.display().to_string(),
             "--env".to_string(),
             format!("{RUNNER_NAME_ENV}={}", self.identity.runner_name()),
             "--env".to_string(),
@@ -527,11 +578,13 @@ pub enum RunnerProvision {
 
 /// Ensure the runner container exists and is started, adopting on retry.
 ///
-/// Same contract as [`super::dind::ensure_dind`]: missing → create from
-/// [`RunnerSpec::create_args`] + start; present → ownership labels must
-/// match, then idempotent start. Call only after the DinD daemon is
-/// ready: the runner joins the daemon's network namespace, so creating
-/// it first would fail against a missing namespace.
+/// Same contract as [`super::dind::ensure_dind`]: missing → write the
+/// `0600` JIT env file, create from
+/// [`RunnerSpec::create_args_with_env_file`], delete the env file, +
+/// start; present → ownership labels must match, then idempotent start.
+/// Call only after the DinD daemon is ready: the runner joins the
+/// daemon's network namespace, so creating it first would fail against a
+/// missing namespace.
 pub(crate) fn ensure_runner(
     runner: &mut dyn WorkerRunner,
     spec: &RunnerSpec,
@@ -550,9 +603,12 @@ pub(crate) fn ensure_runner(
         )
         .with_context(|| format!("inspect runner container {name}"))?;
     if inspect.stdout.trim().is_empty() {
-        let created = runner
-            .run("docker", &spec.create_args())
-            .with_context(|| format!("create runner container {name}"))?;
+        let env_file = spec.write_env_file(spec.state_dir())?;
+        let created = runner.run("docker", &spec.create_args_with_env_file(&env_file));
+        // The JIT blob's disk lifetime ends here, whatever `docker
+        // create` decided: a live blob must not survive a failed create.
+        let _ = std::fs::remove_file(&env_file);
+        let created = created.with_context(|| format!("create runner container {name}"))?;
         if created.code != 0 {
             anyhow::bail!(
                 "create runner container {name} exited {}: {}",
@@ -735,6 +791,12 @@ mod tests {
         ))
     }
 
+    fn temp_state(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("velnor-runner-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn production_pins_parse() {
         assert_eq!(
@@ -814,9 +876,11 @@ mod tests {
             Path::new("/tmp/velnor-test-runner-state"),
             "jit-blob",
         );
-        let args = spec.create_args();
+        let args =
+            spec.create_args_with_env_file(Path::new("/tmp/velnor-test-runner-state/jit.env"));
         assert!(args.contains(&"--network".to_string()));
-        assert!(args.contains(&"container:velnor-scaleset-dind-s7-velnor-set-0007".to_string()));
+        assert!(args
+            .contains(&"container:velnor-scaleset-dind-s7-velnor-set-0007-2ad92676".to_string()));
         for forbidden in [
             "-p",
             "--publish",
@@ -830,7 +894,9 @@ mod tests {
                 "runner argv must not carry {forbidden}: {args:?}"
             );
         }
-        // No host socket, no App keys; JIT blob env-only.
+        // No host socket, no App keys, and no JIT blob bytes anywhere
+        // in argv: the blob travels via --env-file only, so the host
+        // process list never carries it.
         assert!(
             !args.iter().any(|arg| arg.contains("/var/run/docker.sock")),
             "{args:?}"
@@ -841,15 +907,78 @@ mod tests {
                 .any(|arg| arg.contains("GITHUB_APP") || arg.contains("ghs_")),
             "{args:?}"
         );
-        assert!(args
-            .iter()
-            .any(|arg| arg == &format!("{JIT_CONFIG_ENV}=jit-blob")));
+        assert!(!args.iter().any(|arg| arg.contains("jit-blob")), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.contains(JIT_CONFIG_ENV)),
+            "{args:?}"
+        );
+        let env_file = args
+            .windows(2)
+            .find(|pair| pair[0] == "--env-file")
+            .map(|pair| pair[1].clone());
+        assert_eq!(
+            env_file.as_deref(),
+            Some("/tmp/velnor-test-runner-state/jit.env"),
+            "{args:?}"
+        );
         assert!(args
             .iter()
             .any(|arg| arg == &format!("{RUNNER_NAME_ENV}=velnor-set-0007")));
         assert!(args
             .iter()
             .any(|arg| arg == &format!("DOCKER_HOST=unix://{DIND_SOCKET}")));
+    }
+
+    #[test]
+    fn runner_spec_debug_redacts_the_jit_blob() {
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            Path::new("/tmp/velnor-test-runner-state"),
+            "live-jit-blob-bytes",
+        );
+        let rendered = format!("{spec:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains("live-jit-blob-bytes"), "{rendered}");
+    }
+
+    #[test]
+    fn jit_env_file_carries_the_image_input() {
+        let state = temp_state("env-file");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "live-jit-blob-bytes",
+        );
+        let env_file = spec.write_env_file(&state).unwrap();
+        assert_eq!(env_file, state.join("jit.env"));
+        assert_eq!(
+            std::fs::read_to_string(&env_file).unwrap(),
+            format!("{JIT_CONFIG_ENV}=live-jit-blob-bytes\n")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&env_file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "JIT env file has mode {mode:o}");
+        }
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn jit_env_file_rejects_multiline_blobs() {
+        let state = temp_state("env-file-multiline");
+        for blob in ["one\ntwo", "one\rtwo"] {
+            let spec = RunnerSpec::new(
+                identity(),
+                PinnedImage::parse(RUNNER_REF).unwrap(),
+                &state,
+                blob,
+            );
+            assert!(spec.write_env_file(&state).is_err());
+        }
+        std::fs::remove_dir_all(&state).unwrap();
     }
 
     #[test]
@@ -860,7 +989,9 @@ mod tests {
             Path::new("/tmp/velnor-test-runner-state"),
             "jit-blob",
         );
-        let args = spec.create_args().join("\n");
+        let args = spec
+            .create_args_with_env_file(Path::new("/tmp/velnor-test-runner-state/jit.env"))
+            .join("\n");
         // Same guest paths the DinD side mounts (dind.rs STATE_MOUNT etc.).
         for guest in [
             STATE_MOUNT,
@@ -947,7 +1078,7 @@ mod tests {
         // Missing container reads as Down.
         let mut runner = ScriptRunner::scripted(vec![ScriptRunner::fail(
             1,
-            "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007",
+            "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
         )]);
         assert_eq!(
             runner_connection(&mut runner, &identity()).unwrap(),
@@ -987,39 +1118,66 @@ mod tests {
 
     #[test]
     fn runner_provision_creates_then_adopts() {
+        let state = temp_state("provision");
         let spec = RunnerSpec::new(
             identity(),
             PinnedImage::parse(RUNNER_REF).unwrap(),
-            Path::new("/tmp/velnor-test-runner-state"),
+            &state,
             "jit-blob",
         );
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok(""),
             ScriptRunner::ok("cafe\n"),
-            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007\n"),
+            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
         ]);
         assert_eq!(
             ensure_runner(&mut runner, &spec).unwrap(),
             RunnerProvision::Created
         );
-        // The create argv carries the JIT blob env-only (never App keys).
+        // The create argv carries --env-file, never the blob (never App
+        // keys either), and the env file is deleted right after create.
         let create = &runner.seen[1];
         assert!(
-            create
-                .iter()
-                .any(|arg| arg == "jit-blob" || arg.ends_with("=jit-blob")),
+            !create.iter().any(|arg| arg.contains("jit-blob")),
             "{create:?}"
         );
+        assert!(
+            create.windows(2).any(|pair| pair[0] == "--env-file"
+                && pair[1] == state.join("jit.env").display().to_string()),
+            "{create:?}"
+        );
+        assert!(!state.join("jit.env").exists());
 
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok("cafe\n"),
             ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
-            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007\n"),
+            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
         ]);
         assert_eq!(
             ensure_runner(&mut runner, &spec).unwrap(),
             RunnerProvision::Adopted
         );
+        // Adoption writes no env file at all.
+        assert!(!state.join("jit.env").exists());
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn runner_provision_deletes_the_env_file_when_create_fails() {
+        let state = temp_state("provision-fail");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok(""),
+            ScriptRunner::fail(1, "Error response from daemon: conflict"),
+        ]);
+        assert!(ensure_runner(&mut runner, &spec).is_err());
+        assert!(!state.join("jit.env").exists());
+        std::fs::remove_dir_all(&state).unwrap();
     }
 
     #[test]
