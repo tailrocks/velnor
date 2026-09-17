@@ -146,10 +146,6 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             ],
             pr_commands: commands.clone(),
             full_commands: commands,
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: Vec::new(),
             pinned_lockfile: false,
             cache: Some(CacheSpec {
@@ -163,7 +159,12 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             mise_tools: Vec::new(),
             toolchain: None,
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::UntrustedOk,
+            platform: crate::provider::Platform::MacosArm64,
+            capabilities: crate::provider::Capabilities {
+                native_macos_arm64: true,
+                ..crate::provider::Capabilities::default()
+            },
             workspace_check: false,
         };
         unit.watch.sort();

@@ -50,9 +50,9 @@ impl Primitive for UnitAggregation {
             )));
         }
         let content = if kind == WorkflowKind::Nightly {
-            ctx.lanes.ir().render_nightly_dispatcher()
+            ctx.providers.ir().render_nightly_dispatcher()
         } else {
-            ctx.lanes
+            ctx.providers
                 .ir()
                 .render_nested(kind, ctx.nodes, Some(ctx.contracts))
         };

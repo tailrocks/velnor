@@ -1,7 +1,9 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/polyglot"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-runner-label"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-runner-label"]

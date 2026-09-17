@@ -280,9 +280,9 @@ fn parameterized_callees_resolve_to_the_pre_parameterization_cache_keys() {
     }
 }
 
-/// The kind reusables hold exactly one step block per lane job: no step is
-/// guarded by a unit identity, and the callee's size is independent of how
-/// many units the kind has.
+/// The kind reusables hold exactly one step block per provider job: no step
+/// is guarded by a unit identity, and the callee's size is independent of
+/// how many units the kind has.
 #[test]
 fn kind_reusables_hold_no_per_unit_step_blocks() {
     for entry in fs::read_dir(repository_root().join(".github/workflows")).expect("workflows") {
@@ -298,7 +298,7 @@ fn kind_reusables_hold_no_per_unit_step_blocks() {
         );
         assert!(
             content.matches("- name: Run unit checks").count() <= 3,
-            "{name} renders more than one checks step per lane job"
+            "{name} renders more than one checks step per provider job"
         );
     }
 }

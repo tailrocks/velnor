@@ -1,7 +1,9 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/synthetic-workspace"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-lane"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]

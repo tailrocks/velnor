@@ -715,7 +715,6 @@ include(":real")
     #[expect(clippy::unwrap_used, reason = "fixture setup fails the test")]
     fn workspace_scan_emits_wrapper_module_commands_and_depends_on() {
         use super::super::scan_shape;
-        use crate::RunnerMode;
         use std::fs;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -744,7 +743,13 @@ include(":real")
             "dependencies { implementation(projects.lib) }\n",
         )
         .unwrap();
-        let shape = scan_shape(&root, RunnerMode::Velnor, "main", &[]).unwrap();
+        let shape = scan_shape(
+            &root,
+            &std::collections::BTreeSet::from([crate::provider::ProviderId::Velnor]),
+            "main",
+            &[],
+        )
+        .unwrap();
         let app = shape
             .units
             .iter()
@@ -776,7 +781,6 @@ include(":real")
     #[expect(clippy::unwrap_used, reason = "fixture setup fails the test")]
     fn jooq_module_gets_postgres_service_and_schema_tasks() {
         use super::super::scan_shape;
-        use crate::RunnerMode;
         use std::fs;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -801,7 +805,13 @@ jooqCodegen(libs.postgresql)
 "#,
         )
         .unwrap();
-        let shape = scan_shape(&root, RunnerMode::Velnor, "main", &[]).unwrap();
+        let shape = scan_shape(
+            &root,
+            &std::collections::BTreeSet::from([crate::provider::ProviderId::Velnor]),
+            "main",
+            &[],
+        )
+        .unwrap();
         let domain = shape
             .units
             .iter()
@@ -883,7 +893,6 @@ flyway { url = datasourceUrl }
     #[expect(clippy::unwrap_used, reason = "fixture setup fails the test")]
     fn workspace_postgres_service_creates_sibling_flyway_catalogs() {
         use super::super::scan_shape;
-        use crate::RunnerMode;
         use std::fs;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -922,7 +931,13 @@ flyway { url = datasourceUrl }
 "#,
         )
         .unwrap();
-        let shape = scan_shape(&root, RunnerMode::Velnor, "main", &[]).unwrap();
+        let shape = scan_shape(
+            &root,
+            &std::collections::BTreeSet::from([crate::provider::ProviderId::Velnor]),
+            "main",
+            &[],
+        )
+        .unwrap();
         let domain = shape
             .units
             .iter()

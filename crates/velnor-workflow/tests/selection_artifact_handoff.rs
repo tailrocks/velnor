@@ -32,7 +32,7 @@ impl Fixture {
         fs::write(
             root.join(".velnor-ci-selection/velnor-ci-selection"),
             format!(
-                "version=1\nbase_sha={PLAN_BASE_SHA}\nhead_sha={PLAN_HEAD_SHA}\nscope=affected\nunits=selected\nfull_units=selected\n"
+                "version=2\nbase_sha={PLAN_BASE_SHA}\nhead_sha={PLAN_HEAD_SHA}\nscope=affected\nunits=selected\nfull_units=selected\nplan_digest=digest\n"
             ),
         )?;
         let fake_git = root.join("fake-bin/git");
@@ -159,27 +159,30 @@ fn output_text(output: &Output) -> String {
 }
 
 const CONFIG: &str = r#"
-schema = 2
+schema = 3
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
 
 [[unit]]
 id = "selected"
 label = "selected"
 kind = "rust"
 root = "."
+platform = "linux-x64"
+trust = "untrusted-ok"
 watch = ["selected"]
-github_pr_commands = ["printf selected > selected.marker"]
-github_full_commands = ["printf selected > selected.marker"]
-velnor_pr_commands = ["printf selected > selected.marker"]
-velnor_full_commands = ["printf selected > selected.marker"]
+pr_commands = ["printf selected > selected.marker"]
+full_commands = ["printf selected > selected.marker"]
 
 [[unit]]
 id = "unselected"
 label = "unselected"
 kind = "rust"
 root = "."
+platform = "linux-x64"
+trust = "untrusted-ok"
 watch = ["unselected"]
-github_pr_commands = ["printf unselected > unselected.marker"]
-github_full_commands = ["printf unselected > unselected.marker"]
-velnor_pr_commands = ["printf unselected > unselected.marker"]
-velnor_full_commands = ["printf unselected > unselected.marker"]
+pr_commands = ["printf unselected > unselected.marker"]
+full_commands = ["printf unselected > unselected.marker"]
 "#;

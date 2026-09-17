@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::*;
-use crate::{PolicyJobSpec, ProjectConfig, RunnerMode};
+use crate::{PolicyJobSpec, ProjectConfig};
 
 const PIN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PIN_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -329,7 +329,7 @@ fn commit(root: &Path, message: &str) -> String {
 
 fn generation_config(revision: &str) -> String {
     format!(
-        "schema = 1\n\n[generator]\nrepository = \"{}\"\nrevision = \"{revision}\"\n",
+        "schema = 2\n\n[generator]\nrepository = \"{}\"\nrevision = \"{revision}\"\n",
         crate::workflow_setup_action_repository()
     )
 }
@@ -663,7 +663,12 @@ fn hosted_entrypoint(revision: &str) -> String {
         "[toolchain]\nchannel = \"1.91.1\"\n",
     );
     let shape = must(
-        crate::scan::scan_shape(&fixture, RunnerMode::Both, "main", &[]),
+        crate::scan::scan_shape(
+            &fixture,
+            &crate::provider::ProviderId::ALL.into_iter().collect(),
+            "main",
+            &[],
+        ),
         "scan entrypoint fixture",
     );
     let _ = fs::remove_dir_all(fixture);
@@ -844,46 +849,34 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
 // Semantic rules over a synthetic tree
 // ---------------------------------------------------------------------------
 
-/// The approved Velnor labels as a TOML array literal.
-fn approved_labels_toml() -> String {
-    crate::estate::approved_velnor_runner_labels()
-        .iter()
-        .map(|label| format!("\"{label}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+/// The Velnor selector the synthetic trees declare: the labels are the
+/// tree's own routing, matched by set equality against `runs-on`.
+const VELNOR_SELECTOR: &str = "example-velnor";
 
 fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
     let root = temporary_directory(name);
-    let labels = approved_labels_toml();
     write(
         &root.join(GENERATION_CONFIG),
         &format!(
-            "schema = 1\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nrunners = \"velnor\"\nautomatic = \"velnor\"\ndefault_branch = \"main\"\nvelnor_labels = [{labels}]\nvelnor_trusted_label = \"{TRUSTED_LABEL}\"\n"
+            "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"{VELNOR_SELECTOR}\"]\n"
         ),
     );
     write(
         &root.join(RUNTIME_CONFIG),
-        &format!(
-            "runners = \"velnor\"\n\n[workflow]\ndefault_branch = \"main\"\nvelnor_labels = [{labels}]\n"
-        ),
+        "schema = 3\nrepository = \"example/consumer\"\nprofile = \"generic\"\nverified = true\ndefault_branch = \"main\"\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\", \"velnor\"]\n",
     );
     write(&root.join(PULL_REQUEST_AGGREGATE), pr_workflow);
     write(&root.join(POLICY_ENTRYPOINT), &hosted_entrypoint(PIN_A));
     root
 }
 
-/// A trust label of the tree's own choosing; the estate vocabulary is not
-/// the point of these tests, the gate is.
-const TRUSTED_LABEL: &str = "example-trusted-hosts";
-
-/// A pull-request aggregate with a hosted required job and one Velnor job on
-/// the approved labels plus the trust label, gated on the default-branch
-/// trusted events.
+/// A pull-request aggregate with a hosted required job and one Velnor job
+/// on the declared selector, carrying the generated provider admission: a
+/// provider-selecting dispatch on any ref or the automatic events, with the
+/// trusted-event conjunct.
 fn gated_trusted_job() -> String {
-    let labels = crate::estate::approved_velnor_runner_labels().join(", ");
     format!(
-        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}\n    runs-on: [{labels}, {TRUSTED_LABEL}]\n    steps:\n      - run: echo trusted\n"
+        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
     )
 }
 
@@ -927,7 +920,7 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     assert!(
         runners.details.iter().any(|detail| {
             detail.contains("velnor-docker")
-                && detail.contains("self-hosted jobs require a default-branch trusted-event gate")
+                && detail.contains("local-provider jobs require a trusted-event gate")
         }),
         "{:?}",
         runners.details
@@ -959,40 +952,32 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     let _ = fs::remove_dir_all(ungated);
 }
 
-/// The dual-lane Velnor gate admits a lane-selecting dispatch on any ref —
-/// dispatch authorship is write-authorized — and keeps admitting the older
-/// ref-gated dispatch shapes for trees rendered before lane admission.
+/// The generated provider gate admits a provider-selecting dispatch on any
+/// ref — dispatch authorship is write-authorized — or the automatic events,
+/// with the trusted-event conjunct. A dispatch selecting another provider is
+/// not this provider's gate.
 #[test]
-fn velnor_pr_gate_admits_dispatch_on_any_ref() {
-    let automatic = "github.event_name == 'pull_request' && \
-        github.event.pull_request.head.repo.full_name == github.repository || \
-        (github.ref == 'refs/heads/main' && (github.event_name == 'push' || \
-        github.event_name == 'schedule'))";
-    for dispatch in [
-        "(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && \
-            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))",
-        "(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && \
-            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || \
-            github.event.inputs.runner == '')))",
-        "(github.event_name == 'workflow_dispatch' && \
-            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))",
-        "(github.event_name == 'workflow_dispatch' && \
-            (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || \
-            github.event.inputs.runner == ''))",
-    ] {
-        let gate = format!("${{{{ ({automatic} || {dispatch}) }}}}");
+fn provider_gate_admits_dispatch_on_any_ref() {
+    let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
+    for automatic in ["(github.event_name != 'workflow_dispatch')", "(false)"] {
+        let gate = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || {automatic}) && {trusted} }}}}",
+        );
         assert!(
-            is_generated_velnor_pr_gate(&gate, "main"),
-            "dispatch shape admitted: {dispatch}"
+            is_generated_provider_gate(&gate, "velnor"),
+            "provider gate admitted: {gate}"
+        );
+        assert!(
+            !is_generated_provider_gate(&gate, "github-hosted"),
+            "a dispatch selecting Velnor is not the hosted gate: {gate}"
         );
     }
     let github_only = format!(
-        "${{{{ ({automatic} || (github.event_name == 'workflow_dispatch' && \
-            (github.event.inputs.runner == 'github'))) }}}}",
+        "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
     );
     assert!(
-        !is_generated_velnor_pr_gate(&github_only, "main"),
-        "a dispatch selecting only the hosted lane is not a Velnor gate",
+        !is_generated_provider_gate(&github_only, "velnor"),
+        "a dispatch selecting only the hosted provider is not a Velnor gate",
     );
 }
 
@@ -1023,7 +1008,7 @@ fn job_level_env_with_allowed_contexts_passes() {
     let root = velnor_tree("semantic-job-env-allowed", &gated_trusted_job());
     write(
         &root.join(".github/workflows/allowed.yml"),
-        "name: Allowed\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        target: [a, b]\n    env:\n      TARGET: ${{ matrix.target }}\n      PARALLEL: ${{ strategy.job-index }}\n      VERSION: ${{ needs.identity.outputs.version }}\n      REPO: ${{ github.repository }}\n      SECRET: ${{ secrets.MY_SECRET }}\n      CONFIG: ${{ vars.MY_VAR }}\n      INPUT: ${{ inputs.my_input }}\n      SELECTOR: ${{ github.event.inputs.runner }}\n    steps:\n      - id: first\n        run: echo ok\n      - run: echo ok\n        env:\n          TMP: ${{ runner.temp }}\n          PREV: ${{ steps.first.outputs.value }}\n",
+        "name: Allowed\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        target: [a, b]\n    env:\n      TARGET: ${{ matrix.target }}\n      PARALLEL: ${{ strategy.job-index }}\n      VERSION: ${{ needs.identity.outputs.version }}\n      REPO: ${{ github.repository }}\n      SECRET: ${{ secrets.MY_SECRET }}\n      CONFIG: ${{ vars.MY_VAR }}\n      INPUT: ${{ inputs.my_input }}\n      SELECTOR: ${{ github.event.inputs.providers }}\n    steps:\n      - id: first\n        run: echo ok\n      - run: echo ok\n        env:\n          TMP: ${{ runner.temp }}\n          PREV: ${{ steps.first.outputs.value }}\n",
     );
     let audit = must(audit_workflows(&root), "audit tree with allowed job env");
     assert!(audit.structure.is_empty(), "{:?}", audit.structure);

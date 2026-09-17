@@ -4,7 +4,7 @@
 
 self-hosted-runner:
   labels:
+    - bastion-scale-set
     - self-hosted
     - ubuntu-24.04
-    - velnor-host-docker
     - velnor-target-mvp

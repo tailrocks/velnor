@@ -51,7 +51,7 @@ fn render_title(frame: &mut Frame<'_>, app: &App, system: &DesignSystem, area: R
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                app.cli.runners.display_name(),
+                cli_providers_summary(&app.cli),
                 system.style(Role::Text).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", system.style(Role::TextMuted)),
@@ -175,8 +175,8 @@ fn render_review(frame: &mut Frame<'_>, app: &mut App, system: &DesignSystem, ar
             Span::raw(output),
         ]),
         Line::from(vec![
-            Span::styled("Runners ", system.style(Role::TextMuted)),
-            Span::raw(app.cli.runners.as_str()),
+            Span::styled("Providers ", system.style(Role::TextMuted)),
+            Span::raw(cli_providers_summary(&app.cli)),
         ]),
         Line::from(vec![
             Span::styled("Checks  ", system.style(Role::TextMuted)),
@@ -406,12 +406,30 @@ fn selected_unit(app: &App, system: &DesignSystem) -> Vec<Line<'static>> {
     }) else {
         return vec![Line::from("No check focused")];
     };
-    unit_details(unit, app.cli.runners, system)
+    let empty = std::collections::BTreeSet::new();
+    let providers = app
+        .config
+        .as_ref()
+        .map_or(&empty, |config| &config.providers);
+    unit_details(unit, providers, system)
+}
+
+fn cli_providers_summary(cli: &crate::Cli) -> String {
+    cli.providers.as_ref().map_or_else(
+        || "(config default)".to_owned(),
+        |providers| {
+            providers
+                .iter()
+                .map(crate::provider::ProviderId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
+    )
 }
 
 fn unit_details(
     unit: &Unit,
-    runners: crate::RunnerMode,
+    providers: &crate::provider::ProviderSet,
     system: &DesignSystem,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
@@ -421,9 +439,20 @@ fn unit_details(
         )),
         Line::from(format!("{}  {}", unit.kind.label(), unit.root)),
         Line::from(vec![
-            Span::styled("Runner  ", system.style(Role::TextMuted)),
-            Span::raw(runners.display_name()),
+            Span::styled("Providers  ", system.style(Role::TextMuted)),
+            Span::raw(
+                providers
+                    .iter()
+                    .map(crate::provider::ProviderId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
         ]),
+        Line::from(format!(
+            "Platform  {}  ·  Trust  {}",
+            unit.platform.as_str(),
+            unit.trust.as_str()
+        )),
     ];
     if !unit.depends_on.is_empty() {
         lines.push(Line::from(format!(
@@ -434,46 +463,16 @@ fn unit_details(
     if let Some(version) = &unit.tool_version {
         lines.push(Line::from(format!("Tool  {version}")));
     }
-    match runners {
-        crate::RunnerMode::Github | crate::RunnerMode::Velnor => {
-            append_lane_details(&mut lines, unit, runners, system);
-        }
-        crate::RunnerMode::Both => {
-            append_lane_details(&mut lines, unit, crate::RunnerMode::Github, system);
-            lines.push(Line::from(""));
-            append_lane_details(&mut lines, unit, crate::RunnerMode::Velnor, system);
-        }
-    }
+    append_command_details(&mut lines, unit, system);
     lines
 }
 
-fn append_lane_details(
-    lines: &mut Vec<Line<'static>>,
-    unit: &Unit,
-    lane: crate::RunnerMode,
-    system: &DesignSystem,
-) {
-    let (pr_commands, full_commands) = match lane {
-        crate::RunnerMode::Github => (
-            unit.github_pr_commands
-                .as_deref()
-                .unwrap_or(&unit.pr_commands),
-            unit.github_full_commands
-                .as_deref()
-                .unwrap_or(&unit.full_commands),
-        ),
-        crate::RunnerMode::Velnor => (
-            unit.velnor_pr_commands
-                .as_deref()
-                .unwrap_or(&unit.pr_commands),
-            unit.velnor_full_commands
-                .as_deref()
-                .unwrap_or(&unit.full_commands),
-        ),
-        crate::RunnerMode::Both => (unit.pr_commands.as_slice(), unit.full_commands.as_slice()),
-    };
+fn append_command_details(lines: &mut Vec<Line<'static>>, unit: &Unit, system: &DesignSystem) {
+    // Every provider runs the same commands: show the unit's only lists once.
+    let pr_commands = unit.pr_commands.as_slice();
+    let full_commands = unit.full_commands.as_slice();
     lines.extend([Line::from(Span::styled(
-        format!("{} · Pull requests", lane.display_name()),
+        "Pull requests".to_owned(),
         system.style(Role::TextMuted),
     ))]);
     lines.extend(
@@ -484,7 +483,7 @@ fn append_lane_details(
     lines.extend([
         Line::from(""),
         Line::from(Span::styled(
-            format!("{} · Main and scheduled runs", lane.display_name()),
+            "Main and scheduled runs".to_owned(),
             system.style(Role::TextMuted),
         )),
     ]);
@@ -681,7 +680,7 @@ mod tests {
                 target: ".".to_owned(),
                 default_branch: None,
                 output: None,
-                runners: crate::RunnerMode::Github,
+                providers: None,
                 dry_run: false,
                 check: false,
                 force: false,
@@ -705,10 +704,6 @@ mod tests {
                 .map(|index| format!("cargo test --package example-{index}"))
                 .collect(),
             full_commands: vec!["cargo test --workspace --all-targets".to_owned()],
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: Vec::new(),
             pinned_lockfile: true,
             cache: None,
@@ -723,7 +718,9 @@ mod tests {
                 profile: None,
             }),
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::UntrustedOk,
+            platform: crate::provider::Platform::LinuxX64,
+            capabilities: crate::provider::Capabilities::default(),
             workspace_check: false,
         };
         let config = crate::ProjectConfig {
@@ -740,11 +737,13 @@ mod tests {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
-            runners: crate::RunnerMode::Github,
-            automatic: crate::RunnerMode::Github,
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
-            velnor_labels: Vec::new(),
+            providers: std::collections::BTreeSet::from([
+                crate::provider::ProviderId::GithubHosted,
+            ]),
+            automatic_providers: std::collections::BTreeSet::from([
+                crate::provider::ProviderId::GithubHosted,
+            ]),
+            selectors: crate::scan::default_selectors(),
             release_enabled: false,
             release_reason: "not configured".to_owned(),
             release: None,
@@ -759,15 +758,10 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            velnor_runner_group: None,
-            velnor_trusted_label: None,
-            velnor_trusted_runner_available: None,
-            pull_request_on_velnor: false,
-            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
-            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
-            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
-            velnor_concurrency_group: None,
-            velnor_serial_stack_groups: false,
+            default_dispatch_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            rust_needs: crate::RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -821,18 +815,23 @@ mod tests {
     fn scanning_frame_is_calm_and_honest() {
         let mut app = app();
         let text = render_text(&mut app, 80, 24);
-        assert!(text.contains("GitHub"));
-        assert!(!text.contains("GitHub Actions"));
+        assert!(text.contains("(config default)"));
         assert!(text.contains("Scanning project"));
         assert!(text.contains("No project commands are run"));
         assert!(!text.contains("[waiting]"));
         assert!(!text.contains("TR/phosphor"));
         assert!(text.contains("q quit"));
 
-        app.cli.runners = crate::RunnerMode::Velnor;
-        assert!(render_text(&mut app, 80, 24).contains("Velnor"));
-        app.cli.runners = crate::RunnerMode::Both;
-        assert!(render_text(&mut app, 80, 24).contains("Both"));
+        assert!(render_text(&mut app, 80, 24).contains("(config default)"));
+        app.cli.providers = Some(std::collections::BTreeSet::from([
+            crate::provider::ProviderId::Velnor,
+        ]));
+        assert!(render_text(&mut app, 80, 24).contains("velnor"));
+        app.cli.providers = Some(crate::provider::ProviderId::ALL.into_iter().collect());
+        let all = render_text(&mut app, 80, 24);
+        assert!(all.contains("github-hosted"));
+        assert!(all.contains("github-self-hosted"));
+        assert!(all.contains("velnor"));
     }
 
     #[test]
@@ -989,40 +988,18 @@ mod tests {
         if let Some(config) = app.config.as_mut()
             && let Some(unit) = config.units.first_mut()
         {
-            unit.github_pr_commands = Some(vec!["github-pr-exact".to_owned()]);
-            unit.github_full_commands = Some(vec!["github-full-exact".to_owned()]);
-            unit.velnor_pr_commands = Some(vec!["velnor-pr-exact".to_owned()]);
-            unit.velnor_full_commands = Some(vec!["velnor-full-exact".to_owned()]);
+            unit.pr_commands = vec!["pr-exact".to_owned()];
+            unit.full_commands = vec!["full-exact".to_owned()];
         }
         app.overlay = Some(super::super::Overlay::Details);
 
-        app.cli.runners = crate::RunnerMode::Github;
-        let github = render_text(&mut app, 80, 24);
-        assert!(github.contains("Runner  GitHub"));
-        assert!(github.contains("GitHub · Pull requests"));
-        assert!(github.contains("github-pr-exact"));
-        assert!(github.contains("GitHub · Main and scheduled runs"));
-        assert!(github.contains("github-full-exact"));
-        assert!(!github.contains("velnor-pr-exact"));
-
-        app.cli.runners = crate::RunnerMode::Velnor;
-        let velnor = render_text(&mut app, 80, 24);
-        assert!(velnor.contains("Runner  Velnor"));
-        assert!(velnor.contains("Velnor · Pull requests"));
-        assert!(velnor.contains("velnor-pr-exact"));
-        assert!(velnor.contains("Velnor · Main and scheduled runs"));
-        assert!(velnor.contains("velnor-full-exact"));
-        assert!(!velnor.contains("github-pr-exact"));
-
-        app.cli.runners = crate::RunnerMode::Both;
-        let both = render_text(&mut app, 80, 24);
-        assert!(both.contains("Runner  Both"));
-        assert!(both.contains("GitHub · Pull requests"));
-        assert!(both.contains("github-pr-exact"));
-        assert!(both.contains("Velnor · Pull requests"));
-        assert!(both.contains("velnor-pr-exact"));
-        assert!(both.contains("github-full-exact"));
-        assert!(both.contains("velnor-full-exact"));
+        let details = render_text(&mut app, 80, 24);
+        assert!(details.contains("Providers  github-hosted"));
+        assert!(details.contains("Pull requests"));
+        assert!(details.contains("pr-exact"));
+        assert!(details.contains("Main and scheduled runs"));
+        assert!(details.contains("full-exact"));
+        assert!(details.contains("Platform  linux-x64  ·  Trust  untrusted-ok"));
     }
 
     #[test]

@@ -4,9 +4,10 @@
 use std::fmt::Write as _;
 
 use super::{trusted_cache_save_expression, Args, Primitive, RenderCtx, Rendered};
+use crate::provider::ProviderId;
 use crate::{
-    velnor_runner, velnor_runner_group, yaml_scalar, ActionPin, GeneratorError, ProjectConfig,
-    RenovateSpec, GENERATED_HEADER,
+    selector_runs_on_yaml, yaml_scalar, ActionPin, GeneratorError, ProjectConfig, RenovateSpec,
+    GENERATED_HEADER,
 };
 
 /// The pinned Renovate OSS version rendered into `renovate-version`.
@@ -34,11 +35,14 @@ pub(crate) fn canonical_renovate_side_file(primitive: &str) -> Option<&'static s
 }
 
 /// The `renovate.yml` content for a config, or `None` when Renovate is disabled.
-pub(crate) fn renovate_content(config: &ProjectConfig) -> Option<String> {
+pub(crate) fn renovate_content(config: &ProjectConfig) -> Result<Option<String>, GeneratorError> {
     config
         .renovate
         .as_ref()
-        .map(|spec| format!("{GENERATED_HEADER}{}", render_renovate(config, spec)))
+        .map(|spec| {
+            render_renovate(config, spec).map(|content| format!("{GENERATED_HEADER}{content}"))
+        })
+        .transpose()
 }
 
 /// The `renovate-validate.yml` content, or `None` when validation is disabled.
@@ -69,7 +73,7 @@ impl Primitive for Renovate {
 
     fn render(&self, ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let spec = configured_spec(ctx)?;
-        let content = format!("{GENERATED_HEADER}{}", render_renovate(ctx.config, &spec));
+        let content = format!("{GENERATED_HEADER}{}", render_renovate(ctx.config, &spec)?);
         render_file(ctx, "renovate.yml", content)
     }
 }
@@ -136,14 +140,9 @@ fn render_file(
     })
 }
 
-fn renovate_runner(config: &ProjectConfig) -> String {
-    let mut labels = config.velnor_labels.clone();
-    if let Some(trusted) = config.velnor_trusted_label.as_deref()
-        && !labels.iter().any(|label| label == trusted)
-    {
-        labels.push(trusted.to_owned());
-    }
-    velnor_runner(&labels, velnor_runner_group(config))
+fn renovate_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
+    crate::provider::runs_on_for(&config.selectors, ProviderId::Velnor)
+        .map(crate::runs_on_labels_yaml)
 }
 
 fn trusted_renovate_gate(default_branch: &str) -> String {
@@ -174,12 +173,12 @@ fn cache_hash_files(spec: &RenovateSpec) -> String {
     )
 }
 
-fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
+fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> Result<String, GeneratorError> {
     let checkout = ActionPin::Checkout.reference();
     let cache_restore = ActionPin::CacheRestore.reference();
     let cache_save = ActionPin::CacheSave.reference();
     let renovate_action = ActionPin::Renovate.reference();
-    let runner = renovate_runner(config);
+    let runner = renovate_runner(config)?;
     let gate = trusted_renovate_gate(&config.default_branch);
     let token_secret = format!("secrets.{}", spec.token);
     let cache_save_gate = trusted_cache_save_expression(&config.default_branch);
@@ -221,7 +220,7 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
         );
     }
 
-    format!(
+    Ok(format!(
         r#"name: Renovate
 run-name: Renovate · ${{{{ github.event_name }}}}
 
@@ -272,12 +271,16 @@ jobs:
         schedule = yaml_scalar(&spec.schedule),
         version = yaml_scalar(RENOVATE_OSS_VERSION),
         token = spec.token,
-    )
+    ))
 }
 
 fn render_renovate_validate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
     let checkout = ActionPin::Checkout.reference();
-    let runner = yaml_scalar(&config.github_runner);
+    let runner = config
+        .selectors
+        .get(&ProviderId::GithubHosted)
+        .map(selector_runs_on_yaml)
+        .unwrap_or_default();
     let config_arg = shell_escape(&spec.config_path);
 
     format!(
@@ -360,6 +363,17 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
     fn renovate_config() -> ProjectConfig {
         let mut config = ProjectConfig {
             repository: String::new(),
@@ -375,11 +389,11 @@ mod tests {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
-            runners: crate::RunnerMode::Velnor,
-            automatic: crate::RunnerMode::Velnor,
-            github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
-            velnor_labels: vec!["self-hosted".to_owned(), "example-lane".to_owned()],
+            providers: std::collections::BTreeSet::from([crate::provider::ProviderId::Velnor]),
+            automatic_providers: std::collections::BTreeSet::from([
+                crate::provider::ProviderId::Velnor,
+            ]),
+            selectors: crate::scan::default_selectors(),
             release_enabled: false,
             release_reason: String::new(),
             release: None,
@@ -394,15 +408,10 @@ mod tests {
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
-            velnor_runner_group: None,
-            velnor_trusted_label: Some("example-trusted".to_owned()),
-            velnor_trusted_runner_available: None,
-            pull_request_on_velnor: false,
-            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
-            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
-            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
-            velnor_concurrency_group: None,
-            velnor_serial_stack_groups: false,
+            default_dispatch_providers: crate::provider::ProviderId::ALL.into_iter().collect(),
+            rust_needs: crate::RustNeeds::Parallel,
+            concurrency_group: None,
+            serial_stack_groups: false,
             static_files: Vec::new(),
             declared_surface: false,
             mise_lock_keys: BTreeSet::new(),
@@ -428,7 +437,7 @@ mod tests {
             config.renovate.as_ref(),
             "renovate_config must include a renovate spec",
         );
-        let workflow = render_renovate(&config, spec);
+        let workflow = must(render_renovate(&config, spec), "render renovate workflow");
         assert!(workflow.contains("secrets.GH_RENOVATE_TOKEN"));
         assert!(workflow.contains(ActionPin::Renovate.reference()));
         assert!(workflow.contains("renovate-version: \"44.93.6\""));
@@ -442,15 +451,14 @@ mod tests {
     }
 
     #[test]
-    fn renovate_writer_uses_trusted_runner_labels() {
+    fn renovate_writer_uses_the_velnor_selector() {
         let config = renovate_config();
         let spec = must_some(
             config.renovate.as_ref(),
             "renovate_config must include a renovate spec",
         );
-        let workflow = render_renovate(&config, spec);
-        assert!(workflow.contains("example-trusted"));
-        assert!(workflow.contains("self-hosted"));
+        let workflow = must(render_renovate(&config, spec), "render renovate workflow");
+        assert!(workflow.contains("velnor-native"));
     }
 
     #[test]

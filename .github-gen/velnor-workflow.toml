@@ -1,4 +1,4 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "tailrocks/velnor"
@@ -11,46 +11,37 @@ revision = "7341ef4bdf750c1fbe419e94fb3848c5b8dde718"
 [scan]
 exclude = ["migrations/**"]
 
-# Runner placement: `runners` is the available backends. `automatic` is the
-# lanes that run on PR/push/schedule without a dispatch choice.
-# Recovery: both families automatically and in parallel.
+# Provider placement: `providers` is the available backends.
+# `automatic_providers` run on PR/push/schedule without a dispatch choice.
+# Recovery: all families automatically and in parallel.
 [workflow]
-runners = "both"
-automatic = "both"
+providers = ["github-hosted", "github-self-hosted", "velnor"]
+automatic_providers = ["github-hosted", "github-self-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted", "github-self-hosted", "velnor"]
 default_branch = "main"
-github_runner = "ubuntu-24.04"
 # Routing contract: the release-side guest-payload producer builds Linux
 # cross-target guest agents and Firecracker kernel/rootfs images, so the
-# generator keeps that job on `github_runner`. The verification units below
+# generator keeps that job on the hosted selector. The verification units below
 # only run native Linux checks and remain eligible for Docker-backed Velnor
 # capacity, including a macOS host.
 profile = "rust-workspace-release"
-velnor_labels = ["self-hosted", "velnor-target-mvp"]
-default_dispatch_runner = "both"
-# Trust-gated routing: units with `requires_trusted` append this label to
-# their Velnor `runs-on`, so only trusted runners (which mount the Docker
-# lease socket) receive them. Untrusted hosts must never claim it.
-# Deliberately distinct from org pool velnor-trusted: a label, not a group.
-velnor_trusted_label = "velnor-host-docker"
-# Declared, never probed: the generator renders trust-gated Velnor jobs as
-# real jobs (true) or explicit skips (false) from this key alone, so the tree
-# is reproducible. Set false again if no online runner claims the label, or
-# the gated jobs queue until one does. Verified 2026-09-16: dogfood slots 1-5
-# advertise velnor-host-docker.
-velnor_trusted_runner_available = true
-# Recovery: omit velnor_runner_group so repository-scoped macOS/Linux hosts
-# can claim Velnor-lane jobs without joining org pool velnor-trusted.
-# Restore velnor-trusted after Sentry org fleet is healthy.
-pull_request_on_velnor = true
-velnor_rust_needs = "dependency-closure"
+# Trust is a per-unit event gate (`trust = "trusted-only"`), never a label:
+# the docker unit below gates its local-provider jobs on trusted events.
+rust_needs = "dependency-closure"
 # Supersede stale heads within one PR/branch; separate PRs run in parallel.
 # A repo-wide group with cancel-in-progress would cancel every in-progress run
 # on each push anywhere, making green CI unobtainable. Host capacity stays
 # bounded by runner slots: queued jobs wait for a free slot, they never
 # overload the host. Pull-request and nightly groups fall back to github.ref;
 # Main groups append github.run_id so every main execution can run concurrently.
-velnor_concurrency_group = "velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
+concurrency_group = "velnor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}"
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "velnor-target-mvp"]
 
 [policy]
 ruleset_required_status_checks = ["ci-required"]
@@ -157,12 +148,12 @@ units = ["rust-production-topology"]
 primitive = "rust-crate-pipeline"
 units = ["rust-velnor-workflow-contract"]
 
-# Lanes and cache: the default matrix (GitHub-hosted plus the trust-gated
-# self-hosted lane) and the detected cache contract, stated explicitly so the
-# repository owns the decision.
+# Providers and cache: the default provider matrix (GitHub-hosted plus the
+# trust-gated local providers) and the detected cache contract, stated
+# explicitly so the repository owns the decision.
 
 [[declare]]
-primitive = "lane-matrix"
+primitive = "provider-matrix"
 
 [[declare]]
 primitive = "cache-contract"
@@ -269,8 +260,8 @@ paths = ["~/.cargo/registry", "~/.cargo/git"]
 [[units]]
 id = "docker"
 # The image build needs the host Docker lease socket, which only trusted
-# runners mount. Gate its Velnor jobs onto runners claiming the label.
-requires_trusted = true
+# runners mount. Gate its local-provider jobs on trusted events.
+trust = "trusted-only"
 
 # The mutable mount seed: the compatibility identity of the state the image's
 # cache mounts hold (Cargo sources, the locked mise toolset, the build recipe)

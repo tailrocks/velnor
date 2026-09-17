@@ -413,7 +413,7 @@ fn composite_step_block<'a>(action: &'a str, name: &str) -> &'a str {
 /// checkout's `.github-gen/velnor-workflow.toml`, so the extraction asserts
 /// the script carries the checkout and parses the pin from the audited tree.
 fn velnor_provisioner_script(checkout: &str) -> String {
-    let step = crate::workflow_pinned_policy_runtime_velnor(checkout);
+    let step = crate::workflow_pinned_policy_runtime_local(checkout);
     assert!(
         step.contains(&format!("CHECKOUT_PATH: {checkout}")),
         "the env block carries the checkout"

@@ -13,9 +13,9 @@
 mod aggregate;
 mod cache;
 mod ir;
-mod lanes;
 mod pipeline;
 mod plan;
+mod providers;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
@@ -27,18 +27,19 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::config::RepoGenerationConfig;
+use crate::provider::ProviderId;
 use crate::scan::RepositoryShape;
 use crate::{
-    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode,
-    Unit, UnitKind,
+    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, Unit,
+    UnitKind,
 };
 
 pub(crate) use ir::{
     checks_env, config_snapshot_identity, default_branch_push_cache_save_expression,
     render_cargo_source_preparation, render_pinned_toolchain_steps,
-    render_retained_output_cache_note, render_velnor_runner_identity_step,
-    trusted_cache_save_expression, validate_nextest_tools_are_locked, LaneAdmission, WorkflowIr,
-    WorkflowKind, GITHUB_WORKFLOW_BYTE_LIMIT,
+    render_retained_output_cache_note, trusted_cache_save_expression,
+    validate_nextest_tools_are_locked, ProviderAdmission, WorkflowIr, WorkflowKind,
+    GITHUB_WORKFLOW_BYTE_LIMIT,
 };
 
 #[cfg(test)]
@@ -50,7 +51,7 @@ pub(crate) const DEFAULT_UNIT_TIMEOUT_MINUTES: u32 = 45;
 /// A primitive id the registry knows how to build.
 pub(crate) const AFFECTED_PLAN: &str = "affected-plan";
 pub(crate) const UNIT_AGGREGATION: &str = "unit-aggregation";
-pub(crate) const LANE_MATRIX: &str = "lane-matrix";
+pub(crate) const PROVIDER_MATRIX: &str = "provider-matrix";
 pub(crate) const CACHE_CONTRACT: &str = "cache-contract";
 pub(crate) const WATCH_GRAPH: &str = "watch-graph";
 pub(crate) const REGEN_GATE: &str = "regen-gate";
@@ -139,15 +140,15 @@ impl Pins {
     }
 }
 
-/// One lane job of a nested unit workflow.
+/// One provider job of a nested unit workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LaneJob {
-    pub(crate) lane: RunnerMode,
-    /// The hosted lane is the only lane allowed to save a cache entry: entries
-    /// are written from trusted events only.
+pub(crate) struct ProviderJob {
+    pub(crate) provider: ProviderId,
+    /// The hosted provider is the only one allowed to save a cache entry:
+    /// entries are written from trusted events only.
     pub(crate) cache_save: bool,
-    /// The Velnor lane carries the generated default-branch trusted-event
-    /// gate. Persistent cache writes remain restricted to trusted events.
+    /// Local providers carry the generated trusted-event gate. Persistent
+    /// cache writes remain restricted to trusted events.
     pub(crate) trusted: bool,
 }
 
@@ -296,74 +297,51 @@ pub(crate) fn validate_mutable_mount_seed(unit: &Unit) -> Result<(), GeneratorEr
     }
     let injection = format!("--build-context {MUTABLE_MOUNT_SEED_CONTEXT}=");
     let extraction = format!("--target {MUTABLE_MOUNT_EXPORT_TARGET}");
-    let github_full = lane_commands(unit.github_full_commands.as_deref(), &unit.full_commands);
-    if !github_full
+    if !unit
+        .full_commands
         .iter()
         .any(|command| command.contains(&injection))
     {
         return Err(GeneratorError::usage(format!(
-            "unit `{}` declares a mutable mount seed, but no hosted full command injects it with \
+            "unit `{}` declares a mutable mount seed, but no full command injects it with \
              `--build-context {MUTABLE_MOUNT_SEED_CONTEXT}=<dir>`; a seed the build never reads \
              is declared persistence that does not exist",
             unit.id
         )));
     }
-    if !github_full
+    if !unit
+        .full_commands
         .iter()
         .any(|command| command.contains(&extraction) && command.contains("--output type=local"))
     {
         return Err(GeneratorError::usage(format!(
-            "unit `{}` declares a mutable mount seed, but no hosted full command extracts the \
+            "unit `{}` declares a mutable mount seed, but no full command extracts the \
              updated state with `--target {MUTABLE_MOUNT_EXPORT_TARGET}` and `--output \
              type=local`; without extraction the seed can only ever go cold",
             unit.id
         )));
     }
-    for (lane, commands, allow_injection) in [
-        (
-            "hosted pull-request",
-            lane_commands(unit.github_pr_commands.as_deref(), &unit.pr_commands),
-            true,
-        ),
-        (
-            "self-hosted",
-            lane_commands(unit.velnor_full_commands.as_deref(), &unit.full_commands),
-            false,
-        ),
-        (
-            "self-hosted pull-request",
-            lane_commands(unit.velnor_pr_commands.as_deref(), &unit.pr_commands),
-            false,
-        ),
-    ] {
-        if commands.iter().any(|command| command.contains(&extraction)) {
-            return Err(GeneratorError::usage(format!(
-                "unit `{}` runs `{lane}` commands that reference the mutable mount seed export \
-                 target; extraction is restricted to trusted hosted full builds",
-                unit.id
-            )));
-        }
-        if !allow_injection && commands.iter().any(|command| command.contains(&injection)) {
-            return Err(GeneratorError::usage(format!(
-                "unit `{}` runs `{lane}` commands that reference the mutable mount seed context; \
-                 the generator restores and injects the seed on the hosted lane only",
-                unit.id
-            )));
-        }
+    // Every provider runs the same commands, so the seed lifecycle is one
+    // contract: extraction happens on trusted hosted full builds, and the
+    // pull-request commands never touch the export target.
+    if unit
+        .pr_commands
+        .iter()
+        .any(|command| command.contains(&extraction))
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` runs pull-request commands that reference the mutable mount seed export \
+             target; extraction is restricted to trusted hosted full builds",
+            unit.id
+        )));
     }
     Ok(())
-}
-
-/// The commands a lane runs: the lane-specific override when declared, the
-/// base vector otherwise.
-fn lane_commands<'a>(lane_override: Option<&'a [String]>, base: &'a [String]) -> &'a [String] {
-    lane_override.unwrap_or(base)
 }
 
 /// Everything a declared unit pipeline may tune for one unit's surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UnitContract {
-    pub(crate) lanes: Vec<LaneJob>,
+    pub(crate) providers: Vec<ProviderJob>,
     pub(crate) timeout_minutes: u32,
     pub(crate) cache: CacheBackend,
     /// Cache entries are saved on trusted events only, which is a property of
@@ -455,7 +433,7 @@ pub(crate) struct RenderCtx<'a> {
     #[expect(dead_code, reason = "primitives render pins through the lane context")]
     pub(crate) pins: &'a Pins,
     /// The resolved lane matrix and the toolchain environment behind it.
-    pub(crate) lanes: &'a lanes::ResolvedLanes,
+    pub(crate) providers: &'a providers::ResolvedProviders,
     /// The resolved cache contract.
     pub(crate) cache: &'a cache::ResolvedCache,
     /// The CI graph nodes contributed by the primitives rendered so far.
@@ -599,7 +577,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
     vec![
         Box::new(plan::AffectedPlan),
         Box::new(aggregate::UnitAggregation),
-        Box::new(lanes::LaneMatrix),
+        Box::new(providers::ProviderMatrix),
         Box::new(cache::CacheContract),
         Box::new(watch::WatchGraph),
         Box::new(regen::RegenGate),
@@ -714,7 +692,7 @@ pub(crate) fn generate(
     // Unit contracts, in declaration order, before any file is rendered: the
     // watch graph and the regeneration gate define what a unit is for this
     // surface, and the project config records the same result.
-    let lanes = lanes::resolve(config, &rows)?;
+    let providers = providers::resolve(config, &rows)?;
     let mut units = config.units.clone();
     for row in rows.iter().filter(|row| row.unit_contract) {
         let primitive = lookup(&row.primitive)?;
@@ -738,7 +716,7 @@ pub(crate) fn generate(
                 row.file.as_deref(),
                 primitive.id(),
                 &pins,
-                &lanes,
+                &providers,
                 &cache,
                 &[],
                 &BTreeMap::new(),
@@ -749,7 +727,7 @@ pub(crate) fn generate(
     }
     let mut resolved = config.clone();
     resolved.units.clone_from(&units);
-    let lanes = lanes::resolve(&resolved, &rows)?;
+    let providers = providers::resolve(&resolved, &rows)?;
 
     // Per-unit pipelines, then the plan, then the aggregates that compose both.
     let mut files = BTreeMap::new();
@@ -771,7 +749,7 @@ pub(crate) fn generate(
                 row.file.as_deref(),
                 primitive.id(),
                 &pins,
-                &lanes,
+                &providers,
                 &cache,
                 &nodes,
                 &contracts,
@@ -872,7 +850,7 @@ fn ctx<'a>(
     file: Option<&'a str>,
     family: &'static str,
     pins: &'a Pins,
-    lanes: &'a lanes::ResolvedLanes,
+    providers: &'a providers::ResolvedProviders,
     cache: &'a cache::ResolvedCache,
     nodes: &'a [GraphNode],
     contracts: &'a BTreeMap<String, UnitContract>,
@@ -886,7 +864,7 @@ fn ctx<'a>(
         file,
         family,
         pins,
-        lanes,
+        providers,
         cache,
         nodes,
         contracts,
@@ -1336,7 +1314,7 @@ mod tests {
             ids.push(pipeline.to_owned());
         }
         for contract in [
-            LANE_MATRIX,
+            PROVIDER_MATRIX,
             CACHE_CONTRACT,
             AFFECTED_PLAN,
             UNIT_AGGREGATION,

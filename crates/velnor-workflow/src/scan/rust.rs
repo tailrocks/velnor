@@ -579,10 +579,6 @@ fn analyze_rust_manifests(
             watch,
             pr_commands: commands.clone(),
             full_commands: commands,
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: Vec::new(),
             pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
@@ -596,7 +592,13 @@ fn analyze_rust_manifests(
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::UntrustedOk,
+            platform: crate::provider::Platform::LinuxX64,
+            capabilities: crate::provider::Capabilities {
+                docker: true,
+                testcontainers: true,
+                ..crate::provider::Capabilities::default()
+            },
             workspace_check: false,
         });
     }
@@ -632,10 +634,6 @@ fn analyze_rust_manifests(
             ],
             pr_commands: commands.clone(),
             full_commands: commands,
-            github_pr_commands: None,
-            github_full_commands: None,
-            velnor_pr_commands: None,
-            velnor_full_commands: None,
             depends_on: Vec::new(),
             pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
@@ -653,7 +651,13 @@ fn analyze_rust_manifests(
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
             services: Vec::new(),
-            requires_trusted: false,
+            trust: crate::provider::TrustReq::UntrustedOk,
+            platform: crate::provider::Platform::LinuxX64,
+            capabilities: crate::provider::Capabilities {
+                docker: true,
+                testcontainers: true,
+                ..crate::provider::Capabilities::default()
+            },
             workspace_check: false,
         });
     }

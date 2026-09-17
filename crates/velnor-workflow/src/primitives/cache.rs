@@ -1,7 +1,8 @@
 //! `cache-contract`: the cache transport a unit job restores and saves.
 
 use super::{Args, CacheBackend, Primitive, RenderCtx, Rendered, CACHE_CONTRACT};
-use crate::{CacheSpec, GeneratorError, RunnerMode, Unit, WorkflowIr};
+use crate::provider::ProviderId;
+use crate::{CacheSpec, GeneratorError, Unit, WorkflowIr};
 
 /// Exact Velnor mounts whose contents persist across job containers. Keep this
 /// list lexical: classification must not turn path normalization into an
@@ -101,7 +102,7 @@ fn cache_path_is_lexically_valid(path: &str) -> bool {
 /// Matches `velnor-runner::executor::velnor_persistent_cache_path` so the
 /// generator and executor agree about which actions/cache steps are no-ops on
 /// warm Velnor hosts.
-pub(crate) fn velnor_host_persistent_cache_path(path: &str) -> bool {
+pub(crate) fn local_host_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
     path_or_child(path, VELNOR_CARGO_REGISTRY_MOUNT)
         || path_or_child(path, VELNOR_CARGO_GIT_MOUNT)
@@ -121,48 +122,48 @@ pub(crate) fn velnor_host_persistent_cache_path(path: &str) -> bool {
 }
 
 /// True when every declared cache path is host-persistent on Velnor.
-pub(crate) fn cache_is_velnor_host_persistent(cache: &CacheSpec) -> bool {
+pub(crate) fn cache_is_local_host_persistent(cache: &CacheSpec) -> bool {
     !cache.paths.is_empty()
         && cache
             .paths
             .iter()
-            .all(|path| velnor_host_persistent_cache_path(path))
+            .all(|path| local_host_persistent_cache_path(path))
 }
 
 fn should_bypass_host_persistent_cache(
     backend: CacheBackend,
-    lane: RunnerMode,
+    provider: ProviderId,
     cache: Option<&CacheSpec>,
 ) -> bool {
     backend == CacheBackend::Detected
-        && lane == RunnerMode::Velnor
-        && cache.is_some_and(cache_is_velnor_host_persistent)
+        && provider.is_local()
+        && cache.is_some_and(cache_is_local_host_persistent)
 }
 
 impl CacheBackend {
-    /// Whether a lane job should emit actions/cache restore and save steps.
+    /// Whether a provider job should emit actions/cache restore and save steps.
     ///
-    /// The Velnor lane skips restore when every declared path already lives on
+    /// Local providers skip restore when every declared path already lives on
     /// the runner's host-persistent mounts: the executor would no-op the copy,
     /// but the step still costs hashFiles evaluation and a cache lookup.
-    pub(crate) fn lane_enables_actions_cache(
+    pub(crate) fn provider_enables_actions_cache(
         self,
-        lane: RunnerMode,
+        provider: ProviderId,
         ir: &WorkflowIr,
         unit: &Unit,
     ) -> bool {
         if !self.enables_actions_cache(ir, unit) {
             return false;
         }
-        if should_bypass_host_persistent_cache(self, lane, unit.cache.as_ref()) {
+        if should_bypass_host_persistent_cache(self, provider, unit.cache.as_ref()) {
             return false;
         }
         true
     }
 }
 
-pub(crate) fn velnor_skips_pinned_rust_toolchain(lane: RunnerMode) -> bool {
-    lane == RunnerMode::Velnor
+pub(crate) fn local_skips_pinned_rust_toolchain(provider: ProviderId) -> bool {
+    provider.is_local()
 }
 
 #[cfg(test)]
@@ -171,7 +172,7 @@ mod tests {
     use crate::CachePurpose;
 
     #[test]
-    fn velnor_host_persistent_cache_path_matches_runner_contract() {
+    fn local_host_persistent_cache_path_matches_runner_contract() {
         for path in [
             "/github/home/.cargo/registry",
             "/github/home/.cargo/registry/cache",
@@ -198,7 +199,7 @@ mod tests {
             "~/.terraform.d/plugin-cache",
         ] {
             assert!(
-                velnor_host_persistent_cache_path(path),
+                local_host_persistent_cache_path(path),
                 "{path} should be host-persistent"
             );
         }
@@ -229,7 +230,7 @@ mod tests {
             ".cargo/registry/{cache}",
         ] {
             assert!(
-                !velnor_host_persistent_cache_path(path),
+                !local_host_persistent_cache_path(path),
                 "unsafe or unsupported alias {path} should not be host-persistent"
             );
         }
@@ -247,23 +248,23 @@ mod tests {
 
         assert!(should_bypass_host_persistent_cache(
             CacheBackend::Detected,
-            RunnerMode::Velnor,
+            ProviderId::Velnor,
             Some(&cache)
         ));
         assert!(!should_bypass_host_persistent_cache(
             CacheBackend::Actions,
-            RunnerMode::Velnor,
+            ProviderId::Velnor,
             Some(&cache)
         ));
         assert!(!should_bypass_host_persistent_cache(
             CacheBackend::Detected,
-            RunnerMode::Github,
+            ProviderId::GithubHosted,
             Some(&cache)
         ));
     }
 
     #[test]
-    fn cache_is_velnor_host_persistent_requires_every_path() {
+    fn cache_is_local_host_persistent_requires_every_path() {
         let cargo = CacheSpec {
             key_files: vec!["Cargo.lock".to_owned()],
             paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
@@ -271,17 +272,17 @@ mod tests {
             mbx_output_cache_justification: None,
             mutable_mount_seed: false,
         };
-        assert!(cache_is_velnor_host_persistent(&cargo));
+        assert!(cache_is_local_host_persistent(&cargo));
         let mixed = CacheSpec {
             paths: vec!["~/.cargo/registry".to_owned(), "target".to_owned()],
             ..cargo.clone()
         };
-        assert!(!cache_is_velnor_host_persistent(&mixed));
+        assert!(!cache_is_local_host_persistent(&mixed));
     }
 
     #[test]
-    fn velnor_lane_skips_pinned_rust_toolchain() {
-        assert!(velnor_skips_pinned_rust_toolchain(RunnerMode::Velnor));
-        assert!(!velnor_skips_pinned_rust_toolchain(RunnerMode::Github));
+    fn local_provider_skips_pinned_rust_toolchain() {
+        assert!(local_skips_pinned_rust_toolchain(ProviderId::Velnor));
+        assert!(!local_skips_pinned_rust_toolchain(ProviderId::GithubHosted));
     }
 }

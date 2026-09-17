@@ -222,8 +222,8 @@ fn promote_advances_a_committed_prior_render() {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
+            "--providers",
+            "github-hosted,github-self-hosted,velnor",
             repo.to_str().unwrap(),
         ])
         .output()

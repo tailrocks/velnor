@@ -25,7 +25,11 @@ use sha2::{Digest, Sha256};
 use super::primitives::snapshot::{
     budget_report, plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
-use super::{lanes_support_unit_kind, GeneratorError, RunnerMode, UnitKind};
+use super::provider::{
+    check_capabilities, eligibility, parse_provider_set, plan_digest, Capabilities,
+    ExclusionReason, Platform, ProviderId, ProviderSet, TrustReq,
+};
+use super::{GeneratorError, UnitKind};
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -47,9 +51,11 @@ pub(crate) struct CiConfig {
     #[serde(default)]
     default_branch: String,
     #[serde(default)]
-    runners: String,
+    providers: Vec<String>,
     #[serde(default)]
-    automatic: String,
+    automatic_providers: Vec<String>,
+    #[serde(default)]
+    default_dispatch_providers: Vec<String>,
     #[serde(default)]
     analysis: Analysis,
     #[serde(default)]
@@ -68,17 +74,9 @@ struct Analysis {
     limitations: Vec<String>,
 }
 
-#[expect(
-    dead_code,
-    reason = "runtime preserves the complete generated workflow contract while execution consumes selected fields"
-)]
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Workflow {
-    github_runner: String,
-    #[serde(default)]
-    macos_runner: String,
-    velnor_labels: Vec<String>,
     files: Vec<String>,
     notes: Vec<String>,
     #[serde(default)]
@@ -124,16 +122,21 @@ struct CiUnit {
     #[serde(default)]
     root: String,
     watch: Vec<String>,
-    github_pr_commands: Vec<String>,
-    github_full_commands: Vec<String>,
-    velnor_pr_commands: Vec<String>,
-    velnor_full_commands: Vec<String>,
+    /// The unit's only commands: every provider runs the same command set.
+    pr_commands: Vec<String>,
+    full_commands: Vec<String>,
     #[serde(default)]
     depends_on: Vec<String>,
     #[serde(default)]
     tool_version: Option<String>,
     #[serde(default)]
     cache: Option<Cache>,
+    #[serde(default)]
+    platform: String,
+    #[serde(default)]
+    trust: String,
+    #[serde(default)]
+    capabilities: RuntimeCapabilities,
     /// A workspace-wide Rust verification gate. Its watch paths may stay
     /// narrow; affected Rust changes select it explicitly to preserve the
     /// workspace coverage without broadening every topology match.
@@ -141,40 +144,58 @@ struct CiUnit {
     workspace_check: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RunnerLane {
-    Github,
-    Velnor,
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RuntimeCapabilities {
+    docker: bool,
+    nested_privileged_docker: bool,
+    buildx_compose: bool,
+    testcontainers: bool,
+    services_with_readiness: bool,
+    browser_binaries: bool,
+    native_macos_arm64: bool,
 }
 
-impl RunnerLane {
-    /// Velnor's job container advertises its authoritative execution backend;
-    /// hosted GitHub jobs and local invocations deliberately fall back to the
-    /// GitHub command set.
-    fn from_execution_backend(backend: Option<&str>) -> Self {
-        if backend.is_some_and(|value| {
-            value.trim().eq_ignore_ascii_case("docker")
-                || value.trim().eq_ignore_ascii_case("microvm")
-        }) {
-            Self::Velnor
-        } else {
-            Self::Github
+impl From<&RuntimeCapabilities> for Capabilities {
+    fn from(value: &RuntimeCapabilities) -> Self {
+        Self {
+            docker: value.docker,
+            nested_privileged_docker: value.nested_privileged_docker,
+            buildx_compose: value.buildx_compose,
+            testcontainers: value.testcontainers,
+            services_with_readiness: value.services_with_readiness,
+            browser_binaries: value.browser_binaries,
+            native_macos_arm64: value.native_macos_arm64,
         }
-    }
-
-    fn current() -> Self {
-        Self::from_execution_backend(env::var("VELNOR_EXECUTION_BACKEND").ok().as_deref())
     }
 }
 
 impl CiUnit {
-    fn commands(&self, lane: RunnerLane, scope: Scope) -> &[String] {
-        match (lane, scope) {
-            (RunnerLane::Github, Scope::Affected) => &self.github_pr_commands,
-            (RunnerLane::Github, Scope::Full) => &self.github_full_commands,
-            (RunnerLane::Velnor, Scope::Affected) => &self.velnor_pr_commands,
-            (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
+    /// The unit's commands for a scope. Providers never diverge: the same
+    /// source/command/profile/features/fixture runs on every provider.
+    fn commands(&self, scope: Scope) -> &[String] {
+        match scope {
+            Scope::Affected => &self.pr_commands,
+            Scope::Full => &self.full_commands,
         }
+    }
+
+    fn platform(&self) -> Result<Platform, GeneratorError> {
+        Platform::parse(&self.platform).map_err(|_| {
+            GeneratorError::usage(format!(
+                "CI unit `{}` declares unknown platform `{}`",
+                self.id, self.platform
+            ))
+        })
+    }
+
+    fn trust(&self) -> Result<TrustReq, GeneratorError> {
+        TrustReq::parse(&self.trust).map_err(|_| {
+            GeneratorError::usage(format!(
+                "CI unit `{}` declares unknown trust `{}`",
+                self.id, self.trust
+            ))
+        })
     }
 
     /// Whether affected Rust changes should also select this workspace gate.
@@ -185,19 +206,14 @@ impl CiUnit {
         if self.workspace_check {
             return true;
         }
-        [
-            &self.github_pr_commands,
-            &self.github_full_commands,
-            &self.velnor_pr_commands,
-            &self.velnor_full_commands,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|command| {
-            command.contains("check --workspace --all-targets")
-                && (command.contains("cargo check --workspace")
-                    || command.contains("mbx check --workspace"))
-        })
+        [&self.pr_commands, &self.full_commands]
+            .into_iter()
+            .flatten()
+            .any(|command| {
+                command.contains("check --workspace --all-targets")
+                    && (command.contains("cargo check --workspace")
+                        || command.contains("mbx check --workspace"))
+            })
     }
 
     /// Return the Cargo lockfile root recorded by the generator metadata.
@@ -341,7 +357,7 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 /// `velnor-workflow promote --rev SHA|HEAD [--repo PATH] [--generator-repo PATH]
-/// [--default-branch BRANCH] [--runners MODE] [--message TEXT] [--dry-run]`:
+/// [--default-branch BRANCH] [--providers IDS] [--message TEXT] [--dry-run]`:
 /// stamp the D19 pin and regenerate the whole tree in one atomic commit. The
 /// running binary must render with exactly the source closure the pin names
 /// (render with X ⇒ stamp X); anything else fails closed before touching the
@@ -365,7 +381,7 @@ fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "repo",
             "generator-repo",
             "default-branch",
-            "runners",
+            "providers",
             "message",
         ],
     )?;
@@ -377,11 +393,17 @@ fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
         None => env::current_dir()
             .map_err(|error| GeneratorError::usage(format!("resolve promote root: {error}")))?,
     };
-    let runners = options
-        .get("runners")
-        .map_or(Ok(crate::RunnerMode::Both), |value| {
-            crate::parse_runner_mode(value)
-        })?;
+    let providers = options
+        .get("providers")
+        .map(|value| {
+            let values = value
+                .split(',')
+                .map(|entry| entry.trim().to_owned())
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>();
+            crate::provider::parse_provider_set(&values, "--providers")
+        })
+        .transpose()?;
     let report = crate::promote::run_promote(&crate::promote::PromoteOptions {
         rev: rev.clone(),
         repo,
@@ -389,7 +411,7 @@ fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
             .get("generator-repo")
             .map(|path| PathBuf::from(path.as_str())),
         default_branch: options.get("default-branch").cloned(),
-        runners,
+        providers,
         message: options.get("message").cloned(),
         dry_run,
     })?;
@@ -701,7 +723,7 @@ pub(crate) fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
             path.display()
         ))
     })?;
-    if config.schema != 2 {
+    if config.schema != 3 {
         return Err(GeneratorError::usage(format!(
             "unsupported CI configuration schema: {}",
             config.schema
@@ -714,6 +736,20 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
     if config.unit.is_empty() {
         return Err(GeneratorError::usage("CI configuration declares no units"));
     }
+    let universe = parse_provider_set(&config.providers, "providers")?;
+    super::provider::require_non_empty(&universe, "providers")?;
+    let automatic = parse_provider_set(&config.automatic_providers, "automatic_providers")?;
+    super::provider::require_subset(&automatic, &universe, "automatic_providers", "providers")?;
+    let dispatch = parse_provider_set(
+        &config.default_dispatch_providers,
+        "default_dispatch_providers",
+    )?;
+    super::provider::require_subset(
+        &dispatch,
+        &universe,
+        "default_dispatch_providers",
+        "providers",
+    )?;
     let mut known = BTreeSet::new();
     for unit in &config.unit {
         if !is_unit_id(&unit.id) {
@@ -728,18 +764,22 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
                 unit.id
             )));
         }
+        if UnitKind::from_prefix(&unit.kind).is_none() {
+            return Err(GeneratorError::usage(format!(
+                "CI unit `{}` has unknown kind `{}`",
+                unit.id, unit.kind
+            )));
+        }
         // An empty watch is valid: a unit with no sources never matches an
         // affected diff but still runs in full scope.
-        if unit.github_pr_commands.is_empty()
-            || unit.github_full_commands.is_empty()
-            || unit.velnor_pr_commands.is_empty()
-            || unit.velnor_full_commands.is_empty()
-        {
+        if unit.pr_commands.is_empty() || unit.full_commands.is_empty() {
             return Err(GeneratorError::usage(format!(
-                "CI unit must declare GitHub and Velnor PR/full commands: {}",
+                "CI unit must declare PR/full commands: {}",
                 unit.id
             )));
         }
+        unit.platform()?;
+        unit.trust()?;
     }
     for unit in &config.unit {
         for dependency in &unit.depends_on {
@@ -781,6 +821,20 @@ pub(crate) fn is_unit_id(value: &str) -> bool {
         && value.as_bytes()[0].is_ascii_lowercase()
 }
 
+/// One unit's post-eligibility provider fanout.
+struct PlannedUnit {
+    unit_id: String,
+    providers: ProviderSet,
+    command_digest: String,
+}
+
+/// One pre-expansion exclusion declaration.
+struct PlannedExclusion {
+    unit_id: String,
+    provider: ProviderId,
+    reason: ExclusionReason,
+}
+
 fn plan(config_path: &Path) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
     let scope = match scope_for_event()? {
@@ -791,22 +845,125 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
     let base = env::var("BASE_SHA").unwrap_or_default();
     let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    let lanes = plan_lanes()?;
-    let selection = selection_for_lanes(
-        &config,
-        selection_for_diff(&root, &config, scope, &base, &head)?,
-        lanes,
-    );
-    let units = selection
+    let universe = parse_provider_set(&config.providers, "providers")?;
+    let effective = plan_providers(&universe)?;
+    let event_trusted = event_is_trusted();
+    let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
+    let selected: BTreeSet<&str> = selection
         .units
         .iter()
         .map(|unit| unit.id.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect();
+    let mut planned: Vec<PlannedUnit> = Vec::new();
+    let mut excluded: Vec<PlannedExclusion> = Vec::new();
+    for unit in &config.unit {
+        let platform = unit.platform()?;
+        let trust = unit.trust()?;
+        let required = Capabilities::from(&unit.capabilities);
+        for provider in &effective {
+            if !selected.contains(unit.id.as_str()) {
+                excluded.push(PlannedExclusion {
+                    unit_id: unit.id.clone(),
+                    provider: *provider,
+                    reason: ExclusionReason::GenuinelyUnaffected,
+                });
+                continue;
+            }
+            match eligibility(platform, trust, *provider, event_trusted) {
+                Ok(()) => {}
+                Err(reason) => {
+                    excluded.push(PlannedExclusion {
+                        unit_id: unit.id.clone(),
+                        provider: *provider,
+                        reason,
+                    });
+                    continue;
+                }
+            }
+            check_capabilities(&unit.id, &required, *provider)?;
+        }
+        if selected.contains(unit.id.as_str()) {
+            let providers: ProviderSet = effective
+                .iter()
+                .copied()
+                .filter(|provider| {
+                    !excluded.iter().any(|exclusion| {
+                        exclusion.unit_id == unit.id && exclusion.provider == *provider
+                    })
+                })
+                .collect();
+            if providers.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "CI unit `{}` is selected but eligible on no provider; exclusions must be declared, not silent",
+                    unit.id
+                )));
+            }
+            planned.push(PlannedUnit {
+                unit_id: unit.id.clone(),
+                providers,
+                command_digest: command_digest_for(unit, scope),
+            });
+        }
+    }
+    planned.sort_by(|left, right| left.unit_id.cmp(&right.unit_id));
+    excluded.sort_by(|left, right| {
+        (&left.unit_id, left.provider).cmp(&(&right.unit_id, right.provider))
+    });
+    let digest_input: Vec<(String, ProviderSet, String)> = planned
+        .iter()
+        .map(|unit| {
+            (
+                unit.unit_id.clone(),
+                unit.providers.clone(),
+                unit.command_digest.clone(),
+            )
+        })
+        .collect();
+    let exclusion_input: Vec<(String, ProviderId, ExclusionReason)> = excluded
+        .iter()
+        .map(|exclusion| {
+            (
+                exclusion.unit_id.clone(),
+                exclusion.provider,
+                exclusion.reason,
+            )
+        })
+        .collect();
+    let digest = plan_digest(&digest_input, &exclusion_input);
+    let units_json = serde_json::to_string(
+        &planned
+            .iter()
+            .map(|unit| {
+                serde_json::json!({
+                    "unit_id": unit.unit_id,
+                    "providers": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| GeneratorError::usage(format!("serialize plan units: {error}")))?;
+    let excluded_json = serde_json::to_string(
+        &excluded
+            .iter()
+            .map(|exclusion| {
+                serde_json::json!({
+                    "unit_id": exclusion.unit_id,
+                    "provider": exclusion.provider.as_str(),
+                    "reason": exclusion.reason.as_str(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| GeneratorError::usage(format!("serialize plan exclusions: {error}")))?;
     let full_units = selection
         .full_units
         .iter()
         .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    let unit_ids = planned
+        .iter()
+        .map(|unit| unit.unit_id.as_str())
         .collect::<Vec<_>>()
         .join(",");
     if let Some(path) = env::var_os("VELNOR_SELECTION_FILE") {
@@ -815,8 +972,9 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             &base,
             &head,
             scope,
-            &units,
+            &unit_ids,
             &full_units,
+            &digest,
         )?;
     }
     if let Some(output) = env::var_os("GITHUB_OUTPUT") {
@@ -826,22 +984,36 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .append(true)
             .open(&output_path)
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
-        writeln!(file, "scope={}", scope_name(scope))
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
-        writeln!(file, "base_sha={base}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
-        writeln!(file, "head_sha={head}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
-        writeln!(file, "units={units}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
-        writeln!(file, "full_units={full_units}")
-            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        for (name, value) in [
+            ("scope", scope_name(scope).to_owned()),
+            ("base_sha", base.clone()),
+            ("head_sha", head.clone()),
+            ("units", units_json.clone()),
+            ("full_units", full_units.clone()),
+            ("plan_digest", digest.clone()),
+            ("excluded", excluded_json.clone()),
+        ] {
+            writeln!(file, "{name}={value}")
+                .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        }
         write_kind_matrices(&mut file, &config, &selection, &output_path)?;
     }
     println!("scope={}", scope_name(scope));
-    println!("units={units}");
+    println!("units={units_json}");
     println!("full_units={full_units}");
+    println!("plan_digest={digest}");
+    println!("excluded={excluded_json}");
     Ok(())
+}
+
+/// Stable digest over a unit's planned commands for one scope.
+fn command_digest_for(unit: &CiUnit, scope: Scope) -> String {
+    let mut input = String::new();
+    for command in unit.commands(scope) {
+        input.push_str(command);
+        input.push('\n');
+    }
+    format!("{:016x}", super::content_digest_bytes(input.as_bytes()))
 }
 
 fn write_kind_matrices(
@@ -935,67 +1107,39 @@ fn scope_name(scope: Scope) -> &'static str {
     }
 }
 
-/// The lanes admitted for this plan, from the `VELNOR_LANES` environment the
-/// Both-mode plan step sets to `needs.lane-admission.outputs.lanes`.
-/// Absent or empty means `both`: single-lane aggregates and local runs plan
-/// without lane filtering, exactly as before.
-fn plan_lanes() -> Result<RunnerMode, GeneratorError> {
-    plan_lanes_for_value(env::var("VELNOR_LANES").unwrap_or_default().as_str())
+/// The effective providers for this plan, from the `VELNOR_PROVIDERS`
+/// environment the generated plan step renders (the dispatch `providers:`
+/// input on dispatch events, the automatic set otherwise). Absent means the
+/// full universe (local runs). Dispatch narrows, never widens.
+fn plan_providers(universe: &ProviderSet) -> Result<ProviderSet, GeneratorError> {
+    let value = env::var("VELNOR_PROVIDERS").unwrap_or_default();
+    plan_providers_for_value(&value, universe)
 }
 
-fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
-    match value.trim() {
-        "" | "both" => Ok(RunnerMode::Both),
-        "velnor" => Ok(RunnerMode::Velnor),
-        "github" => Ok(RunnerMode::Github),
-        other => Err(GeneratorError::usage(format!(
-            "unsupported CI lanes `{other}`: use velnor, github, or both"
-        ))),
+fn plan_providers_for_value(
+    value: &str,
+    universe: &ProviderSet,
+) -> Result<ProviderSet, GeneratorError> {
+    if value.trim().is_empty() {
+        return Ok(universe.clone());
     }
+    let values = value
+        .split(',')
+        .map(|entry| entry.trim().to_owned())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    let providers = parse_provider_set(&values, "VELNOR_PROVIDERS")?;
+    super::provider::require_subset(&providers, universe, "VELNOR_PROVIDERS", "providers")?;
+    Ok(providers)
 }
 
-/// Narrow a diff selection to the units the admitted `lanes` can execute.
-/// A velnor-only dispatch drops whatever the Velnor lane cannot run (Swift
-/// units); the required gate already tolerates `skipped` for unselected
-/// units, so the excluded callers stay green instead of failing a selection
-/// they can never satisfy. Units of an unknown kind are kept: dropping a
-/// unit the planner does not recognize would silently skip verification.
-///
-/// A both-lane plan keeps pairable kinds. A GitHub-only kind (Swift) stays
-/// selected so an explicit `jobs = ["github"]` opt-out still runs on the
-/// hosted lane when the plan admits GitHub.
-fn selection_for_lanes<'a>(
-    config: &'a CiConfig,
-    selection: UnitSelection<'a>,
-    lanes: RunnerMode,
-) -> UnitSelection<'a> {
-    let kinds = config
-        .unit
-        .iter()
-        .map(|unit| (unit.id.as_str(), unit.kind.as_str()))
-        .collect::<BTreeMap<_, _>>();
-    let supported = |kind: &str| {
-        UnitKind::from_prefix(kind).is_none_or(|parsed| {
-            if lanes_support_unit_kind(lanes, parsed) {
-                return true;
-            }
-            lanes == RunnerMode::Both
-                && (crate::lane_supports_unit_kind(RunnerMode::Github, parsed)
-                    || crate::lane_supports_unit_kind(RunnerMode::Velnor, parsed))
-        })
-    };
-    UnitSelection {
-        units: selection
-            .units
-            .into_iter()
-            .filter(|unit| supported(unit.kind.as_str()))
-            .collect(),
-        full_units: selection
-            .full_units
-            .into_iter()
-            .filter(|id| kinds.get(id.as_str()).is_none_or(|kind| supported(kind)))
-            .collect(),
-    }
+/// Whether the current event is trusted. The generated plan step renders
+/// `VELNOR_EVENT_TRUSTED` from the controller-side verdict (fork and bot PRs
+/// are untrusted); local runs without the variable are trusted.
+fn event_is_trusted() -> bool {
+    env::var("VELNOR_EVENT_TRUSTED")
+        .map(|value| value.trim() != "false")
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -1078,67 +1222,62 @@ mod scope_event_tests {
 
 #[cfg(test)]
 mod runner_lane_tests {
-    use super::{collect_manifests, expand_affected_units, CiUnit, RunnerLane, Scope};
+    use super::{
+        collect_manifests, expand_affected_units, plan_providers_for_value, CiUnit, Scope,
+    };
     use std::path::Path;
 
     #[test]
-    fn github_is_the_default_lane_and_velnor_backend_selects_velnor() {
-        assert_eq!(RunnerLane::from_execution_backend(None), RunnerLane::Github);
+    fn plan_providers_defaults_to_the_universe_and_dispatch_narrows() {
+        use crate::provider::{ProviderId, ProviderSet};
+        let universe: ProviderSet = ProviderId::ALL.into_iter().collect();
         assert_eq!(
-            RunnerLane::from_execution_backend(Some("github-hosted")),
-            RunnerLane::Github
+            super::super::provider::parse_provider_set(&[] as &[String], "test")
+                .unwrap_or_default(),
+            ProviderSet::new(),
+            "sanity: empty parses empty"
         );
         assert_eq!(
-            RunnerLane::from_execution_backend(Some("docker")),
-            RunnerLane::Velnor
+            plan_providers_for_value("", &universe).unwrap_or_default(),
+            universe,
+            "absent VELNOR_PROVIDERS means the full universe (local runs)"
         );
+        let narrowed: ProviderSet = [ProviderId::Velnor].into_iter().collect();
         assert_eq!(
-            RunnerLane::from_execution_backend(Some("MICROVM")),
-            RunnerLane::Velnor
+            plan_providers_for_value("velnor", &universe).unwrap_or_default(),
+            narrowed,
+            "dispatch narrows to the selected provider"
         );
-        assert_eq!(
-            RunnerLane::Github,
-            RunnerLane::from_execution_backend(Some("self-hosted"))
+        assert!(
+            plan_providers_for_value("github-hosted,velnor", &narrowed).is_err(),
+            "dispatch narrows, never widens beyond the universe"
         );
-        assert_eq!(
-            RunnerLane::Github,
-            RunnerLane::from_execution_backend(Some("unknown"))
+        assert!(
+            plan_providers_for_value("both", &universe).is_err(),
+            "legacy lane aliases are not providers"
         );
     }
 
     #[test]
-    fn lane_and_scope_select_the_matching_command_array() {
+    fn scope_selects_the_matching_command_array() {
         let unit = CiUnit {
             id: "docker".to_owned(),
             label: "Docker".to_owned(),
             kind: "docker".to_owned(),
             root: ".".to_owned(),
             watch: vec!["Dockerfile".to_owned()],
-            github_pr_commands: vec!["github-pr".to_owned()],
-            github_full_commands: vec!["github-full".to_owned()],
-            velnor_pr_commands: vec!["velnor-pr".to_owned()],
-            velnor_full_commands: vec!["velnor-full".to_owned()],
+            pr_commands: vec!["pr".to_owned()],
+            full_commands: vec!["full".to_owned()],
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: super::RuntimeCapabilities::default(),
             workspace_check: false,
         };
-        assert_eq!(
-            unit.commands(RunnerLane::Github, Scope::Affected),
-            &["github-pr".to_owned()]
-        );
-        assert_eq!(
-            unit.commands(RunnerLane::Github, Scope::Full),
-            &["github-full".to_owned()]
-        );
-        assert_eq!(
-            unit.commands(RunnerLane::Velnor, Scope::Affected),
-            &["velnor-pr".to_owned()]
-        );
-        assert_eq!(
-            unit.commands(RunnerLane::Velnor, Scope::Full),
-            &["velnor-full".to_owned()]
-        );
+        assert_eq!(unit.commands(Scope::Affected), &["pr".to_owned()]);
+        assert_eq!(unit.commands(Scope::Full), &["full".to_owned()]);
     }
 
     #[test]
@@ -1150,13 +1289,14 @@ mod runner_lane_tests {
                 kind: "rust".to_owned(),
                 root: ".".to_owned(),
                 watch: Vec::new(),
-                github_pr_commands: vec!["base".to_owned()],
-                github_full_commands: vec!["base".to_owned()],
-                velnor_pr_commands: vec!["base".to_owned()],
-                velnor_full_commands: vec!["base".to_owned()],
                 depends_on: Vec::new(),
                 tool_version: None,
                 cache: None,
+                pr_commands: Vec::new(),
+                full_commands: Vec::new(),
+                platform: "linux-x64".to_owned(),
+                trust: "untrusted-ok".to_owned(),
+                capabilities: super::RuntimeCapabilities::default(),
                 workspace_check: false,
             },
             CiUnit {
@@ -1165,13 +1305,14 @@ mod runner_lane_tests {
                 kind: "rust".to_owned(),
                 root: ".".to_owned(),
                 watch: Vec::new(),
-                github_pr_commands: vec!["changed".to_owned()],
-                github_full_commands: vec!["changed".to_owned()],
-                velnor_pr_commands: vec!["changed".to_owned()],
-                velnor_full_commands: vec!["changed".to_owned()],
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
+                pr_commands: Vec::new(),
+                full_commands: Vec::new(),
+                platform: "linux-x64".to_owned(),
+                trust: "untrusted-ok".to_owned(),
+                capabilities: super::RuntimeCapabilities::default(),
                 workspace_check: false,
             },
             CiUnit {
@@ -1180,13 +1321,14 @@ mod runner_lane_tests {
                 kind: "rust".to_owned(),
                 root: ".".to_owned(),
                 watch: Vec::new(),
-                github_pr_commands: vec!["sibling".to_owned()],
-                github_full_commands: vec!["sibling".to_owned()],
-                velnor_pr_commands: vec!["sibling".to_owned()],
-                velnor_full_commands: vec!["sibling".to_owned()],
                 depends_on: vec!["base".to_owned()],
                 tool_version: None,
                 cache: None,
+                pr_commands: Vec::new(),
+                full_commands: Vec::new(),
+                platform: "linux-x64".to_owned(),
+                trust: "untrusted-ok".to_owned(),
+                capabilities: super::RuntimeCapabilities::default(),
                 workspace_check: false,
             },
             CiUnit {
@@ -1195,13 +1337,14 @@ mod runner_lane_tests {
                 kind: "rust".to_owned(),
                 root: ".".to_owned(),
                 watch: Vec::new(),
-                github_pr_commands: vec!["leaf".to_owned()],
-                github_full_commands: vec!["leaf".to_owned()],
-                velnor_pr_commands: vec!["leaf".to_owned()],
-                velnor_full_commands: vec!["leaf".to_owned()],
                 depends_on: vec!["changed".to_owned()],
                 tool_version: None,
                 cache: None,
+                pr_commands: Vec::new(),
+                full_commands: Vec::new(),
+                platform: "linux-x64".to_owned(),
+                trust: "untrusted-ok".to_owned(),
+                capabilities: super::RuntimeCapabilities::default(),
                 workspace_check: false,
             },
         ];
@@ -1313,9 +1456,10 @@ struct PlannedSelection {
     scope: Scope,
     units: BTreeSet<String>,
     full_units: BTreeSet<String>,
+    plan_digest: String,
 }
 
-pub(crate) const SELECTION_FILE_VERSION: &str = "1";
+pub(crate) const SELECTION_FILE_VERSION: &str = "2";
 
 fn write_selection_file(
     path: &Path,
@@ -1324,9 +1468,10 @@ fn write_selection_file(
     scope: Scope,
     units: &str,
     full_units: &str,
+    plan_digest: &str,
 ) -> Result<(), GeneratorError> {
     let contents = format!(
-        "version={SELECTION_FILE_VERSION}\nbase_sha={base_sha}\nhead_sha={head_sha}\nscope={}\nunits={units}\nfull_units={full_units}\n",
+        "version={SELECTION_FILE_VERSION}\nbase_sha={base_sha}\nhead_sha={head_sha}\nscope={}\nunits={units}\nfull_units={full_units}\nplan_digest={plan_digest}\n",
         scope_name(scope)
     );
     fs::write(path, contents)
@@ -1372,6 +1517,14 @@ fn read_selection_file(path: &Path) -> Result<PlannedSelection, GeneratorError> 
         parse_selection_ids(&fields.remove("full_units").ok_or_else(|| {
             GeneratorError::usage("CI selection artifact is missing full_units")
         })?)?;
+    let plan_digest = fields
+        .remove("plan_digest")
+        .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing plan_digest"))?;
+    if plan_digest.is_empty() {
+        return Err(GeneratorError::usage(
+            "CI selection artifact has an empty plan_digest",
+        ));
+    }
     if !fields.is_empty() {
         return Err(GeneratorError::usage(
             "CI selection artifact contains unknown fields",
@@ -1383,6 +1536,7 @@ fn read_selection_file(path: &Path) -> Result<PlannedSelection, GeneratorError> 
         scope,
         units,
         full_units,
+        plan_digest,
     })
 }
 
@@ -1727,7 +1881,6 @@ fn run_layers(
     run_scope: Scope,
     full_units: &BTreeSet<String>,
 ) -> Result<(), GeneratorError> {
-    let runner_lane = RunnerLane::current();
     let mut finished = BTreeSet::new();
     while finished.len() < units.len() {
         let ready = units
@@ -1754,9 +1907,9 @@ fn run_layers(
             for unit in ready.iter().copied() {
                 let sender = sender.clone();
                 let commands = if full_units.contains(&unit.id) {
-                    unit.commands(runner_lane, run_scope).to_vec()
+                    unit.commands(run_scope).to_vec()
                 } else {
-                    prerequisite_commands(unit, runner_lane, run_scope)
+                    prerequisite_commands(unit, run_scope)
                 };
                 thread_scope.spawn(move || {
                     let result = run_unit(root, unit, &commands);
@@ -1773,23 +1926,19 @@ fn run_layers(
     Ok(())
 }
 
-fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<String> {
+fn prerequisite_commands(unit: &CiUnit, scope: Scope) -> Vec<String> {
     if unit.kind != "rust" {
         return Vec::new();
     }
-    unit.commands(lane, scope)
+    unit.commands(scope)
         .iter()
         .filter(|command| command.contains(" clippy "))
         .map(|command| {
-            let command = command
+            command
                 .replacen(" clippy ", " check ", 1)
-                .replace(" -- -D warnings", "");
-            if lane == RunnerLane::Velnor {
+                .replace(" -- -D warnings", "")
                 // `mbx check` does not expose Cargo's `--no-deps` flag.
-                command.replace(" --no-deps", "")
-            } else {
-                command
-            }
+                .replace(" --no-deps", "")
         })
         .collect()
 }
@@ -3049,6 +3198,17 @@ mod tests {
         clippy::panic,
         reason = "tests need setup failures to name their root cause"
     )]
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
     fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> GeneratorError {
         match result {
             Ok(_) => panic!("{context}: expected a failure, got success"),
@@ -3238,13 +3398,14 @@ mod tests {
             kind: "rust".to_owned(),
             root: ".".to_owned(),
             watch: watch.iter().map(|value| (*value).to_owned()).collect(),
-            github_pr_commands: vec!["true".to_owned()],
-            github_full_commands: vec!["true".to_owned()],
-            velnor_pr_commands: vec!["true".to_owned()],
-            velnor_full_commands: vec!["true".to_owned()],
             depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
             tool_version: None,
             cache: None,
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
             workspace_check: false,
         };
         CiConfig {
@@ -3253,8 +3414,9 @@ mod tests {
             profile: "rust-workspace".to_owned(),
             verified: true,
             default_branch: "main".to_owned(),
-            runners: "github".to_owned(),
-            automatic: "github".to_owned(),
+            providers: vec!["github-hosted".to_owned()],
+            automatic_providers: vec!["github-hosted".to_owned()],
+            default_dispatch_providers: vec!["github-hosted".to_owned()],
             analysis: Analysis::default(),
             workflow: Workflow::default(),
             release: Release::default(),
@@ -3461,12 +3623,14 @@ mod tests {
     /// a small rust crate graph, and a version-bump allowlist. The selection
     /// engine consumes whatever the file declares, so the fixture stays
     /// independent of any repository the workspace happens to live in.
-    const SELECTION_PROJECT_CONFIG: &str = r#"schema = 2
+    const SELECTION_PROJECT_CONFIG: &str = r#"schema = 3
 repository = "example/selection"
 profile = "generic"
 verified = true
 default_branch = "main"
-runners = "github"
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"
@@ -3474,103 +3638,104 @@ detected = []
 limitations = []
 
 [workflow]
-github_runner = "ubuntu-24.04"
 files = ["ci-docker-docker.yml", "ci-rust-base.yml", "ci-rust-leaf.yml", "ci-pr.yml", "ci-main.yml", "ci-policy.yml", "maintenance.yml", "nightly.yml"]
 version_bump_units = ["docker", "rust-bench", "rust-leaf"]
 
 [[unit]]
 id = "docker"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "docker"
 root = "."
 watch = ["Dockerfile"]
-github_pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-github_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-velnor_pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-velnor_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 
 [[unit]]
 id = "rust-base"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/base"
 watch = ["crates/base/**", "Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+pr_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+full_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
 
 [[unit]]
 id = "rust-leaf"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/leaf"
 depends_on = ["rust-base"]
 watch = ["crates/leaf/**", "Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+pr_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+full_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
 
 [[unit]]
 id = "rust-bench"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/bench"
 depends_on = ["rust-base"]
 watch = ["crates/bench/**", "Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
 "#;
 
-    const ROOT_SCOPED_SELECTION_PROJECT_CONFIG: &str = r#"schema = 2
+    const ROOT_SCOPED_SELECTION_PROJECT_CONFIG: &str = r#"schema = 3
 repository = "example/selection"
 profile = "generic"
 verified = true
 default_branch = "main"
-runners = "both"
+providers = ["github-hosted", "github-self-hosted", "velnor"]
+automatic_providers = ["github-hosted", "github-self-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted", "github-self-hosted", "velnor"]
 
 [workflow]
 version_bump_units = ["rust-contract"]
 
 [[unit]]
 id = "rust-root"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/root"
 watch = ["crates/root/**", "Cargo.lock"]
-github_pr_commands = ["true"]
-github_full_commands = ["true"]
-velnor_pr_commands = ["true"]
-velnor_full_commands = ["true"]
+pr_commands = ["true"]
+full_commands = ["true"]
 
 [[unit]]
 id = "rust-contract"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/velnor-workflow-contract"
 watch = ["crates/velnor-workflow-contract/**", "Cargo.lock", "crates/velnor-workflow-contract/Cargo.lock"]
-github_pr_commands = ["true"]
-github_full_commands = ["true"]
-velnor_pr_commands = ["true"]
-velnor_full_commands = ["true"]
+pr_commands = ["true"]
+full_commands = ["true"]
 
 [[unit]]
 id = "rust-root-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 
 [[unit]]
 id = "rust-contract-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/velnor-workflow-contract"
 watch = ["crates/velnor-workflow-contract/Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 "#;
 
@@ -3668,13 +3833,14 @@ workspace_check = true
             kind: kind.to_owned(),
             root: ".".to_owned(),
             watch: vec!["**".to_owned()],
-            github_pr_commands: vec!["true".to_owned()],
-            github_full_commands: vec!["true".to_owned()],
-            velnor_pr_commands: vec!["true".to_owned()],
-            velnor_full_commands: vec!["true".to_owned()],
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
             workspace_check: false,
         };
         CiConfig {
@@ -3683,8 +3849,21 @@ workspace_check = true
             profile: String::new(),
             verified: true,
             default_branch: "main".to_owned(),
-            runners: "both".to_owned(),
-            automatic: "both".to_owned(),
+            providers: vec![
+                "github-hosted".to_owned(),
+                "github-self-hosted".to_owned(),
+                "velnor".to_owned(),
+            ],
+            automatic_providers: vec![
+                "github-hosted".to_owned(),
+                "github-self-hosted".to_owned(),
+                "velnor".to_owned(),
+            ],
+            default_dispatch_providers: vec![
+                "github-hosted".to_owned(),
+                "github-self-hosted".to_owned(),
+                "velnor".to_owned(),
+            ],
             analysis: Analysis::default(),
             workflow: Workflow::default(),
             release: Release::default(),
@@ -3697,89 +3876,47 @@ workspace_check = true
     }
 
     #[test]
-    fn plan_lanes_default_to_both_and_reject_unknown_lanes() {
+    fn macos_platform_excludes_local_providers_but_keeps_hosted() {
+        use crate::provider::{eligibility, ExclusionReason, Platform, ProviderId, TrustReq};
+        let mut config = lanes_selection_config();
+        let swift = must_some(
+            config.unit.iter_mut().find(|unit| unit.id == "swift-app"),
+            "swift-app fixture unit",
+        );
+        swift.platform = Platform::MacosArm64.as_str().to_owned();
+        let swift_platform = must(swift.platform(), "swift platform parses");
+        let trust = TrustReq::UntrustedOk;
         assert_eq!(
-            must(plan_lanes_for_value(""), "empty lanes"),
-            RunnerMode::Both
+            eligibility(swift_platform, trust, ProviderId::Velnor, true),
+            Err(ExclusionReason::Platform),
+            "macos units are excluded on Velnor with an explicit reason"
         );
         assert_eq!(
-            must(plan_lanes_for_value("both"), "both lanes"),
-            RunnerMode::Both
+            eligibility(swift_platform, trust, ProviderId::GithubSelfHosted, true),
+            Err(ExclusionReason::Platform),
+            "macos units are excluded on self-hosted with an explicit reason"
         );
-        assert_eq!(
-            must(plan_lanes_for_value("velnor"), "velnor lanes"),
-            RunnerMode::Velnor
-        );
-        assert_eq!(
-            must(plan_lanes_for_value("github"), "github lanes"),
-            RunnerMode::Github
-        );
-        let result = plan_lanes_for_value("self-hosted");
         assert!(
-            result.as_ref().is_err_and(|error| error
-                .to_string()
-                .contains("unsupported CI lanes `self-hosted`")),
-            "unknown lanes must fail closed: {result:?}"
+            eligibility(swift_platform, trust, ProviderId::GithubHosted, true).is_ok(),
+            "macos units stay eligible on hosted"
         );
-    }
-
-    #[test]
-    fn velnor_only_selection_drops_swift_but_keeps_unknown_kinds() {
-        let config = lanes_selection_config();
-        let narrowed = selection_for_lanes(
-            &config,
-            must(full_selection(&config), "full selection"),
-            RunnerMode::Velnor,
-        );
-        let ids = narrowed
-            .units
-            .iter()
-            .map(|unit| unit.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["rust-app", "future-app"]);
-        assert_eq!(
-            narrowed.full_units,
-            ["future-app", "rust-app"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        );
-        for lanes in [RunnerMode::Github, RunnerMode::Both] {
-            let narrowed = selection_for_lanes(
-                &config,
-                must(full_selection(&config), "full selection"),
-                lanes,
-            );
-            let ids = narrowed
-                .units
-                .iter()
-                .map(|unit| unit.id.as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                ids,
-                vec!["rust-app", "swift-app", "future-app"],
-                "{lanes:?}"
-            );
-            assert_eq!(narrowed.full_units.len(), 3, "{lanes:?}");
+        for unit in &config.unit {
+            if unit.id == "swift-app" {
+                continue;
+            }
+            let platform = must(unit.platform(), "fixture platform parses");
+            for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
+                assert!(
+                    eligibility(platform, trust, provider, true).is_ok(),
+                    "{} stays eligible on {provider}",
+                    unit.id
+                );
+            }
         }
     }
 
     #[test]
-    fn velnor_only_selection_prunes_full_marks_of_excluded_units() {
-        let config = lanes_selection_config();
-        let units = config.unit.iter().collect::<Vec<_>>();
-        let selection = UnitSelection {
-            units,
-            full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
-        };
-        let narrowed = selection_for_lanes(&config, selection, RunnerMode::Velnor);
-        assert!(narrowed.full_units.is_empty());
-        assert!(narrowed.units.iter().all(|unit| unit.id != "swift-app"));
-    }
-
-    #[test]
-    fn velnor_only_plan_output_excludes_swift_and_empties_its_matrix() -> Result<(), Box<dyn Error>>
-    {
+    fn plan_output_without_swift_empties_its_matrix() -> Result<(), Box<dyn Error>> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -3787,11 +3924,19 @@ workspace_check = true
             std::process::id()
         ));
         let config = lanes_selection_config();
-        let narrowed = selection_for_lanes(
-            &config,
-            full_selection(&config).map_err(|error| error.to_string())?,
-            RunnerMode::Velnor,
-        );
+        let full = full_selection(&config).map_err(|error| error.to_string())?;
+        let narrowed = UnitSelection {
+            units: full
+                .units
+                .into_iter()
+                .filter(|unit| unit.id != "swift-app")
+                .collect(),
+            full_units: full
+                .full_units
+                .into_iter()
+                .filter(|id| id != "swift-app")
+                .collect(),
+        };
         let units = narrowed
             .units
             .iter()
@@ -3836,6 +3981,7 @@ workspace_check = true
             Scope::Affected,
             "base,app",
             "app",
+            "plan-digest",
         )?;
         let selection = read_selection_file(&path)?;
         assert_eq!(selection.base_sha, "base-sha");
@@ -3849,6 +3995,7 @@ workspace_check = true
             selection.full_units,
             ["app"].into_iter().map(str::to_owned).collect()
         );
+        assert_eq!(selection.plan_digest, "plan-digest");
         std::fs::remove_file(path)?;
         Ok(())
     }
@@ -3874,27 +4021,28 @@ workspace_check = true
             kind: "rust".to_owned(),
             root: ".".to_owned(),
             watch: vec!["crates/app/**".to_owned()],
-            github_pr_commands: vec![
+            pr_commands: vec![
                 "cargo fmt --check".to_owned(),
                 "cargo clippy --locked --no-deps --all-targets -- -D warnings".to_owned(),
                 "cargo nextest run --locked".to_owned(),
             ],
-            github_full_commands: vec!["true".to_owned()],
-            velnor_pr_commands: vec![
+            full_commands: vec![
                 "mbx clippy --locked --no-deps --all-targets -- -D warnings".to_owned()
             ],
-            velnor_full_commands: vec!["true".to_owned()],
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
             workspace_check: false,
         };
         assert_eq!(
-            prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
-            vec!["cargo check --locked --no-deps --all-targets"]
+            prerequisite_commands(&unit, Scope::Affected),
+            vec!["cargo check --locked --all-targets"]
         );
         assert_eq!(
-            prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected),
+            prerequisite_commands(&unit, Scope::Full),
             vec!["mbx check --locked --all-targets"]
         );
     }
@@ -3997,13 +4145,14 @@ workspace_check = true
             kind: "rust".to_owned(),
             root: ".".to_owned(),
             watch: watch.iter().map(|value| (*value).to_owned()).collect(),
-            github_pr_commands: vec!["true".to_owned()],
-            github_full_commands: vec!["true".to_owned()],
-            velnor_pr_commands: vec!["true".to_owned()],
-            velnor_full_commands: vec!["true".to_owned()],
             depends_on: Vec::new(),
             tool_version: None,
             cache: None,
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: RuntimeCapabilities::default(),
             workspace_check: false,
         };
         let mut config = selection_config();
@@ -4086,48 +4235,48 @@ workspace_check = true
     fn workspace_checks_are_selected_only_for_matching_cargo_roots() -> Result<(), Box<dyn Error>> {
         let workspace_unit = r#"[[unit]]
 id = "rust-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml", "Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 
 [[unit]]
 id = "rust-contract"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
 [unit.cache]
 key_files = ["crates/contract/Cargo.lock"]
 paths = ["~/.cargo/registry"]
 
 [[unit]]
 id = "rust-contract-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 
 [[unit]]
 id = "docs"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "docs"
 root = "."
 watch = ["docs/**"]
-github_pr_commands = ["markdownlint docs"]
-github_full_commands = ["markdownlint docs"]
-velnor_pr_commands = ["markdownlint docs"]
-velnor_full_commands = ["markdownlint docs"]
+pr_commands = ["markdownlint docs"]
+full_commands = ["markdownlint docs"]
 "#;
         let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
         let (root, base, head) = current_project_selection_git_fixture_with_config(
@@ -4205,37 +4354,37 @@ velnor_full_commands = ["markdownlint docs"]
     ) -> Result<(), Box<dyn Error>> {
         let workspace_unit = r#"[[unit]]
 id = "rust-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml", "Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 
 [[unit]]
 id = "rust-contract"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
 [unit.cache]
 key_files = ["crates/contract/Cargo.lock"]
 paths = ["~/.cargo/registry"]
 
 [[unit]]
 id = "rust-contract-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 "#;
         let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
@@ -4287,37 +4436,37 @@ workspace_check = true
     ) -> Result<(), Box<dyn Error>> {
         let workspace_unit = r#"[[unit]]
 id = "rust-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml", "Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 
 [[unit]]
 id = "rust-contract"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
 [unit.cache]
 key_files = ["crates/contract/Cargo.lock"]
 paths = ["~/.cargo/registry"]
 
 [[unit]]
 id = "rust-contract-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 "#;
         let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}").replace(
@@ -4357,24 +4506,24 @@ workspace_check = true
     ) -> Result<(), Box<dyn Error>> {
         let workspace_unit = r#"[[unit]]
 id = "rust-contract-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 
 [[unit]]
 id = "rust-contract"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "crates/contract"
 watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
-github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
-velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
 [unit.cache]
 key_files = ["crates/contract/Cargo.lock"]
 paths = ["~/.cargo/registry"]
@@ -4417,13 +4566,13 @@ paths = ["~/.cargo/registry"]
     fn hosted_selection_keeps_matching_workspace_checks() -> Result<(), Box<dyn Error>> {
         let workspace_unit = r#"[[unit]]
 id = "rust-workspace"
+platform = "linux-x64"
+trust = "untrusted-ok"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml", "Cargo.lock"]
-github_pr_commands = ["cargo check --workspace --all-targets --locked"]
-github_full_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
-velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+pr_commands = ["cargo check --workspace --all-targets --locked"]
+full_commands = ["cargo check --workspace --all-targets --locked"]
 workspace_check = true
 "#;
         let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
@@ -4436,9 +4585,11 @@ workspace_check = true
         )?;
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let hosted = selection_for_lanes(&config, selection, RunnerMode::Github);
-        assert!(hosted.units.iter().any(|unit| unit.id == "rust-workspace"));
-        assert!(hosted.full_units.contains("rust-workspace"));
+        assert!(selection
+            .units
+            .iter()
+            .any(|unit| unit.id == "rust-workspace"));
+        assert!(selection.full_units.contains("rust-workspace"));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

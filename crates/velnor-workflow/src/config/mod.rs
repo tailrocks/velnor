@@ -20,6 +20,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::provider::{parse_provider_set, parse_selectors, ProviderSelector};
 use crate::{content_digest_bytes, GeneratorError};
 
 /// Location of the repository-owned generation config, relative to the
@@ -27,8 +28,9 @@ use crate::{content_digest_bytes, GeneratorError};
 pub(crate) const GENERATION_CONFIG_PATH: &str = ".github-gen/velnor-workflow.toml";
 
 /// The only accepted `schema` value. Rejecting every other value keeps the
-/// config contract explicit instead of guessing at future layouts.
-const CONFIG_SCHEMA: i64 = 1;
+/// config contract explicit instead of guessing at future layouts. Schema 2
+/// is the provider-set contract; schema 1 lane strings are not read.
+const CONFIG_SCHEMA: i64 = 2;
 
 /// Load and parse the generation config at `path`.
 ///
@@ -162,39 +164,24 @@ struct GeneratorSection {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkflowSection {
-    /// GitHub-hosted runner label for hosted lanes.
-    github_runner: Option<String>,
-    /// GitHub-hosted runner label for Apple (Swift/Xcode) lanes. Absent keeps
-    /// the generator's `macos-15` default.
+    /// The provider universe for this repo. Non-empty. Absent keeps the
+    /// generator default (all three providers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    macos_runner: Option<String>,
-    /// Generated runner lanes. Absent keeps the generator's current default.
+    providers: Option<Vec<String>>,
+    /// Providers that run on `pull_request`/`push`/`schedule`. A subset of
+    /// `providers`; pure event-to-provider routing, never trust gating.
+    /// Absent keeps the generator default (the full universe).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    runners: Option<String>,
-    /// Lanes that run on `pull_request`/`push`/`schedule` without a dispatch choice.
-    /// Must be a subset of `runners`. Absent infers `github` when GitHub is
-    /// available, otherwise the sole configured backend.
+    automatic_providers: Option<Vec<String>>,
+    /// Default providers for the `workflow_dispatch` `providers:` multi-select
+    /// input. A subset of `providers`. Absent keeps the generator default
+    /// (the full universe).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    automatic: Option<String>,
-    /// Velnor runner labels for self-hosted lanes. A surface that renders
-    /// self-hosted jobs without them is a configuration error, never an empty
-    /// `runs-on`.
-    velnor_labels: Option<Vec<String>>,
-    /// Velnor runner group for self-hosted lanes.
-    velnor_runner_group: Option<String>,
-    /// Extra Velnor runner label that trust-gated units append to their
-    /// self-hosted `runs-on`. Only runners that claim it receive those
-    /// jobs, so untrusted pools never attract work they must refuse.
-    /// Required when any unit sets `requires_trusted`. Absent from the
-    /// canonical form, so configs that do not use it keep their recorded
-    /// digest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    velnor_trusted_label: Option<String>,
-    /// When set, pins whether trust-gated Velnor jobs render or skip at
-    /// generation time. Absent values probe `gh api …/runners` once per
-    /// generation; probe failure skips instead of queueing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    velnor_trusted_runner_available: Option<bool>,
+    default_dispatch_providers: Option<Vec<String>>,
+    /// Per-provider `runs-on` routing, keyed by provider ID. The only place
+    /// labels live; local providers need disjoint dedicated selectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    selectors: BTreeMap<String, ProviderSelector>,
     /// The repository profile recorded in the generated `project.toml`. A free
     /// label: it describes the surface, it never selects one.
     profile: Option<String>,
@@ -221,38 +208,25 @@ struct WorkflowSection {
     package_update_channels: Option<BTreeMap<String, Vec<String>>>,
     /// Overrides the resolved default branch used for branch gates.
     default_branch: Option<String>,
-    /// When true, automatic `pull_request` runs on the Velnor lane. Default
-    /// false: self-hosted jobs stay on the trusted default-branch gate.
+    /// How Rust unit jobs relate through GitHub Actions `needs:` on every
+    /// provider. Absent keeps parallel starts; `dependency-closure` waits on
+    /// direct `depends_on` Rust unit jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pull_request_on_velnor: Option<bool>,
-    /// Default `runner` choice for `workflow_dispatch` on generated CI
-    /// aggregates. Absent keeps the generator default (`github`).
+    rust_needs: Option<String>,
+    /// When set, generated local-provider PR aggregate workflows derive a
+    /// pull-request-scoped concurrency group from this value so limited
+    /// local capacity admits one verification run at a time across pull
+    /// requests. Main aggregates append `github.run_id` so unrelated main
+    /// executions remain concurrent. The separate read-only policy workflow
+    /// derives a `-policy` suffix, so a queued policy check cannot hold the
+    /// verification workflow at the GitHub workflow-run concurrency
+    /// boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    default_dispatch_runner: Option<String>,
-    /// Fallback lane selection for automatic release and other static
-    /// workflows that read `vars.VELNOR_AUTOMATIC_LANES`. Absent keeps the
-    /// generator default (`github`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    automatic_lanes: Option<String>,
-    /// How Velnor-lane Rust unit jobs relate through GitHub Actions `needs:`.
-    /// Absent keeps parallel starts; `dependency-closure` waits on direct
-    /// `depends_on` Rust unit jobs on the Velnor lane.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    velnor_rust_needs: Option<String>,
-    /// When set and `runners = "velnor"`, generated Velnor-lane PR aggregate
-    /// workflows derive a pull-request-scoped concurrency group from this
-    /// value so a single recovery host admits one verification run at a time
-    /// across pull requests. Main aggregates append `github.run_id` so
-    /// unrelated main executions remain concurrent. The separate read-only
-    /// policy workflow derives a `-policy` suffix, so a queued policy check
-    /// cannot hold the verification workflow at the GitHub workflow-run
-    /// concurrency boundary.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    velnor_concurrency_group: Option<String>,
-    /// When true and `runners = "velnor"`, aggregate stack-group callers chain
+    concurrency_group: Option<String>,
+    /// When true, aggregate stack-group callers on local providers chain
     /// through `needs:` instead of fanning out from `plan` in parallel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    velnor_serial_stack_groups: Option<bool>,
+    serial_stack_groups: Option<bool>,
 }
 
 /// The Renovate contract a repository declares for self-hosted dependency
@@ -320,14 +294,6 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     full_commands: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    github_pr_commands: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    github_full_commands: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    velnor_pr_commands: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    velnor_full_commands: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     depends_on: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cache: Option<UnitCacheSection>,
@@ -350,13 +316,15 @@ pub(crate) struct UnitSection {
     /// or backend-qualified exactly as the lock spells it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mise_tools: Option<Vec<String>>,
-    /// Whether this unit's Velnor jobs require a trusted runner. A gated
-    /// unit appends `[workflow] velnor_trusted_label` to its self-hosted
-    /// `runs-on`, so runners that do not claim the label never receive it.
-    /// Absent from the canonical form, so configs that do not use it keep
-    /// their recorded digest.
+    /// The trust tier this unit needs: `untrusted-ok` (default) or
+    /// `trusted-only`. Typed; trust is evaluated against (event, provider),
+    /// never expressed as a label on `runs-on`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    requires_trusted: Option<bool>,
+    trust: Option<String>,
+    /// The execution platform this unit needs: `linux-x64` (default),
+    /// `linux-arm64`, or `macos-arm64`. Typed; platforms are never labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform: Option<String>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -568,22 +536,6 @@ impl UnitSection {
         self.full_commands.as_deref()
     }
 
-    pub(crate) fn github_pr_commands(&self) -> Option<&[String]> {
-        self.github_pr_commands.as_deref()
-    }
-
-    pub(crate) fn github_full_commands(&self) -> Option<&[String]> {
-        self.github_full_commands.as_deref()
-    }
-
-    pub(crate) fn velnor_pr_commands(&self) -> Option<&[String]> {
-        self.velnor_pr_commands.as_deref()
-    }
-
-    pub(crate) fn velnor_full_commands(&self) -> Option<&[String]> {
-        self.velnor_full_commands.as_deref()
-    }
-
     pub(crate) fn depends_on(&self) -> Option<&[String]> {
         self.depends_on.as_deref()
     }
@@ -612,8 +564,12 @@ impl UnitSection {
         self.mise_tools.as_deref()
     }
 
-    pub(crate) fn requires_trusted(&self) -> bool {
-        self.requires_trusted == Some(true)
+    pub(crate) fn trust(&self) -> Option<&str> {
+        self.trust.as_deref()
+    }
+
+    pub(crate) fn platform(&self) -> Option<&str> {
+        self.platform.as_deref()
     }
 }
 
@@ -734,74 +690,39 @@ impl RepoGenerationConfig {
         self.generator.revision.as_deref()
     }
 
-    /// The GitHub-hosted runner label, when the config declares one.
-    pub(crate) fn github_runner(&self) -> Option<&str> {
-        self.workflow.github_runner.as_deref()
+    /// The declared provider universe, if any.
+    pub(crate) fn providers(&self) -> Option<&[String]> {
+        self.workflow.providers.as_deref()
     }
 
-    /// The Apple-lane runner label, when the config declares one.
-    pub(crate) fn macos_runner(&self) -> Option<&str> {
-        self.workflow.macos_runner.as_deref()
+    /// The declared automatic providers, if any.
+    pub(crate) fn automatic_providers(&self) -> Option<&[String]> {
+        self.workflow.automatic_providers.as_deref()
     }
 
-    /// The declared generated runner lanes, if any.
-    pub(crate) fn runners(&self) -> Option<&str> {
-        self.workflow.runners.as_deref()
+    /// The declared default dispatch providers, if any.
+    pub(crate) fn default_dispatch_providers(&self) -> Option<&[String]> {
+        self.workflow.default_dispatch_providers.as_deref()
     }
 
-    /// The declared automatic lanes, if any.
-    pub(crate) fn automatic(&self) -> Option<&str> {
-        self.workflow.automatic.as_deref()
+    /// The declared per-provider selectors, keyed by provider id string.
+    pub(crate) fn selectors(&self) -> &BTreeMap<String, ProviderSelector> {
+        &self.workflow.selectors
     }
 
-    /// When true, automatic `pull_request` runs on the Velnor lane.
-    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
-        self.workflow.pull_request_on_velnor
+    /// The declared Rust unit `needs:` topology.
+    pub(crate) fn rust_needs(&self) -> Option<&str> {
+        self.workflow.rust_needs.as_deref()
     }
 
-    /// The declared self-hosted runner labels.
-    pub(crate) fn velnor_labels(&self) -> Option<&[String]> {
-        self.workflow.velnor_labels.as_deref()
+    /// The declared repository-scoped local-provider concurrency group.
+    pub(crate) fn concurrency_group(&self) -> Option<&str> {
+        self.workflow.concurrency_group.as_deref()
     }
 
-    /// The declared self-hosted runner group.
-    pub(crate) fn velnor_runner_group(&self) -> Option<&str> {
-        self.workflow.velnor_runner_group.as_deref()
-    }
-
-    /// The declared trust-gated runner label.
-    pub(crate) fn velnor_trusted_label(&self) -> Option<&str> {
-        self.workflow.velnor_trusted_label.as_deref()
-    }
-
-    /// The declared trust-gated runner availability pin.
-    pub(crate) fn velnor_trusted_runner_available(&self) -> Option<bool> {
-        self.workflow.velnor_trusted_runner_available
-    }
-
-    /// The declared default `workflow_dispatch` runner choice.
-    pub(crate) fn default_dispatch_runner(&self) -> Option<&str> {
-        self.workflow.default_dispatch_runner.as_deref()
-    }
-
-    /// The declared automatic lane fallback for static workflows.
-    pub(crate) fn automatic_lanes(&self) -> Option<&str> {
-        self.workflow.automatic_lanes.as_deref()
-    }
-
-    /// The declared Velnor-lane Rust unit `needs:` topology.
-    pub(crate) fn velnor_rust_needs(&self) -> Option<&str> {
-        self.workflow.velnor_rust_needs.as_deref()
-    }
-
-    /// The declared repository-scoped Velnor runner concurrency group.
-    pub(crate) fn velnor_concurrency_group(&self) -> Option<&str> {
-        self.workflow.velnor_concurrency_group.as_deref()
-    }
-
-    /// Whether aggregate stack groups serialize on the Velnor lane.
-    pub(crate) fn velnor_serial_stack_groups(&self) -> Option<bool> {
-        self.workflow.velnor_serial_stack_groups
+    /// Whether aggregate stack groups serialize on local providers.
+    pub(crate) fn serial_stack_groups(&self) -> Option<bool> {
+        self.workflow.serial_stack_groups
     }
     /// The declared profile label.
     pub(crate) fn profile(&self) -> Option<&str> {
@@ -949,22 +870,6 @@ impl RepoGenerationConfig {
         })?;
         validate_repository_slug(repository)?;
         validate_workflow(&self.workflow)?;
-        if self.units.iter().any(UnitSection::requires_trusted) {
-            if self.workflow.velnor_trusted_label.is_none() {
-                return Err(GeneratorError::usage(
-                    "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_label is not declared",
-                ));
-            }
-            // Whether trust-gated jobs are emitted or skipped is a rendering
-            // input, so it must be declared: the generator never consults the
-            // live fleet (an earlier `gh api` probe made `--check` and the
-            // policy regeneration depend on which runners were online).
-            if self.workflow.velnor_trusted_runner_available.is_none() {
-                return Err(GeneratorError::usage(
-                    "a [[units]] row sets requires_trusted but [workflow] velnor_trusted_runner_available is not declared; set it to true when an online runner claims velnor_trusted_label, false to render the trust-gated jobs as skips",
-                ));
-            }
-        }
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
         }
@@ -1102,131 +1007,47 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-fn automatic_fits_runners(runners: &str, automatic: &str) -> bool {
-    match (runners, automatic) {
-        ("both", "both") => true,
-        ("both", _) => false,
-        (runners, automatic) => runners == automatic,
-    }
-}
-
 fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
-    if workflow.github_runner.as_deref().is_some_and(str::is_empty) {
-        return Err(GeneratorError::usage(
-            "[workflow] github_runner must not be empty",
-        ));
-    }
-    if workflow.macos_runner.as_deref().is_some_and(str::is_empty) {
-        return Err(GeneratorError::usage(
-            "[workflow] macos_runner must not be empty",
-        ));
-    }
-    if let Some(runners) = workflow.runners.as_deref()
-        && !matches!(runners, "github" | "velnor" | "both")
-    {
-        return Err(GeneratorError::usage(format!(
-            "[workflow] runners must be one of: github, velnor, both; found `{runners}`"
-        )));
-    }
-    if let Some(automatic) = workflow.automatic.as_deref()
-        && !matches!(automatic, "github" | "velnor" | "both")
-    {
-        return Err(GeneratorError::usage(format!(
-            "[workflow] automatic must be one of: github, velnor, both; found `{automatic}`"
-        )));
-    }
-    if let (Some(runners), Some(automatic)) =
-        (workflow.runners.as_deref(), workflow.automatic.as_deref())
-        && !automatic_fits_runners(runners, automatic)
-    {
-        return Err(GeneratorError::usage(format!(
-            "[workflow] automatic = `{automatic}` is not available when runners = `{runners}`"
-        )));
-    }
-    if let Some(labels) = &workflow.velnor_labels {
-        if labels.is_empty() {
-            return Err(GeneratorError::usage(
-                "[workflow] velnor_labels must not be empty",
-            ));
-        }
-        if labels.iter().any(String::is_empty) {
-            return Err(GeneratorError::usage(
-                "[workflow] velnor_labels must not contain empty labels",
-            ));
-        }
-    }
-    if workflow
-        .velnor_runner_group
+    use crate::provider::{require_non_empty, require_subset, validate_selector_disjointness};
+    let universe = workflow
+        .providers
         .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(GeneratorError::usage(
-            "[workflow] velnor_runner_group must not be empty",
-        ));
+        .map(|providers| parse_provider_set(providers, "[workflow] providers"))
+        .transpose()?
+        .unwrap_or_else(|| crate::provider::ProviderId::ALL.into_iter().collect());
+    if workflow.providers.is_some() {
+        require_non_empty(&universe, "[workflow] providers")?;
     }
-    validate_trusted_label(workflow)?;
+    if let Some(automatic) = workflow.automatic_providers.as_deref() {
+        let automatic = parse_provider_set(automatic, "[workflow] automatic_providers")?;
+        require_subset(
+            &automatic,
+            &universe,
+            "[workflow] automatic_providers",
+            "[workflow] providers",
+        )?;
+    }
+    if let Some(dispatch) = workflow.default_dispatch_providers.as_deref() {
+        let dispatch = parse_provider_set(dispatch, "[workflow] default_dispatch_providers")?;
+        require_subset(
+            &dispatch,
+            &universe,
+            "[workflow] default_dispatch_providers",
+            "[workflow] providers",
+        )?;
+    }
+    let selectors = parse_selectors(&workflow.selectors)?;
+    validate_selector_disjointness(&selectors)?;
     if workflow.templates.is_some() {
         return Err(GeneratorError::usage(
             "[workflow] templates is not supported; imported workflow bodies are not a generation input",
         ));
     }
-    for (field, value) in [
-        (
-            "[workflow] default_dispatch_runner",
-            workflow.default_dispatch_runner.as_deref(),
-        ),
-        (
-            "[workflow] automatic_lanes",
-            workflow.automatic_lanes.as_deref(),
-        ),
-    ] {
-        if let Some(value) = value {
-            crate::validate_lane_selection(value, field)?;
-        }
+    if let Some(value) = workflow.rust_needs.as_deref() {
+        crate::parse_rust_needs(value)?;
     }
-    if let Some(value) = workflow.velnor_rust_needs.as_deref() {
-        crate::parse_velnor_rust_needs(value)?;
-    }
-    if let Some(value) = workflow.velnor_concurrency_group.as_deref() {
-        crate::validate_config_text(value, "[workflow] velnor_concurrency_group")?;
-    }
-    if let (Some(runners), Some(default_dispatch_runner)) = (
-        workflow.runners.as_deref(),
-        workflow.default_dispatch_runner.as_deref(),
-    ) {
-        crate::validate_dispatch_runner_for_runners(
-            crate::parse_runner_mode(runners)?,
-            default_dispatch_runner,
-        )?;
-    }
-    Ok(())
-}
-
-/// The trusted label trust-gated units append to their self-hosted `runs-on`
-/// must stand on its own: non-empty, distinct from the organization pool
-/// group it is too easily confused with, and not a repeat of a base label.
-fn validate_trusted_label(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
-    let Some(label) = workflow.velnor_trusted_label.as_deref() else {
-        return Ok(());
-    };
-    if label.is_empty() {
-        return Err(GeneratorError::usage(
-            "[workflow] velnor_trusted_label must not be empty",
-        ));
-    }
-    if Some(label) == workflow.velnor_runner_group.as_deref() {
-        return Err(GeneratorError::usage(
-            "[workflow] velnor_trusted_label must not equal velnor_runner_group; the label routes jobs to trusted runners, the group selects an organization pool",
-        ));
-    }
-    if workflow
-        .velnor_labels
-        .as_deref()
-        .is_some_and(|labels| labels.iter().any(|candidate| candidate == label))
-    {
-        return Err(GeneratorError::usage(
-            "[workflow] velnor_trusted_label must not repeat a velnor_labels entry; trust-gated units append it to those labels",
-        ));
+    if let Some(value) = workflow.concurrency_group.as_deref() {
+        crate::validate_config_text(value, "[workflow] concurrency_group")?;
     }
     Ok(())
 }
@@ -1463,16 +1284,24 @@ fn validate_units(
                     UNIT_KIND_PREFIXES.join(", ")
                 )));
         }
-        if row.pr_commands.is_some()
-            || row.full_commands.is_some()
-            || row.github_pr_commands.is_some()
-            || row.github_full_commands.is_some()
-            || row.velnor_pr_commands.is_some()
-            || row.velnor_full_commands.is_some()
-        {
+        if row.pr_commands.is_some() || row.full_commands.is_some() {
             return Err(GeneratorError::usage(format!(
-                "[[unit]] {id} declares command arrays; generation config is not a workflow programming language. Detected work uses typed capabilities; remove pr_commands, full_commands, and lane-specific command overrides"
+                "[[unit]] {id} declares command arrays; generation config is not a workflow programming language. Detected work uses typed capabilities; remove pr_commands and full_commands"
             )));
+        }
+        if let Some(trust) = row.trust.as_deref() {
+            crate::provider::TrustReq::parse(trust).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "[[unit]] {id} declares trust `{trust}`; expected one of: untrusted-ok, trusted-only"
+                ))
+            })?;
+        }
+        if let Some(platform) = row.platform.as_deref() {
+            crate::provider::Platform::parse(platform).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "[[unit]] {id} declares platform `{platform}`; expected one of: linux-x64, linux-arm64, macos-arm64"
+                ))
+            })?;
         }
         if let Some(cache) = &row.cache
             && (cache.key_files.as_ref().is_none_or(std::vec::Vec::is_empty)
@@ -1691,29 +1520,21 @@ impl RepoGenerationConfig {
                 "[renovate] validate = true requires `[[declare]] primitive = \"renovate-validate\" file = \"renovate-validate.yml\"`",
             ));
         }
-        if self.workflow.velnor_trusted_label.is_none() {
-            return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires [workflow] velnor_trusted_label for the writer job",
-            ));
-        }
-        if self.workflow.velnor_trusted_runner_available.is_none() {
-            return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires [workflow] velnor_trusted_runner_available",
-            ));
-        }
-        if self
+        let universe = self
             .workflow
-            .velnor_labels
-            .as_ref()
-            .is_none_or(Vec::is_empty)
-        {
+            .providers
+            .as_deref()
+            .map(|providers| parse_provider_set(providers, "[workflow] providers"))
+            .transpose()?
+            .unwrap_or_else(|| crate::provider::ProviderId::ALL.into_iter().collect());
+        if !universe.contains(&crate::provider::ProviderId::Velnor) {
             return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires [workflow] velnor_labels for the writer job",
+                "[renovate] enabled = true requires the velnor provider in [workflow] providers; the Renovate writer runs on Velnor",
             ));
         }
-        if self.workflow.runners.as_deref() == Some("github") {
+        if !self.workflow.selectors.contains_key("velnor") {
             return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires a Velnor runner lane; [workflow] runners = \"github\" cannot execute the Renovate writer",
+                "[renovate] enabled = true requires [workflow.selectors.velnor] for the writer job",
             ));
         }
         if let Some(token) = renovate.token.as_deref() {
@@ -1892,8 +1713,10 @@ mod tests {
     }
 
     fn shape_for(root: &Path) -> crate::scan::RepositoryShape {
+        let providers: crate::provider::ProviderSet =
+            crate::provider::ProviderId::ALL.into_iter().collect();
         must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
+            crate::scan::scan_shape(root, &providers, "main", &[]),
             "scan config test repository",
         )
     }
@@ -1930,16 +1753,21 @@ mod tests {
 
     fn full_config(unit: &str) -> String {
         format!(
-            "schema = 1\n\
+            "schema = 2\n\
              \n\
              [generator]\n\
              repository = \"example/fixture\"\n\
              \n\
              [workflow]\n\
-             github_runner = \"ubuntu-24.04\"\n\
-             velnor_labels = [\"self-hosted\", \"example-runner-label\"]\n\
-             velnor_runner_group = \"example-runner-group\"\n\
+             providers = [\"github-hosted\", \"velnor\"]\n\
+             automatic_providers = [\"github-hosted\", \"velnor\"]\n\
              default_branch = \"trunk\"\n\
+             \n\
+             [workflow.selectors.github-hosted]\n\
+             runs_on = [\"ubuntu-24.04\"]\n\
+             \n\
+             [workflow.selectors.velnor]\n\
+             runs_on = [\"self-hosted\", \"example-runner-label\"]\n\
              \n\
              [scan]\n\
              exclude = [\"config/fleet/**\", \"docs/**\"]\n\
@@ -1976,7 +1804,7 @@ mod tests {
             config.validate(&unit_ids, &package_update_blocks(), &BTreeSet::new()),
             "validate full config",
         );
-        assert_eq!(config.schema, Some(1));
+        assert_eq!(config.schema, Some(2));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2004,255 +1832,256 @@ mod tests {
     }
 
     #[test]
-    fn workflow_runners_accepts_lowercase_modes() {
-        for runners in ["github", "velnor", "both"] {
+    fn workflow_providers_accepts_strict_ids() {
+        for providers in [
+            "[\"github-hosted\"]",
+            "[\"velnor\"]",
+            "[\"github-hosted\", \"github-self-hosted\", \"velnor\"]",
+        ] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"{runners}\"\n"
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = {providers}\n"
             ));
-            assert_eq!(config.runners(), Some(runners));
             must(
                 config.validate(&[], &[], &BTreeSet::new()),
-                "validate accepted workflow runner mode",
+                "validate accepted provider universe",
             );
         }
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\"]\n",
+        );
+        assert_eq!(config.providers(), Some(&["velnor".to_owned()][..]));
     }
 
     #[test]
-    fn workflow_dispatch_and_automatic_lane_defaults_are_optional() {
-        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
-        assert_eq!(config.default_dispatch_runner(), None);
-        assert_eq!(config.automatic_lanes(), None);
+    fn workflow_dispatch_and_automatic_provider_defaults_are_optional() {
+        let config = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(config.automatic_providers(), None);
+        assert_eq!(config.default_dispatch_providers(), None);
         let declared = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ndefault_dispatch_runner = \"github\"\nautomatic_lanes = \"velnor\"\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nautomatic_providers = [\"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\"]\n",
         );
-        assert_eq!(declared.default_dispatch_runner(), Some("github"));
-        assert_eq!(declared.automatic_lanes(), Some("velnor"));
+        assert_eq!(
+            declared.automatic_providers(),
+            Some(&["velnor".to_owned()][..])
+        );
+        assert_eq!(
+            declared.default_dispatch_providers(),
+            Some(&["github-hosted".to_owned()][..])
+        );
         must(
             declared.validate(&[], &[], &BTreeSet::new()),
-            "validate declared lane defaults",
+            "validate declared provider defaults",
         );
     }
 
     #[test]
-    fn workflow_dispatch_runner_must_match_declared_runners() {
+    fn workflow_dispatch_providers_must_stay_inside_the_universe() {
         let config = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"github\"\ndefault_dispatch_runner = \"velnor\"\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\ndefault_dispatch_providers = [\"velnor\"]\n",
         );
         let error = must_fail(
             config.validate(&[], &[], &BTreeSet::new()),
-            "dispatch default incompatible with github-only runners",
+            "dispatch default outside the universe",
         );
         assert!(
-            error
-                .to_string()
-                .contains("default_dispatch_runner `velnor` is not available"),
+            error.to_string().contains(
+                "[workflow] default_dispatch_providers names provider `velnor` outside [workflow] providers"
+            ),
             "unexpected error: {error}"
         );
     }
 
     #[test]
-    fn workflow_runners_is_optional_without_changing_canonical_shape() {
-        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
-        assert_eq!(config.runners(), None);
+    fn workflow_providers_is_optional_without_changing_canonical_shape() {
+        let config = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(config.providers(), None);
         let canonical = must(
             config.canonical_json(),
             "canonicalize default workflow config",
         );
-        assert!(!canonical.contains("\"runners\""), "{canonical}");
+        assert!(!canonical.contains("\"providers\""), "{canonical}");
     }
 
     #[test]
-    fn workflow_runners_rejects_unknown_or_non_lowercase_modes() {
-        for runners in ["GitHub", "VELNOR", "Both", "hosted"] {
+    fn workflow_providers_rejects_unknown_ids_and_repeats() {
+        for providers in ["GitHub", "both", "hosted", "github"] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"{runners}\"\n"
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"{providers}\"]\n"
             ));
             let error = must_fail(
                 config.validate(&[], &[], &BTreeSet::new()),
-                "invalid workflow runner mode must fail validation",
+                "unknown provider id must fail validation",
             );
             assert!(
-                error
-                    .to_string()
-                    .contains("[workflow] runners must be one of"),
-                "unexpected error for {runners}: {error}"
+                error.to_string().contains("has unknown provider"),
+                "unexpected error for {providers}: {error}"
             );
         }
-    }
-
-    #[test]
-    fn workflow_automatic_must_be_a_subset_of_runners() {
-        let rejected = must_fail(
-            config_for(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"github\"\n",
-            )
-            .validate(&[], &[], &BTreeSet::new()),
-            "both+github automatic must be rejected",
-        );
-        assert!(
-            rejected.to_string().contains("[workflow] automatic"),
-            "{rejected}"
-        );
-
-        let both = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\n",
-        );
-        assert_eq!(both.automatic(), Some("both"));
-        must(
-            both.validate(&[], &[], &BTreeSet::new()),
-            "both+both automatic is valid",
-        );
-
-        let error = must_fail(
-            config_for(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"github\"\nautomatic = \"velnor\"\n",
-            )
-            .validate(&[], &[], &BTreeSet::new()),
-            "github runners cannot enable velnor automatic",
-        );
-        assert!(
-            error.to_string().contains("[workflow] automatic"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn workflow_macos_runner_is_optional_without_changing_canonical_shape() {
-        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
-        assert_eq!(config.macos_runner(), None);
-        let canonical = must(
-            config.canonical_json(),
-            "canonicalize default workflow config",
-        );
-        assert!(!canonical.contains("\"macos_runner\""), "{canonical}");
-        let declared = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"macos-26\"\n",
-        );
-        assert_eq!(declared.macos_runner(), Some("macos-26"));
-        must(
-            declared.validate(&[], &[], &BTreeSet::new()),
-            "validate declared macos runner",
-        );
-    }
-
-    #[test]
-    fn workflow_macos_runner_rejects_empty_labels() {
-        let config = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"\"\n",
+        let repeated = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"velnor\", \"velnor\"]\n",
         );
         let error = must_fail(
-            config.validate(&[], &[], &BTreeSet::new()),
-            "empty macos_runner must fail validation",
+            repeated.validate(&[], &[], &BTreeSet::new()),
+            "repeated provider id must fail validation",
         );
         assert!(
-            error
-                .to_string()
-                .contains("[workflow] macos_runner must not be empty"),
-            "{error}"
+            error.to_string().contains("must not repeat an id"),
+            "unexpected error: {error}"
         );
-    }
-
-    #[test]
-    fn workflow_trusted_label_is_optional_without_changing_canonical_shape() {
-        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
-        assert_eq!(config.velnor_trusted_label(), None);
-        let canonical = must(
-            config.canonical_json(),
-            "canonicalize default workflow config",
-        );
-        assert!(
-            !canonical.contains("\"velnor_trusted_label\""),
-            "{canonical}"
-        );
-        assert!(!canonical.contains("\"requires_trusted\""), "{canonical}");
-        let declared = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\n",
-        );
-        assert_eq!(declared.velnor_trusted_label(), Some("example-trusted"));
-        must(
-            declared.validate(&[], &[], &BTreeSet::new()),
-            "validate declared trusted label",
-        );
-    }
-
-    #[test]
-    fn workflow_trusted_label_rejects_empty_confused_and_duplicate_labels() {
         let empty = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"\"\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = []\n",
         );
         let error = must_fail(
             empty.validate(&[], &[], &BTreeSet::new()),
-            "empty trusted label must fail validation",
+            "empty provider universe must fail validation",
         );
         assert!(
             error
                 .to_string()
-                .contains("[workflow] velnor_trusted_label must not be empty"),
-            "{error}"
+                .contains("[workflow] providers must name at least one provider"),
+            "unexpected error: {error}"
         );
-        let confused = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_runner_group = \"example-group\"\nvelnor_trusted_label = \"example-group\"\n",
+    }
+
+    #[test]
+    fn workflow_automatic_providers_must_stay_inside_the_universe() {
+        let subset = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\"]\n",
         );
+        assert_eq!(
+            subset.automatic_providers(),
+            Some(&["github-hosted".to_owned()][..])
+        );
+        must(
+            subset.validate(&[], &[], &BTreeSet::new()),
+            "an automatic subset of the universe is valid",
+        );
+
         let error = must_fail(
-            confused.validate(&[], &[], &BTreeSet::new()),
-            "trusted label equal to the runner group must fail validation",
+            config_for(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\nautomatic_providers = [\"velnor\"]\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "automatic outside the universe must be rejected",
         );
         assert!(
-            error
-                .to_string()
-                .contains("[workflow] velnor_trusted_label must not equal velnor_runner_group"),
-            "{error}"
-        );
-        let duplicate = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-trusted\"]\nvelnor_trusted_label = \"example-trusted\"\n",
-        );
-        let error = must_fail(
-            duplicate.validate(&[], &[], &BTreeSet::new()),
-            "trusted label repeating a base label must fail validation",
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("[workflow] velnor_trusted_label must not repeat"),
+            error.to_string().contains(
+                "[workflow] automatic_providers names provider `velnor` outside [workflow] providers"
+            ),
             "{error}"
         );
     }
 
     #[test]
-    fn unit_requiring_trust_without_a_label_is_a_usage_error() {
-        let config = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
+    fn workflow_selectors_route_each_provider_and_reject_empty_labels() {
+        let config = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert!(config.selectors().is_empty());
+        let canonical = must(
+            config.canonical_json(),
+            "canonicalize default workflow config",
         );
-        assert!(config.units().iter().any(UnitSection::requires_trusted));
-        let error = must_fail(
-            config.validate(&["example".to_owned()], &[], &BTreeSet::new()),
-            "requires_trusted without a trusted label must fail validation",
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("velnor_trusted_label is not declared"),
-            "{error}"
-        );
-        let undecided = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
-        );
-        let error = must_fail(
-            undecided.validate(&["example".to_owned()], &[], &BTreeSet::new()),
-            "requires_trusted without a declared runner availability must fail validation",
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("[workflow] velnor_trusted_runner_available is not declared"),
-            "{error}"
-        );
+        assert!(!canonical.contains("\"selectors\""), "{canonical}");
         let declared = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"example-trusted\"\nvelnor_trusted_runner_available = false\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nrequires_trusted = true\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n",
+        );
+        assert_eq!(
+            declared
+                .selectors()
+                .get("velnor")
+                .map(|selector| selector.runs_on.as_slice()),
+            Some(&["self-hosted".to_owned(), "example-runner".to_owned()][..])
         );
         must(
-            declared.validate(&["example".to_owned()], &[], &BTreeSet::new()),
-            "requires_trusted with a trusted label and a declared availability validates",
+            declared.validate(&[], &[], &BTreeSet::new()),
+            "validate declared selectors",
+        );
+        let empty = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow.selectors.velnor]\nruns_on = []\n",
+        );
+        let error = must_fail(
+            empty.validate(&[], &[], &BTreeSet::new()),
+            "empty runs_on must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow.selectors.velnor] runs_on must name at least one label"),
+            "{error}"
+        );
+        let unknown = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow.selectors.both]\nruns_on = [\"self-hosted\"]\n",
+        );
+        let error = must_fail(
+            unknown.validate(&[], &[], &BTreeSet::new()),
+            "unknown selector provider must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow.selectors] has unknown provider `both`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn workflow_selectors_reject_shared_local_labels() {
+        let shared = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow.selectors.github-self-hosted]\nruns_on = [\"shared-label\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"shared-label\"]\n",
+        );
+        let error = must_fail(
+            shared.validate(&[], &[], &BTreeSet::new()),
+            "shared local labels must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("label `shared-label` is claimed by github-self-hosted and velnor"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unit_trust_and_platform_are_typed() {
+        let config = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\ntrust = \"trusted-only\"\nplatform = \"macos-arm64\"\n",
+        );
+        assert_eq!(
+            config.units().first().and_then(|unit| unit.trust()),
+            Some("trusted-only")
+        );
+        assert_eq!(
+            config.units().first().and_then(|unit| unit.platform()),
+            Some("macos-arm64")
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "typed trust and platform validate",
+        );
+        let bad_trust = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\ntrust = \"trusted\"\n",
+        );
+        let error = must_fail(
+            bad_trust.validate(&[], &[], &BTreeSet::new()),
+            "unknown trust tier must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("declares trust `trusted`; expected one of: untrusted-ok, trusted-only"),
+            "{error}"
+        );
+        let bad_platform = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"example\"\nkind = \"docs\"\nplatform = \"macos-26\"\n",
+        );
+        let error = must_fail(
+            bad_platform.validate(&[], &[], &BTreeSet::new()),
+            "label platform must fail validation",
+        );
+        assert!(
+            error.to_string().contains(
+                "declares platform `macos-26`; expected one of: linux-x64, linux-arm64, macos-arm64"
+            ),
+            "{error}"
         );
     }
 
@@ -2260,7 +2089,7 @@ mod tests {
     fn workflow_runners_keeps_unknown_fields_denied() {
         let error = must_fail(
             toml::from_str::<RepoGenerationConfig>(
-                "schema = 1\n\n[workflow]\nrunner = \"velnor\"\n",
+                "schema = 2\n\n[workflow]\nrunner = \"velnor\"\n",
             ),
             "unknown workflow fields must be rejected",
         );
@@ -2269,10 +2098,10 @@ mod tests {
 
     #[test]
     fn declaration_order_is_part_of_the_digest() {
-        let leading = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+        let leading = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                        [[declare]]\nprimitive = \"a\"\nfile = \"a.yml\"\n\n\
                        [[declare]]\nprimitive = \"b\"\nfile = \"b.yml\"\n";
-        let trailing = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+        let trailing = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                         [[declare]]\nprimitive = \"b\"\nfile = \"b.yml\"\n\n\
                         [[declare]]\nprimitive = \"a\"\nfile = \"a.yml\"\n";
         let first = must(config_for(leading).canonical_json(), "canonicalize leading");
@@ -2287,7 +2116,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_must_be_exactly_one() {
+    fn schema_must_be_exactly_two() {
         let root = scanned_root("schema");
         let path = root.join(GENERATION_CONFIG_PATH);
         must(
@@ -2297,13 +2126,25 @@ mod tests {
         must(
             fs::write(
                 &path,
-                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
+                "schema = 3\n\n[generator]\nrepository = \"example/fixture\"\n",
             ),
             "write future schema",
         );
         let error = must_some_error(load(&path).err(), "future schema must fail");
         assert!(
-            error.contains("schema 2"),
+            error.contains("schema 3"),
+            "error must name the schema: {error}"
+        );
+        must(
+            fs::write(
+                &path,
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write previous schema",
+        );
+        let error = must_some_error(load(&path).err(), "previous schema must fail");
+        assert!(
+            error.contains("has schema 1; this generator reads schema 2 only"),
             "error must name the schema: {error}"
         );
         must(
@@ -2312,7 +2153,7 @@ mod tests {
         );
         let missing = must_some_error(load(&path).err(), "missing schema must fail");
         assert!(
-            missing.contains("missing `schema = 1`"),
+            missing.contains("missing `schema = 2`"),
             "error must name the missing schema: {missing}"
         );
         let _ = fs::remove_dir_all(root);
@@ -2325,7 +2166,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let available = shape.unit_ids().collect::<Vec<_>>().join(", ");
         let config = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"not-a-unit\"]\nfile = \"rust.yml\"\n",
         );
         let error = must_some_error(
@@ -2344,7 +2185,7 @@ mod tests {
 
     fn mise_tools_config(unit: &str, tools: &str) -> String {
         format!(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [{tools}]\n"
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [{tools}]\n"
         )
     }
 
@@ -2545,7 +2386,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         for file in ["../escape.yml", "nested/deep.yml", "workflow.yaml", ".yml"] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [[declare]]\nprimitive = \"rust-crate\"\nfile = \"{file}\"\n"
             ));
             let error = must_some_error(
@@ -2560,7 +2401,7 @@ mod tests {
             );
         }
         let separator = config_for(concat!(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n",
             "[[declare]]\nprimitive = \"rust-crate\"\nfile = 'back\\slash.yml'\n",
         ));
         let error = must_some_error(
@@ -2586,7 +2427,7 @@ mod tests {
             "example/fixture/extra",
         ] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"{repository}\"\n"
+                "schema = 2\n\n[generator]\nrepository = \"{repository}\"\n"
             ));
             let error = must_some_error(
                 config
@@ -2607,7 +2448,7 @@ mod tests {
         let root = scanned_root("missing-generator");
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
-        let config = config_for("schema = 1\n");
+        let config = config_for("schema = 2\n");
         let error = must_some_error(
             config
                 .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
@@ -2624,7 +2465,7 @@ mod tests {
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let opaque = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nanything = { goes = [\"here\", 3, true] }\n",
         );
@@ -2633,7 +2474,7 @@ mod tests {
             "opaque args validate",
         );
         let float = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nratio = 1.5\n",
         );
@@ -2650,7 +2491,7 @@ mod tests {
     #[test]
     fn cache_sections_parse_and_stay_generator_only() {
         let config = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [cache.github]\nbudget_bytes = 8589934592\nproducer_window_seconds = 7200\n\
              mbx_generation_bound = 2\n\n[cache.velnor]\nbudget_bytes = 53687091200\n\
              mbx_generation_bound = 6\n",
@@ -2665,7 +2506,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_rejected() {
         let error = match toml::from_str::<RepoGenerationConfig>(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [policy]\ndco_required_is_spelled_like_this = true\n",
         ) {
             Ok(_) => String::from("accepted"),
@@ -2701,7 +2542,7 @@ mod tests {
             (format!("{other} = [\"stable\"]"), "declares no `default`"),
         ] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\npackage_update_channels = {{{grants}}}\n"
             ));
             let error = must_some_error(
@@ -2721,7 +2562,7 @@ mod tests {
             .join(", ");
         for grants in [every_block, String::from("default = [\"stable\"]")] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\npackage_update_channels = {{{grants}}}\n"
             ));
             must(
@@ -2734,14 +2575,14 @@ mod tests {
     #[test]
     fn absent_config_digests_the_empty_canonical_form() {
         let empty = must(
-            config_for("schema = 1\n").canonical_json(),
+            config_for("schema = 2\n").canonical_json(),
             "canonicalize minimal",
         );
         assert_ne!(empty, canonical::EMPTY_CANONICAL_FORM);
         assert_ne!(
             must(RepoGenerationConfig::digest(None), "digest absent config"),
             must(
-                RepoGenerationConfig::digest(Some(&config_for("schema = 1\n"))),
+                RepoGenerationConfig::digest(Some(&config_for("schema = 2\n"))),
                 "digest minimal config"
             ),
             "introducing a config must change the recorded input"
@@ -2760,7 +2601,7 @@ mod tests {
         must(
             fs::write(
                 &path,
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
             ),
             "write discovered config",
         );
@@ -2787,7 +2628,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let error = must_fail(
             config_for(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [renovate]\nenabled = true\nreason = \"test\"\n",
             )
             .validate(&unit_ids, &[], &BTreeSet::new()),
@@ -2803,7 +2644,7 @@ mod tests {
     fn renovate_unknown_field_fails_closed() {
         let error = must_some_error(
             toml::from_str::<RepoGenerationConfig>(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [renovate]\nenabled = true\nreason = \"test\"\nunknown = true\n",
             )
             .err(),
