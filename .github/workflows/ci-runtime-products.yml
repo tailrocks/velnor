@@ -8,8 +8,10 @@
 # `cargo build --locked --no-default-features --release`, proves the binary's
 # own `--closure` report equals the tag closure, attests the asset, and
 # uploads it; the publish job proves transport integrity, assembles
-# `manifest.json`, creates the release, and smoke-tests the exact consumer
-# flow (download, attestation, manifest, digest, self-report) before finishing.
+# `manifest.json`, attests it, smoke-tests the exact consumer flow
+# (attestation, manifest, digest, self-report) against those same bytes, and
+# only then creates the release. Verification precedes exposure: a product no
+# consumer would accept never reaches a release.
 #
 # The workflow never overwrites: when the tag already exists the run skips,
 # and the publish job re-checks immediately before creating the release.
@@ -41,6 +43,13 @@ jobs:
       head-sha: ${{ steps.closure.outputs.head-sha }}
       exists: ${{ steps.exists.outputs.exists }}
     steps:
+      - name: Prove the default-branch ref
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$REF" == "refs/heads/main" ]] || { echo "::error::the producer publishes only from refs/heads/main, got $REF" >&2; exit 1; }
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -201,14 +210,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Assemble and publish the release
+      - name: Assemble and verify the release
         id: assemble
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           CLOSURE: ${{ needs.closure.outputs.closure }}
-          TAG: ${{ needs.closure.outputs.tag }}
-          HEAD_SHA: ${{ needs.closure.outputs.head-sha }}
         run: |
           set -euo pipefail
           # The build jobs proved each binary's identity on its native runner;
@@ -239,48 +245,54 @@ jobs:
             jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
               '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' dist/manifest.json >/dev/null
           done
-          if gh release view "$TAG" --repo tailrocks/velnor >/dev/null 2>&1; then
-            echo "::notice::release $TAG already exists; leaving it untouched"
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gh release create "$TAG" --repo tailrocks/velnor --target "$HEAD_SHA" --title "$TAG" \
-            --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
-            dist/velnor-workflow-Linux-X64 dist/velnor-workflow-Linux-ARM64 dist/velnor-workflow-macOS-ARM64 dist/manifest.json
       - name: Attest release manifest
-        if: steps.assemble.outputs.skipped != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/manifest.json
-      - name: Smoke-test the published release
-        if: steps.assemble.outputs.skipped != 'true'
+      - name: Smoke-test the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOSURE: ${{ needs.closure.outputs.closure }}
+        run: |
+          set -euo pipefail
+          # The exact consumer flow, against the local bytes the release will
+          # publish: attestation, manifest, digest, and the self-report from
+          # the install layout the setup action uses. The release is created
+          # only after this flow passes, so a product no consumer would
+          # accept fails the publish instead of shipping silently.
+          asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+          gh attestation verify "dist/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+          gh attestation verify "dist/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+          jq -e --arg closure "$CLOSURE" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" \
+            '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "dist/manifest.json" >/dev/null
+          actual="$(sha256sum "dist/$asset" | awk '{print $1}')"
+          expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "dist/manifest.json")"
+          [[ "$actual" == "$expected" ]] || { echo "::error::smoke-test digest mismatch" >&2; exit 1; }
+          runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
+          mkdir -p "$runtime/bin"
+          cp "dist/$asset" "$runtime/bin/velnor-workflow"
+          chmod 0755 "$runtime/bin/velnor-workflow"
+          cp "dist/manifest.json" "$runtime/manifest.json"
+          chmod 0644 "$runtime/manifest.json"
+          reported="$("$runtime/bin/velnor-workflow" --closure)"
+          [[ "$reported" == "$CLOSURE" ]] || { echo "::error::installed runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }
+      - name: Create the release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           CLOSURE: ${{ needs.closure.outputs.closure }}
           TAG: ${{ needs.closure.outputs.tag }}
+          HEAD_SHA: ${{ needs.closure.outputs.head-sha }}
         run: |
           set -euo pipefail
-          # The exact consumer flow, against the release just created: download,
-          # attestation, manifest, digest, and the self-report from the install
-          # layout the setup action uses. A product no consumer would accept
-          # fails the publish instead of shipping silently.
-          asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
-          temporary="$(mktemp -d)"
-          trap 'rm -rf "$temporary"' EXIT
-          gh release download "$TAG" --repo tailrocks/velnor --pattern "$asset" --pattern manifest.json --dir "$temporary"
-          gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
-          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
-          jq -e --arg closure "$CLOSURE" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" \
-            '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
-          actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
-          expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
-          [[ "$actual" == "$expected" ]] || { echo "::error::smoke-test digest mismatch" >&2; exit 1; }
-          runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
-          mkdir -p "$runtime/bin"
-          cp "$temporary/$asset" "$runtime/bin/velnor-workflow"
-          chmod 0755 "$runtime/bin/velnor-workflow"
-          cp "$temporary/manifest.json" "$runtime/manifest.json"
-          chmod 0644 "$runtime/manifest.json"
-          reported="$("$runtime/bin/velnor-workflow" --closure)"
-          [[ "$reported" == "$CLOSURE" ]] || { echo "::error::installed runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }
+          # Every verification above passed on exactly these bytes; the
+          # re-check immediately before creating keeps the never-overwrite
+          # promise against a concurrent run that published first.
+          if gh release view "$TAG" --repo tailrocks/velnor >/dev/null 2>&1; then
+            echo "::notice::release $TAG already exists; leaving it untouched"
+            exit 0
+          fi
+          gh release create "$TAG" --repo tailrocks/velnor --target "$HEAD_SHA" --title "$TAG" \
+            --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
+            dist/velnor-workflow-Linux-X64 dist/velnor-workflow-Linux-ARM64 dist/velnor-workflow-macOS-ARM64 dist/manifest.json
