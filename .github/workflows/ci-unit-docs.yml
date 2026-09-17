@@ -159,12 +159,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-0469e5a5ec929c2a2e02dbac968c75f197203ab5-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-12b2570072a6294395c87ddea2b785750adfc3ed-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 0469e5a5ec929c2a2e02dbac968c75f197203ab5
+          EXPECTED_REVISION: 12b2570072a6294395c87ddea2b785750adfc3ed
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -178,7 +178,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 0469e5a5ec929c2a2e02dbac968c75f197203ab5
+          EXPECTED_REVISION: 12b2570072a6294395c87ddea2b785750adfc3ed
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
