@@ -2584,10 +2584,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PINNED_REVISION: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
           CHECKOUT_PATH: ${{ github.workspace }}
         run: |
           set -euo pipefail
+          PINNED_REVISION="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' "$CHECKOUT_PATH/.github-gen/velnor-workflow.toml" | head -n 1)"
+          test "$PINNED_REVISION" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }
           if ! git -C "$CHECKOUT_PATH" cat-file -e "$PINNED_REVISION^{commit}" 2>/dev/null; then
             git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PINNED_REVISION"
           fi

@@ -839,6 +839,53 @@ fn missing_commit_reason(root: &Path, pin: &str, head: &str) -> String {
     }
 }
 
+/// Ensure the declared pin is a commit of the audited checkout, fetching
+/// it from `origin` when a shallow checkout cut it off. Unit jobs check out
+/// at depth 1, so the pin — usually the parent of the audited head — is
+/// absent until fetched; the fetch is the tool's job, not each lane's.
+/// A checkout that already holds the pin never touches the network, so full
+/// clones and offline runs behave exactly as before. Closure verification
+/// stays strict: a pin the remote cannot provide fails closed here, never
+/// through the revision fallback.
+fn ensure_pin_present(checkout: &Path, pin: &str) -> Result<(), GeneratorError> {
+    if commit_exists(checkout, pin) {
+        return Ok(());
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["fetch", "--no-tags", "--depth", "1", "origin", pin])
+        .output()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "fetch pin {pin} into {}: {error}",
+                checkout.display()
+            ))
+        })?;
+    if output.status.success() && commit_exists(checkout, pin) {
+        return Ok(());
+    }
+    Err(GeneratorError::usage(pin_fetch_failure(checkout, pin)))
+}
+
+/// Why the pin is still absent after the fetch: names the pin, the shallow
+/// state that cut it off (or the full history that genuinely lacks it), and
+/// the remediation — the same shape as [`missing_commit_reason`].
+fn pin_fetch_failure(checkout: &Path, pin: &str) -> String {
+    let fetch = format!("`git fetch --no-tags --depth 1 origin {pin}`");
+    if is_shallow_checkout(checkout) {
+        format!(
+            "pin {pin} is not a commit in this shallow checkout of {} and {fetch} did not provide it; the job that runs the check must check out full history (actions/checkout `fetch-depth: 0`) or fetch the pin, or the tree must re-pin to a commit the remote has",
+            checkout.display()
+        )
+    } else {
+        format!(
+            "pin {pin} is not a commit in this full-history checkout of {} and {fetch} did not provide it; fetch the missing commit or re-pin to a commit the head descends from",
+            checkout.display()
+        )
+    }
+}
+
 /// The pin the tree at the merge base of `head` and `base` declared, when
 /// both commits are present and the merge base carries a generation config.
 fn merge_base_pin(root: &Path, head: &str, base: &str) -> Option<String> {
@@ -1433,9 +1480,14 @@ pub(crate) fn regenerate_and_compare(
 ) -> Result<TreeComparison, GeneratorError> {
     // The generator's own repository audits a full history, so the pin's
     // closures are always computable there; a consumer tree without generator
-    // history resolves through the revision fallback instead.
+    // history resolves through the revision fallback instead. Unit checkouts
+    // are shallow by default, so the tool fetches the pin commit itself
+    // instead of relying on per-lane shell snippets to have done it.
     let expected = match source {
-        PinSource::Checkout(_) => Some(expected_closures(checkout, pin)?),
+        PinSource::Checkout(_) => {
+            ensure_pin_present(checkout, pin)?;
+            Some(expected_closures(checkout, pin)?)
+        }
         PinSource::Remote(_) => expected_closures(checkout, pin).ok(),
     };
     let binary = resolve_pinned_binary(pin, expected.as_deref(), lookup, source)?;

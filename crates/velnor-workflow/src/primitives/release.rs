@@ -1813,7 +1813,6 @@ fn render_release_unit_job(
     // the host's persistent executable store instead.
     if lane == crate::RunnerMode::Velnor && super::ir::unit_runs_workflow_plain_check(unit) {
         output.push_str(&crate::workflow_pinned_policy_runtime_velnor(
-            &workflow.workflow_revision,
             "${{ github.workspace }}",
         ));
     }

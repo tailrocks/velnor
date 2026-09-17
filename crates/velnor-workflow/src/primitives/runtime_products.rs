@@ -1027,7 +1027,7 @@ mod tests {
         );
         // The Velnor policy provisioner is the second consumer: it must accept
         // the same manifest and the same attestation the setup action does.
-        let velnor = crate::workflow_pinned_policy_runtime_velnor(FIXTURE_REVISION, "checkout");
+        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
         assert!(
             velnor.contains(MANIFEST_ACCEPT_FILTER),
             "the Velnor consumer evaluates the same filter"
@@ -1084,7 +1084,7 @@ mod tests {
         }
         // Subject-level: both consumers verify the manifest as well as the
         // asset, against the same pinned producer workflow.
-        let velnor = crate::workflow_pinned_policy_runtime_velnor(FIXTURE_REVISION, "checkout");
+        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
         for (name, consumer) in [
             ("setup action", action.as_str()),
             ("velnor", velnor.as_str()),
