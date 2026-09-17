@@ -386,6 +386,22 @@ pub(crate) struct ReleaseJobSection {
     modes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timeout_minutes: Option<i64>,
+    /// The GitHub environment the job runs in (protection rules, scoped
+    /// secrets). Empty runs outside any environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment: Option<String>,
+    /// Build-provenance attestation subjects: artifact paths the job
+    /// attests after its tasks succeed. Empty attests nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attest_subjects: Option<Vec<String>>,
+    /// Job-level permission overrides. Empty keeps the workflow default
+    /// (`contents: read`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    permissions: BTreeMap<String, String>,
+    /// Job-level environment the named tasks read: toolchain pins and
+    /// secret references (`${{ secrets.NAME }}`), never secret values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -943,6 +959,22 @@ impl ReleaseJobSection {
 
     pub(crate) fn timeout_minutes(&self) -> Option<i64> {
         self.timeout_minutes
+    }
+
+    pub(crate) fn environment(&self) -> Option<&str> {
+        self.environment.as_deref()
+    }
+
+    pub(crate) fn attest_subjects(&self) -> Option<&[String]> {
+        self.attest_subjects.as_deref()
+    }
+
+    pub(crate) fn permissions(&self) -> &BTreeMap<String, String> {
+        &self.permissions
+    }
+
+    pub(crate) fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
     }
 }
 
@@ -2329,6 +2361,30 @@ const RELEASE_KINDS: &[&str] = &[
 /// list runs the job on every release event.
 pub(crate) const RELEASE_JOB_MODES: &[&str] = &["validate", "publish"];
 
+/// The permission scopes a `[[release.job]]` row may override. A typo'd
+/// scope would silently do nothing, so anything outside this set fails
+/// closed instead of rendering a dead permission.
+pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "models",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+];
+
+/// The access levels a `[[release.job]]` permission override may grant.
+pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
+
 /// The OCI platforms the `docker` publisher builds. Native builders exist
 /// for exactly these; anything else fails closed instead of silently
 /// emulating an architecture under QEMU.
@@ -3608,6 +3664,54 @@ fn validate_release_job_row(
             "[[release.job]] {id} timeout_minutes must be a positive number of minutes, found {timeout}"
         )));
     }
+    validate_release_job_shape(row, id)
+}
+
+/// A job row's execution shape: environment, attestation subjects,
+/// permission overrides, and task environment.
+fn validate_release_job_shape(row: &ReleaseJobSection, id: &str) -> Result<(), GeneratorError> {
+    if let Some(environment) = row.environment.as_deref()
+        && (environment.is_empty() || environment.contains(['\n', '\r']))
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} environment must be one non-empty line"
+        )));
+    }
+    if let Some(subjects) = row.attest_subjects.as_deref() {
+        for subject in subjects {
+            if subject.is_empty() || subject.contains(['\n', '\r']) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} attest_subjects must be one non-empty line per subject"
+                )));
+            }
+        }
+    }
+    for (scope, level) in &row.permissions {
+        if !RELEASE_JOB_PERMISSIONS.contains(&scope.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} permissions names `{scope}`, which is not a job permission scope; use one of {}",
+                RELEASE_JOB_PERMISSIONS.join(", ")
+            )));
+        }
+        if !RELEASE_JOB_PERMISSION_LEVELS.contains(&level.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} permissions `{scope}` must be one of {}, found `{level}`",
+                RELEASE_JOB_PERMISSION_LEVELS.join(", ")
+            )));
+        }
+    }
+    for (key, value) in &row.env {
+        if !valid_check_profile_env_key(key) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} env names `{key}`, which is not an environment name; use shell identifiers such as DEVELOPER_DIR"
+            )));
+        }
+        if value.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} env `{key}` must be one line"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -3856,6 +3960,77 @@ mod tests {
         assert_eq!(jobs[1].runner(), Some("macos"));
         assert_eq!(jobs[1].modes(), Some(&["publish".to_owned()][..]));
         assert_eq!(jobs[1].timeout_minutes(), Some(45));
+    }
+
+    #[test]
+    fn tasks_release_accepts_job_shape() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\n\n[[release.job]]\nid = \"sign\"\ntasks = [\"sign-release\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"example-signing\"\nattest_subjects = [\"dist/example-app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\nattestations = \"write\"\n\n[release.job.env]\nDEVELOPER_DIR = \"/Applications/Xcode.app/Contents/Developer\"\nSIGNING_KEY_ID = \"${{ secrets.EXAMPLE_SIGNING_KEY_ID }}\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate tasks release with job shape",
+        );
+        let jobs = config.release().jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].environment(), Some("example-signing"));
+        assert_eq!(
+            jobs[0].attest_subjects(),
+            Some(&["dist/example-app.zip".to_owned()][..])
+        );
+        assert_eq!(
+            jobs[0].permissions().get("id-token").map(String::as_str),
+            Some("write")
+        );
+        assert_eq!(
+            jobs[0].env().get("DEVELOPER_DIR").map(String::as_str),
+            Some("/Applications/Xcode.app/Contents/Developer")
+        );
+    }
+
+    #[test]
+    fn tasks_release_rejects_bad_job_shape() {
+        for (name, shape, fragment) in [
+            (
+                "empty-environment",
+                "environment = \"\"\n",
+                "environment must be one non-empty line",
+            ),
+            (
+                "empty-subject",
+                "attest_subjects = [\"\"]\n",
+                "one non-empty line per subject",
+            ),
+            (
+                "bad-scope",
+                "[release.job.permissions]\noidc = \"write\"\n",
+                "not a job permission scope",
+            ),
+            (
+                "bad-level",
+                "[release.job.permissions]\ncontents = \"admin\"\n",
+                "must be one of read, write, none",
+            ),
+            (
+                "bad-env-key",
+                "[release.job.env]\n\"has space\" = \"x\"\n",
+                "not an environment name",
+            ),
+            (
+                "multiline-env-value",
+                "[release.job.env]\nKEY = \"a\\nb\"\n",
+                "must be one line",
+            ),
+        ] {
+            let error = must_fail(
+                config_for(&format!(
+                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"build-release\"]\n{shape}"
+                ))
+                .validate(&[], &[], &BTreeSet::new()),
+                "bad release job shape must fail",
+            );
+            assert!(error.to_string().contains(fragment), "{name}: {error}");
+        }
     }
 
     #[test]

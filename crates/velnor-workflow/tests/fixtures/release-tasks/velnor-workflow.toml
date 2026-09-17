@@ -23,6 +23,16 @@ tasks = ["sign-release"]
 needs = ["build"]
 runner = "macos"
 modes = ["publish"]
+environment = "example-signing"
+attest_subjects = ["dist/example-app.zip"]
+
+[release.job.permissions]
+id-token = "write"
+attestations = "write"
+
+[release.job.env]
+DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer"
+SIGNING_KEY_ID = "${{ secrets.EXAMPLE_SIGNING_KEY_ID }}"
 
 [[declare]]
 primitive = "release"

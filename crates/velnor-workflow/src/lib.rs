@@ -959,7 +959,9 @@ struct ReleaseSpec {
 
 /// One named-task release job: the job id, display name, repository tasks it
 /// runs, sibling jobs it waits on, the lane it runs on, the release modes
-/// that run it (empty runs on every release event), and its timeout.
+/// that run it (empty runs on every release event), its timeout, the
+/// environment it runs in, the subjects it attests, and its permission and
+/// environment overrides.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReleaseJobSpec {
     pub(crate) id: String,
@@ -969,6 +971,10 @@ pub(crate) struct ReleaseJobSpec {
     pub(crate) runner: String,
     pub(crate) modes: Vec<String>,
     pub(crate) timeout_minutes: u32,
+    pub(crate) environment: String,
+    pub(crate) attest_subjects: Vec<String>,
+    pub(crate) permissions: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
 }
 
 /// One credential the release lane mounts and must unmount: the setup
@@ -2512,6 +2518,10 @@ fn apply_release(
                     .timeout_minutes()
                     .and_then(|timeout| u32::try_from(timeout).ok())
                     .unwrap_or(primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES),
+                environment: row.environment().unwrap_or_default().to_owned(),
+                attest_subjects: row.attest_subjects().unwrap_or_default().to_vec(),
+                permissions: row.permissions().clone(),
+                env: row.env().clone(),
             });
         }
         spec.jobs = jobs;
