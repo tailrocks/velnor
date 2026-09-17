@@ -12,9 +12,10 @@
 # Acquisition: the immutable release `velnor-workflow-runtime-v1-<digest16>`
 # in the product repository. The tag is a locator only; every byte is proven:
 # the manifest binds closure/revision/platform, the binary SHA-256 is
-# recomputed, the binary's own `--closure` report must match, and the
-# asset and manifest attestations must verify against the pinned producer
-# workflow.
+# recomputed, the binary's own `--closure` report must match the resolved
+# closure and its `--revision` report must match the manifest revision, and
+# the asset and manifest attestations must verify against the pinned
+# producer workflow and default-branch ref.
 #
 # The Actions cache is a pure acceleration: the per-closure directory is
 # re-verified on every restore, and a cold cache costs one small download,
@@ -121,15 +122,17 @@ runs:
         fi
         gh attestation verify "$temporary/$asset" \
           --owner tailrocks \
-          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
+          --source-ref refs/heads/main
         gh attestation verify "$temporary/manifest.json" \
           --owner tailrocks \
-          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
+          --source-ref refs/heads/main
         jq -e \
           --arg closure "$CLOSURE" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
           --arg asset "$asset" \
-          '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
+          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \
           "$temporary/manifest.json" >/dev/null
         if command -v sha256sum >/dev/null 2>&1; then
           actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
@@ -155,7 +158,7 @@ runs:
         jq -e \
           --arg closure "$CLOSURE" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
-          '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \
+          '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \
           "$runtime/manifest.json" >/dev/null
         if command -v sha256sum >/dev/null 2>&1; then
           actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"
@@ -176,6 +179,9 @@ runs:
         test -s "$runtime/manifest.json"
         reported="$("$runtime/bin/velnor-workflow" --closure)"
         [[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }
+        manifest_revision="$(jq -er '.revision' "$runtime/manifest.json")"
+        reported_revision="$("$runtime/bin/velnor-workflow" --revision)"
+        [[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::runtime at $runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }
         echo "$runtime/bin" >> "$GITHUB_PATH"
 
     - name: Save runtime cache

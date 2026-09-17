@@ -73,11 +73,19 @@ const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
 const MACOS_ARM64_RUNNER: &str = "macos-15";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
-/// full closure, release profile, empty features, a 64-hex digest for the
-/// platform, and the asset name the platform expects. The publish job
-/// evaluates this same filter over the assembled manifest, so a manifest no
-/// consumer would accept never reaches a release.
-const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
+/// full closure, a well-formed source revision, release profile, empty
+/// features, a 64-hex digest for the platform, and the asset name the
+/// platform expects. The publish job evaluates this same filter over the
+/// assembled manifest, so a manifest no consumer would accept never reaches
+/// a release.
+///
+/// The revision clause is well-formedness, not equality with the requested
+/// revision: several commits can share one closure (and therefore one
+/// product), so the manifest names the commit the producer built from while
+/// the consumer requested another. Both consumers bind the binary to the
+/// manifest instead, requiring its `--revision` report to equal the
+/// manifest's `revision`.
+const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
 
 /// The isolated Cargo home the producer steps build under, as a rendered
 /// step-level `env:` value. The `runner` context is unavailable in job-level
@@ -1779,7 +1787,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "b26ff11de799ac1c438ef7a988181499e7e1d3a1b5f785de4fcec427862001b3";
+        const PINNED: &str = "dc9c5d95a00c193a7c2332e348398ccd15f05df64252c863fa14558197b2843b";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");
