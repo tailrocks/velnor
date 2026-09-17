@@ -1749,7 +1749,7 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 /// identity the owner policy run waits for and verifies.
 ///
 /// The unit job checks out the merge commit, but the policy consumer waits
-/// for an artifact named by the audited pin's candidate closure and verifies
+/// for an artifact named by the audited head's candidate closure and verifies
 /// the audited PR-head tree's closure. Naming the artifact from the merge
 /// tree flakes whenever main advances in closure paths (rebase/merge-state
 /// decides pass/fail), so the prepare step fetches the PR head, the base,
