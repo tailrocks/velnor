@@ -14,7 +14,7 @@
 //! shared cron, and profiles in an evented file may omit `schedule` entirely
 //! for a cron-less evented file. One file carries one trigger set — scheduled
 //! and schedule-less profiles never mix in one file — and runners stay
-//! per-profile: each job runs on its own profile's lane exactly as in a
+//! per-profile: each job runs on its own profile's runner exactly as in a
 //! cron-only file, because triggers change when a job runs, never where.
 //!
 //! Why a file, not a CI unit: a scheduled check is a whole-repo compliance
@@ -428,7 +428,7 @@ fn render_scheduled_checks(
     render_checks_file(config, file, name, profiles, &[], &[])
 }
 
-/// One profile job: the lane it runs on, the timeout it holds, the threshold
+/// One profile job: the runner it runs on, the timeout it holds, the threshold
 /// environment its tasks read, and the steps that check out, provision tools,
 /// run the named tasks, and upload the declared artifacts.
 fn render_profile_job(

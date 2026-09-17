@@ -9054,6 +9054,14 @@ mod tests {
             plain.platform == provider::Platform::LinuxX64,
             "a portable package stays portable"
         );
+        assert!(
+            provider_supports_unit(ProviderId::GithubHosted, plain),
+            "a portable package is admitted on the hosted provider"
+        );
+        assert!(
+            provider_supports_unit(ProviderId::Velnor, plain),
+            "a portable package is admitted on Velnor"
+        );
         let bridge = must_some(
             config
                 .units
@@ -12982,7 +12990,7 @@ lockfile = true
         );
         assert!(
             !ci_units.contains("inputs.unit == '"),
-            "the collapsed lane jobs must not guard steps by unit identity: {ci_units}"
+            "the collapsed provider jobs must not guard steps by unit identity: {ci_units}"
         );
         assert!(
             ci_units.contains(
@@ -14411,7 +14419,7 @@ lockfile = true
         );
         assert!(
             !padded_rust.contains("inputs.unit == '"),
-            "the collapsed lane jobs must not guard steps by unit identity"
+            "the collapsed provider jobs must not guard steps by unit identity"
         );
         // The prepare-cargo job gate enumerates the restricted units (one
         // expression); every step block is rendered once per lane job.

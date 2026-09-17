@@ -2902,10 +2902,10 @@ pub(crate) mod provider_input {
     /// Comma-separated `depends_on` ids the nested job records; empty when
     /// the unit depends on nothing.
     pub(crate) const UNIT_DEPENDENCIES: &str = "unit_dependencies";
-    /// The lane admission class id the nested job records.
+    /// The provider admission class id the nested job records.
     pub(crate) const UNIT_ADMISSION: &str = "unit_admission";
     /// Comma-separated prepared-tool need records (`tool:digest:producers`)
-    /// the lane restores for the unit; empty when it needs none.
+    /// the provider restores for the unit; empty when it needs none.
     pub(crate) const PREPARED_TOOLS: &str = "prepared_tools";
 
     /// Every per-unit input, in declaration order.

@@ -196,14 +196,10 @@ pub(crate) fn unit(
 fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
     let trust = TrustReq::UntrustedOk;
     match kind {
-        UnitKind::Swift => (
-            Platform::MacosArm64,
-            trust,
-            Capabilities {
-                native_macos_arm64: true,
-                ..Capabilities::default()
-            },
-        ),
+        // A SwiftPM package is portable: it verifies wherever its toolchain
+        // provisions. Only Xcode scheme work and XCFramework consumers carry
+        // the Apple need, which the Swift detector overlays afterwards.
+        UnitKind::Swift => (Platform::LinuxX64, trust, Capabilities::default()),
         UnitKind::Docker => (
             Platform::LinuxX64,
             trust,
