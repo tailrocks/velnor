@@ -269,6 +269,18 @@ pub(crate) enum SlotCursor {
     Superseded { owner: Generation },
 }
 
+/// Which required admission check failed closed.
+///
+/// `record_admission` returns this instead of a bare boolean so the rejection
+/// completion can name the failing check and its remediation class instead of
+/// blaming workflow fields for daemon-side causes (`store.masks`,
+/// `physical-budget`, `persist`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionRejection {
+    /// Forensic check code, e.g. `store.admission.validate` or `store.masks`.
+    pub code: &'static str,
+}
+
 /// Lifetime of one job's secret masks inside the sink.
 ///
 /// The job that admitted the masks owns them; when the scope drops — on
@@ -526,33 +538,35 @@ impl OpsSink {
     /// REQUIRED write before accepting a job: persists the sanitized
     /// admission row plus its `job.acquired` transition.
     ///
-    /// Returns `false` — and never panics — when validation or persistence
-    /// fails; the caller must then reject the job explicitly rather than
-    /// execute unrecorded work.
-    pub fn record_admission(&self, admission: &JobAdmission) -> bool {
+    /// Returns the failing check code — and never panics — when validation or
+    /// persistence fails; the caller must then reject the job explicitly
+    /// rather than execute unrecorded work.
+    pub fn record_admission(&self, admission: &JobAdmission) -> Result<(), AdmissionRejection> {
         let Some(job_uid) = admission.job_uid() else {
             // The admission row is the required durable record before a job
             // can execute. Without both identity fields it has no stable key,
             // so accepting the job would create unrecorded work.
-            return self.required_failure("store.admission.identity", "github.job_id is required");
+            return Err(
+                self.required_failure("store.admission.identity", "github.job_id is required")
+            );
         };
         let summary = match admission.model_summary() {
             Ok(summary) => summary,
             Err(error) => {
-                return self.required_failure("store.admission.validate", &error);
+                return Err(self.required_failure("store.admission.validate", &error));
             }
         };
         if summary.instance_slug() != self.instance_slug {
-            return self.required_failure(
+            return Err(self.required_failure(
                 "store.admission.instance",
                 "admission instance does not match the installed operational-store sink",
-            );
+            ));
         }
         let token = format!("t-acquired-{job_uid}");
         let correlation_id = match Slug::validate("correlation_id", &format!("corr-{token}")) {
             Ok(value) => value,
             Err(error) => {
-                return self.required_failure("store.admission.transition", &error.to_string());
+                return Err(self.required_failure("store.admission.transition", &error.to_string()));
             }
         };
         let transition = Transition {
@@ -570,10 +584,10 @@ impl OpsSink {
         // completion still projects this job's text, and the caller's
         // `JobMaskScope` releases them once that path has finished.
         if !self.remember_job_masks(&job_uid, &admission.masks) {
-            return self.required_failure(
+            return Err(self.required_failure(
                 "store.masks",
                 "event mask registry is unavailable; admission rejected",
-            );
+            ));
         }
         match self.store_write(|store| {
             store.persist_summary_and_transition_with_budget(
@@ -586,13 +600,13 @@ impl OpsSink {
         }) {
             Ok(status) if status.admits_job() => {}
             Ok(status) => {
-                return self.required_failure(
+                return Err(self.required_failure(
                     "store.admission.physical-budget",
                     physical_budget_rejection(status),
-                );
+                ));
             }
             Err(error) => {
-                return self.required_failure("store.admission.persist", &error.to_string());
+                return Err(self.required_failure("store.admission.persist", &error.to_string()));
             }
         }
         let _ = self.emit_telemetry_for_admission(
@@ -600,7 +614,7 @@ impl OpsSink {
             TelemetryEvent::RunAdmitted,
             BTreeMap::new(),
         );
-        true
+        Ok(())
     }
 
     /// Emit one secret-safe lifecycle observation for an admitted job.
@@ -1177,13 +1191,13 @@ impl OpsSink {
             })
     }
 
-    fn required_failure(&self, code: &str, detail: &str) -> bool {
+    fn required_failure(&self, code: &'static str, detail: &str) -> AdmissionRejection {
         let detail = sanitize_forensic_detail(detail);
         eprintln!("REQUIRED operational-store write failed ({code}): {detail}");
         self.degraded.store(true, Ordering::Relaxed);
         self.record_forensic_failure(code, &detail);
         eprintln!("{}", forensic_failure_line(code, &detail));
-        false
+        AdmissionRejection { code }
     }
 
     /// Run one durable store operation.
@@ -1629,7 +1643,7 @@ mod tests {
         assert!(!rows[0].labels_json.contains("ghp_"));
         let mut admission = admission(202, None);
         admission.runner_name = Some(name.to_owned());
-        assert!(sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_ok());
         let stored = sink.store.fetch_summary("test-instance", 202, 1).unwrap();
         assert_eq!(
             stored.as_ref().and_then(|row| row.runner_name()),
@@ -1641,7 +1655,7 @@ mod tests {
     #[test]
     fn admission_persists_sanitized_row_and_acquired_transition() {
         let (dir, sink) = temp_sink("admission");
-        assert!(sink.record_admission(&admission(101, None)));
+        assert!(sink.record_admission(&admission(101, None)).is_ok());
         let uid = admission(101, None).job_uid().unwrap();
         let stored = sink.store.fetch_summary("test-instance", 101, 1).unwrap();
         assert!(stored.is_some());
@@ -1670,7 +1684,7 @@ mod tests {
         ] {
             let mut adm = admission(run_id, None);
             adm.trust = AdmittedTrust::narrow(class, "trusted");
-            assert!(sink.record_admission(&adm));
+            assert!(sink.record_admission(&adm).is_ok());
             let uid = adm.job_uid().unwrap();
             let stored = sink
                 .store
@@ -1696,7 +1710,7 @@ mod tests {
         let mut adm = admission(301, Some("super-secret-marker-value"));
         adm.execution_backend = Some(velnor_model::ExecutionBackendKind::MicroVm);
         adm.job_name = "hold".to_owned();
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
         let uid = adm.job_uid().unwrap();
         let stored = sink
             .store
@@ -1722,7 +1736,7 @@ mod tests {
         assert!(sink
             .emit_telemetry_for_admission(&adm, TelemetryEvent::RunQueued, fields)
             .is_some());
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
 
         let telemetry = std::fs::read_to_string(dir.join("state.test-instance.telemetry.jsonl"))
             .expect("telemetry records");
@@ -1747,7 +1761,7 @@ mod tests {
         let mut adm = admission(205, Some("fork-pr"));
         adm.trust = AdmittedTrust::narrow(TrustClass::ForkPR, "trusted");
         adm.job_name = "hold".to_owned();
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
         let uid = adm.job_uid().unwrap();
         let stored = sink
             .store
@@ -1774,7 +1788,7 @@ mod tests {
         assert!(sink
             .emit_telemetry_for_admission(&adm, TelemetryEvent::RunQueued, fields)
             .is_some());
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
 
         let telemetry = std::fs::read_to_string(dir.join("state.test-instance.telemetry.jsonl"))
             .expect("telemetry records");
@@ -1796,7 +1810,7 @@ mod tests {
         let (dir, sink) = temp_sink("passive-wait");
         let marker_secret = "super-secret-marker-value-42";
         let adm = admission(102, Some(marker_secret));
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
 
         let fields = BTreeMap::from([
             ("cause".to_owned(), serde_json::json!("host_capacity")),
@@ -1830,8 +1844,11 @@ mod tests {
                 _ => unreachable!("test only covers required identity fields"),
             }
 
-            assert!(
-                !sink.record_admission(&adm),
+            // A missing run identity reaches the durable write, which refuses
+            // the unidentified row: the code is `persist`, not `identity`.
+            assert_eq!(
+                sink.record_admission(&adm).unwrap_err().code,
+                "store.admission.persist",
                 "missing {missing} was accepted"
             );
             assert!(sink.degraded());
@@ -1841,6 +1858,82 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    /// Every required admission check names itself on failure: the rejection
+    /// completion renders the code plus the remediation class, so a stale-slot
+    /// `store.masks` streak never again reads as a workflow defect.
+    #[test]
+    fn admission_rejection_names_the_failing_check() {
+        // `store.admission.identity`: no stable job key.
+        let (_dir, sink) = temp_sink("rejection-code-identity");
+        let mut adm = admission(131, None);
+        adm.job_uid = String::new();
+        assert_eq!(
+            sink.record_admission(&adm).unwrap_err().code,
+            "store.admission.identity"
+        );
+
+        // `store.admission.validate`: the repository is not owner/name.
+        let (_dir, sink) = temp_sink("rejection-code-validate");
+        let mut adm = admission(132, None);
+        adm.repository_full_name = "noslash".to_owned();
+        assert_eq!(
+            sink.record_admission(&adm).unwrap_err().code,
+            "store.admission.validate"
+        );
+
+        // `store.admission.instance`: the admission names another sink.
+        let (_dir, sink) = temp_sink("rejection-code-instance");
+        let mut adm = admission(133, None);
+        adm.instance_slug = "other-instance".to_owned();
+        assert_eq!(
+            sink.record_admission(&adm).unwrap_err().code,
+            "store.admission.instance"
+        );
+
+        // `store.admission.transition`: the job uid fits the slug cap but the
+        // derived `corr-t-acquired-` (16 chars) correlation id exceeds it.
+        let (_dir, sink) = temp_sink("rejection-code-transition");
+        let mut adm = admission(134, None);
+        adm.job_uid = "a".repeat(velnor_model::MAX_SLUG_LEN - 15);
+        assert!(adm.job_uid.len() < velnor_model::MAX_SLUG_LEN);
+        assert_eq!(
+            sink.record_admission(&adm).unwrap_err().code,
+            "store.admission.transition"
+        );
+
+        // `store.masks`: the job's own secret patterns exceed the per-job bound.
+        let (_dir, sink) = temp_sink("rejection-code-masks");
+        let mut adm = admission(135, None);
+        adm.masks = (0..MAX_JOB_MASK_COUNT + 1)
+            .map(|index| format!("job-secret-{index}"))
+            .collect();
+        assert_eq!(sink.record_admission(&adm).unwrap_err().code, "store.masks");
+
+        // `store.admission.physical-budget`: the store holds no budget for one
+        // more job.
+        let (_dir, mut sink) = temp_sink("rejection-code-physical-budget");
+        Arc::get_mut(&mut sink)
+            .expect("test sink is uniquely owned")
+            .budget
+            .max_database_bytes = 1;
+        assert_eq!(
+            sink.record_admission(&admission(136, None))
+                .unwrap_err()
+                .code,
+            "store.admission.physical-budget"
+        );
+
+        // `store.admission.persist`: the durable write itself failed.
+        let (_dir, sink) = temp_sink("rejection-code-persist");
+        sink.fail_next_durable_store_write(ExitClass::Operation, "store.test.disk-full");
+        assert_eq!(
+            sink.record_admission(&admission(137, None))
+                .unwrap_err()
+                .code,
+            "store.admission.persist"
+        );
     }
 
     #[test]
@@ -1853,7 +1946,7 @@ mod tests {
         let mut admission = admission(112, Some("admission-secret"));
         admission.job_name = "physical-overage".to_owned();
 
-        assert!(!sink.record_admission(&admission));
+        assert!(sink.record_admission(&admission).is_err());
         assert!(sink.degraded());
         assert!(sink
             .store
@@ -1880,7 +1973,7 @@ mod tests {
         oversized.masks = (0..MAX_JOB_MASK_COUNT + 1)
             .map(|index| format!("job-secret-{index}"))
             .collect();
-        assert!(!sink.record_admission(&oversized));
+        assert!(sink.record_admission(&oversized).is_err());
         assert!(sink
             .store
             .job_summaries("test-instance")
@@ -1908,7 +2001,7 @@ mod tests {
                 .collect();
             let scope = sink.job_mask_scope(&adm.job_uid);
             assert!(
-                sink.record_admission(&adm),
+                sink.record_admission(&adm).is_ok(),
                 "cycle {cycle} must admit; the registry only holds the live job"
             );
             assert_eq!(
@@ -1933,7 +2026,7 @@ mod tests {
         let adm = admission(130, Some(secret));
         let uid = adm.job_uid().unwrap();
         let scope = sink.job_mask_scope(&uid);
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
 
         // While the scope lives, transition messages naming the secret are
         // masked before they reach the store.
@@ -1982,8 +2075,9 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    assert!(!sink
-                        .record_admission(&admission(113 + run_id, Some("concurrent-secret"),)));
+                    assert!(sink
+                        .record_admission(&admission(113 + run_id, Some("concurrent-secret"),))
+                        .is_err());
                 })
             })
             .collect::<Vec<_>>();
@@ -2007,14 +2101,14 @@ mod tests {
     fn running_job_can_complete_after_new_admission_is_denied() {
         let (_dir, mut sink) = temp_sink("admission-completion-under-pressure");
         let existing = admission(119, None);
-        assert!(sink.record_admission(&existing));
+        assert!(sink.record_admission(&existing).is_ok());
         let existing_uid = existing.job_uid().unwrap();
         Arc::get_mut(&mut sink)
             .expect("test sink is uniquely owned")
             .budget
             .max_database_bytes = 1;
 
-        assert!(!sink.record_admission(&admission(120, None)));
+        assert!(sink.record_admission(&admission(120, None)).is_err());
         assert!(sink.transition(
             &existing_uid,
             &format!("t-waiting-{existing_uid}"),
@@ -2063,7 +2157,7 @@ mod tests {
         // must be rejected rather than allowing execution to proceed.
         adm.instance_slug = "other-instance".to_owned();
 
-        assert!(!sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_err());
         assert!(sink.degraded());
     }
 
@@ -2072,7 +2166,7 @@ mod tests {
         let (_dir, sink) = temp_sink("injected-admission-failure");
         sink.fail_next_durable_store_write(ExitClass::Operation, "store.test.disk-full");
 
-        assert!(!sink.record_admission(&admission(122, None)));
+        assert!(sink.record_admission(&admission(122, None)).is_err());
         assert!(sink.degraded());
         assert!(sink
             .forensic_failures()
@@ -2090,7 +2184,7 @@ mod tests {
     fn injected_event_write_failure_degrades_without_changing_job_state() {
         let (_dir, sink) = temp_sink("injected-event-failure");
         let adm = admission(123, None);
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
         sink.fail_next_durable_store_write(ExitClass::Operation, "store.test.disk-full");
 
         sink.emit(
@@ -2124,7 +2218,7 @@ mod tests {
     fn injected_transition_write_failure_degrades_without_changing_job_state() {
         let (_dir, sink) = temp_sink("injected-transition-failure");
         let adm = admission(124, None);
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
         let uid = adm.job_uid().unwrap();
         sink.fail_next_durable_store_write(ExitClass::Timeout, "store.test.locked");
 
@@ -2162,7 +2256,7 @@ mod tests {
     fn actual_sqlite_lock_during_event_write_degrades_without_job_mutation() {
         let (dir, sink) = temp_sink("actual-locked-event");
         let adm = admission(125, None);
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
 
         let locker = rusqlite::Connection::open(dir.join("state.db")).unwrap();
         locker
@@ -2256,7 +2350,9 @@ mod tests {
         let marker_secret = "super-secret-marker-value-42";
         // A workflow whose display name embeds a secret variable value still
         // admits — but every projection is masked first.
-        assert!(sink.record_admission(&admission(202, Some(marker_secret))));
+        assert!(sink
+            .record_admission(&admission(202, Some(marker_secret)))
+            .is_ok());
         let all = sink.store.job_summaries("test-instance").unwrap();
         assert_eq!(all.len(), 1);
         assert!(!all[0].job_name.contains(marker_secret));
@@ -2301,7 +2397,7 @@ mod tests {
     fn transitions_replay_idempotently_and_terminal_events_do_not_duplicate() {
         let (_dir, sink) = temp_sink("replay");
         let adm = admission(303, None);
-        assert!(sink.record_admission(&adm));
+        assert!(sink.record_admission(&adm).is_ok());
         let uid = adm.job_uid().unwrap();
         let waiting = format!("t-waiting-{uid}");
         sink.transition(&uid, &waiting, EventReason::JobWaiting, None, None, None);
