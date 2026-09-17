@@ -11,9 +11,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
-    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
-    render_retained_output_cache_note, Args, CacheBackend, Primitive, RenderCtx, Rendered,
-    WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
+    checks_env, lanes_input_entry, lanes_runs_on, render_cargo_source_preparation,
+    render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
+    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER,
+    STATIC_WORKFLOW,
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, unit_display_label,
@@ -47,13 +48,6 @@ pub(crate) fn is_release_side(primitive: &str) -> bool {
     canonical_release_side_file(primitive).is_some() || primitive == STATIC_WORKFLOW
 }
 
-/// The workspace package compiled into the job image: the Dockerfile copies
-/// `release-binaries/<arch>/velnor-workflow`, so the platform lane builds
-/// exactly this package natively on each builder.
-const IMAGE_WORKFLOW_PACKAGE: &str = "velnor-workflow";
-/// The job-image Dockerfile the platform lane builds, relative to the
-/// repository root.
-const IMAGE_DOCKERFILE: &str = "docker/job-ubuntu.Dockerfile";
 /// The release-record schema the stable publisher assembles. The record tool
 /// and the package consumer refuse any other tag.
 const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
@@ -127,24 +121,64 @@ impl Primitive for Release {
             "apt_feed_url",
             "apt_identity_dir",
             "apt_origin",
+            "archive_checksum",
+            "archive_members",
+            "archive_retention_days",
             "artifact_path",
+            "assert_tasks",
             "binary",
+            "build_tasks",
             "consumer_repository",
+            "context",
+            "dockerfile",
             "image",
+            "image_package",
             "keyring_path",
             "kind",
             "manifest_schema",
+            "modes",
+            "name",
             "package",
             "packages",
             "passphrase_secret",
+            "platforms",
+            "producer_conclusion",
+            "producer_workflow",
+            "publish_group",
+            "pull_request_paths",
+            "push_paths",
+            "registry",
+            "registry_password_secret",
+            "registry_username_secret",
             "retention",
             "signer_fingerprint",
             "source_repository",
+            "tag_pattern",
             "targets",
+            "version_gate_tasks",
+            "version_manifest",
+            "version_prefix",
         ]
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
+        // The main-branch-driven publisher bypasses the tag-driven contract:
+        // its version comes from a manifest plus a PR gate, not from a tag,
+        // so it parses and renders from its own spec.
+        if args.string("kind")?.as_deref() == Some(VERSIONED_TOOL_KIND) {
+            let file = ctx.file.filter(|file| !file.is_empty()).ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "`{}` renders a versioned-tool publisher and needs `file`",
+                    ctx.family
+                ))
+            })?;
+            let spec = declared_versioned_tool_spec(ctx.family, file, args)?;
+            if !versioned_tool_contract_complete(&spec) {
+                return Err(incomplete_versioned_tool_contract(ctx.family, file, &spec));
+            }
+            let content = render_versioned_tool_release(ctx.config, &spec);
+            return render_file(ctx, file, content);
+        }
         let spec = declared_or_configured_spec(ctx, args)?;
         let content = render_release(ctx.config, &spec);
         render_file(ctx, "release.yml", content)
@@ -160,13 +194,27 @@ impl Primitive for Preview {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &["binary", "package", "targets"]
+        &[
+            "archive_checksum",
+            "archive_members",
+            "archive_retention_days",
+            "binary",
+            "lanes_input",
+            "modes",
+            "package",
+            "producer_conclusion",
+            "producer_workflow",
+            "targets",
+        ]
     }
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        let content = if args.keys().is_empty() {
+        let lanes_input = args.flag("lanes_input")?;
+        let content = if args.keys().is_empty() || args.keys() == ["lanes_input"] {
             // The default row renders the configured contract exactly as the
-            // legacy dispatch does, omission contract included.
+            // legacy dispatch does, omission contract included. A row naming
+            // only `lanes_input` rides the same path: the flag selects lanes,
+            // never a contract.
             preview_content(ctx.config)
         } else {
             let spec = declared_preview_spec(args)?;
@@ -174,6 +222,11 @@ impl Primitive for Preview {
                 return Err(incomplete_contract(ctx.family, &spec));
             }
             render_preview(ctx.config, Some(&spec))
+        };
+        let content = if lanes_input {
+            inject_preview_lanes(&content, ctx.config, ctx.family)?
+        } else {
+            content
         };
         render_file(ctx, "preview.yml", content)
     }
@@ -188,11 +241,14 @@ impl Primitive for Maintenance {
     }
 
     fn schema(&self) -> &'static [&'static str] {
-        &[]
+        &["lanes_input"]
     }
 
-    fn render(&self, ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        let content = format!("{GENERATED_HEADER}{}", maintenance_content(ctx.config));
+    fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
+        let content = format!(
+            "{GENERATED_HEADER}{}",
+            maintenance_content_with_lanes(ctx.config, ctx.family, args.flag("lanes_input")?)?
+        );
         render_file(ctx, "maintenance.yml", content)
     }
 }
@@ -244,20 +300,27 @@ fn declared_or_configured_spec(
 /// partially rendered publisher.
 fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError> {
     let kind = match args.string("kind")?.as_deref() {
-        Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt") => {
+        Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt" | "docker") => {
             args.string("kind")?.unwrap_or_default()
         }
         Some(other) => {
             return Err(GeneratorError::usage(format!(
-                "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, or `apt`, found `{other}`"
+                "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, `apt`, or `docker`, found `{other}`"
             )))
         }
         None => {
             return Err(GeneratorError::usage(format!(
-                "`{family}` needs `kind`; one of `crates`, `rust-binary`, `native`, `pages`, `homebrew`, or `apt`"
+                "`{family}` needs `kind`; one of `crates`, `rust-binary`, `native`, `pages`, `homebrew`, `apt`, or `docker`"
             )))
         }
     };
+    let (registry, registry_username_secret, registry_password_secret) = declared_registry_auth(
+        family,
+        &kind,
+        args.string("registry")?.as_deref(),
+        args.string("registry_username_secret")?.as_deref(),
+        args.string("registry_password_secret")?.as_deref(),
+    )?;
     let spec = ReleaseSpec {
         kind,
         package: args.string("package")?.unwrap_or_default(),
@@ -265,6 +328,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         binary: args.string("binary")?.unwrap_or_default(),
         targets: args.strings("targets")?.unwrap_or_default(),
         image: args.string("image")?.unwrap_or_default(),
+        image_package: args.string("image_package")?.unwrap_or_default(),
         source_repository: args.string("source_repository")?.unwrap_or_default(),
         consumer_repository: args.string("consumer_repository")?.unwrap_or_default(),
         artifact_path: args.string("artifact_path")?.unwrap_or_default(),
@@ -285,6 +349,33 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
                 ))
             })?,
         },
+        dockerfile: args.string("dockerfile")?.unwrap_or_default(),
+        context: args.string("context")?.unwrap_or_default(),
+        platforms: args.strings("platforms")?.unwrap_or_default(),
+        producer_workflow: args.string("producer_workflow")?.unwrap_or_default(),
+        producer_conclusion: declared_producer_conclusion(
+            family,
+            args.string("producer_conclusion")?.as_deref(),
+            args.string("producer_workflow")?.as_deref(),
+        )?,
+        modes: declared_modes(family, args.strings("modes")?.unwrap_or_default())?,
+        archive_members: declared_archive_members(
+            family,
+            args.strings("archive_members")?.unwrap_or_default(),
+        )?,
+        archive_checksum: declared_archive_checksum(
+            family,
+            args.string("archive_checksum")?.as_deref(),
+        )?,
+        archive_retention_days: declared_retention_days(
+            family,
+            args.integer("archive_retention_days")?,
+        )?,
+        credentials: Vec::new(),
+        tag_pattern: declared_tag_pattern(family, args.string("tag_pattern")?.as_deref())?,
+        registry,
+        registry_username_secret,
+        registry_password_secret,
     };
     // A declared apt contract is validated now: malformed values fail the
     // declaration loudly instead of rendering a broken feed.
@@ -301,6 +392,8 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
 /// Parse a declared rolling-preview contract: the preview lane publishes a
 /// Rust binary, so the contract is the binary publisher's without a `kind`.
 fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError> {
+    let family = PREVIEW;
+    let modes = declared_modes(family, args.strings("modes")?.unwrap_or_default())?;
     Ok(ReleaseSpec {
         kind: "rust-binary".to_owned(),
         package: args.string("package")?.unwrap_or_default(),
@@ -308,6 +401,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         binary: args.string("binary")?.unwrap_or_default(),
         targets: args.strings("targets")?.unwrap_or_default(),
         image: String::new(),
+        image_package: String::new(),
         source_repository: String::new(),
         consumer_repository: String::new(),
         artifact_path: String::new(),
@@ -321,7 +415,442 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         apt_identity_dir: String::new(),
         apt_feed_url: String::new(),
         retention: 0,
+        dockerfile: String::new(),
+        context: String::new(),
+        platforms: Vec::new(),
+        producer_workflow: args.string("producer_workflow")?.unwrap_or_default(),
+        producer_conclusion: declared_producer_conclusion(
+            family,
+            args.string("producer_conclusion")?.as_deref(),
+            args.string("producer_workflow")?.as_deref(),
+        )?,
+        modes,
+        archive_members: declared_archive_members(
+            family,
+            args.strings("archive_members")?.unwrap_or_default(),
+        )?,
+        archive_checksum: declared_archive_checksum(
+            family,
+            args.string("archive_checksum")?.as_deref(),
+        )?,
+        archive_retention_days: declared_retention_days(
+            family,
+            args.integer("archive_retention_days")?,
+        )?,
+        credentials: Vec::new(),
+        // Rolling previews trigger on push, never on tags: no pattern.
+        tag_pattern: String::new(),
+        // Rolling previews never log in to a registry.
+        registry: String::new(),
+        registry_username_secret: String::new(),
+        registry_password_secret: String::new(),
     })
+}
+
+/// The main-branch-driven versioned publisher: a tool whose version comes
+/// from a manifest plus a PR gate, published as immutable
+/// `<version_prefix><version>` releases. Unlike the tag-triggered publishers
+/// it renders to the row's own file with the row's own workflow name.
+pub(crate) const VERSIONED_TOOL_KIND: &str = "versioned-tool";
+
+/// Whether a release `kind` is driven by the main branch instead of tags.
+/// Only these rows may render outside `release.yml`; tag-triggered kinds
+/// stay pinned to the canonical file.
+pub(crate) fn is_main_branch_driven_release_kind(kind: &str) -> bool {
+    kind == VERSIONED_TOOL_KIND
+}
+
+/// The workflow `name:` a release row renders: tag-driven publishers share
+/// `Release`, while a main-branch-driven publisher takes its row's `name`
+/// or, when the row names none, the file stem — so every publisher owns a
+/// distinct identity.
+pub(crate) fn release_workflow_name(file: &str, args: &Args<'_>) -> Result<String, GeneratorError> {
+    let kind = args.string("kind")?.unwrap_or_default();
+    if !is_main_branch_driven_release_kind(&kind) {
+        return Ok("Release".to_owned());
+    }
+    if let Some(name) = args.string("name")? {
+        return Ok(name);
+    }
+    Ok(file
+        .strip_suffix(".yml")
+        .or_else(|| file.strip_suffix(".yaml"))
+        .unwrap_or(file)
+        .to_owned())
+}
+
+/// A declared main-branch-driven publisher contract. It bypasses
+/// `ReleaseSpec`: that record carries the tag-driven contract, and a
+/// manifest version plus gate tasks is not one.
+struct VersionedToolSpec {
+    name: String,
+    package: String,
+    binary: String,
+    targets: Vec<String>,
+    version_manifest: String,
+    version_prefix: String,
+    publish_group: String,
+    version_gate_tasks: Vec<String>,
+    assert_tasks: Vec<String>,
+    build_tasks: Vec<String>,
+    push_paths: Vec<String>,
+    pull_request_paths: Vec<String>,
+}
+
+/// Whether `prefix` is a well-formed version tag prefix: a non-empty stem
+/// over the tag alphabet ending in `-v`, so `gh release create` mints tags
+/// like `example-tool-v0.1.0`.
+fn valid_version_prefix(prefix: &str) -> bool {
+    prefix.strip_suffix("-v").is_some_and(|stem| {
+        !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    })
+}
+
+/// Validate one declared versioned-tool task list against the same predicate
+/// the scheduled checks use: every entry renders verbatim into
+/// `mise run <task>`.
+fn declared_versioned_tool_tasks(
+    family: &str,
+    file: &str,
+    key: &str,
+    tasks: Vec<String>,
+) -> Result<Vec<String>, GeneratorError> {
+    for task in &tasks {
+        if !crate::config::valid_check_profile_task(task) {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` file `{file}` `{key}` names task `{task}`, which is not a plain task reference; use names such as check-smoke without whitespace or shell syntax"
+            )));
+        }
+    }
+    Ok(tasks)
+}
+
+/// Validate one declared versioned-tool path list: every entry renders into
+/// a trigger `paths:` block, so empty and multi-line entries fail closed.
+fn declared_versioned_tool_paths(
+    family: &str,
+    file: &str,
+    key: &str,
+    paths: Vec<String>,
+) -> Result<Vec<String>, GeneratorError> {
+    for path in &paths {
+        if path.is_empty() || path.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` file `{file}` `{key}` must not contain an empty or multi-line path"
+            )));
+        }
+    }
+    Ok(paths)
+}
+
+/// Parse a declared versioned-tool contract. Shapes fail here with the
+/// offending value; missing fields fail in the completeness check, which
+/// names every one of them at once.
+fn declared_versioned_tool_spec(
+    family: &str,
+    file: &str,
+    args: &Args<'_>,
+) -> Result<VersionedToolSpec, GeneratorError> {
+    let name = release_workflow_name(file, args)?;
+    if name.is_empty() || name.contains(['\n', '\r']) {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` file `{file}` `name` must be one non-empty line"
+        )));
+    }
+    let version_manifest = args.string("version_manifest")?.unwrap_or_default();
+    if version_manifest.contains(['\n', '\r']) {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` file `{file}` `version_manifest` must be one line, found a multi-line value"
+        )));
+    }
+    let version_prefix = args.string("version_prefix")?.unwrap_or_default();
+    if !version_prefix.is_empty() && !valid_version_prefix(&version_prefix) {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` file `{file}` `version_prefix` must be a tag prefix ending in `-v` (letters, digits, `_`, `.`, `-`), found `{version_prefix}`"
+        )));
+    }
+    let publish_group = args.string("publish_group")?.unwrap_or_default();
+    if publish_group.contains(['\n', '\r']) {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` file `{file}` `publish_group` must be one line, found a multi-line value"
+        )));
+    }
+    Ok(VersionedToolSpec {
+        name,
+        package: args.string("package")?.unwrap_or_default(),
+        binary: args.string("binary")?.unwrap_or_default(),
+        targets: args.strings("targets")?.unwrap_or_default(),
+        version_manifest,
+        version_prefix,
+        publish_group,
+        version_gate_tasks: declared_versioned_tool_tasks(
+            family,
+            file,
+            "version_gate_tasks",
+            args.strings("version_gate_tasks")?.unwrap_or_default(),
+        )?,
+        assert_tasks: declared_versioned_tool_tasks(
+            family,
+            file,
+            "assert_tasks",
+            args.strings("assert_tasks")?.unwrap_or_default(),
+        )?,
+        build_tasks: declared_versioned_tool_tasks(
+            family,
+            file,
+            "build_tasks",
+            args.strings("build_tasks")?.unwrap_or_default(),
+        )?,
+        push_paths: declared_versioned_tool_paths(
+            family,
+            file,
+            "push_paths",
+            args.strings("push_paths")?.unwrap_or_default(),
+        )?,
+        pull_request_paths: declared_versioned_tool_paths(
+            family,
+            file,
+            "pull_request_paths",
+            args.strings("pull_request_paths")?.unwrap_or_default(),
+        )?,
+    })
+}
+
+/// Whether a declared versioned-tool contract renders: the binary publisher
+/// core (package, binary, real targets) plus the manifest version source,
+/// the tag prefix, the publish mutex, the gate and build tasks, and both
+/// trigger path lists. Assert tasks stay optional: the assert job's generic
+/// published-reuse check renders with or without them.
+fn versioned_tool_contract_complete(spec: &VersionedToolSpec) -> bool {
+    !spec.package.is_empty()
+        && !spec.binary.is_empty()
+        && targets_are_real(&spec.targets)
+        && !spec.version_manifest.is_empty()
+        && valid_version_prefix(&spec.version_prefix)
+        && !spec.publish_group.is_empty()
+        && !spec.version_gate_tasks.is_empty()
+        && !spec.build_tasks.is_empty()
+        && !spec.push_paths.is_empty()
+        && !spec.pull_request_paths.is_empty()
+}
+
+fn incomplete_versioned_tool_contract(
+    family: &str,
+    file: &str,
+    spec: &VersionedToolSpec,
+) -> GeneratorError {
+    let mut missing = Vec::new();
+    if spec.package.is_empty() {
+        missing.push("`package`");
+    }
+    if spec.binary.is_empty() {
+        missing.push("`binary`");
+    }
+    if !targets_are_real(&spec.targets) {
+        missing.push("`targets`");
+    }
+    if spec.version_manifest.is_empty() {
+        missing.push("`version_manifest`");
+    }
+    if !valid_version_prefix(&spec.version_prefix) {
+        missing.push("`version_prefix`");
+    }
+    if spec.publish_group.is_empty() {
+        missing.push("`publish_group`");
+    }
+    if spec.version_gate_tasks.is_empty() {
+        missing.push("`version_gate_tasks`");
+    }
+    if spec.build_tasks.is_empty() {
+        missing.push("`build_tasks`");
+    }
+    if spec.push_paths.is_empty() {
+        missing.push("`push_paths`");
+    }
+    if spec.pull_request_paths.is_empty() {
+        missing.push("`pull_request_paths`");
+    }
+    GeneratorError::usage(format!(
+        "`{family}` file `{file}` declares an incomplete versioned-tool contract; missing: {}",
+        missing.join(", ")
+    ))
+}
+
+/// Validate a declared producer conclusion: only `success` binds, and a
+/// conclusion without a producer workflow binds nothing.
+fn declared_producer_conclusion(
+    family: &str,
+    conclusion: Option<&str>,
+    producer: Option<&str>,
+) -> Result<String, GeneratorError> {
+    match conclusion {
+        None => Ok(String::new()),
+        Some("success") if producer.is_some_and(|value| !value.is_empty()) => {
+            Ok("success".to_owned())
+        }
+        Some("success") => Err(GeneratorError::usage(format!(
+            "`{family}` `producer_conclusion` needs `producer_workflow`: a required conclusion without a trusted producer binds nothing"
+        ))),
+        Some(other) => Err(GeneratorError::usage(format!(
+            "`{family}` `producer_conclusion` must be `success`, found `{other}`"
+        ))),
+    }
+}
+
+/// Validate declared dispatch modes: every mode must be one the renderer
+/// offers, and `publish` is never a dispatch option.
+/// Validate a declared tag-trigger filter: one non-empty line with no
+/// whitespace. Absent selects `v*` at render.
+fn declared_tag_pattern(family: &str, pattern: Option<&str>) -> Result<String, GeneratorError> {
+    match pattern {
+        None => Ok(String::new()),
+        Some(pattern) if crate::runtime::valid_tag_pattern(pattern) => Ok(pattern.to_owned()),
+        Some(pattern) => Err(GeneratorError::usage(format!(
+            "`{family}` `tag_pattern` must be one non-empty line with no whitespace, found `{pattern}`"
+        ))),
+    }
+}
+
+/// Validate a declared registry-auth triple: all three members travel
+/// together, the host is a lowercase hostname, and both credentials are
+/// secret names. Absent selects the GHCR automatic-token login at render.
+/// The triple renders only for the `docker` publisher — every other kind
+/// either never logs in or is bound to GHCR by its attestation flow.
+fn declared_registry_auth(
+    family: &str,
+    kind: &str,
+    registry: Option<&str>,
+    username_secret: Option<&str>,
+    password_secret: Option<&str>,
+) -> Result<(String, String, String), GeneratorError> {
+    if registry.is_none() && username_secret.is_none() && password_secret.is_none() {
+        return Ok((String::new(), String::new(), String::new()));
+    }
+    for (name, value) in [
+        ("registry", registry),
+        ("registry_username_secret", username_secret),
+        ("registry_password_secret", password_secret),
+    ] {
+        if value.is_none() {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` `{name}` is missing: registry auth declares `registry`, `registry_username_secret`, and `registry_password_secret` together"
+            )));
+        }
+    }
+    let registry = registry.unwrap_or_default();
+    if !crate::runtime::valid_registry_host(registry) {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` `registry` must be a lowercase host with an optional `:port`, found `{registry}`"
+        )));
+    }
+    crate::config::validate_secret_name(
+        &format!("`{family}` `registry_username_secret`"),
+        username_secret.unwrap_or_default(),
+        "REGISTRY_USERNAME",
+    )?;
+    crate::config::validate_secret_name(
+        &format!("`{family}` `registry_password_secret`"),
+        password_secret.unwrap_or_default(),
+        "REGISTRY_PASSWORD",
+    )?;
+    if kind != "docker" {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` registry auth renders only for kind `docker`, not `{kind}`"
+        )));
+    }
+    Ok((
+        registry.to_owned(),
+        username_secret.unwrap_or_default().to_owned(),
+        password_secret.unwrap_or_default().to_owned(),
+    ))
+}
+
+/// The tag filter the push trigger matches: the declared pattern, or `v*`
+/// when the contract declares none.
+fn release_tag_pattern(release: &ReleaseSpec) -> &str {
+    if release.tag_pattern.is_empty() {
+        "v*"
+    } else {
+        &release.tag_pattern
+    }
+}
+
+/// The `on: push: tags:` trigger block. The base renders and the dispatch
+/// injectors share it, so a declared pattern flows to both the rendered
+/// trigger and the match the injector looks for.
+fn release_trigger_block(release: &ReleaseSpec) -> String {
+    format!(
+        "on:\n  push:\n    tags: [{}]\n",
+        yaml_scalar(release_tag_pattern(release))
+    )
+}
+
+/// The `release.yml` trigger header: the workflow name plus the tag-filtered
+/// push trigger, through the control-plane verify job's step list.
+fn release_trigger_header(release: &ReleaseSpec) -> String {
+    format!(
+        "name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\n{trigger}\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Control / Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
+        trigger = release_trigger_block(release),
+    )
+}
+
+fn declared_modes(family: &str, modes: Vec<String>) -> Result<Vec<String>, GeneratorError> {
+    for mode in &modes {
+        if !crate::config::is_release_mode(mode) {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` `modes` must be one of {}, found `{mode}`; publish is tag-triggered, never a dispatch option",
+                crate::config::RELEASE_MODES.join(", ")
+            )));
+        }
+    }
+    Ok(modes)
+}
+
+/// Validate declared archive members: portable bare file names, never paths.
+fn declared_archive_members(
+    family: &str,
+    members: Vec<String>,
+) -> Result<Vec<String>, GeneratorError> {
+    for member in &members {
+        if member.is_empty()
+            || !member
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` `archive_members` must be portable file names without directories, found `{member}`"
+            )));
+        }
+    }
+    Ok(members)
+}
+
+/// Validate a declared archive checksum algorithm: only `sha256` exists.
+fn declared_archive_checksum(
+    family: &str,
+    checksum: Option<&str>,
+) -> Result<String, GeneratorError> {
+    match checksum {
+        None => Ok(String::new()),
+        Some("sha256") => Ok("sha256".to_owned()),
+        Some(other) => Err(GeneratorError::usage(format!(
+            "`{family}` `archive_checksum` must be `sha256`, found `{other}`"
+        ))),
+    }
+}
+
+/// Validate a declared archive retention: GitHub's 1-90 day window.
+fn declared_retention_days(family: &str, retention: Option<i64>) -> Result<u32, GeneratorError> {
+    match retention {
+        None => Ok(0),
+        Some(days) if (1..=90).contains(&days) => Ok(u32::try_from(days).unwrap_or(0)),
+        Some(days) => Err(GeneratorError::usage(format!(
+            "`{family}` `archive_retention_days` must be 1-90, found `{days}`"
+        ))),
+    }
 }
 
 fn incomplete_contract(family: &str, spec: &ReleaseSpec) -> GeneratorError {
@@ -330,6 +859,7 @@ fn incomplete_contract(family: &str, spec: &ReleaseSpec) -> GeneratorError {
         "rust-binary" => "`package`, `binary`, and `targets`",
         "pages" => "`artifact_path`",
         "apt" => "`package`, `binary`, `source_repository`, `consumer_repository`, `manifest_schema`, `signer_fingerprint`, `passphrase_secret`, and `apt_feed_url`",
+        "docker" => "`image`",
         _ => "the contract",
     };
     GeneratorError::usage(format!(
@@ -363,13 +893,16 @@ fn render_file(
     })
 }
 
+/// Whether every declared target is a real Rust target triple the release
+/// lanes build for: Linux GNU or Apple Darwin, never a bare arch.
+fn targets_are_real(targets: &[String]) -> bool {
+    !targets.is_empty()
+        && targets.iter().all(|target| {
+            target.ends_with("-unknown-linux-gnu") || target.ends_with("-apple-darwin")
+        })
+}
+
 pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
-    let targets_are_real = |targets: &[String]| {
-        !targets.is_empty()
-            && targets.iter().all(|target| {
-                target.ends_with("-unknown-linux-gnu") || target.ends_with("-apple-darwin")
-            })
-    };
     match release.kind.as_str() {
         "crates" => !release.packages.is_empty(),
         "rust-binary" | "native" => {
@@ -389,6 +922,12 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
                 && !release.passphrase_secret.is_empty()
                 && !release.apt_feed_url.is_empty()
         }
+        "docker" => {
+            !release.image.is_empty() && crate::config::valid_docker_platforms(&release.platforms)
+        }
+        // `versioned-tool` included: it never arrives as a `ReleaseSpec` —
+        // the declare row parses it into its own spec, whose completeness
+        // gate is `versioned_tool_contract_complete`.
         _ => false,
     }
 }
@@ -1180,10 +1719,17 @@ fn render_sign_deb_job(
             format!("refs/heads/{}", config.default_branch),
         )
     } else {
+        // Provenance signing is publish-only: drilled modes build and
+        // verify the packages but sign nothing.
+        let gate = if has_release_modes(release) {
+            "    if: ${{ needs.verify.outputs.mode == 'publish' }}\n".to_owned()
+        } else {
+            String::new()
+        };
         (
             "Sign ${{ matrix.arch }} Debian package",
             "    needs: [verify, debian]\n",
-            String::new(),
+            gate,
             release.package.clone(),
             "${{ needs.verify.outputs.version }}",
             "refs/tags/${{ github.ref_name }}".to_owned(),
@@ -1231,18 +1777,31 @@ fn render_image_admission_job(config: &ProjectConfig, release: &ReleaseSpec) -> 
     format!(
         "  image-admission:\n    needs: [admit-runner, verify]\n    name: Admit immutable image tag\n    timeout-minutes: 10\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: read\n    outputs:\n      existing: ${{{{ steps.inspect.outputs.existing }}}}\n      index_digest: ${{{{ steps.inspect.outputs.index_digest }}}}\n    steps:\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Inspect version tag without mutation\n        id: inspect\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          GHCR_IMAGE: {image}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          REPOSITORY: ${{{{ github.repository }}}}\n          RECOVERY_INDEX_DIGEST: ${{{{ github.event_name == 'workflow_dispatch' && inputs.existing-image-digest || '' }}}}\n        run: |\n          set -euo pipefail\n          ref=\"${{GHCR_IMAGE}}:${{VERSION}}\"\n          error_file=\"$(mktemp)\"\n          if docker buildx imagetools inspect \"$ref\" --format '{{{{json .}}}}' > image.json 2>\"$error_file\"; then\n            index_digest=\"$(jq -er '.manifest.digest' image.json)\"\n            case \"$index_digest\" in\n              sha256:[0-9a-fA-F]*) ;;\n              *) echo \"::error::existing image tag $ref returned an invalid index digest\" >&2; exit 1 ;;\n            esac\n            if ! gh release view \"v${{VERSION}}\" --repo \"$REPOSITORY\" >/dev/null 2>&1; then\n              if [ -z \"$RECOVERY_INDEX_DIGEST\" ] || [ \"$index_digest\" != \"$RECOVERY_INDEX_DIGEST\" ]; then\n                echo \"::error::OCI tag $ref already exists without a matching GitHub release; refusing to adopt unknown bytes\" >&2\n                exit 1\n              fi\n              echo \"adopting explicitly supplied recovery index $index_digest\"\n            fi\n            {{\n              echo \"existing=true\"\n              echo \"index_digest=$index_digest\"\n            }} >> \"$GITHUB_OUTPUT\"\n          elif grep -Eiq 'manifest unknown|no such manifest|not found|name unknown' \"$error_file\"; then\n            {{\n              echo \"existing=false\"\n              echo \"index_digest=\"\n            }} >> \"$GITHUB_OUTPUT\"\n          else\n            cat \"$error_file\" >&2\n            echo \"::error::could not determine whether OCI tag $ref exists; refusing a fail-open publish\" >&2\n            exit 1\n          fi\n",
         runner = yaml_scalar(&config.github_runner),
-        image = release.image,
+        image = yaml_scalar(&release.image),
     )
 }
 
-/// The per-arch OCI platform lane: each native builder compiles the workflow
-/// binary the job image embeds, then builds and pushes its platform image
-/// under a disposable commit-scoped staging tag. Version tags are admitted
-/// and promoted only by the index job; staging tags can never overwrite a
-/// consumer-facing tag.
+/// The per-arch OCI platform lane: each native builder compiles the binary
+/// the image embeds (the declared image package, else the release package),
+/// then builds and pushes its platform image under a disposable
+/// commit-scoped staging tag. Version tags are admitted and promoted only
+/// by the index job; staging tags can never overwrite a consumer-facing
+/// tag. The lane standardizes the Dockerfile handoff points — the binary
+/// at `release-binaries/<arch>/<package>`, a `VERSION` build arg, and the
+/// automatic token as the `github_token` build secret — while Dockerfiles
+/// and image contents stay consumer-owned.
 fn render_image_platform_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let needs = "admit-runner, verify, metadata, image-admission";
-    let gate = "    if: ${{ needs.image-admission.outputs.existing != 'true' }}\n";
+    // Staging pushes write to the registry, so drilled modes skip the lane
+    // instead of pushing drill bytes under commit tags, and a modeless lane
+    // never pushes from a dispatch: without a mode gate a dispatch-on-tag
+    // would stage platforms the index job then assembles into an orphaned
+    // version tag no later tag push can adopt.
+    let gate = if has_release_modes(release) {
+        "    if: ${{ needs.image-admission.outputs.existing != 'true' && needs.verify.outputs.mode == 'publish' }}\n"
+    } else {
+        "    if: ${{ needs.image-admission.outputs.existing != 'true' && github.event_name != 'workflow_dispatch' }}\n"
+    };
     let Some(matrix) = image_platform_matrix(config, &release.targets) else {
         return format!(
             "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} GHCR image\n    needs: [{needs}]\n{gate}    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject non-multi-arch image contract\n        run: |\n          echo '::error::native OCI lane needs exactly x86_64+aarch64 linux targets' >&2\n          exit 1\n",
@@ -1254,20 +1813,37 @@ fn render_image_platform_job(config: &ProjectConfig, release: &ReleaseSpec) -> S
     let buildx = ActionPin::DockerBuildx.reference();
     let login = ActionPin::DockerLogin.reference();
     let build = ActionPin::DockerBuild.reference();
+    // The binary the Dockerfile copies from `release-binaries/<arch>/`: the
+    // declared image package, else the release package. Both empty means the
+    // contract names no binary, so the lane rejects instead of building a
+    // hardcoded package that only exists in one repository.
+    let workflow_package = if release.image_package.is_empty() {
+        release.package.as_str()
+    } else {
+        release.image_package.as_str()
+    };
+    if workflow_package.is_empty() {
+        return format!(
+            "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} GHCR image\n    needs: [{needs}]\n{gate}    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject imageless binary contract\n        run: |\n          echo '::error::native OCI lane needs `package` or `image_package` naming the binary the image embeds' >&2\n          exit 1\n",
+            runner = yaml_scalar(&config.github_runner),
+        );
+    }
     let mut setup = String::new();
     let workflow = WorkflowIr::from_config(config);
-    let cargo_cmd = if let Some(unit) = rust_package_unit(config, IMAGE_WORKFLOW_PACKAGE) {
+    let cargo_cmd = if let Some(unit) = rust_package_unit(config, workflow_package) {
         workflow.render_tool_provisioning(&mut setup, RunnerMode::Github, unit, false);
         "mbx"
     } else {
         "cargo"
     };
     format!(
-        "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} GHCR image\n    needs: [{needs}]\n{gate}    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n{setup}      - name: Build the workflow binary for the image\n        env:\n          CARGO_INCREMENTAL: \"0\"\n        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {workflow_package}\n          binary=\"release-binaries/${{{{ matrix.arch }}}}/{workflow_package}\"\n          mkdir -p \"release-binaries/${{{{ matrix.arch }}}}\"\n          cp \"target/release/{workflow_package}\" \"$binary\"\n          chmod 0755 \"$binary\"\n          test -x \"$binary\"\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Build + push platform image\n        id: push\n        uses: {build}\n        with:\n          context: .\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          push: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope=velnor-job-ubuntu-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope=velnor-job-ubuntu-${{{{ matrix.arch }}}},mode=max\n          secrets: |\n            mise_github_token=${{{{ github.token }}}}\n          build-args: |\n            VELNOR_IMAGE_VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}:release-${{{{ env.COMMIT }}}}-${{{{ matrix.arch }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n            org.velnor.manifest-sha256=${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n      - name: Record platform digest\n        env:\n          ARCH: ${{{{ matrix.arch }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \\\n            \"${{GHCR_IMAGE}}:release-${{COMMIT}}-${{ARCH}}\" \\\n            --format '{{{{json .}}}}' > image-inspect.json\n          PLATFORM_DIGEST=\"$(jq -er --arg arch \"$ARCH\" '\n            [.manifest.manifests[]\n             | select(.platform.architecture == $arch and .platform.os == \"linux\")\n             | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")\n             | .digest]\n            | if length == 1 then .[0] else error(\"expected one image manifest for architecture\") end\n          ' image-inspect.json)\"\n          case \"$PLATFORM_DIGEST\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::staging image inspection did not return a platform digest\" >&2; exit 1 ;;\n          esac\n          printf '%s\\n' \"$PLATFORM_DIGEST\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
-        image = release.image,
+        "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} GHCR image\n    needs: [{needs}]\n{gate}    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n{setup}      - name: Build the image binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {workflow_package}\n          binary=\"release-binaries/${{{{ matrix.arch }}}}/{workflow_package}\"\n          mkdir -p \"release-binaries/${{{{ matrix.arch }}}}\"\n          cp \"target/release/{workflow_package}\" \"$binary\"\n          chmod 0755 \"$binary\"\n          test -x \"$binary\"\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Build + push platform image\n        id: push\n        uses: {build}\n        with:\n          context: {context}\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          push: true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope={scope}-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope={scope}-${{{{ matrix.arch }}}},mode=max\n          secrets: |\n            github_token=${{{{ github.token }}}}\n          build-args: |\n            VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}:release-${{{{ env.COMMIT }}}}-${{{{ matrix.arch }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n            org.velnor.manifest-sha256=${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n      - name: Record platform digest\n        env:\n          ARCH: ${{{{ matrix.arch }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \\\n            \"${{GHCR_IMAGE}}:release-${{COMMIT}}-${{ARCH}}\" \\\n            --format '{{{{json .}}}}' > image-inspect.json\n          PLATFORM_DIGEST=\"$(jq -er --arg arch \"$ARCH\" '\n            [.manifest.manifests[]\n             | select(.platform.architecture == $arch and .platform.os == \"linux\")\n             | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")\n             | .digest]\n            | if length == 1 then .[0] else error(\"expected one image manifest for architecture\") end\n          ' image-inspect.json)\"\n          case \"$PLATFORM_DIGEST\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::staging image inspection did not return a platform digest\" >&2; exit 1 ;;\n          esac\n          printf '%s\\n' \"$PLATFORM_DIGEST\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        image = yaml_scalar(&release.image),
         source_url = release_source_url(release),
-        workflow_package = IMAGE_WORKFLOW_PACKAGE,
-        dockerfile = IMAGE_DOCKERFILE,
+        workflow_package = workflow_package,
+        dockerfile = yaml_scalar(docker_dockerfile(release)),
+        context = yaml_scalar(docker_context(release)),
+        scope = docker_cache_scope(&release.image),
     )
 }
 
@@ -1281,10 +1857,20 @@ fn render_image_index_job(config: &ProjectConfig, release: &ReleaseSpec) -> Stri
     let upload = ActionPin::UploadArtifact.reference();
     let buildx = ActionPin::DockerBuildx.reference();
     let login = ActionPin::DockerLogin.reference();
+    // A drilled mode assembles no version tag: the immutable index push is
+    // publish-only, while skipped staging builds stay skipped. A modeless
+    // lane refuses the dispatch event outright: assembling a version index
+    // off a dispatch orphans a tag no later tag push can adopt.
+    let mode_gate = if has_release_modes(release) {
+        " && needs.verify.outputs.mode == 'publish'"
+    } else {
+        " && github.event_name != 'workflow_dispatch'"
+    };
     format!(
-        "  image:\n    if: ${{{{ always() && needs.admit-runner.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') }}}}\n    needs: [admit-runner, verify, metadata, image-platform, image-admission]\n    name: Assemble one multi-platform GHCR image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n      manifest_sha256: ${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n    env:\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          AMD64_DIGEST_FILE: image-artifacts/image-amd64.digest\n          ARM64_DIGEST_FILE: image-artifacts/image-arm64.digest\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n            for path in \"$AMD64_DIGEST_FILE\" \"$ARM64_DIGEST_FILE\"; do\n              test -s \"$path\"\n              digest=\"$(tr -d '[:space:]' < \"$path\")\"\n              case \"$digest\" in\n                sha256:[0-9a-fA-F]*) ;;\n                *) echo \"::error::invalid platform digest in $path\" >&2; exit 1 ;;\n              esac\n            done\n            amd64_digest=\"$(tr -d '[:space:]' < \"$AMD64_DIGEST_FILE\")\"\n            arm64_digest=\"$(tr -d '[:space:]' < \"$ARM64_DIGEST_FILE\")\"\n            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-amd64\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-arm64\"\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e --arg amd \"$amd64_digest\" --arg arm \"$arm64_digest\" '\n              any(.manifest.manifests[]; .digest == $amd and .platform.architecture == \"amd64\") and\n              any(.manifest.manifests[]; .digest == $arm and .platform.architecture == \"arm64\")\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference both newly built platform digests\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  image:\n    if: ${{{{ always() && needs.admit-runner.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped'){mode_gate} }}}}\n    needs: [admit-runner, verify, metadata, image-platform, image-admission]\n    name: Assemble one multi-platform GHCR image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n      manifest_sha256: ${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n    env:\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          AMD64_DIGEST_FILE: image-artifacts/image-amd64.digest\n          ARM64_DIGEST_FILE: image-artifacts/image-arm64.digest\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n            for path in \"$AMD64_DIGEST_FILE\" \"$ARM64_DIGEST_FILE\"; do\n              test -s \"$path\"\n              digest=\"$(tr -d '[:space:]' < \"$path\")\"\n              case \"$digest\" in\n                sha256:[0-9a-fA-F]*) ;;\n                *) echo \"::error::invalid platform digest in $path\" >&2; exit 1 ;;\n              esac\n            done\n            amd64_digest=\"$(tr -d '[:space:]' < \"$AMD64_DIGEST_FILE\")\"\n            arm64_digest=\"$(tr -d '[:space:]' < \"$ARM64_DIGEST_FILE\")\"\n            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-amd64\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-arm64\"\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e --arg amd \"$amd64_digest\" --arg arm \"$arm64_digest\" '\n              any(.manifest.manifests[]; .digest == $amd and .platform.architecture == \"amd64\") and\n              any(.manifest.manifests[]; .digest == $arm and .platform.architecture == \"arm64\")\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference both newly built platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"2\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}
+          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
         runner = yaml_scalar(&config.github_runner),
-        image = release.image,
+        image = yaml_scalar(&release.image),
         source_url = release_source_url(release),
     )
 }
@@ -1379,6 +1965,37 @@ fn native_publish_asset_lists(release: &ReleaseSpec, version: &str) -> (String, 
     (assets, published, arch_targets)
 }
 
+/// Re-verify the release tag still points at the event commit, immediately
+/// before publication. `gh release create --verify-tag` only checks the tag
+/// exists, so a tag moved between verify and publish would otherwise bind
+/// the release to bytes built from a different commit. Every immutable
+/// publisher carries this step; the tag, the bytes, and the record agree or
+/// the lane refuses.
+const TAG_IMMUTABILITY_STEP: &str = r#"      - name: Verify release tag stayed immutable before publication
+        env:
+          EXPECTED_TAG_REF: ${{ github.ref }}
+          EXPECTED_TAG_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          remote_tag_refs="$(git ls-remote --exit-code origin "$EXPECTED_TAG_REF" "$EXPECTED_TAG_REF^{}")"
+          remote_tag_commit="$(printf '%s\n' "$remote_tag_refs" | awk -v expected="$EXPECTED_TAG_REF" '
+            $2 == expected "^{}" { peeled=$1; found_peeled=1; next }
+            $2 == expected && !found_peeled { raw=$1 }
+            END {
+              if (found_peeled) print peeled
+              else if (raw != "") print raw
+            }
+          ')"
+          case "$remote_tag_commit" in
+            *[!0-9a-f]*|'') echo "::error::release tag $EXPECTED_TAG_REF did not resolve to lowercase hex" >&2; exit 1 ;;
+          esac
+          [ "${#remote_tag_commit}" -eq 40 ] || { echo "::error::release tag $EXPECTED_TAG_REF did not resolve to one commit" >&2; exit 1; }
+          [ "$remote_tag_commit" = "$EXPECTED_TAG_COMMIT" ] || {
+            echo "::error::release tag $EXPECTED_TAG_REF moved from $EXPECTED_TAG_COMMIT to $remote_tag_commit" >&2
+            exit 1
+          }
+"#;
+
 fn render_native_publish_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -1430,14 +2047,22 @@ fn render_native_publish_job(
         assets = assets,
         consumer = release.consumer_repository,
     );
+    // Publication — including its no-clobber reconciliation — is
+    // publish-only: drilled modes stop after the local assembly.
+    let mode_gate = if has_release_modes(release) {
+        "    if: ${{ needs.verify.outputs.mode == 'publish' }}\n"
+    } else {
+        ""
+    };
     format!(
-        "  publish:\n    name: Control / Publish\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n      packages: read\n    env:\n      VERSION: {version}\n      SOURCE_REF: ${{{{ github.ref }}}}\n      SOURCE_COMMIT: ${{{{ github.sha }}}}\n      COMMIT: ${{{{ github.sha }}}}\n      INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n      MANIFEST_SHA256: ${{{{ needs.image.outputs.manifest_sha256 }}}}\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: {lane}-*\n          merge-multiple: true\n      - name: Download Debian packages\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n          path: artifacts\n      - name: Download image digests\n        uses: {download}\n        with:\n          name: image-digests\n          path: artifacts\n      - name: Verify tarball provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify deb provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.deb; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\"; done\n{record_assembly}{record_reverify}      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*.tar.gz artifacts/*.deb)\n          test \"${{#subjects[@]}}\" -eq {subject_count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {subject_count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n{manifest_step}      - name: Stage package subjects for hosted signer\n        run: |\n          set -euo pipefail\n          mkdir signer-input\n          cp artifacts/{binary}-*.tar.gz artifacts/{package}-*.deb signer-input/\n{packaged_identity}      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR for immutable image verification\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Verify OCI index stayed immutable before publication\n        env:\n          EXPECTED_INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > published-image.json\n          published_index=\"$(jq -er '.manifest.digest' published-image.json)\"\n          [ \"$published_index\" = \"$EXPECTED_INDEX_DIGEST\" ] || {{\n            echo \"::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication\" >&2\n            exit 1\n          }}\n      - name: Verify release tag stayed immutable before publication\n        env:\n          EXPECTED_TAG_REF: ${{{{ github.ref }}}}\n          EXPECTED_TAG_COMMIT: ${{{{ github.sha }}}}\n        run: |\n          set -euo pipefail\n          remote_tag_refs=\"$(git ls-remote --exit-code origin \"$EXPECTED_TAG_REF\" \"$EXPECTED_TAG_REF^{{}}\")\"\n          remote_tag_commit=\"$(printf '%s\\n' \"$remote_tag_refs\" | awk -v expected=\"$EXPECTED_TAG_REF\" '\n            $2 == expected \"^{{}}\" {{ peeled=$1; found_peeled=1; next }}\n            $2 == expected && !found_peeled {{ raw=$1 }}\n            END {{\n              if (found_peeled) print peeled\n              else if (raw != \"\") print raw\n            }}\n          ')\"\n          case \"$remote_tag_commit\" in\n            *[!0-9a-f]*|'') echo \"::error::release tag $EXPECTED_TAG_REF did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#remote_tag_commit}}\" -eq 40 ] || {{ echo \"::error::release tag $EXPECTED_TAG_REF did not resolve to one commit\" >&2; exit 1; }}\n          [ \"$remote_tag_commit\" = \"$EXPECTED_TAG_COMMIT\" ] || {{\n            echo \"::error::release tag $EXPECTED_TAG_REF moved from $EXPECTED_TAG_COMMIT to $remote_tag_commit\" >&2\n            exit 1\n          }}\n{create_verify}      - name: Upload package subjects\n        uses: {upload}\n        with:\n          name: package-subjects\n          path: signer-input\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  publish:\n    name: Control / Publish\n    needs: [{needs}]\n{mode_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n      packages: read\n    env:\n      VERSION: {version}\n      SOURCE_REF: ${{{{ github.ref }}}}\n      SOURCE_COMMIT: ${{{{ github.sha }}}}\n      COMMIT: ${{{{ github.sha }}}}\n      INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n      MANIFEST_SHA256: ${{{{ needs.image.outputs.manifest_sha256 }}}}\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: artifacts\n          pattern: {lane}-*\n          merge-multiple: true\n      - name: Download Debian packages\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n          path: artifacts\n      - name: Download image digests\n        uses: {download}\n        with:\n          name: image-digests\n          path: artifacts\n      - name: Verify tarball provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify deb provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in artifacts/*.deb; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\"; done\n{record_assembly}{record_reverify}      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*.tar.gz artifacts/*.deb)\n          test \"${{#subjects[@]}}\" -eq {subject_count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {subject_count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n{manifest_step}      - name: Stage package subjects for hosted signer\n        run: |\n          set -euo pipefail\n          mkdir signer-input\n          cp artifacts/{binary}-*.tar.gz artifacts/{package}-*.deb signer-input/\n{packaged_identity}      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR for immutable image verification\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Verify OCI index stayed immutable before publication\n        env:\n          EXPECTED_INDEX_DIGEST: ${{{{ needs.image.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > published-image.json\n          published_index=\"$(jq -er '.manifest.digest' published-image.json)\"\n          [ \"$published_index\" = \"$EXPECTED_INDEX_DIGEST\" ] || {{\n            echo \"::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication\" >&2\n            exit 1\n          }}\n{tag_check}{create_verify}      - name: Upload package subjects\n        uses: {upload}\n        with:\n          name: package-subjects\n          path: signer-input\n          if-no-files-found: error\n          retention-days: 2\n",
         runner = selected_runner(config),
         lane = canonical_lane(config),
-        image = release.image,
+        image = yaml_scalar(&release.image),
         source_url = release_source_url(release),
         binary = release.binary,
         package = release.package,
+        tag_check = TAG_IMMUTABILITY_STEP,
     )
 }
 
@@ -1539,12 +2164,96 @@ fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sig
         )
     };
     format!(
-        "  publish:\n    needs: [{needs}]\n    name: Replace the rolling preview release\n    if: ${{{{ github.ref == 'refs/heads/{branch}' }}}}\n    timeout-minutes: 20\n    runs-on: {runner}\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.identity.outputs.version }}}}\n      NAME: ${{{{ needs.identity.outputs.name }}}}\n      COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      GH_REPO: ${{{{ github.repository }}}}\n    steps:\n      - name: Download preview debs\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download preview metadata\n        uses: {download}\n        with:\n          name: preview-metadata\n          path: preview-metadata\n      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*-preview-*.deb)\n          test \"${{#subjects[@]}}\" -eq {count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n          chmod +x preview-metadata/{binary}-release-tool\n          tmpdir=\"$(mktemp -d)\"\n          trap 'rm -rf -- \"$tmpdir\"' EXIT\n          for arch in {arch_list}; do\n            deb=\"artifacts/{package}-preview-${{VERSION}}-${{arch}}.deb\"\n            [ -f \"$deb\" ] || {{ echo \"::error::missing preview deb for $arch\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Version)\" = \"$VERSION\" ] \\\n              || {{ echo \"::error::published deb version != preview identity ($arch)\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Architecture)\" = \"$arch\" ] \\\n              || {{ echo \"::error::published deb arch mismatch ($arch)\" >&2; exit 1; }}\n            record=\"$tmpdir/package-record-$arch.json\"\n            record_path=\"$(dpkg-deb -c \"$deb\" | awk '$NF ~ /(^|\\/)package-record\\.json$/ {{ print $NF }}')\"\n            [ -n \"$record_path\" ] || {{ echo \"::error::deb missing its package record ($arch)\" >&2; exit 1; }}\n            dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - \"$record_path\" > \"$record\"\n            record_digest=\"$(sha256sum \"$record\" | awk '{{print $1}}')\"\n            preview-metadata/{binary}-release-tool release verify-record \\\n              --record \"$record\" --sha256 \"$record_digest\" >/dev/null \\\n              || {{ echo \"::error::packaged package record is incoherent ($arch)\" >&2; exit 1; }}\n            packaged_binary=\"$(dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - ./usr/bin/{binary} | sha256sum | awk '{{print $1}}')\"\n            jq -e --arg commit \"$COMMIT\" --arg version \"$VERSION\" --arg arch \"$arch\" --arg binary \"$packaged_binary\" \\\n              '.build.kind == \"preview\" and .build.commit == $commit and\n               .build.debian_version == $version and\n               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \\\n              \"$record\" >/dev/null \\\n              || {{ echo \"::error::packaged package record does not name this preview identity ($arch)\" >&2; exit 1; }}\n          done\n{manifest_step}      - name: Replace the rolling preview release atomically\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          live_response=\"$(mktemp)\"\n          trap 'rm -f -- \"$live_response\"' EXIT\n          live_status=0\n          gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > \"$live_response\" 2>/dev/null || live_status=$?\n          live_http=\"$(awk 'NR == 1 {{print $2; exit}}' \"$live_response\")\"\n          if [ \"$live_status\" -ne 0 ]; then\n            [ \"$live_http\" = \"404\" ] \\\n              || {{ echo \"::error::could not read the live preview release (gh api exit $live_status, HTTP ${{live_http:-unknown}}); refusing to replace it\" >&2; exit 1; }}\n          else\n            live_body=\"$(awk 'body {{print; next}} /^\\r?$/ {{body = 1}}' \"$live_response\")\"\n            if ! live_name=\"$(jq -er '.name | strings' <<<\"$live_body\" 2>/dev/null)\"; then\n              echo \"::error::live preview release response carries no name; refusing to replace it\" >&2\n              exit 1\n            fi\n            [ -n \"$live_name\" ] || {{ echo \"::error::live preview release has an empty name; refusing to replace it\" >&2; exit 1; }}\n            live_version=\"${{live_name#Preview }}\"\n            [[ \"$live_name\" = \"Preview $live_version\" && \"$live_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n              || {{ echo \"::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to delete it\" >&2; exit 1; }}\n            if dpkg --compare-versions \"$live_version\" eq \"$VERSION\"; then\n              :\n            elif dpkg --compare-versions \"$live_version\" gt \"$VERSION\"; then\n              echo \"::error::live preview $live_version is newer than candidate $VERSION; refusing to move the rolling preview backward — re-run the LATEST preview run instead\" >&2\n              exit 1\n            fi\n          fi\n          gh release delete preview --cleanup-tag --yes || true\n          gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\" \\\n            {create_assets}\n      - name: Verify the published rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh api \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > published.json\n          asset_version=\"${{VERSION//'~'/'.'}}\"\n          jq -e \\\n            --arg name \"$NAME\" --arg commit \"$COMMIT\" --arg asset_version \"$asset_version\" '\n              (.draft | not) and .prerelease == true and\n              .tag_name == \"preview\" and .name == $name and\n              .target_commitish == $commit and\n              ([.assets[].name] | sort) ==\n              ([\n                {expected_assets}\n              ] | sort)\n            ' published.json >/dev/null\n          jq -e --arg version \"$VERSION\" \\\n            '.version == $version and .source_ref == \"refs/heads/{branch}\" and\n             (.assets | length) == {count}' release-manifest.json >/dev/null\n",
+        "  publish:\n    needs: [{needs}]\n    name: Replace the rolling preview release\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{branch}' }}}}\n    timeout-minutes: 20\n    runs-on: {runner}\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.identity.outputs.version }}}}\n      NAME: ${{{{ needs.identity.outputs.name }}}}\n      COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      GH_REPO: ${{{{ github.repository }}}}\n    steps:\n      - name: Download preview debs\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download preview metadata\n        uses: {download}\n        with:\n          name: preview-metadata\n          path: preview-metadata\n      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*-preview-*.deb)\n          test \"${{#subjects[@]}}\" -eq {count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n          chmod +x preview-metadata/{binary}-release-tool\n          tmpdir=\"$(mktemp -d)\"\n          trap 'rm -rf -- \"$tmpdir\"' EXIT\n          for arch in {arch_list}; do\n            deb=\"artifacts/{package}-preview-${{VERSION}}-${{arch}}.deb\"\n            [ -f \"$deb\" ] || {{ echo \"::error::missing preview deb for $arch\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Version)\" = \"$VERSION\" ] \\\n              || {{ echo \"::error::published deb version != preview identity ($arch)\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Architecture)\" = \"$arch\" ] \\\n              || {{ echo \"::error::published deb arch mismatch ($arch)\" >&2; exit 1; }}\n            record=\"$tmpdir/package-record-$arch.json\"\n            record_path=\"$(dpkg-deb -c \"$deb\" | awk '$NF ~ /(^|\\/)package-record\\.json$/ {{ print $NF }}')\"\n            [ -n \"$record_path\" ] || {{ echo \"::error::deb missing its package record ($arch)\" >&2; exit 1; }}\n            dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - \"$record_path\" > \"$record\"\n            record_digest=\"$(sha256sum \"$record\" | awk '{{print $1}}')\"\n            preview-metadata/{binary}-release-tool release verify-record \\\n              --record \"$record\" --sha256 \"$record_digest\" >/dev/null \\\n              || {{ echo \"::error::packaged package record is incoherent ($arch)\" >&2; exit 1; }}\n            packaged_binary=\"$(dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - ./usr/bin/{binary} | sha256sum | awk '{{print $1}}')\"\n            jq -e --arg commit \"$COMMIT\" --arg version \"$VERSION\" --arg arch \"$arch\" --arg binary \"$packaged_binary\" \\\n              '.build.kind == \"preview\" and .build.commit == $commit and\n               .build.debian_version == $version and\n               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \\\n              \"$record\" >/dev/null \\\n              || {{ echo \"::error::packaged package record does not name this preview identity ($arch)\" >&2; exit 1; }}\n          done\n{manifest_step}      - name: Replace the rolling preview release atomically\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          live_response=\"$(mktemp)\"\n          trap 'rm -f -- \"$live_response\"' EXIT\n          live_status=0\n          gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > \"$live_response\" 2>/dev/null || live_status=$?\n          live_http=\"$(awk 'NR == 1 {{print $2; exit}}' \"$live_response\")\"\n          if [ \"$live_status\" -ne 0 ]; then\n            [ \"$live_http\" = \"404\" ] \\\n              || {{ echo \"::error::could not read the live preview release (gh api exit $live_status, HTTP ${{live_http:-unknown}}); refusing to replace it\" >&2; exit 1; }}\n          else\n            live_body=\"$(awk 'body {{print; next}} /^\\r?$/ {{body = 1}}' \"$live_response\")\"\n            if ! live_name=\"$(jq -er '.name | strings' <<<\"$live_body\" 2>/dev/null)\"; then\n              echo \"::error::live preview release response carries no name; refusing to replace it\" >&2\n              exit 1\n            fi\n            [ -n \"$live_name\" ] || {{ echo \"::error::live preview release has an empty name; refusing to replace it\" >&2; exit 1; }}\n            live_version=\"${{live_name#Preview }}\"\n            [[ \"$live_name\" = \"Preview $live_version\" && \"$live_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n              || {{ echo \"::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to delete it\" >&2; exit 1; }}\n            if dpkg --compare-versions \"$live_version\" eq \"$VERSION\"; then\n              :\n            elif dpkg --compare-versions \"$live_version\" gt \"$VERSION\"; then\n              echo \"::error::live preview $live_version is newer than candidate $VERSION; refusing to move the rolling preview backward — re-run the LATEST preview run instead\" >&2\n              exit 1\n            fi\n          fi\n          gh release delete preview --cleanup-tag --yes || true\n          gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\" \\\n            {create_assets}\n      - name: Verify the published rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh api \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > published.json\n          asset_version=\"${{VERSION//'~'/'.'}}\"\n          jq -e \\\n            --arg name \"$NAME\" --arg commit \"$COMMIT\" --arg asset_version \"$asset_version\" '\n              (.draft | not) and .prerelease == true and\n              .tag_name == \"preview\" and .name == $name and\n              .target_commitish == $commit and\n              ([.assets[].name] | sort) ==\n              ([\n                {expected_assets}\n              ] | sort)\n            ' published.json >/dev/null\n          jq -e --arg version \"$VERSION\" \\\n            '.version == $version and .source_ref == \"refs/heads/{branch}\" and\n             (.assets | length) == {count}' release-manifest.json >/dev/null\n",
         branch = config.default_branch,
         runner = selected_runner(config),
         count = arches.len(),
         package = release.package,
     )
+}
+
+/// Thread a declared lanes selection through a rendered preview: the lanes
+/// input on dispatch (first, above any drill-mode input) and a
+/// dispatch-conditional `runs-on` on every job. Every job-level `runs-on`
+/// must be the github static or the cell-less matrix expression, and every
+/// matrix cell the github static — a macos, arch-pinned, or otherwise
+/// routed job cannot dispatch across lanes, so it fails closed naming the
+/// job instead of silently half-threading the file. No-op without a
+/// dispatch trigger: the omission contract renders no jobs to select lanes
+/// for, and admission applies to rendered jobs.
+fn inject_preview_lanes(
+    output: &str,
+    config: &ProjectConfig,
+    family: &str,
+) -> Result<String, GeneratorError> {
+    if !output.contains("  workflow_dispatch:\n") {
+        return Ok(output.to_owned());
+    }
+    let conditional = lanes_runs_on(config, family, RunnerMode::Github)?;
+    if output.contains("  guest-payload:\n") {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` `lanes_input` cannot route the guest-payload job: its cells pin arch-specific runners, and one conditional cannot route two architectures"
+        )));
+    }
+    let expected = yaml_scalar(&config.github_runner);
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("    runs-on: ")
+            && value != expected
+            && value != "${{ matrix.runner }}"
+        {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` `lanes_input` threads every job across lanes; `runs-on: {value}` is routed outside the github lane and cannot dispatch"
+            )));
+        }
+        if let Some(value) = line.strip_prefix("            runner: ")
+            && value != expected
+        {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` `lanes_input` threads every job across lanes; a matrix cell pins `runner: {value}`, and pinned cells cannot dispatch"
+            )));
+        }
+    }
+    let mut output = output.replace(
+        &format!("    runs-on: {expected}\n"),
+        &format!("    runs-on: {conditional}\n"),
+    );
+    output = output.replace(
+        "    runs-on: ${{ matrix.runner }}\n",
+        &format!("    runs-on: {conditional}\n"),
+    );
+    let entry = lanes_input_entry(RunnerMode::Github);
+    output = if output.contains("  workflow_dispatch:\n    inputs:\n") {
+        output.replacen(
+            "  workflow_dispatch:\n    inputs:\n",
+            &format!("  workflow_dispatch:\n    inputs:\n{entry}"),
+            1,
+        )
+    } else {
+        output.replacen(
+            "  workflow_dispatch:\n",
+            &format!("  workflow_dispatch:\n    inputs:\n{entry}"),
+            1,
+        )
+    };
+    Ok(output)
+}
+
+/// The rolling-lane trigger bindings: a `workflow_run` block for the bound
+/// producer ahead of dispatch, and the declared drill modes on dispatch.
+/// No-op without a producer or modes.
+fn inject_preview_triggers(output: &str, config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let mut output = output.to_owned();
+    if has_producer_binding(release) {
+        output = output.replacen(
+            "  workflow_dispatch:\n",
+            &format!(
+                "{}  workflow_dispatch:\n",
+                workflow_run_trigger(config, release)
+            ),
+            1,
+        );
+    }
+    inject_dispatch_modes(&output, release)
 }
 
 /// The native rolling preview: identity, metadata, per-arch preview debs,
@@ -1578,11 +2287,69 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         release,
         sign_job.is_some(),
     ));
-    format!(
+    let output = format!(
         "{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{jobs}",
         yaml_scalar(&config.default_branch),
         paths = release_watch_paths(config),
-    )
+    );
+    inject_native_preview_bindings(&output, config, release)
+}
+
+/// The Debian preview bindings: trigger bindings with the source and gate
+/// jobs, the identity job rewired onto the resolved source, and the rolling
+/// publish admitted by the gate. Archive and credential contracts bind the
+/// tarball package steps, which the Debian lane has none of, so a declared
+/// contract there is a visible note instead of a silent skip: the lane
+/// mounts no credential it would have to tear down.
+fn inject_native_preview_bindings(
+    output: &str,
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+) -> String {
+    let mut output = inject_preview_triggers(output, config, release);
+    output = inject_binding_jobs(&output, config, release);
+    if has_producer_binding(release) {
+        output = output.replacen(
+            "  identity:\n    name: Resolve preview identity\n",
+            "  identity:\n    name: Resolve preview identity\n    needs: [source]\n",
+            1,
+        );
+        output = output.replacen(
+            "          ref: ${{ github.sha }}\n",
+            "          ref: ${{ needs.source.outputs.sha }}\n",
+            1,
+        );
+        output = output.replacen(
+            "          EVENT_SHA: ${{ github.sha }}\n",
+            "          EVENT_SHA: ${{ needs.source.outputs.sha }}\n",
+            1,
+        );
+        output = output.replacen(
+            "  publish:\n    needs: [",
+            "  publish:\n    needs: [publish-gate, ",
+            1,
+        );
+        let publish_gate = format!(
+            "    if: ${{{{ github.ref == 'refs/heads/{}' && needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish' }}}}\n    timeout-minutes: 20\n",
+            config.default_branch,
+        );
+        output = output.replacen(
+            &format!(
+                "    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 20\n",
+                config.default_branch,
+            ),
+            &publish_gate,
+            1,
+        );
+    }
+    if has_archive_contract(release) || !release.credentials.is_empty() {
+        output = output.replacen(
+            "permissions:\n  contents: read\n\njobs:",
+            "permissions:\n  contents: read\n\n# Archive and credential contracts bind the tarball package steps; the Debian preview lane packages with its packager and mounts no credential.\njobs:",
+            1,
+        );
+    }
+    output
 }
 
 fn release_runner(config: &ProjectConfig, target: &str) -> String {
@@ -1659,6 +2426,271 @@ fn canonical_lane(config: &ProjectConfig) -> &'static str {
         "velnor"
     } else {
         "github"
+    }
+}
+
+/// Whether the contract binds a trusted producer workflow: a non-empty
+/// producer renders the `workflow_run` trigger with its source-resolution
+/// and publish-gate jobs.
+fn has_producer_binding(release: &ReleaseSpec) -> bool {
+    !release.producer_workflow.is_empty()
+}
+
+/// Whether the contract declares dispatch modes: a non-empty list renders
+/// the `mode` dispatch input with a resolver step and publish gates.
+fn has_release_modes(release: &ReleaseSpec) -> bool {
+    !release.modes.is_empty()
+}
+
+/// Whether the contract declares archive contents: a non-empty member list
+/// renders deterministic multi-member packaging with the declared retention.
+fn has_archive_contract(release: &ReleaseSpec) -> bool {
+    !release.archive_members.is_empty()
+}
+
+/// Whether the contract declares anything only the tarball publishers
+/// (`rust-binary`, `native`) and the preview lane implement.
+fn has_tarball_bindings(release: &ReleaseSpec) -> bool {
+    has_producer_binding(release)
+        || has_release_modes(release)
+        || has_archive_contract(release)
+        || !release.credentials.is_empty()
+}
+
+/// The `workflow_run` trigger block for a bound producer: the rolling lane
+/// publishes only after the trusted producer completes on the default
+/// branch. The runtime publish gate re-checks the producer name and
+/// conclusion; the trigger alone never admits a run.
+fn workflow_run_trigger(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    format!(
+        "  workflow_run:\n    workflows: [{}]\n    types: [completed]\n    branches: [{}]\n",
+        yaml_scalar(&release.producer_workflow),
+        yaml_scalar(&config.default_branch),
+    )
+}
+
+/// The dispatch `mode` input: the declared drill modes. `publish` is never
+/// an option; publication stays tag-triggered (stable) or
+/// admitted-producer-triggered (rolling).
+fn dispatch_mode_input(release: &ReleaseSpec) -> String {
+    let mut options = String::new();
+    for mode in &release.modes {
+        let _ = writeln!(options, "          - {mode}");
+    }
+    let default = release.modes.first().map_or("validate", String::as_str);
+    format!(
+        "    inputs:\n      mode:\n        description: Release drill mode (publication is tag-triggered, never dispatched)\n        required: false\n        default: {default}\n        type: choice\n        options:\n{options}"
+    )
+}
+
+/// Expand a bare `workflow_dispatch:` trigger with the declared mode input.
+/// No-op without declared modes, so legacy triggers keep their bytes.
+fn inject_dispatch_modes(output: &str, release: &ReleaseSpec) -> String {
+    if !has_release_modes(release) {
+        return output.to_owned();
+    }
+    output.replacen(
+        "  workflow_dispatch:\n",
+        &format!("  workflow_dispatch:\n{}", dispatch_mode_input(release)),
+        1,
+    )
+}
+
+/// The source-resolution job: one 40-hex revision for the whole lane. A
+/// `workflow_run` event builds the producer run's head SHA, every other
+/// event builds its own SHA; the runtime refuses anything else.
+fn render_binding_source_job(config: &ProjectConfig) -> String {
+    let setup = workflow_runtime_setup_for_config(config);
+    format!(
+        "  source:\n    name: Resolve release source\n    runs-on: {}\n    timeout-minutes: 5\n    outputs:\n      sha: ${{{{ steps.resolve.outputs.sha }}}}\n    steps:\n{setup}      - name: Resolve source revision\n        id: resolve\n        env:\n          EVENT: ${{{{ github.event_name }}}}\n          SHA: ${{{{ github.sha }}}}\n          RUN_SHA: ${{{{ github.event.workflow_run.head_sha }}}}\n        run: |\n          set -euo pipefail\n          sha=\"$(velnor-workflow release resolve-source --event \"$EVENT\" --sha \"$SHA\" --run-sha \"$RUN_SHA\")\"\n          echo \"sha=$sha\" >> \"$GITHUB_OUTPUT\"\n",
+        selected_runner(config),
+    )
+}
+
+/// The rolling publish gate: `workflow_run` admits only the trusted
+/// producer at `success`, dispatches resolve their drill mode immediately,
+/// and anything else fails closed. A dispatch rehearsal finishes here
+/// without waiting for default-branch CI — the gate resolves, never polls,
+/// so no wait loop can strand a feature branch.
+fn render_binding_gate_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let setup = workflow_runtime_setup_for_config(config);
+    format!(
+        "  publish-gate:\n    name: Admit rolling publish\n    needs: source\n    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      admitted: ${{{{ steps.admit.outputs.admitted }}}}\n      mode: ${{{{ steps.admit.outputs.mode }}}}\n      sha: ${{{{ needs.source.outputs.sha }}}}\n    steps:\n{setup}      - name: Admit producer or resolve drill mode\n        id: admit\n        env:\n          EVENT: ${{{{ github.event_name }}}}\n          REF: ${{{{ github.ref }}}}\n          PRODUCER: ${{{{ github.event.workflow_run.name }}}}\n          CONCLUSION: ${{{{ github.event.workflow_run.conclusion }}}}\n          MODE_INPUT: ${{{{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}}}\n          EXPECTED: {}\n          BRANCH: {}\n        run: |\n          set -euo pipefail\n          if [ \"$EVENT\" = \"workflow_run\" ]; then\n            velnor-workflow release admit-producer --producer \"$PRODUCER\" --expected \"$EXPECTED\" --conclusion \"$CONCLUSION\"\n            mode=publish\n          elif [ \"$EVENT\" = \"workflow_dispatch\" ]; then\n            mode=\"$(velnor-workflow release resolve-mode --event \"$EVENT\" --input \"${{MODE_INPUT:-validate}}\")\"\n          elif [ \"$EVENT\" = \"push\" ]; then\n            mode=\"$(velnor-workflow release resolve-mode --event push --ref \"$REF\" --rolling true --branch \"$BRANCH\")\"\n          else\n            echo \"::error::unsupported rolling event '$EVENT'\" >&2\n            exit 1\n          fi\n          {{\n            echo \"admitted=true\"\n            echo \"mode=$mode\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        selected_runner(config),
+        yaml_scalar(&release.producer_workflow),
+        yaml_scalar(&config.default_branch),
+    )
+}
+
+/// Prepend the source-resolution and publish-gate jobs. No-op without a
+/// bound producer.
+fn inject_binding_jobs(output: &str, config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    if !has_producer_binding(release) {
+        return output.to_owned();
+    }
+    let jobs = format!(
+        "{}{}",
+        render_binding_source_job(config),
+        render_binding_gate_job(config, release)
+    );
+    output.replacen("jobs:\n", &format!("jobs:\n{jobs}"), 1)
+}
+
+/// Sanitize a credential name into a shell function suffix.
+fn credential_function(name: &str) -> String {
+    let mut sanitized: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        sanitized.push_str("credential");
+    }
+    format!("teardown_{sanitized}")
+}
+
+/// Indent a multi-line repository command into a `run:` block.
+fn indent_command(command: &str) -> String {
+    let mut indented = String::new();
+    for line in command.lines() {
+        indented.push_str("            ");
+        indented.push_str(line);
+        indented.push('\n');
+    }
+    indented
+}
+
+/// The credential setup steps: each setup runs with its teardown trapped
+/// first, so a partially materialized credential is cleaned inside the
+/// step. Teardown commands must be idempotent: the lane runs them again
+/// before supply-chain sidecars and once more under `if: always()`.
+fn render_credential_setup_steps(release: &ReleaseSpec) -> String {
+    let mut steps = String::new();
+    for credential in &release.credentials {
+        let function = credential_function(&credential.name);
+        let _ = writeln!(
+            steps,
+            "      - name: Mount {} credential\n        run: |\n          set -euo pipefail\n          {function}() {{\n{}          }}\n          trap {function} EXIT\n{}",
+            yaml_scalar(&credential.name),
+            indent_command(&credential.teardown),
+            indent_command(&credential.setup),
+        );
+    }
+    steps
+}
+
+/// The explicit teardown call before supply-chain sidecars: secrets leave
+/// the host before attestation, manifests, and uploads run.
+fn render_credential_unmount_steps(release: &ReleaseSpec) -> String {
+    let mut steps = String::new();
+    for credential in &release.credentials {
+        let _ = writeln!(
+            steps,
+            "      - name: Unmount {} credential before supply-chain sidecars\n        run: |\n          set -euo pipefail\n{}",
+            yaml_scalar(&credential.name),
+            indent_command(&credential.teardown),
+        );
+    }
+    steps
+}
+
+/// The final teardown under `if: always()`: success, failure, cancellation,
+/// and timeout all restore host state, including paths where the explicit
+/// unmount step never ran.
+fn render_credential_restore_steps(release: &ReleaseSpec) -> String {
+    let mut steps = String::new();
+    for credential in &release.credentials {
+        let _ = writeln!(
+            steps,
+            "      - name: Restore {} credential state\n        if: always()\n        run: |\n          set -euo pipefail\n{}",
+            yaml_scalar(&credential.name),
+            indent_command(&credential.teardown),
+        );
+    }
+    steps
+}
+
+/// Inject the credential pairing into a tarball build section: setup before
+/// the target install, explicit unmount before attestation, and the
+/// `always()` restore after the artifact upload. Anchors are the build
+/// job's own step names; no-op without declared credentials.
+fn inject_credential_pairing(output: &str, release: &ReleaseSpec, attest: &str) -> String {
+    if release.credentials.is_empty() {
+        return output.to_owned();
+    }
+    let output = output.replacen(
+        "      - name: Add Rust target\n",
+        &format!(
+            "{}      - name: Add Rust target\n",
+            render_credential_setup_steps(release)
+        ),
+        1,
+    );
+    let output = output.replacen(
+        attest,
+        &format!("{}{attest}", render_credential_unmount_steps(release)),
+        1,
+    );
+    // The `always()` restore follows the build upload: the upload is the
+    // only step in the section carrying a retention, so its line ends the
+    // upload block.
+    if let Some(position) = output.find("          retention-days: ") {
+        let end = output[position..]
+            .find('\n')
+            .map_or(output.len(), |offset| position + offset + 1);
+        let mut patched = output.clone();
+        patched.insert_str(end, &render_credential_restore_steps(release));
+        patched
+    } else {
+        output
+    }
+}
+
+/// The deterministic flag selection for one archive row: GNU tar lanes
+/// package reproducibly, Apple lanes keep their platform tar. Rendered as
+/// shell over the matrix target because one job covers both runners.
+fn archive_deterministic_selection() -> &'static str {
+    "          case \"${{ matrix.target }}\" in\n            *-apple-darwin) deterministic=false ;;\n            *) deterministic=true ;;\n          esac\n"
+}
+
+/// The extra `package-binary` flags for a declared archive contract.
+fn archive_package_flags(release: &ReleaseSpec) -> String {
+    if !has_archive_contract(release) {
+        return String::new();
+    }
+    format!(
+        " --members {} --deterministic \"$deterministic\"",
+        shell_quote(&release.archive_members.join(",")),
+    )
+}
+
+/// Override the tarball upload retention with the declared window. Only the
+/// build upload — the first retention in the file — is the release
+/// archive lane; intermediate digests keep their own windows.
+fn inject_archive_retention(output: &str, release: &ReleaseSpec) -> String {
+    if release.archive_retention_days == 0 {
+        return output.to_owned();
+    }
+    if let Some(position) = output.find("          retention-days: ") {
+        let end = output[position..]
+            .find('\n')
+            .map_or(output.len(), |offset| position + offset);
+        let mut patched = output.to_owned();
+        patched.replace_range(
+            position..end,
+            &format!(
+                "          retention-days: {}",
+                release.archive_retention_days
+            ),
+        );
+        patched
+    } else {
+        output.to_owned()
     }
 }
 
@@ -1750,7 +2782,17 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         &format!("    runs-on: {matrix_runner}\n    timeout-minutes: 75"),
         &format!(
             "    runs-on: {matrix_runner}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 75",
-            trusted_release_runner_gate(&config.default_branch)
+            // The rolling lane has no verify job to resolve the drill, so a
+            // declared rehearse reads the dispatch input directly: the arm
+            // can only enable a drill build, never the push-gated publish.
+            if has_release_modes(release) {
+                format!(
+                    "{} || (github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearse')",
+                    trusted_release_runner_gate(&config.default_branch)
+                )
+            } else {
+                trusted_release_runner_gate(&config.default_branch)
+            }
         ),
     )
     .replace(
@@ -1782,13 +2824,372 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     if let Some(guest) = render_guest_payload_job(config, release, false) {
         output = output.replace("jobs:\n  build:", &format!("jobs:\n{guest}\n  build:"));
     }
-    output
+    inject_tarball_preview_bindings(&output, config, release)
+}
+
+/// The tarball preview bindings: trigger bindings with the source and gate
+/// jobs, the build (and guest) checkouts pinned to the resolved source, the
+/// rolling publish admitted by the gate, declared archive packaging with
+/// its manifest assembly, and the credential pairing.
+fn inject_tarball_preview_bindings(
+    output: &str,
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+) -> String {
+    let mut output = inject_preview_triggers(output, config, release);
+    output = inject_binding_jobs(&output, config, release);
+    if has_producer_binding(release) {
+        output = output.replacen(
+            "  build:\n    name: Preview / ${{ matrix.target }}\n",
+            "  build:\n    name: Preview / ${{ matrix.target }}\n    needs: [source]\n",
+            1,
+        );
+        output = output.replacen(
+            "        with:\n          fetch-depth: 0\n          persist-credentials: false\n",
+            "        with:\n          ref: ${{ needs.source.outputs.sha }}\n          fetch-depth: 0\n          persist-credentials: false\n",
+            1,
+        );
+        if output.contains("  guest-payload:\n") {
+            output = output.replacen(
+                "  guest-payload:\n    name: Guest payload ${{ matrix.arch }}\n    runs-on:",
+                "  guest-payload:\n    name: Guest payload ${{ matrix.arch }}\n    needs: [source]\n    runs-on:",
+                1,
+            );
+            output = output.replacen(
+                "        with:\n          persist-credentials: false\n",
+                "        with:\n          ref: ${{ needs.source.outputs.sha }}\n          persist-credentials: false\n",
+                1,
+            );
+        }
+        let legacy_publish = format!(
+            "    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n",
+            config.default_branch,
+        );
+        output = output.replacen(
+            &legacy_publish,
+            "    needs: [build, publish-gate]\n    if: ${{ needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish' }}\n",
+            1,
+        );
+    }
+    if has_archive_contract(release) {
+        output = output.replacen(
+            "        run: velnor-workflow release package-binary",
+            &format!(
+                "        run: |\n          set -euo pipefail\n{}          velnor-workflow release package-binary",
+                archive_deterministic_selection()
+            ),
+            1,
+        );
+        let package_tail = format!(" --binary {}\n", yaml_scalar(&release.binary));
+        output = output.replacen(
+            &package_tail,
+            &format!(
+                " --binary {}{}\n",
+                yaml_scalar(&release.binary),
+                archive_package_flags(release)
+            ),
+            1,
+        );
+        if !release.manifest_schema.is_empty() {
+            let subjects = release
+                .targets
+                .iter()
+                .map(|target| format!("{}-preview-{target}.tar.gz", release.binary))
+                .collect::<Vec<_>>()
+                .join(",");
+            let commit = if has_producer_binding(release) {
+                "${{ needs.publish-gate.outputs.sha }}"
+            } else {
+                "${{ github.sha }}"
+            };
+            output = output.replacen(
+                "      - name: Replace rolling preview\n",
+                &format!(
+                    "{}      - name: Assemble release manifest\n        run: |\n          set -euo pipefail\n          velnor-workflow release assemble-manifest --dir dist --subjects \"{subjects}\" --schema {} --repository \"${{{{ github.repository }}}}\" --ref \"${{{{ github.ref }}}}\" --commit \"{commit}\" --version preview\n      - name: Replace rolling preview\n",
+                    workflow_runtime_setup_for_config(config),
+                    shell_quote(&release.manifest_schema),
+                ),
+                1,
+            );
+        }
+    }
+    output = inject_credential_pairing(&output, release, "      - name: Attest preview artifact\n");
+    inject_archive_retention(&output, release)
+}
+
+/// The lanes a versioned-tool dispatch offers: exactly the repository's
+/// lanes, plus `both` when the repository has two.
+fn versioned_tool_lanes(config: &ProjectConfig) -> Vec<&'static str> {
+    match config.runners {
+        RunnerMode::Github => vec!["github"],
+        RunnerMode::Velnor => vec!["velnor"],
+        RunnerMode::Both => vec!["github", "velnor", "both"],
+    }
+}
+
+/// Render `value` as a JSON string: the runner-configs the version job emits
+/// travel through bash into `fromJSON`, so every label is escaped.
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other if other.is_control() => {
+                let _ = write!(escaped, "\\u{:04x}", other as u32);
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+/// The `runs-on` JSON value for one lane: a hosted label string, or the
+/// self-hosted labels (with the group when the repository declares one).
+fn versioned_tool_runner_json(config: &ProjectConfig, lane: &str) -> String {
+    if lane == "velnor" {
+        let labels = config
+            .velnor_labels
+            .iter()
+            .map(|label| json_string(label))
+            .collect::<Vec<_>>()
+            .join(",");
+        match velnor_runner_group(config) {
+            Some(group) => format!("{{\"group\":{},\"labels\":[{labels}]}}", json_string(group)),
+            None => format!("[{labels}]"),
+        }
+    } else {
+        json_string(&config.github_runner)
+    }
+}
+
+/// The runner-configs array for one `lanes` input value: one
+/// `{lane, runner}` object per lane the build matrix fans out to.
+fn versioned_tool_lane_configs(config: &ProjectConfig, lanes: &str) -> String {
+    let lanes = match lanes {
+        "both" => vec!["github", "velnor"],
+        lane => vec![lane],
+    };
+    // Exactly one lane uploads: the Velnor lane when it runs, else the single
+    // lane. Every cell still builds (lane redundancy validates the compile),
+    // but only the writer attests and uploads, so two lanes never publish
+    // the same tarball name twice.
+    let writer = if lanes.contains(&"velnor") {
+        "velnor"
+    } else {
+        lanes[0]
+    };
+    let configs = lanes
+        .iter()
+        .map(|lane| {
+            format!(
+                "{{\"lane\":\"{lane}\",\"runner\":{},\"writer\":{}}}",
+                versioned_tool_runner_json(config, lane),
+                lane == &writer,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{configs}]")
+}
+
+/// Pinned Mise provisioning for a versioned-tool job: hosted lanes install
+/// through the pinned action, the Velnor lane uses its preinstalled binary.
+/// Mirrors the scheduled-check tool steps; these jobs run named tasks and
+/// nothing else product-shaped.
+fn render_versioned_tool_mise_setup(config: &ProjectConfig) -> String {
+    if config.runners == RunnerMode::Velnor {
+        return String::new();
+    }
+    format!(
+        "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false\n",
+        ActionPin::Mise.reference()
+    )
+}
+
+/// One `mise run` step per named task, exactly the scheduled-check shape,
+/// with an optional job-expression gate on every step.
+fn render_versioned_tool_task_steps(tasks: &[String], gate: Option<&str>) -> String {
+    let mut steps = String::new();
+    for task in tasks {
+        if let Some(gate) = gate {
+            let _ = writeln!(
+                steps,
+                "      - name: Run {task}\n        if: {gate}\n        run: mise run {task}"
+            );
+        } else {
+            let _ = writeln!(
+                steps,
+                "      - name: Run {task}\n        run: mise run {task}"
+            );
+        }
+    }
+    steps
+}
+
+/// The PR-only version gate: fails the pull request when the product's own
+/// version task reports artifact inputs changed without a version bump.
+///
+/// Selection-vs-enforcement split: `version_bump_matches` in `runtime.rs`
+/// stays the single cargo-specific classifier for *local-run selection*
+/// (the `workflow.version_bump_units` allowlist); it is deliberately NOT
+/// ported into this YAML. The CI gate is *enforcement* via the product's
+/// named task — generic code classifies nothing here, so no second
+/// classifier exists.
+fn render_version_gate_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    format!(
+        "  validate-version:\n    name: Validate version bump\n    if: ${{{{ github.event_name == 'pull_request' }}}}\n    runs-on: {}\n    timeout-minutes: 15\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}",
+        selected_runner(config),
+        ActionPin::Checkout.reference(),
+        render_versioned_tool_mise_setup(config),
+        render_versioned_tool_task_steps(&spec.version_gate_tasks, None),
+    )
+}
+
+/// The version job: one manifest version plus the runner-configs the build
+/// matrix fans out to, resolved from the dispatch lanes input.
+fn render_versioned_tool_version_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let mut lane_arms = String::new();
+    for lane in versioned_tool_lanes(config) {
+        let configs = shell_quote(&versioned_tool_lane_configs(config, lane));
+        let _ = writeln!(lane_arms, "          {lane}) configs={configs} ;;");
+    }
+    format!(
+        "  version:\n    name: Resolve tool version\n    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      version: ${{{{ steps.resolve.outputs.version }}}}\n      runner-configs: ${{{{ steps.resolve.outputs.runner-configs }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{}{}      - name: Resolve the tool version from the manifest\n        id: resolve\n        env:\n          LANES: ${{{{ github.event_name == 'workflow_dispatch' && inputs.lanes || '{}' }}}}\n          MANIFEST: {}\n        run: |\n          set -euo pipefail\n          version=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' \"$MANIFEST\" | head -n1)\"\n          case \"$version\" in\n            ''|*[!0-9.]*) echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::tool version $version is not an X.Y.Z version\" >&2; exit 1; }}\n          case \"$LANES\" in\n{}            *) echo \"::error::unknown lanes '$LANES'\" >&2; exit 1 ;;\n          esac\n          {{\n            echo \"version=$version\"\n            echo \"runner-configs=$configs\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        selected_runner(config),
+        ActionPin::Checkout.reference(),
+        workflow_runtime_setup_for_config(config),
+        policy_enforcement_step(),
+        canonical_lane(config),
+        yaml_scalar(&spec.version_manifest),
+        lane_arms,
+    )
+}
+
+/// The assert job: on the default branch the published-reuse check reports
+/// whether the version already shipped, and the declared assert tasks run
+/// their product checks (formula and the like); off the branch the job
+/// reports unpublished without touching the release API.
+fn render_versioned_tool_assert_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let mut steps = format!(
+        "      - name: Check whether the version is already published\n        id: published\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          VERSION: ${{{{ needs.version.outputs.version }}}}\n          REF: ${{{{ github.ref }}}}\n        run: |\n          set -euo pipefail\n          tag=\"{}$VERSION\"\n          if [ \"$REF\" = \"refs/heads/{}\" ] && gh release view \"$tag\" --json tagName --jq .tagName >/dev/null 2>&1; then\n            echo \"published=true\" >> \"$GITHUB_OUTPUT\"\n          else\n            echo \"published=false\" >> \"$GITHUB_OUTPUT\"\n          fi\n",
+        spec.version_prefix, config.default_branch,
+    );
+    if !spec.assert_tasks.is_empty() {
+        let gate = format!(
+            "${{{{ github.ref == 'refs/heads/{}' }}}}",
+            config.default_branch
+        );
+        let _ = write!(
+            steps,
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}{}",
+            ActionPin::Checkout.reference(),
+            render_versioned_tool_mise_setup(config),
+            render_versioned_tool_task_steps(&spec.assert_tasks, Some(&gate)),
+        );
+    }
+    format!(
+        "  assert-version:\n    name: Assert the version is unpublished\n    needs: [version]\n    runs-on: {}\n    timeout-minutes: 10\n    outputs:\n      published: ${{{{ steps.published.outputs.published }}}}\n    steps:\n{}",
+        selected_runner(config),
+        steps,
+    )
+}
+
+/// The matrix build: declared targets crossed with the version job's lane
+/// configs. The declared build tasks own the compile — cross-builders like
+/// zigbuild stay named tasks, never generic code — and generic code
+/// packages the conventional `target/<triple>/release/<binary>` output,
+/// attests it, and uploads it per lane and target.
+fn render_versioned_tool_build_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let mut targets = String::new();
+    for target in &spec.targets {
+        let _ = writeln!(targets, "          - {}", yaml_scalar(target));
+    }
+    let build_steps = format!(
+        "{}{}",
+        render_versioned_tool_mise_setup(config),
+        render_versioned_tool_task_steps(&spec.build_tasks, None),
+    );
+    format!(
+        "  build:\n    name: Build / ${{{{ matrix.target }}}} / ${{{{ matrix.config.lane }}}}\n    needs: [version, assert-version]\n    if: ${{{{ github.event_name != 'pull_request' && needs.assert-version.outputs.published != 'true' }}}}\n    runs-on: ${{{{ matrix.config.runner }}}}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        target:\n{}        config: ${{{{ fromJSON(needs.version.outputs.runner-configs) }}}}\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}{}      - name: Package tool binary\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"$VERSION\" --package {} --binary {}\n      - name: Attest tool artifact\n        if: ${{{{ matrix.config.writer }}}}\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload tool artifact\n        if: ${{{{ matrix.config.writer }}}}\n        uses: {}\n        with:\n          name: ${{{{ matrix.config.lane }}}}-${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n",
+        targets,
+        ActionPin::Checkout.reference(),
+        workflow_runtime_setup_for_config(config),
+        build_steps,
+        yaml_scalar(&spec.package),
+        yaml_scalar(&spec.binary),
+        ActionPin::Attest.reference(),
+        ActionPin::UploadArtifact.reference(),
+    )
+}
+
+/// The mutexed immutable publish: downloads every lane's archives,
+/// re-verifies provenance and checksums, and creates the versioned release
+/// once — no clobber, and no tag check, because no tag triggered this lane.
+fn render_versioned_tool_publish_job(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    format!(
+        "  publish:\n    name: Publish immutable tool release\n    needs: [version, assert-version, build]\n    if: ${{{{ github.ref == 'refs/heads/{}' && needs.assert-version.outputs.published != 'true' }}}}\n    runs-on: {}\n    timeout-minutes: 20\n    environment: github-release\n    concurrency:\n      group: {}\n      cancel-in-progress: false\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.version.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download tool artifacts\n        uses: {}\n        with:\n          path: dist\n          pattern: \"*-*\"\n          merge-multiple: true\n      - name: Verify artifact provenance\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          for artifact in dist/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable tool release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          tag=\"{}$VERSION\"\n          gh release create \"$tag\" dist/* --target \"$COMMIT\" --title \"$tag\" --generate-notes\n",
+        config.default_branch,
+        selected_runner(config),
+        yaml_scalar(&spec.publish_group),
+        ActionPin::DownloadArtifact.reference(),
+        spec.version_prefix,
+    )
+}
+
+/// The main-branch-driven versioned-tool publisher: the row's own workflow
+/// name, push-main plus pull-request triggers over declared paths, a lanes
+/// dispatch, per-ref concurrency that cancels PR runs only, and the
+/// five-job version graph — gate, version, assert, matrix build, and the
+/// mutexed immutable publish. No tag checks render: no tag triggers this
+/// lane, so there is nothing to verify.
+fn render_versioned_tool_release(config: &ProjectConfig, spec: &VersionedToolSpec) -> String {
+    let mut lane_options = String::new();
+    for lane in versioned_tool_lanes(config) {
+        let _ = writeln!(lane_options, "          - {lane}");
+    }
+    let mut push_paths = String::new();
+    for path in &spec.push_paths {
+        let _ = writeln!(push_paths, "      - {}", yaml_scalar(path));
+    }
+    let mut pull_request_paths = String::new();
+    for path in &spec.pull_request_paths {
+        let _ = writeln!(pull_request_paths, "      - {}", yaml_scalar(path));
+    }
+    format!(
+        "{GENERATED_HEADER}name: {}\nrun-name: {}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{}  pull_request:\n    paths:\n{}  workflow_dispatch:\n    inputs:\n      lanes:\n        description: Build lanes (both builds every lane)\n        required: false\n        default: {}\n        type: choice\n        options:\n{}concurrency:\n  group: ${{{{ github.workflow }}}}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n\npermissions:\n  contents: read\n\njobs:\n{}{}{}{}{}",
+        yaml_scalar(&spec.name),
+        yaml_scalar(&format!(
+            "{} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}",
+            spec.name
+        )),
+        yaml_scalar(&config.default_branch),
+        push_paths,
+        pull_request_paths,
+        canonical_lane(config),
+        lane_options,
+        render_version_gate_job(config, spec),
+        render_versioned_tool_version_job(config, spec),
+        render_versioned_tool_assert_job(config, spec),
+        render_versioned_tool_build_job(config, spec),
+        render_versioned_tool_publish_job(config, spec),
+    )
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     if !release_contract_complete(release) {
         return format!(
             "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
+        );
+    }
+    if has_tarball_bindings(release) && !matches!(release.kind.as_str(), "rust-binary" | "native") {
+        return format!(
+            "{GENERATED_HEADER}# Release omitted: producer bindings, dispatch modes, archive contracts, and credential pairings render only for the `rust-binary` and `native` publishers.\n"
         );
     }
     match release.kind.as_str() {
@@ -1798,6 +3199,7 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
         "pages" => render_pages_release(config, release),
         "homebrew" => render_homebrew_release(config, release),
         "apt" => render_apt_release(config, release),
+        "docker" => render_docker_release(config, release),
         _ => format!(
             "{GENERATED_HEADER}# Release omitted: this publisher requires a separately verified contract.\n"
         ),
@@ -1939,9 +3341,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
 
 fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
-    output.push_str(
-        "name: Release\nrun-name: Release · ${{ github.ref_name }}\n\non:\n  push:\n    tags: [\"v*\"]\n\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Control / Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
-    );
+    output.push_str(&release_trigger_header(release));
     let _ = writeln!(
         output,
         "      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Verify tag\n        run: velnor-workflow release verify-tag\n      - name: Run full CI\n        run: velnor-workflow run --config .github/ci/project.toml --scope full\n      - name: Package declared crates\n        run: cargo package --workspace --locked\n\n  publish:\n    name: Publish crates.io packages\n    needs: verify\n    runs-on: ubuntu-24.04\n    timeout-minutes: 45\n    environment: crates.io\n    permissions:\n      contents: read\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Authenticate to crates.io\n        id: auth\n        uses: {}\n      - name: Publish in dependency order\n        env:\n          CARGO_REGISTRY_TOKEN: {}\n        run: |\n          set -euo pipefail\n",
@@ -2027,9 +3427,7 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
 
 fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
-    output.push_str(
-        "name: Release\nrun-name: Release · ${{ github.ref_name }}\n\non:\n  push:\n    tags: [\"v*\"]\n\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  verify:\n    name: Control / Verify release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps:\n",
-    );
+    output.push_str(&release_trigger_header(release));
     let _ = writeln!(
         output,
         "      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Verify tag\n        run: velnor-workflow release verify-tag\n      - name: Run full CI\n        run: velnor-workflow run --config .github/ci/project.toml --scope full\n",
@@ -2082,7 +3480,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let matrix_runner = release_matrix_runner(config, &release.targets);
     let _ = writeln!(
         output,
-        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
+        "    runs-on: {matrix_runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Add Rust target\n        run: rustup target add \"${{{{ matrix.target }}}}\"\n      - name: Build release binary\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target \"${{{{ matrix.target }}}}\"\n      - name: Package release binary\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-binary --target \"${{{{ matrix.target }}}}\" --version \"${{VERSION#v}}\" --package {} --binary {}\n      - name: Attest release artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload release artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 2\n\n  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    environment: github-release\n    permissions:\n      contents: write\n    steps:\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Verify archive checksums\n        run: |\n          set -euo pipefail\n          cd dist\n          for checksum in *.sha256; do sha256sum --check \"$checksum\"; done\n      - name: Checkout\n        uses: {publish_checkout}\n        with:\n          persist-credentials: false\n{tag_check}      - name: Publish immutable GitHub release\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: gh release create \"${{{{ github.ref_name }}}}\" dist/* --verify-tag --generate-notes\n",
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
         yaml_scalar(&release.package),
@@ -2093,6 +3491,8 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ActionPin::UploadArtifact.reference(),
         ActionPin::DownloadArtifact.reference(),
         matrix_runner = matrix_runner,
+        publish_checkout = ActionPin::Checkout.reference(),
+        tag_check = TAG_IMMUTABILITY_STEP,
     );
     if let Some((prefix, build)) = output.split_once("\n  build:") {
         let build = build.replace(
@@ -2102,12 +3502,21 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
                 workflow_runtime_setup_for_config(config)
             ),
         );
+        // A declared rehearse drill finishes its declared work on the
+        // feature branch it was dispatched from: the trusted gate alone
+        // would skip every build off main, green without building. Publish
+        // stays tag-gated downstream, so the extra arm can only rehearse.
+        let build_gate = if has_release_modes(release) {
+            format!(
+                "{} || (github.event_name == 'workflow_dispatch' && needs.verify.outputs.mode == 'rehearse')",
+                trusted_release_runner_gate(&config.default_branch)
+            )
+        } else {
+            trusted_release_runner_gate(&config.default_branch)
+        };
         let build = build.replace(
             &format!("    runs-on: {matrix_runner}\n    timeout-minutes: 90"),
-            &format!(
-                "    runs-on: {matrix_runner}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 90",
-                trusted_release_runner_gate(&config.default_branch)
-            ),
+            &format!("    runs-on: {matrix_runner}\n    if: ${{{{ {build_gate} }}}}\n    timeout-minutes: 90"),
         );
         output = format!("{prefix}\n  build:{build}");
     }
@@ -2128,7 +3537,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "runs-on: ubuntu-24.04",
         &format!("runs-on: {}", selected_runner(config)),
     );
-    output
+    let output = output
         .replace(
             "name: ${{ matrix.target }}",
             "name: ${{ matrix.lane }}-${{ matrix.target }}",
@@ -2139,7 +3548,82 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
                 "          path: dist\n          pattern: {}-*\n          merge-multiple: true",
                 canonical_lane(config)
             ),
-        )
+        );
+    inject_binary_bindings(&output, config, release)
+}
+
+/// The stable-publisher bindings: a dispatch trigger carrying the declared
+/// drill modes, a mode resolver in the verify job, a publish-only gate on
+/// the tag check and the publish job, declared archive packaging with its
+/// manifest assembly, and the credential pairing. Every injection is gated
+/// on its declared contract; an undeclared contract keeps every byte.
+fn inject_binary_bindings(output: &str, config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let mut output = output.to_owned();
+    if has_release_modes(release) {
+        let trigger = release_trigger_block(release);
+        output = output.replacen(
+            &trigger,
+            &format!(
+                "{trigger}  workflow_dispatch:\n{}",
+                dispatch_mode_input(release)
+            ),
+            1,
+        );
+        output = output.replacen(
+            "  verify:\n    name: Control / Verify release\n",
+            "  verify:\n    name: Control / Verify release\n    outputs:\n      mode: ${{ steps.mode.outputs.mode }}\n",
+            1,
+        );
+        output = output.replacen(
+            "      - name: Verify tag\n",
+            "      - name: Resolve release mode\n        id: mode\n        env:\n          MODE_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}\n        run: |\n          mode=\"$(velnor-workflow release resolve-mode --event \"${{ github.event_name }}\" --ref \"${{ github.ref }}\" --input \"${MODE_INPUT:-validate}\")\"\n          echo \"mode=$mode\" >> \"$GITHUB_OUTPUT\"\n      - name: Verify tag\n        if: ${{ steps.mode.outputs.mode == 'publish' }}\n",
+            1,
+        );
+        output = output.replacen(
+            "  publish:\n    name: Control / Publish\n    needs: [verify, build]\n",
+            "  publish:\n    name: Control / Publish\n    needs: [verify, build]\n    if: ${{ needs.verify.outputs.mode == 'publish' }}\n",
+            1,
+        );
+    }
+    if has_archive_contract(release) {
+        output = output.replacen(
+            "          velnor-workflow release package-binary",
+            &format!(
+                "{}          velnor-workflow release package-binary",
+                archive_deterministic_selection()
+            ),
+            1,
+        );
+        let package_tail = format!(" --binary {}\n", yaml_scalar(&release.binary));
+        output = output.replacen(
+            &package_tail,
+            &format!(
+                " --binary {}{}\n",
+                yaml_scalar(&release.binary),
+                archive_package_flags(release)
+            ),
+            1,
+        );
+        if !release.manifest_schema.is_empty() {
+            let subjects = release
+                .targets
+                .iter()
+                .map(|target| format!("{}-${{VERSION#v}}-{target}.tar.gz", release.binary))
+                .collect::<Vec<_>>()
+                .join(",");
+            output = output.replacen(
+                "      - name: Publish immutable GitHub release\n",
+                &format!(
+                    "{}      - name: Assemble release manifest\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release assemble-manifest --dir dist --subjects \"{subjects}\" --schema {} --repository \"${{{{ github.repository }}}}\" --ref \"${{{{ github.ref }}}}\" --commit \"${{{{ github.sha }}}}\" --version \"${{VERSION#v}}\"\n      - name: Publish immutable GitHub release\n",
+                    workflow_runtime_setup_for_config(config),
+                    shell_quote(&release.manifest_schema),
+                ),
+                1,
+            );
+        }
+    }
+    output = inject_credential_pairing(&output, release, "      - name: Attest release artifact\n");
+    inject_archive_retention(&output, release)
 }
 
 #[allow(clippy::format_push_string)]
@@ -2150,19 +3634,34 @@ fn inject_native_verify_outputs(
     config: &ProjectConfig,
     release: &ReleaseSpec,
 ) -> String {
-    let output = output.replace(
-        "  verify:\n    name: Control / Verify release\n",
-        "  verify:\n    name: Control / Verify release\n    outputs:\n      version: ${{ steps.version.outputs.version }}\n",
-    );
+    // With declared modes the verify job already carries a mode output
+    // block; the version merges into it instead of opening a second block.
+    let output = if has_release_modes(release) {
+        output.replacen(
+            "    outputs:\n",
+            "    outputs:\n      version: ${{ steps.version.outputs.version }}\n",
+            1,
+        )
+    } else {
+        output.replace(
+            "  verify:\n    name: Control / Verify release\n",
+            "  verify:\n    name: Control / Verify release\n    outputs:\n      version: ${{ steps.version.outputs.version }}\n",
+        )
+    };
     let verify_tag_run = format!(
         "run: velnor-workflow release verify-tag --branch {} --package {}\n",
         shell_quote(&config.default_branch),
         shell_quote(&release.package)
     );
+    let version_gate = if has_release_modes(release) {
+        "        if: ${{ steps.mode.outputs.mode == 'publish' }}\n"
+    } else {
+        ""
+    };
     output.replace(
         &verify_tag_run,
         &format!(
-            "{verify_tag_run}      - name: Resolve release version\n        id: version\n        env:\n          TAG: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          case \"$TAG\" in\n            v[0-9]*) ;;\n            *) echo \"::error::release tag $TAG must match v[0-9]*\" >&2; exit 1 ;;\n          esac\n          version=\"${{TAG#v}}\"\n          case \"$version\" in\n            ''|*['/ ']*) echo \"::error::release version is not portable: $version\" >&2; exit 1 ;;\n          esac\n          echo \"version=$version\" >> \"$GITHUB_OUTPUT\"\n"
+            "{verify_tag_run}      - name: Resolve release version\n        id: version\n{version_gate}        env:\n          TAG: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          case \"$TAG\" in\n            v[0-9]*) ;;\n            *) echo \"::error::release tag $TAG must match v[0-9]*\" >&2; exit 1 ;;\n          esac\n          version=\"${{TAG#v}}\"\n          case \"$version\" in\n            ''|*['/ ']*) echo \"::error::release version is not portable: $version\" >&2; exit 1 ;;\n          esac\n          echo \"version=$version\" >> \"$GITHUB_OUTPUT\"\n"
         ),
     )
 }
@@ -2237,6 +3736,267 @@ fn native_image_jobs(config: &ProjectConfig, release: &ReleaseSpec, debian: bool
             ActionPin::DockerBuild.reference(),
         )
     }
+}
+
+/// The `docker` publisher's platform rows: `(arch, platform)` per declared
+/// platform, defaulting to both Linux architectures when the contract
+/// declares none. Rows dedupe by arch so one platform can never gain two
+/// authorized publishers. Unknown platforms fail closed at contract
+/// validation, so this mapping is total over complete contracts.
+fn docker_platform_arches(release: &ReleaseSpec) -> Vec<(&'static str, String)> {
+    let platforms: Vec<String> = if release.platforms.is_empty() {
+        crate::config::DOCKER_PLATFORMS
+            .iter()
+            .map(|platform| (*platform).to_owned())
+            .collect()
+    } else {
+        release.platforms.clone()
+    };
+    let mut arches = Vec::new();
+    for platform in &platforms {
+        let arch = match platform.as_str() {
+            "linux/amd64" => "amd64",
+            "linux/arm64" => "arm64",
+            _ => continue,
+        };
+        if !arches.iter().any(|(known, _)| *known == arch) {
+            arches.push((arch, platform.clone()));
+        }
+    }
+    arches
+}
+
+/// The consumer-owned Dockerfile the `docker` publisher builds.
+fn docker_dockerfile(release: &ReleaseSpec) -> &str {
+    if release.dockerfile.is_empty() {
+        "Dockerfile"
+    } else {
+        &release.dockerfile
+    }
+}
+
+/// The build context the `docker` publisher builds from.
+fn docker_context(release: &ReleaseSpec) -> &str {
+    if release.context.is_empty() {
+        "."
+    } else {
+        &release.context
+    }
+}
+
+/// The GHA cache scope stem for one image: the lowercased image slug, so
+/// repositories publishing several images never share a `BuildKit` cache
+/// scope across images. The matrix arch suffixes it per platform row.
+fn docker_cache_scope(image: &str) -> String {
+    let slug: String = image
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "image".to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
+/// The multi-arch platform matrix: one native builder per declared
+/// platform. Arm64 builders run on the hosted arm64 label; anything else
+/// would silently emulate under QEMU, so there is no fallback.
+fn docker_platform_matrix(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let mut matrix = String::new();
+    for (arch, platform) in docker_platform_arches(release) {
+        let runner = match arch {
+            "amd64" => yaml_scalar(&config.github_runner),
+            // GitHub's hosted arm64 label; the release contract names it and
+            // no second hosted label exists to configure.
+            _ => "ubuntu-24.04-arm".to_owned(),
+        };
+        let _ = writeln!(
+            matrix,
+            "          - arch: {arch}\n            platform: {platform}\n            runner: {runner}"
+        );
+    }
+    matrix
+}
+
+/// The source URL stamped into the `docker` publisher's OCI labels: the
+/// repository's own address on github.com, never a declared guess.
+fn docker_source_url(config: &ProjectConfig) -> String {
+    format!("https://github.com/{}", config.repository)
+}
+
+/// The registry login step every docker job runs: the GHCR automatic-token
+/// login by default, or the declared registry with its credential secret
+/// names. Credentials travel by reference; secret values never appear as
+/// workflow text.
+fn docker_login_step(release: &ReleaseSpec) -> String {
+    let login = ActionPin::DockerLogin.reference();
+    if release.registry.is_empty() {
+        format!(
+            "      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n"
+        )
+    } else {
+        format!(
+            "      - name: Log in to {}\n        uses: {login}\n        with:\n          registry: {}\n          username: ${{{{ secrets.{} }}}}\n          password: ${{{{ secrets.{} }}}}\n",
+            release.registry,
+            yaml_scalar(&release.registry),
+            release.registry_username_secret,
+            release.registry_password_secret,
+        )
+    }
+}
+
+fn render_docker_admit_job(config: &ProjectConfig) -> String {
+    format!(
+        "  admit-runner:\n    name: Control / Admit release\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only docker release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo 'docker release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n",
+        runner = yaml_scalar(&config.github_runner),
+    )
+}
+
+/// The tag gate: the tag must equal the protected branch tip (via
+/// `verify-tag`, without a Cargo package: the `docker` publisher has none),
+/// and one resolved version flows to every downstream job.
+fn render_docker_verify_job(config: &ProjectConfig) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    // The verify job always runs on the hosted github runner, so its
+    // runtime install is keyed to that placement — never to the repo lane.
+    let setup = workflow_runtime_setup(
+        RunnerMode::Github,
+        &config.repository,
+        &config.workflow_revision,
+    );
+    format!(
+        "  verify:\n    name: Control / Verify release\n    runs-on: {runner}\n    timeout-minutes: 30\n    outputs:\n      version: ${{{{ steps.version.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Verify tag\n        run: velnor-workflow release verify-tag --branch {branch}\n      - name: Resolve release version\n        id: version\n        env:\n          TAG: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          case \"$TAG\" in\n            v[0-9]*) ;;\n            *) echo \"::error::release tag $TAG must match v[0-9]*\" >&2; exit 1 ;;\n          esac\n          version=\"${{TAG#v}}\"\n          case \"$version\" in\n            ''|*['/ ']*) echo \"::error::release version is not portable: $version\" >&2; exit 1 ;;\n          esac\n          echo \"version=$version\" >> \"$GITHUB_OUTPUT\"\n",
+        runner = yaml_scalar(&config.github_runner),
+        policy = policy_enforcement_step(),
+        branch = shell_quote(&config.default_branch),
+    )
+}
+
+/// The image admission gate: inspect the version tag without mutating it. An
+/// absent tag opens the platform lane; a present tag is adopted only with an
+/// explicitly supplied recovery digest naming its exact index, so a version
+/// tag is never clobbered and unknown bytes are never adopted.
+fn render_docker_admission_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let buildx = ActionPin::DockerBuildx.reference();
+    format!(
+        "  image-admission:\n    needs: [admit-runner, verify]\n    name: Admit immutable image tag\n    timeout-minutes: 10\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: read\n    outputs:\n      existing: ${{{{ steps.inspect.outputs.existing }}}}\n      index_digest: ${{{{ steps.inspect.outputs.index_digest }}}}\n    steps:\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Inspect version tag without mutation\n        id: inspect\n        env:\n          GHCR_IMAGE: {image}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          RECOVERY_INDEX_DIGEST: ${{{{ github.event_name == 'workflow_dispatch' && inputs.existing-image-digest || '' }}}}\n        run: |\n          set -euo pipefail\n          ref=\"${{GHCR_IMAGE}}:${{VERSION}}\"\n          error_file=\"$(mktemp)\"\n          if docker buildx imagetools inspect \"$ref\" --format '{{{{json .}}}}' > image.json 2>\"$error_file\"; then\n            index_digest=\"$(jq -er '.manifest.digest' image.json)\"\n            case \"$index_digest\" in\n              sha256:[0-9a-fA-F]*) ;;\n              *) echo \"::error::existing image tag $ref returned an invalid index digest\" >&2; exit 1 ;;\n            esac\n            if [ -z \"$RECOVERY_INDEX_DIGEST\" ] || [ \"$index_digest\" != \"$RECOVERY_INDEX_DIGEST\" ]; then\n              echo \"::error::OCI tag $ref already exists with an unverified index digest; refusing to adopt unknown bytes (supply existing-image-digest to resume a verified run)\" >&2\n              exit 1\n            fi\n            echo \"adopting explicitly supplied recovery index $index_digest\"\n            {{\n              echo \"existing=true\"\n              echo \"index_digest=$index_digest\"\n            }} >> \"$GITHUB_OUTPUT\"\n          elif grep -Eiq 'manifest unknown|no such manifest|not found|name unknown' \"$error_file\"; then\n            {{\n              echo \"existing=false\"\n              echo \"index_digest=\"\n            }} >> \"$GITHUB_OUTPUT\"\n          else\n            cat \"$error_file\" >&2\n            echo \"::error::could not determine whether OCI tag $ref exists; refusing a fail-open publish\" >&2\n            exit 1\n          fi\n",
+        runner = yaml_scalar(&config.github_runner),
+        image = yaml_scalar(&release.image),
+        login_step = docker_login_step(release),
+    )
+}
+
+/// The per-arch OCI platform lane: each native builder pushes its platform
+/// by digest — never under a tag — with `BuildKit` caches plus SBOM and
+/// provenance attestations, then records the digest the manifest job
+/// assembles. The `tags:` input names the bare repository the digest push
+/// targets; only the manifest job writes a version tag.
+fn render_docker_platform_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let buildx = ActionPin::DockerBuildx.reference();
+    let build = ActionPin::DockerBuild.reference();
+    let matrix = docker_platform_matrix(config, release);
+    format!(
+        "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} image\n    needs: [admit-runner, verify, image-admission]\n    if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n{login_step}      - name: Build + push platform image by digest\n        id: build\n        uses: {build}\n        with:\n          context: {context}\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          outputs: type=image,push-by-digest=true,name-canonical=true,push=true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope={scope}-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope={scope}-${{{{ matrix.arch }}}},mode=max\n          build-args: |\n            VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n      - name: Record platform digest\n        run: |\n          set -euo pipefail\n          digest=\"${{{{ steps.build.outputs.digest }}}}\"\n          hex=\"${{digest#sha256:}}\"\n          case \"$digest\" in\n            sha256:*) ;;\n            *) echo \"::error::platform build did not return a digest\" >&2; exit 1 ;;\n          esac\n          case \"$hex\" in\n            ''|*[!0-9a-f]*) echo \"::error::platform digest is not lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#hex}}\" -eq 64 ] || {{ echo \"::error::platform digest has invalid length\" >&2; exit 1; }}\n          printf '%s\\n' \"$digest\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        image = yaml_scalar(&release.image),
+        context = yaml_scalar(docker_context(release)),
+        dockerfile = yaml_scalar(docker_dockerfile(release)),
+        scope = docker_cache_scope(&release.image),
+        source_url = docker_source_url(config),
+        login_step = docker_login_step(release),
+    )
+}
+
+/// The manifest job: assemble the verified platform digests into one
+/// immutable multi-arch version tag (or re-verify an admitted one), and
+/// export the index digest. The job runs whenever its inputs are
+/// trustworthy — including when the platform lane correctly skipped — but
+/// never when admission itself failed. Nothing else in the file writes a
+/// tag: this job is the exactly-one authorized publisher.
+fn render_docker_manifest_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    needs: &[String],
+) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    let download = ActionPin::DownloadArtifact.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let buildx = ActionPin::DockerBuildx.reference();
+    // The manifest job always runs on the hosted github runner, so its
+    // runtime install is keyed to that placement — never to the repo lane.
+    let setup = workflow_runtime_setup(
+        RunnerMode::Github,
+        &config.repository,
+        &config.workflow_revision,
+    );
+    let arches = docker_platform_arches(release);
+    let mut reads = String::new();
+    let mut sources = Vec::new();
+    let mut jq_args = String::new();
+    let mut clauses = Vec::new();
+    for (arch, _) in &arches {
+        let _ = writeln!(
+            reads,
+            "            {arch}_digest=\"$(tr -d '[:space:]' < \"image-artifacts/image-{arch}.digest\")\""
+        );
+        sources.push(format!("              \"${{GHCR_IMAGE}}@${arch}_digest\""));
+        let _ = write!(jq_args, " --arg {arch} \"${arch}_digest\"");
+        clauses.push(format!(
+            "any(.manifest.manifests[]; .digest == ${arch} and .platform.architecture == \"{arch}\")"
+        ));
+    }
+    let sources = sources.join(" \\\n");
+    let clauses = clauses.join(" and\n              ");
+    let arch_list = arches
+        .iter()
+        .map(|(arch, _)| (*arch).to_owned())
+        .collect::<Vec<_>>()
+        .join(",");
+    let needs = needs.join(", ");
+    format!(
+        "  image:\n    if: ${{{{ always() && needs.admit-runner.result == 'success' && needs.verify.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n{login_step}      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        runner = yaml_scalar(&config.github_runner),
+        image = yaml_scalar(&release.image),
+        count = arches.len(),
+        login_step = docker_login_step(release),
+    )
+}
+
+/// The standalone multi-arch OCI publisher for consumer-owned Dockerfiles:
+/// one immutable version tag is admitted, built natively per declared
+/// platform with caches and attestations, and assembled from the complete
+/// verified digest set by the single manifest job. One concurrency group
+/// per ref serializes publishers so a resume and a fresh publication can
+/// never interleave on the same tag.
+fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
+    let mut manifest_needs = vec![
+        "admit-runner".to_owned(),
+        "verify".to_owned(),
+        "image-admission".to_owned(),
+        "image-platform".to_owned(),
+    ];
+    manifest_needs.extend(unit_job_ids);
+    format!(
+        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [{tags}]\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{admit}\n{verify}\n{unit_jobs}{admission}\n{platform}\n{manifest}",
+        tags = yaml_scalar(release_tag_pattern(release)),
+        admit = render_docker_admit_job(config),
+        verify = render_docker_verify_job(config),
+        unit_jobs = unit_jobs,
+        admission = render_docker_admission_job(config, release),
+        platform = render_docker_platform_job(config, release),
+        manifest = render_docker_manifest_job(config, release, &manifest_needs),
+    )
 }
 
 #[allow(clippy::format_push_string)]
@@ -2324,19 +4084,33 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             ),
         );
     }
-    // The recovery digest input exists only with the admission gate that
-    // reads it; contracts without the multi-arch lane keep their dispatch
-    // surface unchanged.
+    inject_native_dispatch(&output, release, debian)
+}
+
+/// The native dispatch surface: the runner input (with the recovery digest
+/// beside the admission gate that reads it) joins the mode-carrying
+/// dispatch block when modes are declared, else the legacy block. Contracts
+/// without the multi-arch lane keep their dispatch surface unchanged.
+fn inject_native_dispatch(output: &str, release: &ReleaseSpec, debian: bool) -> String {
     let recovery_input = if debian && !release.image.is_empty() {
         "      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n"
     } else {
         ""
     };
+    let runner_input = format!(
+        "      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n{recovery_input}"
+    );
+    if has_release_modes(release) {
+        return output.replacen(
+            "  workflow_dispatch:\n    inputs:\n",
+            &format!("  workflow_dispatch:\n    inputs:\n{runner_input}"),
+            1,
+        );
+    }
+    let trigger = release_trigger_block(release);
     output.replace(
-        "on:\n  push:\n    tags: [\"v*\"]\n",
-        &format!(
-            "on:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n{recovery_input}",
-        ),
+        &trigger,
+        &format!("{trigger}  workflow_dispatch:\n    inputs:\n{runner_input}"),
     )
 }
 
@@ -2511,6 +4285,32 @@ fn gate_velnor_release_verify(output: &mut String, config: &ProjectConfig) {
     }
 }
 
+/// Delete one Actions cache entry with bounded retries. A delete the API no
+/// longer knows (HTTP 404) is progress a concurrent maintenance run already
+/// made, not a failure; an authorization refusal (HTTP 401/403) aborts the
+/// step instead of retrying a refusal that cannot succeed. Returns 0 when
+/// the entry is deleted or already gone, 1 after bounded retries, and 2 on
+/// authorization refusal.
+const MAINTENANCE_DELETE_CACHE_FN: &str = r#"          delete_cache_id() {
+            local id="$1" error attempt
+            for attempt in 1 2 3; do
+              error="$(gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" 2>&1 >/dev/null)" && return 0
+              if grep -qi 'not found' <<<"$error"; then
+                return 0
+              fi
+              if grep -Eq 'HTTP 40[13]' <<<"$error"; then
+                echo "::error::cache delete refused for id $id ($error); refusing to retry an authorization failure" >&2
+                return 2
+              fi
+              if (( attempt < 3 )); then
+                sleep $((attempt * 2))
+              fi
+            done
+            echo "::error::failed to delete cache id $id after bounded retries" >&2
+            return 1
+          }
+"#;
+
 const MAINTENANCE_WORKFLOW: &str = r#"name: Maintenance
 run-name: Maintenance · ${{ github.event_name }}
 
@@ -2518,7 +4318,7 @@ on:
   pull_request:
     types: [closed]
   schedule:
-    - cron: '31 3 * * *'
+    - cron: __MAINTENANCE_SCHEDULE__
   workflow_dispatch:
     inputs:
       pull_request_number:
@@ -2547,29 +4347,36 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
         run: |
           set -euo pipefail
+__MAINTENANCE_DELETE_CACHE_FN__
           ref="refs/pull/$PR_NUMBER/merge"
           encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-          cache_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')"
-          if [[ -z "$cache_ids" ]]; then
+          listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')" || {
+            echo "::error::failed to list cache entries for $ref" >&2
+            exit 1
+          }
+          if [[ -z "$listing" ]]; then
             echo "No merge-ref cache entries found for $ref"
             exit 0
           fi
+          mapfile -t cache_ids <<<"$listing"
+          deleted=0
           failed=0
-          while IFS= read -r id; do
+          for id in "${cache_ids[@]}"; do
             [[ -z "$id" ]] && continue
-            deleted=false
-            for delay in 1 2 4 8; do
-              if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
-                deleted=true
-                break
-              fi
-              sleep "$delay"
-            done
-            if [[ "$deleted" != true ]]; then
-              failed=$((failed + 1))
-              echo "::error::failed to delete cache id $id after retries" >&2
+            if (( deleted + failed >= __MAINTENANCE_MAX_DELETES__ )); then
+              echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
+              exit 1
             fi
-          done <<< "$cache_ids"
+            if delete_cache_id "$id"; then
+              deleted=$((deleted + 1))
+            else
+              status=$?
+              if (( status == 2 )); then
+                exit 1
+              fi
+              failed=$((failed + 1))
+            fi
+          done
           if (( failed > 0 )); then
             echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
             exit 1
@@ -2590,7 +4397,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for workflow in ci-main.yml nightly.yml; do
+          for workflow in __MAINTENANCE_PRODUCERS__; do
             if [[ "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status in_progress --limit 1 --json databaseId --jq 'length')" != "0" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "$workflow is in_progress; skipping cache retention" >> "$GITHUB_STEP_SUMMARY"
@@ -2604,14 +4411,21 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Sweep closed-PR merge-ref caches
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+__MAINTENANCE_DELETE_CACHE_FN__
           failed=0
-          mapfile -t refs < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
-            --jq '.actions_caches[].ref' | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
+          processed=0
+          all_refs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].ref')" || {
+            echo "::error::failed to list cache scopes" >&2
+            exit 1
+          }
+          mapfile -t refs < <(printf '%s\n' "$all_refs" | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
           if ((${#refs[@]} == 0)); then
             echo "No merge-ref cache scopes found"
             exit 0
           fi
           for ref in "${refs[@]}"; do
+            [[ -z "$ref" ]] && continue
             pr="${ref#refs/pull/}"
             pr="${pr%/merge}"
             state="$(gh pr view "$pr" --json state --jq .state 2>/dev/null || echo unknown)"
@@ -2619,25 +4433,32 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Sweep closed-PR merge-ref caches
               continue
             fi
             encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-            mapfile -t cache_ids < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
-              --jq '.actions_caches[].id')
-            if ((${#cache_ids[@]} == 0)); then
+            listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
+              --jq '.actions_caches[].id')" || {
+              echo "::error::failed to list cache entries for $ref" >&2
+              exit 1
+            }
+            if [[ -z "$listing" ]]; then
               continue
             fi
+            mapfile -t cache_ids <<<"$listing"
             echo "Sweeping $ref ($pr): ${#cache_ids[@]} entries"
             for id in "${cache_ids[@]}"; do
-              deleted=false
-              for delay in 1 2 4 8; do
-                if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
-                  deleted=true
-                  break
-                fi
-                sleep "$delay"
-              done
-              if [[ "$deleted" != true ]]; then
-                failed=$((failed + 1))
-                echo "::error::failed to delete cache id $id for $ref after retries" >&2
+              [[ -z "$id" ]] && continue
+              if (( processed >= __MAINTENANCE_MAX_DELETES__ )); then
+                echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
+                exit 1
               fi
+              if delete_cache_id "$id"; then
+                :
+              else
+                status=$?
+                if (( status == 2 )); then
+                  exit 1
+                fi
+                failed=$((failed + 1))
+              fi
+              processed=$((processed + 1))
             done
           done
           if (( failed > 0 )); then
@@ -2711,18 +4532,29 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Sweep closed-PR merge-ref caches
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+__MAINTENANCE_DELETE_CACHE_FN__
           evicted=0
           freed=0
           failed=0
           # The plan is applied verbatim, in its own order: generations beyond
           # their class bound first, then classes over budget, then the global
-          # sweep - which never touches a protected class.
+          # sweep - which never touches a protected class. The per-run delete
+          # bound stops the sweep instead of letting one run empty the
+          # account; the next run continues where this one stopped.
           while IFS=$'\t' read -r class reason id size key; do
-            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null; then
+            if (( evicted + failed >= __MAINTENANCE_MAX_DELETES__ )); then
+              echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
+              exit 1
+            fi
+            if delete_cache_id "$id"; then
               evicted=$((evicted + 1))
               freed=$((freed + size))
               echo "evicted id=$id class=$class reason=$reason size=$size key=$key"
             else
+              status=$?
+              if (( status == 2 )); then
+                exit 1
+              fi
               failed=$((failed + 1))
               echo "::warning::failed to evict cache id $id (class $class, key $key)" >&2
             fi
@@ -2830,6 +4662,22 @@ fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW
         .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
         .replace(
+            "__MAINTENANCE_SCHEDULE__",
+            &yaml_scalar(&config.maintenance.schedule),
+        )
+        .replace(
+            "__MAINTENANCE_PRODUCERS__",
+            &config.maintenance.producers.join(" "),
+        )
+        .replace(
+            "__MAINTENANCE_MAX_DELETES__",
+            &config.maintenance.max_deletes.to_string(),
+        )
+        .replace(
+            "__MAINTENANCE_DELETE_CACHE_FN__",
+            MAINTENANCE_DELETE_CACHE_FN.trim_end_matches('\n'),
+        )
+        .replace(
             "__MAINTENANCE_PRUNE_RUNNER__",
             &configured_runner(config, cache_lane),
         )
@@ -2847,6 +4695,347 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         )
 }
 
+/// The headerless `maintenance.yml` body with an optional lanes override: the
+/// base render untouched without the flag, the lanes injection with it.
+fn maintenance_content_with_lanes(
+    config: &ProjectConfig,
+    family: &str,
+    lanes_input: bool,
+) -> Result<String, GeneratorError> {
+    let body = maintenance_content(config);
+    if lanes_input {
+        inject_maintenance_lanes(&body, config, family)
+    } else {
+        Ok(body)
+    }
+}
+
+/// Thread the lanes override through a rendered maintenance body: the lanes
+/// input first, above `pull_request_number`, and a dispatch-conditional
+/// `runs-on` on both jobs. Admission requires both lanes with label routing,
+/// so both jobs render the hosted static; anything else fails closed instead
+/// of dispatching half the file.
+fn inject_maintenance_lanes(
+    output: &str,
+    config: &ProjectConfig,
+    family: &str,
+) -> Result<String, GeneratorError> {
+    let conditional = lanes_runs_on(config, family, RunnerMode::Github)?;
+    let expected = yaml_scalar(&config.github_runner);
+    for line in output.lines() {
+        let Some(value) = line.strip_prefix("    runs-on: ") else {
+            continue;
+        };
+        if value != expected {
+            return Err(GeneratorError::usage(format!(
+                "`{family}` `lanes_input` threads every job across lanes; `runs-on: {value}` is routed outside the github lane and cannot dispatch"
+            )));
+        }
+    }
+    let expected = format!("    runs-on: {expected}");
+    Ok(output
+        .replace(
+            "      pull_request_number:\n",
+            &format!(
+                "{}      pull_request_number:\n",
+                lanes_input_entry(RunnerMode::Github)
+            ),
+        )
+        .replace(&expected, &format!("    runs-on: {conditional}")))
+}
+
+#[cfg(test)]
+mod maintenance_lanes_tests {
+    #![expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    /// A fixed generator pin so the fixture render never moves with the commit
+    /// that builds the test binary.
+    const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"),
+        }
+    }
+
+    fn must_fail<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(_) => panic!("{context}: expected a usage error"),
+            Err(error) => error,
+        }
+    }
+
+    fn lanes_config() -> ProjectConfig {
+        ProjectConfig {
+            repository: "example/declared".to_owned(),
+            workflow_revision: FIXTURE_REVISION.to_owned(),
+            profile: "generic".to_owned(),
+            analysis: crate::AnalysisSummary {
+                method: "test".to_owned(),
+                detected: Vec::new(),
+                limitations: Vec::new(),
+            },
+            verified: true,
+            workflow_files: vec!["maintenance.yml".to_owned()],
+            notes: Vec::new(),
+            version_bump_units: Vec::new(),
+            default_branch: "main".to_owned(),
+            runners: RunnerMode::Both,
+            automatic: RunnerMode::Both,
+            github_runner: "ubuntu-24.04".to_owned(),
+            macos_runner: "macos-15".to_owned(),
+            velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+            release_enabled: false,
+            release_reason: String::new(),
+            release: None,
+            renovate_enabled: false,
+            renovate_reason: String::new(),
+            renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
+            check_profiles: Vec::new(),
+            maintenance: crate::MaintenanceSpec {
+                schedule: "17 4 * * *".to_owned(),
+                producers: vec!["ci-main.yml".to_owned()],
+                max_deletes: 50,
+            },
+            units: Vec::new(),
+            workflow_templates: BTreeMap::new(),
+            adopted_workflow_surface: false,
+            actionlint_config_variables_null: false,
+            ci_required: true,
+            ruleset_required_status_checks: Vec::new(),
+            ruleset_external_status_checks: Vec::new(),
+            package_update_channels: None,
+            velnor_runner_group: None,
+            velnor_trusted_label: None,
+            velnor_trusted_runner_available: None,
+            pull_request_on_velnor: false,
+            default_dispatch_runner: crate::DEFAULT_DISPATCH_RUNNER.to_owned(),
+            automatic_lanes: crate::DEFAULT_AUTOMATIC_LANES.to_owned(),
+            velnor_rust_needs: crate::VelnorRustNeeds::Parallel,
+            velnor_concurrency_group: None,
+            velnor_serial_stack_groups: false,
+            static_files: Vec::new(),
+            declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
+            github_cache: crate::config::CacheGithubSection::default(),
+            velnor_host_cache: crate::config::CacheVelnorSection::default(),
+        }
+    }
+
+    fn scanned_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-maintenance-lanes-{name}-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(&root),
+            "create maintenance test repository",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"example\"\nversion = \"0.1.0\"\n",
+            ),
+            "write maintenance fixture manifest",
+        );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+            "write maintenance fixture toolchain pin",
+        );
+        root
+    }
+
+    fn try_generate(
+        root: &Path,
+        config: &ProjectConfig,
+        rows: &str,
+    ) -> Result<super::super::Surface, GeneratorError> {
+        let shape = must(
+            crate::scan::scan_shape(root, RunnerMode::Both, "main", &[]),
+            "scan maintenance fixture",
+        );
+        let directory = root.join(crate::config::GENERATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(directory.parent().unwrap_or(root)),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                &directory,
+                format!("schema = 1\n\n[generator]\nrepository = \"example/declared\"\n\n{rows}"),
+            ),
+            "write declared config",
+        );
+        let generation = must_some(
+            must(crate::config::discover(root), "discover declared config"),
+            "the declared config must be discovered",
+        );
+        super::super::generate(root, &shape, config, Some(&generation))
+    }
+
+    #[test]
+    fn absent_lanes_input_renders_byte_identical() {
+        let config = lanes_config();
+        let base = maintenance_content(&config);
+        assert_eq!(
+            must(
+                maintenance_content_with_lanes(&config, MAINTENANCE, false),
+                "render without the lanes input",
+            ),
+            base,
+            "an undeclared lanes input renders today's bytes exactly"
+        );
+        for marker in ["lanes:", "inputs.lanes", "fromJSON"] {
+            assert!(
+                !base.contains(marker),
+                "an undeclared lanes input renders nothing: {marker} in {base}"
+            );
+        }
+        let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
+        let runs_on: Vec<&str> = base
+            .lines()
+            .filter(|line| line.trim_start().starts_with("runs-on:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            runs_on.as_slice(),
+            [hosted.as_str(), hosted.as_str()],
+            "both jobs stay on the static lane: {base}"
+        );
+    }
+
+    #[test]
+    fn lanes_input_renders_lanes_first_and_conditional_runners() {
+        let config = lanes_config();
+        let workflow = must(
+            maintenance_content_with_lanes(&config, MAINTENANCE, true),
+            "render with the lanes input",
+        );
+        assert!(
+            workflow.contains(
+                "  workflow_dispatch:\n    inputs:\n      lanes:\n        description: github (default) | velnor\n        type: choice\n        default: github\n        options: [github, velnor]\n      pull_request_number:\n"
+            ),
+            "the lanes entry renders first, above pull_request_number: {workflow}"
+        );
+        let triggers = must_some(
+            workflow.split("permissions:").next(),
+            "the trigger block renders",
+        );
+        assert!(
+            !triggers.contains("both"),
+            "there is no both option to alias one leg: {triggers}"
+        );
+        assert_eq!(
+            workflow.matches("inputs.lanes == 'velnor'").count(),
+            2,
+            "both jobs dispatch across lanes: {workflow}"
+        );
+        assert!(
+            !workflow.contains("runs-on: ubuntu-24.04"),
+            "no static leg remains: {workflow}"
+        );
+        for job in ["  prune-pr-cache:\n", "  cache-budget:\n"] {
+            assert_eq!(
+                workflow.matches(job).count(),
+                1,
+                "one conditional job per job, never per-lane legs: {workflow}"
+            );
+        }
+        assert!(
+            workflow.contains(
+                "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')"
+            ),
+            "the closed-PR prune gate stays live: {workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+            ),
+            "cache retention keeps schedule and dispatch: {workflow}"
+        );
+    }
+
+    #[test]
+    fn lanes_input_needs_both_lanes_and_label_routing() {
+        let mut single = lanes_config();
+        single.runners = RunnerMode::Github;
+        let error = must_fail(
+            maintenance_content_with_lanes(&single, MAINTENANCE, true),
+            "a single-lane repository must fail admission",
+        );
+        assert!(error.to_string().contains("both"), "{error}");
+
+        let mut grouped = lanes_config();
+        grouped.velnor_runner_group = Some("example-group".to_owned());
+        let error = must_fail(
+            maintenance_content_with_lanes(&grouped, MAINTENANCE, true),
+            "a declared runner group must fail admission",
+        );
+        assert!(error.to_string().contains("runner group"), "{error}");
+
+        let mut unlabeled = lanes_config();
+        unlabeled.velnor_labels = Vec::new();
+        let error = must_fail(
+            maintenance_content_with_lanes(&unlabeled, MAINTENANCE, true),
+            "missing velnor labels must fail admission",
+        );
+        assert!(error.to_string().contains("velnor_labels"), "{error}");
+    }
+
+    #[test]
+    fn declared_lanes_input_threads_the_rendered_file() {
+        let root = scanned_root("declared");
+        let config = lanes_config();
+        let surface = must(
+            try_generate(
+                &root,
+                &config,
+                "[[declare]]\nprimitive = \"maintenance\"\nfile = \"maintenance.yml\"\n\n[declare.args]\nlanes_input = true\n",
+            ),
+            "generate the declared maintenance surface",
+        );
+        let workflow = must_some(
+            surface
+                .files
+                .get(&PathBuf::from(".github/workflows/maintenance.yml")),
+            "a declared maintenance row renders maintenance.yml",
+        );
+        assert!(
+            workflow.contains("options: [github, velnor]"),
+            "the declared flag threads the lanes input: {workflow}"
+        );
+        assert_eq!(
+            workflow.matches("inputs.lanes == 'velnor'").count(),
+            2,
+            "the declared flag threads both jobs: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![expect(
@@ -2861,6 +5050,7 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::*;
+    use crate::ReleaseCredential;
 
     /// A fixed generator pin so the pinned render digests below never move
     /// with the commit that builds the test binary.
@@ -3166,6 +5356,12 @@ mod tests {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::portable(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
         }
     }
 
@@ -3180,6 +5376,7 @@ mod tests {
                 "aarch64-unknown-linux-gnu".to_owned(),
             ],
             image: String::new(),
+            image_package: String::new(),
             source_repository: String::new(),
             consumer_repository: String::new(),
             artifact_path: String::new(),
@@ -3193,6 +5390,20 @@ mod tests {
             apt_identity_dir: String::new(),
             apt_feed_url: String::new(),
             retention: 0,
+            dockerfile: String::new(),
+            context: String::new(),
+            platforms: Vec::new(),
+            producer_workflow: String::new(),
+            producer_conclusion: String::new(),
+            modes: Vec::new(),
+            archive_members: Vec::new(),
+            archive_checksum: String::new(),
+            archive_retention_days: 0,
+            credentials: Vec::new(),
+            tag_pattern: String::new(),
+            registry: String::new(),
+            registry_username_secret: String::new(),
+            registry_password_secret: String::new(),
         }
     }
 
@@ -3210,6 +5421,7 @@ mod tests {
                 "aarch64-unknown-linux-gnu".to_owned(),
             ],
             image: "ghcr.io/example/app".to_owned(),
+            image_package: String::new(),
             source_repository: "example/app".to_owned(),
             consumer_repository: "example/apt".to_owned(),
             artifact_path: String::new(),
@@ -3223,6 +5435,61 @@ mod tests {
             apt_identity_dir: String::new(),
             apt_feed_url: String::new(),
             retention: 0,
+            dockerfile: String::new(),
+            context: String::new(),
+            platforms: Vec::new(),
+            producer_workflow: String::new(),
+            producer_conclusion: String::new(),
+            modes: Vec::new(),
+            archive_members: Vec::new(),
+            archive_checksum: String::new(),
+            archive_retention_days: 0,
+            credentials: Vec::new(),
+            tag_pattern: String::new(),
+            registry: String::new(),
+            registry_username_secret: String::new(),
+            registry_password_secret: String::new(),
+        }
+    }
+
+    /// A standalone multi-arch OCI publisher over a consumer-owned
+    /// Dockerfile. All coordinates are fixture-local.
+    fn docker_spec() -> ReleaseSpec {
+        ReleaseSpec {
+            kind: "docker".to_owned(),
+            package: String::new(),
+            packages: Vec::new(),
+            binary: String::new(),
+            targets: Vec::new(),
+            image: "ghcr.io/example/app".to_owned(),
+            image_package: String::new(),
+            source_repository: String::new(),
+            consumer_repository: String::new(),
+            artifact_path: String::new(),
+            description: String::new(),
+            manifest_schema: String::new(),
+            apt_arches: Vec::new(),
+            signer_fingerprint: String::new(),
+            passphrase_secret: String::new(),
+            keyring_path: String::new(),
+            apt_origin: String::new(),
+            apt_identity_dir: String::new(),
+            apt_feed_url: String::new(),
+            retention: 0,
+            dockerfile: "Dockerfile".to_owned(),
+            context: ".".to_owned(),
+            platforms: vec!["linux/amd64".to_owned(), "linux/arm64".to_owned()],
+            producer_workflow: String::new(),
+            producer_conclusion: String::new(),
+            modes: Vec::new(),
+            archive_members: Vec::new(),
+            archive_checksum: String::new(),
+            archive_retention_days: 0,
+            credentials: Vec::new(),
+            tag_pattern: String::new(),
+            registry: String::new(),
+            registry_username_secret: String::new(),
+            registry_password_secret: String::new(),
         }
     }
 
@@ -3263,6 +5530,11 @@ mod tests {
             renovate_enabled: false,
             renovate_reason: String::new(),
             renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
+            check_profiles: Vec::new(),
+            maintenance: crate::MaintenanceSpec::default(),
             units: vec![unit("rust-example")],
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
@@ -3344,7 +5616,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "fe8814a303cf8bf8c542e2b7a1dfe77347ce3cf8ec36d4c38e074a03b37cbefa",
+                "b40b9ceb38f5819446217faa76f424d26eee539b3bbe3dbd9f320ccecef224cf",
             ),
             (
                 "preview.yml",
@@ -3352,7 +5624,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "dec062b10a81cc0add558b5ab3da547b8d818fd8079cc895845c55dd7f945c1d",
+                "41ef15b8f97eaa4503e592deb90be865cde0ef6b4912ef05c61cfc7c16f78dd7",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3470,11 +5742,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "f0e44f87fedb2a31d0934f64986b8027041ab36e60f1bde200ff4fda58798f8d",
+                "2cef6177dcabde81d31c57e62a02659d2801738a913dd0d1041ca5911c605b3a",
             ),
             (
                 "preview.yml",
-                "b2e2a977c325312e21d22d329a5dba598053ca8ac08719b3859a640b06dc739d",
+                "b579999c9879f2dc10ea71ee260ebdb4e8355d24084370ad0b5e4ec9084b7de7",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -3827,6 +6099,91 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_renders_declared_schedule_producers_and_bound() {
+        let mut cfg = config(&["maintenance.yml"], None);
+        cfg.maintenance = crate::MaintenanceSpec {
+            schedule: "17 4 * * *".to_owned(),
+            producers: vec!["ci-main.yml".to_owned()],
+            max_deletes: 50,
+        };
+        let workflow = super::render_maintenance(&cfg);
+        assert!(
+            workflow.contains("- cron: \"17 4 * * *\""),
+            "declared schedule: {workflow}"
+        );
+        assert!(
+            workflow.contains("for workflow in ci-main.yml; do"),
+            "declared producers: {workflow}"
+        );
+        assert!(
+            workflow.contains(">= 50"),
+            "declared delete bound: {workflow}"
+        );
+        assert!(
+            !workflow.contains("__MAINTENANCE_"),
+            "no placeholder survives rendering: {workflow}"
+        );
+        let defaults = super::render_maintenance(&config(&["maintenance.yml"], None));
+        assert!(defaults.contains("- cron: \"31 3 * * *\""), "{defaults}");
+        assert!(
+            defaults.contains("for workflow in ci-main.yml nightly.yml; do"),
+            "{defaults}"
+        );
+        assert!(defaults.contains(">= 500"), "{defaults}");
+    }
+
+    #[test]
+    fn maintenance_deletes_are_bounded_and_progress_aware() {
+        let cfg = config(&["maintenance.yml"], None);
+        let workflow = super::render_maintenance(&cfg);
+        assert_eq!(
+            workflow.matches("delete_cache_id() {").count(),
+            3,
+            "prune, sweep, and eviction share one delete helper: {workflow}"
+        );
+        for marker in [
+            "grep -qi 'not found'",
+            "grep -Eq 'HTTP 40[13]'",
+            "refusing to retry an authorization failure",
+            "after bounded retries",
+            "maintenance delete bound reached",
+            "rerun maintenance to continue",
+        ] {
+            assert!(workflow.contains(marker), "{marker}: {workflow}");
+        }
+        assert!(
+            !workflow.contains("for delay in 1 2 4 8"),
+            "the unbounded retry loop is gone: {workflow}"
+        );
+    }
+
+    #[test]
+    fn maintenance_passes_trusted_policy_audit() {
+        let cfg = config(&["maintenance.yml"], None);
+        let workflow = super::render_maintenance(&cfg);
+        let root = scanned_root("maintenance-audit");
+        let workflows = root.join(".github/workflows");
+        must(fs::create_dir_all(&workflows), "create audited workflows");
+        must(
+            fs::write(workflows.join("maintenance.yml"), &workflow),
+            "write audited maintenance.yml",
+        );
+        let audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit maintenance workflow",
+        );
+        assert!(
+            audit.pull_request_target.is_empty(),
+            "{:?}",
+            audit.pull_request_target
+        );
+        assert!(audit.runners.is_empty(), "{:?}", audit.runners);
+        assert!(audit.actions.is_empty(), "{:?}", audit.actions);
+        assert!(audit.structure.is_empty(), "{:?}", audit.structure);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn maintenance_installs_pin_when_this_repository_owns_setup() {
         let mut cfg = config(&["maintenance.yml"], None);
         cfg.repository = crate::workflow_setup_action_repository().to_owned();
@@ -4028,7 +6385,10 @@ mod tests {
         // The container tag follows the resolved version, never the raw ref:
         // the index job promotes the admitted image under GHCR_IMAGE:VERSION.
         let image = yaml_job(&workflow, "image");
-        assert!(image.contains("GHCR_IMAGE: ghcr.io/example/app"), "{image}");
+        assert!(
+            image.contains("GHCR_IMAGE: \"ghcr.io/example/app\""),
+            "{image}"
+        );
         assert!(
             image.contains("VERSION: ${{ needs.verify.outputs.version }}"),
             "{image}"
@@ -4163,6 +6523,55 @@ mod tests {
         );
     }
 
+    /// The genericity law's deny list, parsed out of its own source so the
+    /// probes stay in sync without this file spelling a consumer name. The
+    /// sibling parser in `tests/migration_contract.rs` reads the same
+    /// source; the law file is the single source of truth for the tokens.
+    fn deny_list_probes() -> (Vec<String>, (String, String)) {
+        const LAW: &str = include_str!("../../tests/generic_surface_literals.rs");
+        const LIST_MARKER: &str = "const DENY_LIST";
+        const REWRITE_MARKER: &str = ".replace(";
+        fn quoted(line: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = line;
+            while let Some(open) = rest.find('"') {
+                rest = &rest[open + 1..];
+                let Some(close) = rest.find('"') else {
+                    break;
+                };
+                out.push(rest[..close].to_lowercase());
+                rest = &rest[close + 1..];
+            }
+            out
+        }
+        let start = LAW.find(LIST_MARKER).unwrap_or(0);
+        let mut probes = Vec::new();
+        let mut in_list = false;
+        for line in LAW[start..].lines() {
+            if !in_list {
+                if line.contains('[') {
+                    in_list = true;
+                }
+                continue;
+            }
+            if line.contains("];") {
+                break;
+            }
+            probes.extend(quoted(line));
+        }
+        let mut rewrite = (String::new(), String::new());
+        for line in LAW.lines() {
+            if line.contains(REWRITE_MARKER) {
+                let parts = quoted(line);
+                if parts.len() >= 2 {
+                    rewrite = (parts[0].clone(), parts[1].clone());
+                }
+                break;
+            }
+        }
+        (probes, rewrite)
+    }
+
     #[test]
     #[expect(
         clippy::panic,
@@ -4183,7 +6592,7 @@ mod tests {
             "{platform}"
         );
         assert!(
-            platform.contains("if: ${{ needs.image-admission.outputs.existing != 'true' }}"),
+            platform.contains("if: ${{ needs.image-admission.outputs.existing != 'true' && github.event_name != 'workflow_dispatch' }}"),
             "{platform}"
         );
         assert!(platform.contains("- arch: amd64"), "{platform}");
@@ -4199,19 +6608,45 @@ mod tests {
             platform.contains("ref: ${{ github.sha }}"),
             "platform builders pin the gated event commit: {platform}"
         );
+        assert!(platform.contains("Build the image binary"), "{platform}");
+        // The lane derives every product value from the contract: the
+        // release package names the binary, the Dockerfile convention
+        // applies, and the cache scope slugifies the image. No
+        // owner-repository literal may appear in a neutral render.
+        assert!(platform.contains("--package example"), "{platform}");
         assert!(
-            platform.contains("Build the workflow binary for the image"),
+            platform.contains("release-binaries/${{ matrix.arch }}/example"),
             "{platform}"
         );
-        assert!(platform.contains("--package velnor-workflow"), "{platform}");
+        assert!(platform.contains("file: Dockerfile"), "{platform}");
         assert!(
-            platform.contains("release-binaries/${{ matrix.arch }}/velnor-workflow"),
+            platform.contains("type=gha,scope=ghcr-io-example-app-${{ matrix.arch }}"),
             "{platform}"
         );
         assert!(
-            platform.contains("file: docker/job-ubuntu.Dockerfile"),
+            platform.contains("github_token=${{ github.token }}"),
             "{platform}"
         );
+        assert!(
+            platform.contains("VERSION=${{ needs.verify.outputs.version }}"),
+            "{platform}"
+        );
+        // No owner-repository literal may appear in a neutral render. The
+        // probe names come from the genericity law's own deny list, parsed
+        // from its source: this file must not spell a consumer name
+        // literally, and the probes stay in sync with the law.
+        let (forbidden, (admitted, replacement)) = deny_list_probes();
+        assert!(
+            !forbidden.is_empty(),
+            "the genericity deny list parsed to no probes"
+        );
+        let text = platform.to_lowercase().replace(&admitted, &replacement);
+        for name in &forbidden {
+            assert!(
+                !text.contains(name),
+                "neutral render must not contain {name}: {platform}"
+            );
+        }
         assert!(
             platform.contains(
                 "tags: ${{ env.GHCR_IMAGE }}:release-${{ env.COMMIT }}-${{ matrix.arch }}"
@@ -4245,6 +6680,46 @@ mod tests {
             platform.contains("name: image-platform-${{ matrix.arch }}"),
             "{platform}"
         );
+    }
+
+    #[test]
+    fn image_package_overrides_the_release_package_for_the_image_lane() {
+        let mut spec = native_spec();
+        spec.image_package = "example-worker".to_owned();
+        spec.dockerfile = "images/app/Dockerfile".to_owned();
+        let config = config(&["release.yml"], Some(spec));
+        let release = must_some(
+            config.release.as_ref(),
+            "config must carry the release contract",
+        );
+        let platform = super::render_image_platform_job(&config, release);
+        assert!(platform.contains("--package example-worker"), "{platform}");
+        assert!(
+            platform.contains("release-binaries/${{ matrix.arch }}/example-worker"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("file: \"images/app/Dockerfile\""),
+            "{platform}"
+        );
+    }
+
+    #[test]
+    fn image_lane_without_any_package_rejects_instead_of_guessing() {
+        let mut spec = native_spec();
+        spec.package = String::new();
+        spec.binary = String::new();
+        let config = config(&["release.yml"], Some(spec));
+        let release = must_some(
+            config.release.as_ref(),
+            "config must carry the release contract",
+        );
+        let platform = super::render_image_platform_job(&config, release);
+        assert!(
+            platform.contains("Reject imageless binary contract"),
+            "{platform}"
+        );
+        assert!(!platform.contains("--package"), "{platform}");
     }
 
     #[test]
@@ -4311,6 +6786,358 @@ mod tests {
         );
     }
 
+    /// A `docker` publisher config over a repository that owns its
+    /// Dockerfile. The repository slug feeds the OCI source label.
+    fn docker_config() -> ProjectConfig {
+        let mut config = config(&["release.yml"], Some(docker_spec()));
+        config.repository = "example/app".to_owned();
+        config
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_publisher_renders_one_native_builder_per_platform() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(
+            platform.contains("needs: [admit-runner, verify, image-admission]"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("if: ${{ needs.image-admission.outputs.existing != 'true' }}"),
+            "{platform}"
+        );
+        assert!(platform.contains("- arch: amd64"), "{platform}");
+        assert!(platform.contains("platform: linux/amd64"), "{platform}");
+        assert!(platform.contains("- arch: arm64"), "{platform}");
+        assert!(platform.contains("platform: linux/arm64"), "{platform}");
+        assert!(platform.contains("runner: ubuntu-24.04-arm"), "{platform}");
+        assert!(
+            platform.contains("runs-on: ${{ matrix.runner }}"),
+            "{platform}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_platform_pushes_by_digest_with_caches_and_attestations() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        // Push-by-digest: no tag is written here; `tags:` names the bare
+        // repository the digest push targets.
+        assert!(
+            platform
+                .contains("outputs: type=image,push-by-digest=true,name-canonical=true,push=true"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("tags: ${{ env.GHCR_IMAGE }}"),
+            "{platform}"
+        );
+        assert!(!platform.contains("imagetools create"), "{platform}");
+        assert!(platform.contains("provenance: true"), "{platform}");
+        assert!(platform.contains("sbom: true"), "{platform}");
+        assert!(platform.contains("id-token: write"), "{platform}");
+        assert!(platform.contains("attestations: write"), "{platform}");
+        assert!(
+            platform
+                .contains("type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }}"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("type=gha,scope=ghcr-io-example-app-${{ matrix.arch }}"),
+            "{platform}"
+        );
+        assert!(platform.contains("mode=max"), "{platform}");
+        // The consumer-owned build inputs render verbatim.
+        assert!(platform.contains("file: Dockerfile"), "{platform}");
+        assert!(platform.contains("context: \".\""), "{platform}");
+        assert!(
+            platform
+                .contains("org.opencontainers.image.version=${{ needs.verify.outputs.version }}"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("org.opencontainers.image.revision=${{ github.sha }}"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("org.opencontainers.image.source=https://github.com/example/app"),
+            "{platform}"
+        );
+        // The recorded digest is strictly validated before transport.
+        assert!(
+            platform.contains("digest=\"${{ steps.build.outputs.digest }}\""),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("platform digest is not lowercase hex"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("name: image-platform-${{ matrix.arch }}"),
+            "{platform}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_admission_reconciles_absent_resume_and_conflict() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let admission = yaml_job(&workflow, "image-admission");
+        assert!(
+            admission.contains("needs: [admit-runner, verify]"),
+            "{admission}"
+        );
+        assert!(
+            admission.contains("imagetools inspect \"$ref\" --format '{{json .}}'"),
+            "{admission}"
+        );
+        // Absent opens the lane.
+        assert!(admission.contains("existing=false"), "{admission}");
+        // Resume adopts only the explicitly supplied recovery index.
+        assert!(
+            admission.contains("inputs.existing-image-digest"),
+            "{admission}"
+        );
+        assert!(
+            admission.contains("adopting explicitly supplied recovery index"),
+            "{admission}"
+        );
+        // Conflict fails closed instead of adopting unknown bytes.
+        assert!(
+            admission.contains("refusing to adopt unknown bytes"),
+            "{admission}"
+        );
+        assert!(
+            admission.contains("refusing a fail-open publish"),
+            "{admission}"
+        );
+        assert!(
+            workflow.contains("existing-image-digest:"),
+            "the recovery input must exist wherever admission reads it: {workflow}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_manifest_assembles_only_the_complete_verified_set() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let image = yaml_job(&workflow, "image");
+        assert!(
+            image.contains("needs.image-admission.result == 'success'"),
+            "{image}"
+        );
+        assert!(
+            image.contains(
+                "(needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped')"
+            ),
+            "{image}"
+        );
+        assert!(
+            image.contains("index_digest: ${{ steps.push.outputs.index_digest }}"),
+            "{image}"
+        );
+        // The shared digest-set gate runs before any assembly.
+        assert!(
+            image.contains(
+                "run: velnor-workflow release verify-digests --dir image-artifacts --archs amd64,arm64"
+            ),
+            "{image}"
+        );
+        // Digest-pinned sources; the version tag is created here only.
+        assert!(image.contains("imagetools create"), "{image}");
+        assert!(
+            image.contains("--tag \"${GHCR_IMAGE}:${VERSION}\""),
+            "{image}"
+        );
+        assert!(image.contains("\"${GHCR_IMAGE}@$amd64_digest\""), "{image}");
+        assert!(image.contains("\"${GHCR_IMAGE}@$arm64_digest\""), "{image}");
+        // Inclusion plus exclusivity: exactly the verified set.
+        assert!(
+            image.contains("does not reference the verified platform digests"),
+            "{image}"
+        );
+        assert!(
+            image.contains("carries an unexpected platform set"),
+            "{image}"
+        );
+        assert!(image.contains("name: image-digests"), "{image}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_publisher_writes_the_version_tag_exactly_once() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        assert_eq!(
+            workflow.matches("imagetools create").count(),
+            1,
+            "exactly one job may create the version tag: {workflow}"
+        );
+        assert!(
+            workflow.contains("group: release-${{ github.ref }}"),
+            "{workflow}"
+        );
+        assert!(workflow.contains("cancel-in-progress: false"), "{workflow}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_contract_defaults_to_both_linux_architectures() {
+        let mut spec = docker_spec();
+        spec.dockerfile.clear();
+        spec.context.clear();
+        spec.platforms.clear();
+        let mut config = config(&["release.yml"], Some(spec));
+        config.repository = "example/app".to_owned();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(super::release_contract_complete(release));
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(platform.contains("platform: linux/amd64"), "{platform}");
+        assert!(platform.contains("platform: linux/arm64"), "{platform}");
+        assert!(platform.contains("file: Dockerfile"), "{platform}");
+        assert!(platform.contains("context: \".\""), "{platform}");
+        let image = yaml_job(&workflow, "image");
+        assert!(image.contains("--archs amd64,arm64"), "{image}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_contract_rejects_unknown_platforms_and_missing_images() {
+        let mut unknown = docker_spec();
+        unknown.platforms = vec!["linux/riscv64".to_owned()];
+        assert!(!super::release_contract_complete(&unknown));
+        let unknown_config = config(&["release.yml"], Some(unknown));
+        let Some(release) = unknown_config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(
+            super::render_release(&unknown_config, release).contains("# Release omitted"),
+            "an unknown platform must omit the publisher instead of silently dropping it"
+        );
+        let mut missing = docker_spec();
+        missing.image.clear();
+        assert!(!super::release_contract_complete(&missing));
+        let missing_config = config(&["release.yml"], Some(missing));
+        let Some(release) = missing_config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(
+            super::render_release(&missing_config, release).contains("# Release omitted"),
+            "a missing image must omit the publisher"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_single_platform_renders_a_singleton_verified_set() {
+        let mut spec = docker_spec();
+        spec.platforms = vec!["linux/arm64".to_owned()];
+        let mut config = config(&["release.yml"], Some(spec));
+        config.repository = "example/app".to_owned();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(super::release_contract_complete(release));
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(!platform.contains("- arch: amd64"), "{platform}");
+        assert!(platform.contains("- arch: arm64"), "{platform}");
+        let image = yaml_job(&workflow, "image");
+        assert!(image.contains("--archs arm64"), "{image}");
+        assert!(
+            image.contains(")\" = \"1\" ]"),
+            "a singleton set must expect exactly one manifest: {image}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_identity_platform_emits_provenance_and_sbom() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(platform.contains("provenance: true"), "{platform}");
+        assert!(platform.contains("sbom: true"), "{platform}");
+        assert!(platform.contains("id-token: write"), "{platform}");
+        assert!(platform.contains("attestations: write"), "{platform}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_identity_index_rejects_an_unexpected_platform_set() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let image = yaml_job(&workflow, "image");
+        assert!(
+            image.contains("does not reference both newly built platform digests"),
+            "{image}"
+        );
+        assert!(
+            image.contains("carries an unexpected platform set"),
+            "{image}"
+        );
+    }
+
     #[test]
     #[expect(
         clippy::panic,
@@ -4334,7 +7161,7 @@ mod tests {
             "{publish}"
         );
         assert!(
-            publish.contains("GHCR_IMAGE: ghcr.io/example/app"),
+            publish.contains("GHCR_IMAGE: \"ghcr.io/example/app\""),
             "{publish}"
         );
         assert!(
@@ -4728,6 +7555,7 @@ mod tests {
                     "aarch64-unknown-linux-gnu".to_owned(),
                 ],
                 image: format!("ghcr.io/{package}/app"),
+                image_package: String::new(),
                 source_repository: String::new(),
                 consumer_repository: format!("{package}/apt"),
                 artifact_path: String::new(),
@@ -4741,6 +7569,20 @@ mod tests {
                 apt_identity_dir: String::new(),
                 apt_feed_url: String::new(),
                 retention: 0,
+                dockerfile: String::new(),
+                context: String::new(),
+                platforms: Vec::new(),
+                producer_workflow: String::new(),
+                producer_conclusion: String::new(),
+                modes: Vec::new(),
+                archive_members: Vec::new(),
+                archive_checksum: String::new(),
+                archive_retention_days: 0,
+                credentials: Vec::new(),
+                tag_pattern: String::new(),
+                registry: String::new(),
+                registry_username_secret: String::new(),
+                registry_password_secret: String::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -4891,6 +7733,7 @@ mod tests {
                     "aarch64-unknown-linux-gnu".to_owned(),
                 ],
                 image: format!("ghcr.io/{package}/app"),
+                image_package: String::new(),
                 source_repository: format!("{package}/app"),
                 consumer_repository: format!("{package}/apt"),
                 artifact_path: String::new(),
@@ -4904,6 +7747,20 @@ mod tests {
                 apt_identity_dir: String::new(),
                 apt_feed_url: String::new(),
                 retention: 0,
+                dockerfile: String::new(),
+                context: String::new(),
+                platforms: Vec::new(),
+                producer_workflow: String::new(),
+                producer_conclusion: String::new(),
+                modes: Vec::new(),
+                archive_members: Vec::new(),
+                archive_checksum: String::new(),
+                archive_retention_days: 0,
+                credentials: Vec::new(),
+                tag_pattern: String::new(),
+                registry: String::new(),
+                registry_username_secret: String::new(),
+                registry_password_secret: String::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -4924,7 +7781,7 @@ mod tests {
                 );
             }
             assert!(
-                release.contains(&format!("GHCR_IMAGE: ghcr.io/{package}/app")),
+                release.contains(&format!("GHCR_IMAGE: \"ghcr.io/{package}/app\"")),
                 "{release}"
             );
             assert!(
@@ -5315,6 +8172,7 @@ mod tests {
             binary: "example".to_owned(),
             targets: Vec::new(),
             image: String::new(),
+            image_package: String::new(),
             source_repository: "example/app".to_owned(),
             consumer_repository: "example/apt".to_owned(),
             artifact_path: String::new(),
@@ -5328,6 +8186,20 @@ mod tests {
             apt_identity_dir: String::new(),
             apt_feed_url: "https://feed.example.test".to_owned(),
             retention: 0,
+            dockerfile: String::new(),
+            context: String::new(),
+            platforms: Vec::new(),
+            producer_workflow: String::new(),
+            producer_conclusion: String::new(),
+            modes: Vec::new(),
+            archive_members: Vec::new(),
+            archive_checksum: String::new(),
+            archive_retention_days: 0,
+            credentials: Vec::new(),
+            tag_pattern: String::new(),
+            registry: String::new(),
+            registry_username_secret: String::new(),
+            registry_password_secret: String::new(),
         }
     }
 
@@ -5436,6 +8308,1725 @@ mod tests {
             error.contains("`ci-unit-rust.yml`, not `ci-rust-example.yml`"),
             "the error must name the colliding path and its renderer: {error}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+    /// A binary contract with every tarball binding declared: a trusted
+    /// producer, drill modes, archive contents with a manifest schema and
+    /// retention, and one credential pair. All names are fixture-local.
+    fn bound_spec() -> ReleaseSpec {
+        ReleaseSpec {
+            kind: "rust-binary".to_owned(),
+            package: "example".to_owned(),
+            packages: Vec::new(),
+            binary: "example".to_owned(),
+            targets: vec![
+                "x86_64-unknown-linux-gnu".to_owned(),
+                "aarch64-unknown-linux-gnu".to_owned(),
+            ],
+            image: String::new(),
+            image_package: String::new(),
+            source_repository: String::new(),
+            consumer_repository: String::new(),
+            artifact_path: String::new(),
+            description: String::new(),
+            manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
+            apt_arches: Vec::new(),
+            signer_fingerprint: String::new(),
+            passphrase_secret: String::new(),
+            keyring_path: String::new(),
+            apt_origin: String::new(),
+            apt_identity_dir: String::new(),
+            apt_feed_url: String::new(),
+            retention: 0,
+            dockerfile: String::new(),
+            context: String::new(),
+            platforms: Vec::new(),
+            producer_workflow: "CI".to_owned(),
+            producer_conclusion: "success".to_owned(),
+            modes: vec![
+                "validate".to_owned(),
+                "build".to_owned(),
+                "rehearse".to_owned(),
+            ],
+            archive_members: vec!["example-role".to_owned()],
+            archive_checksum: "sha256".to_owned(),
+            archive_retention_days: 14,
+            credentials: vec![ReleaseCredential {
+                name: "store-fixture".to_owned(),
+                setup: "setup-store-fixture".to_owned(),
+                teardown: "teardown-store-fixture".to_owned(),
+            }],
+            tag_pattern: String::new(),
+            registry: String::new(),
+            registry_username_secret: String::new(),
+            registry_password_secret: String::new(),
+        }
+    }
+
+    /// The bound producer renders the `workflow_run` trigger with its
+    /// source-resolution and publish-gate jobs, and the rolling publish
+    /// admits only the gate's `publish` mode.
+    #[test]
+    fn preview_producer_binding_renders_source_gate_and_wired_publish() {
+        let root = scanned_root("preview-binding");
+        let config = config(&["preview.yml"], Some(bound_spec()));
+        let surface = generate(&root, &config, None);
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("  workflow_run:\n    workflows: [CI]\n    types: [completed]\n    branches: [main]\n"),
+            "the bound producer must render its trigger: {preview}"
+        );
+        let source = yaml_job(&preview, "source");
+        assert!(
+            source.contains("release resolve-source"),
+            "the source job must resolve one revision: {source}"
+        );
+        let gate = yaml_job(&preview, "publish-gate");
+        assert!(
+            gate.contains("release admit-producer") && gate.contains("EXPECTED: CI"),
+            "the gate must admit the trusted producer: {gate}"
+        );
+        assert!(
+            gate.contains("unsupported rolling event"),
+            "unknown events must fail closed: {gate}"
+        );
+        assert!(
+            !gate.contains("sleep") && !gate.contains("gh run list"),
+            "the gate resolves, never polls: {gate}"
+        );
+        let build = yaml_job(&preview, "build");
+        assert!(
+            build.contains("    needs: [source]\n"),
+            "the build must wait for the resolved source: {build}"
+        );
+        assert!(
+            build.contains("          ref: ${{ needs.source.outputs.sha }}\n"),
+            "the build must pin the resolved source: {build}"
+        );
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains("    needs: [build, publish-gate]\n")
+                && publish.contains(
+                    "    if: ${{ needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish' }}\n"
+                ),
+            "the rolling publish must admit only the gate's publish mode: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Dispatch modes resolve through the runtime matrix: `publish` is
+    /// never an option, and a rehearsal finishes without waiting for
+    /// default-branch CI because the gate has no wait loop at all.
+    #[test]
+    fn preview_dispatch_modes_resolve_without_waiting() {
+        let root = scanned_root("preview-modes");
+        let config = config(&["preview.yml"], Some(bound_spec()));
+        let surface = generate(&root, &config, None);
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("      mode:\n")
+                && preview.contains("          - validate\n")
+                && preview.contains("          - build\n")
+                && preview.contains("          - rehearse\n"),
+            "dispatch must offer the declared drill modes: {preview}"
+        );
+        assert!(
+            !preview.contains("          - publish\n"),
+            "publish must never be a dispatch option: {preview}"
+        );
+        let gate = yaml_job(&preview, "publish-gate");
+        assert!(
+            gate.contains("resolve-mode --event \"$EVENT\" --input"),
+            "dispatches must resolve their drill mode: {gate}"
+        );
+        assert!(
+            !gate.contains("sleep"),
+            "a rehearsal must finish without waiting: {gate}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Declared modes gate the tag check and the publish job on `publish`
+    /// while the build runs trusted refs in every mode and rehearses a
+    /// feature dispatch; the immutable publish path keeps its no-clobber
+    /// create.
+    #[test]
+    fn release_modes_gate_tag_check_and_publish() {
+        let root = scanned_root("release-modes");
+        let config = config(&["release.yml"], Some(bound_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("  workflow_dispatch:\n    inputs:\n      mode:\n"),
+            "modes must render a dispatch mode input: {release}"
+        );
+        let verify = yaml_job(&release, "verify");
+        assert!(
+            verify.contains("      mode: ${{ steps.mode.outputs.mode }}\n")
+                && verify.contains("      - name: Resolve release mode\n"),
+            "verify must resolve and output the mode: {verify}"
+        );
+        assert!(
+            verify.contains(
+                "      - name: Verify tag\n        if: ${{ steps.mode.outputs.mode == 'publish' }}\n"
+            ),
+            "the tag check must be publish-only: {verify}"
+        );
+        let build = yaml_job(&release, "build");
+        assert!(
+            build.contains(&format!(
+                "    if: ${{{{ {} || (github.event_name == 'workflow_dispatch' && needs.verify.outputs.mode == 'rehearse') }}}}",
+                trusted_release_runner_gate("main")
+            )),
+            "the build must run trusted refs in every mode and rehearse on any ref: {build}"
+        );
+        let publish = yaml_job(&release, "publish");
+        assert!(
+            publish.contains("    if: ${{ needs.verify.outputs.mode == 'publish' }}\n")
+                && publish.contains("gh release create")
+                && !publish.contains("--clobber"),
+            "publish must be a gated no-clobber create: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A dispatch rehearsal on a feature branch builds but never publishes:
+    /// the build `if:` carries a rehearse arm that passes off main, while
+    /// the publish `if:` still demands the `publish` mode a dispatch can
+    /// never resolve to.
+    #[test]
+    fn dispatch_rehearsal_on_a_feature_branch_builds_without_publishing() {
+        let root = scanned_root("dispatch-rehearsal");
+        let config = config(&["release.yml", "preview.yml"], Some(bound_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let build = yaml_job(&release, "build");
+        assert!(
+            build.contains("github.event_name == 'workflow_dispatch' && needs.verify.outputs.mode == 'rehearse'"),
+            "the stable build must rehearse a feature dispatch: {build}"
+        );
+        let publish = yaml_job(&release, "publish");
+        assert!(
+            publish.contains("    if: ${{ needs.verify.outputs.mode == 'publish' }}\n"),
+            "the stable publish must stay skipped for a rehearsal: {publish}"
+        );
+        let preview = rendered(&surface, "preview.yml");
+        let preview_build = yaml_job(&preview, "build");
+        assert!(
+            preview_build
+                .contains("github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearse'"),
+            "the rolling build must rehearse a feature dispatch: {preview_build}"
+        );
+        let preview_publish = yaml_job(&preview, "publish");
+        assert!(
+            preview_publish.contains("needs.publish-gate.outputs.mode == 'publish'"),
+            "the rolling publish must stay skipped for a rehearsal: {preview_publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A modeless native image lane never publishes from a dispatch: the
+    /// staging lane and the index assembly both exclude the dispatch event,
+    /// so a dispatch-on-tag cannot orphan a version index no later tag push
+    /// can adopt.
+    #[test]
+    fn modeless_native_image_lane_refuses_dispatch() {
+        let root = scanned_root("modeless-image-dispatch");
+        let config = native_identity_config(&["release.yml"]);
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let platform = yaml_job(&release, "image-platform");
+        assert!(
+            platform.contains("github.event_name != 'workflow_dispatch'"),
+            "staging must skip dispatches: {platform}"
+        );
+        let image = yaml_job(&release, "image");
+        assert!(
+            image.contains("github.event_name != 'workflow_dispatch'"),
+            "the index assembly must skip dispatches: {image}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The native rolling publish replaces only on default-branch pushes: a
+    /// dispatch to main must not move the rolling release. A producer-bound
+    /// lane keeps its admitted-producer path, which publishes off the
+    /// `workflow_run` event a push-only gate would refuse.
+    #[test]
+    fn native_preview_publish_replaces_on_push_only() {
+        let root = scanned_root("native-preview-push-only");
+        let config = native_identity_config(&["preview.yml"]);
+        let surface = generate(&root, &config, None);
+        let preview = rendered(&surface, "preview.yml");
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains(
+                "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n"
+            ),
+            "the unbound rolling publish must require a push: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+
+        let root = scanned_root("native-preview-bound-publish");
+        let mut config = native_identity_config(&["preview.yml"]);
+        if let Some(release) = config.release.as_mut() {
+            release.producer_workflow = "CI".to_owned();
+            release.producer_conclusion = "success".to_owned();
+        }
+        let surface = generate(&root, &config, None);
+        let preview = rendered(&surface, "preview.yml");
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains("needs.publish-gate.outputs.mode == 'publish'")
+                && !publish.contains("github.event_name == 'push'"),
+            "the bound rolling publish must admit the producer run: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// One `TAG_IMMUTABILITY_STEP` block, from its header through the line
+    /// before the next step.
+    fn immutability_step<'a>(publish: &'a str, lane: &str) -> &'a str {
+        let header = "      - name: Verify release tag stayed immutable before publication\n";
+        let start = must_some(
+            publish.find(header),
+            &format!("the {lane} publish must re-verify the tag: {publish}"),
+        );
+        let rest = &publish[start + header.len()..];
+        let end = rest
+            .find("\n      - name: ")
+            .map_or(rest.len(), |offset| offset + 1);
+        &publish[start..start + header.len() + end]
+    }
+
+    /// Every immutable publisher re-verifies the release tag immediately
+    /// before creating the release: the binary and non-identity native lanes
+    /// carry the same step the Debian lane pins, so a tag moved between
+    /// verify and publish refuses instead of binding the release to bytes
+    /// built from another commit.
+    #[test]
+    fn binary_publish_reverifies_the_release_tag_before_creating() {
+        let root = scanned_root("binary-tag-immutability");
+        let binary_config = config(&["release.yml"], Some(binary_spec()));
+        let surface = generate(&root, &binary_config, None);
+        let release = rendered(&surface, "release.yml");
+        let publish = yaml_job(&release, "publish");
+        let step = immutability_step(publish, "binary");
+        assert!(
+            step.contains("git ls-remote --exit-code origin")
+                && step.contains("moved from $EXPECTED_TAG_COMMIT to $remote_tag_commit"),
+            "the binary publish must refuse a moved tag: {step}"
+        );
+        let create = must_some(
+            publish.find("      - name: Publish immutable GitHub release\n"),
+            "the binary create step",
+        );
+        let check = must_some(
+            publish.find("      - name: Verify release tag stayed immutable"),
+            "the binary tag check",
+        );
+        assert!(
+            check < create,
+            "the tag check must run before the release create: {publish}"
+        );
+        assert!(
+            publish.contains("      - name: Checkout\n        uses: actions/checkout@"),
+            "the publish checkout must exist for ls-remote: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+
+        let root = scanned_root("native-tag-immutability");
+        let identity_config = native_identity_config(&["release.yml"]);
+        let surface = generate(&root, &identity_config, None);
+        let native = rendered(&surface, "release.yml");
+        let native_publish = yaml_job(&native, "publish");
+        assert_eq!(
+            immutability_step(native_publish, "native identity"),
+            step,
+            "both immutable lanes must carry the same tag check"
+        );
+        let _ = fs::remove_dir_all(root);
+
+        let root = scanned_root("native-plain-tag-immutability");
+        let plain_config = config(&["release.yml"], Some(native_spec()));
+        let surface = generate(&root, &plain_config, None);
+        let plain = rendered(&surface, "release.yml");
+        let plain_publish = yaml_job(&plain, "publish");
+        assert_eq!(
+            immutability_step(plain_publish, "native without identity"),
+            step,
+            "the non-identity native lane must carry the same tag check"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The archive contract renders multi-member deterministic packaging,
+    /// manifest assembly over declared subjects, and the declared
+    /// retention — on the archive lane only.
+    #[test]
+    fn archive_contract_renders_members_manifest_and_retention() {
+        let root = scanned_root("archive-contract");
+        let config = config(&["release.yml", "preview.yml"], Some(bound_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("--members 'example-role' --deterministic \"$deterministic\""),
+            "packaging must carry the declared members: {release}"
+        );
+        assert!(
+            release.contains("*-apple-darwin) deterministic=false"),
+            "Apple rows must keep their platform tar: {release}"
+        );
+        assert!(
+            release.contains("release assemble-manifest --dir dist")
+                && release.contains("example-${VERSION#v}-x86_64-unknown-linux-gnu.tar.gz")
+                && release.contains("example.test/consumer-manifest-v1"),
+            "publish must assemble the manifest over declared subjects: {release}"
+        );
+        let build = yaml_job(&release, "build");
+        assert!(
+            build.contains("          retention-days: 14\n"),
+            "the archive lane must use the declared retention: {build}"
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("example-preview-x86_64-unknown-linux-gnu.tar.gz"),
+            "the rolling manifest must name preview subjects: {preview}"
+        );
+        assert!(
+            preview.contains("--commit \"${{ needs.publish-gate.outputs.sha }}\""),
+            "the rolling manifest must bind the resolved source: {preview}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Intermediate digests keep their own windows when the archive lane
+    /// takes the declared retention.
+    #[test]
+    fn archive_retention_leaves_intermediate_digests_alone() {
+        let root = scanned_root("archive-retention");
+        let mut config = native_identity_config(&["release.yml"]);
+        let mut spec = native_spec();
+        spec.archive_members = vec!["example-role".to_owned()];
+        spec.archive_retention_days = 14;
+        config.release = Some(spec);
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        let build = yaml_job(&release, "build");
+        assert!(
+            build.contains("          retention-days: 14\n"),
+            "the archive lane must use the declared retention: {build}"
+        );
+        let image = yaml_job(&release, "image");
+        assert!(
+            image.contains("          retention-days: 2\n"),
+            "intermediate digests must keep their own window: {image}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Every setup renders with its teardown trapped first, an explicit
+    /// unmount before supply-chain sidecars, and an `if: always()` restore
+    /// after the upload — so success, failure, cancellation, and timeout
+    /// all restore host state.
+    #[test]
+    fn credential_pairing_traps_then_always_restores() {
+        let root = scanned_root("credential-pairing");
+        let config = config(&["release.yml", "preview.yml"], Some(bound_spec()));
+        let surface = generate(&root, &config, None);
+        for file in ["release.yml", "preview.yml"] {
+            let workflow = rendered(&surface, file);
+            let build = yaml_job(&workflow, "build");
+            let mount = must_some(
+                build.find("      - name: Mount store-fixture credential\n"),
+                "mount step",
+            );
+            let trap = must_some(
+                build[mount..].find("trap teardown_store_fixture EXIT"),
+                "trap",
+            );
+            let setup = must_some(build[mount..].find("setup-store-fixture"), "setup");
+            assert!(
+                trap < setup,
+                "the teardown must trap before the setup runs: {build}"
+            );
+            let unmount = must_some(
+                build.find(
+                    "      - name: Unmount store-fixture credential before supply-chain sidecars\n",
+                ),
+                "unmount step",
+            );
+            let attest = must_some(build.find("      - name: Attest"), "attest step");
+            assert!(
+                unmount < attest,
+                "secrets must leave before supply-chain sidecars: {build}"
+            );
+            let restore = must_some(
+                build.find(
+                    "      - name: Restore store-fixture credential state\n        if: always()\n",
+                ),
+                "restore step",
+            );
+            let upload = must_some(build.find("      - name: Upload"), "upload step");
+            assert!(
+                restore > upload,
+                "the always-restore must follow the upload: {build}"
+            );
+            assert!(
+                build.matches("teardown-store-fixture").count() >= 3,
+                "the teardown must appear in all three steps: {build}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Bindings only the tarball publishers implement omit closed on every
+    /// other kind instead of rendering a silently weaker lane.
+    #[test]
+    fn bindings_on_other_kinds_omit_closed() {
+        let config = config(&[], None);
+        let crates = ReleaseSpec {
+            kind: "crates".to_owned(),
+            packages: vec!["example".to_owned()],
+            modes: vec!["rehearse".to_owned()],
+            ..ReleaseSpec::default()
+        };
+        let release = render_release(&config, &crates);
+        assert!(
+            release.contains("render only for the `rust-binary` and `native` publishers"),
+            "crates with modes must omit closed: {release}"
+        );
+        let pages = ReleaseSpec {
+            kind: "pages".to_owned(),
+            artifact_path: "dist/site".to_owned(),
+            producer_workflow: "CI".to_owned(),
+            ..ReleaseSpec::default()
+        };
+        let release = render_release(&config, &pages);
+        assert!(
+            release.contains("render only for the `rust-binary` and `native` publishers"),
+            "pages with a producer must omit closed: {release}"
+        );
+    }
+
+    /// The Debian preview rebinds its identity job onto the resolved
+    /// source; every downstream job already consumes the identity commit,
+    /// and the rolling publish admits only the gate.
+    #[test]
+    fn native_preview_binding_rewires_identity_onto_resolved_source() {
+        let root = scanned_root("native-preview-binding");
+        let mut config = native_identity_config(&["preview.yml"]);
+        let mut spec = native_spec();
+        spec.producer_workflow = "CI".to_owned();
+        spec.modes = vec!["validate".to_owned(), "rehearse".to_owned()];
+        config.release = Some(spec);
+        let surface = generate(&root, &config, None);
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("  workflow_run:\n    workflows: [CI]\n"),
+            "the Debian preview must bind the producer trigger: {preview}"
+        );
+        let identity = yaml_job(&preview, "identity");
+        assert!(
+            identity.contains("    needs: [source]\n")
+                && identity.contains("          ref: ${{ needs.source.outputs.sha }}\n")
+                && identity.contains("          EVENT_SHA: ${{ needs.source.outputs.sha }}\n"),
+            "identity must resolve from the bound source: {identity}"
+        );
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains("    needs: [publish-gate, ")
+                && publish.contains("needs.publish-gate.outputs.mode == 'publish'"),
+            "the Debian rolling publish must admit only the gate: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Drilled native modes build and verify locally but write nothing
+    /// externally: staging pushes, the version index, signing, and the
+    /// release creation all gate on `publish`, and verify carries one
+    /// outputs block.
+    #[test]
+    fn native_release_modes_gate_external_writes() {
+        let root = scanned_root("native-release-modes");
+        let mut config = native_identity_config(&["release.yml"]);
+        let mut spec = native_spec();
+        spec.modes = vec![
+            "validate".to_owned(),
+            "build".to_owned(),
+            "rehearse".to_owned(),
+        ];
+        config.release = Some(spec);
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("      runner:\n") && release.contains("      mode:\n"),
+            "dispatch must carry both runner and mode inputs: {release}"
+        );
+        let verify = yaml_job(&release, "verify");
+        assert_eq!(
+            verify.matches("    outputs:\n").count(),
+            1,
+            "verify must carry one outputs block: {verify}"
+        );
+        assert!(
+            verify.contains("      version: ${{ steps.version.outputs.version }}\n")
+                && verify.contains("      mode: ${{ steps.mode.outputs.mode }}\n"),
+            "verify must output both version and mode: {verify}"
+        );
+        assert!(
+            verify.contains(
+                "      - name: Resolve release version\n        id: version\n        if: ${{ steps.mode.outputs.mode == 'publish' }}\n"
+            ),
+            "the version resolution must be publish-only: {verify}"
+        );
+        let platform = yaml_job(&release, "image-platform");
+        assert!(
+            platform.contains("needs.verify.outputs.mode == 'publish'"),
+            "staging pushes must be publish-only: {platform}"
+        );
+        let image = yaml_job(&release, "image");
+        assert!(
+            image.contains("needs.verify.outputs.mode == 'publish'"),
+            "the version index must be publish-only: {image}"
+        );
+        let sign = yaml_job(&release, "sign-deb");
+        assert!(
+            sign.contains("    if: ${{ needs.verify.outputs.mode == 'publish' }}\n"),
+            "signing must be publish-only: {sign}"
+        );
+        let publish = yaml_job(&release, "publish");
+        assert!(
+            publish.contains("    if: ${{ needs.verify.outputs.mode == 'publish' }}\n"),
+            "the native publish must be publish-only: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Declared binding shapes fail closed at declaration time: `publish`
+    /// is never a dispatch mode, conclusions bind only `success` with a
+    /// producer, members are portable names, and retention is 1-90.
+    #[test]
+    fn declared_binding_shapes_fail_closed() {
+        let root = scanned_root("declared-bindings");
+        let config = config(&[], None);
+        for (name, args, expected) in [
+            (
+                "publish-mode",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nmodes = [\"publish\"]\n",
+                "never a dispatch option",
+            ),
+            (
+                "bad-mode",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nmodes = [\"ship\"]\n",
+                "must be one of",
+            ),
+            (
+                "bad-conclusion",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nproducer_workflow = \"CI\"\nproducer_conclusion = \"completed\"\n",
+                "must be `success`",
+            ),
+            (
+                "lonely-conclusion",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nproducer_conclusion = \"success\"\n",
+                "needs `producer_workflow`",
+            ),
+            (
+                "bad-member",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\narchive_members = [\"../escape\"]\n",
+                "portable file names",
+            ),
+            (
+                "bad-retention",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\narchive_retention_days = 91\n",
+                "must be 1-90",
+            ),
+        ] {
+            let error = match try_generate(
+                &root,
+                &config,
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n[declare.args]\n{args}"
+                )),
+            ) {
+                Ok(_) => panic!("{name} must fail closed, and did not"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(expected),
+                "`{name}` must name the problem: {error}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A declared preview with bindings renders them end to end through
+    /// the `[[declare]]` surface.
+    #[test]
+    fn declared_preview_bindings_render_end_to_end() {
+        let root = scanned_root("declared-preview-bindings");
+        let config = config(&[], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(
+                "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+                 [declare.args]\npackage = \"example\"\nbinary = \"example\"\n\
+                 targets = [\"x86_64-unknown-linux-gnu\"]\n\
+                 producer_workflow = \"CI\"\nmodes = [\"validate\", \"rehearse\"]\n\
+                 archive_members = [\"example-role\"]\narchive_retention_days = 7\n",
+            ),
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("  workflow_run:\n    workflows: [CI]\n")
+                && preview.contains("  publish-gate:\n")
+                && preview.contains("--members 'example-role'")
+                && preview.contains("          retention-days: 7\n"),
+            "declared preview bindings must render: {preview}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The shared versioned-tool declare args over fixture-local names: the
+    /// package, tag prefix, tasks, and paths below exist only in this test.
+    fn versioned_tool_args() -> &'static str {
+        "kind = \"versioned-tool\"\npackage = \"example-tool\"\nbinary = \"example-tool\"\n\
+         targets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
+         version_manifest = \"crates/example-tool/Cargo.toml\"\n\
+         version_prefix = \"example-tool-v\"\npublish_group = \"example-tap-publish\"\n\
+         version_gate_tasks = [\"check-example-tool-version\"]\n\
+         assert_tasks = [\"assert-example-tool-published\"]\n\
+         build_tasks = [\"build-example-tool\"]\n\
+         push_paths = [\"crates/example-tool/**\"]\n\
+         pull_request_paths = [\"crates/example-tool/**\", \"Cargo.lock\"]\n"
+    }
+
+    fn versioned_tool_row(file: &str) -> String {
+        format!(
+            "[[declare]]\nprimitive = \"release\"\nfile = \"{file}\"\n\n[declare.args]\n{}",
+            versioned_tool_args()
+        )
+    }
+
+    /// A versioned-tool row renders its own file end to end: per-row name,
+    /// main-branch triggers over declared paths, a lanes dispatch, PR-only
+    /// file concurrency, and the five-job version graph.
+    #[test]
+    fn versioned_tool_row_renders_the_five_job_graph() {
+        let root = scanned_root("versioned-tool-graph");
+        let config = config(&[], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(&versioned_tool_row("example-tool.yml")),
+        );
+        assert_eq!(surface.added_files, vec!["example-tool.yml".to_owned()]);
+        let workflow = rendered(&surface, "example-tool.yml");
+        assert!(
+            workflow.contains("name: example-tool\n"),
+            "the workflow name defaults to the file stem: {workflow}"
+        );
+        assert!(
+            workflow.contains("  push:\n    branches: [main]\n    paths:\n      - \"crates/example-tool/**\"\n")
+                && workflow.contains(
+                    "  pull_request:\n    paths:\n      - \"crates/example-tool/**\"\n      - Cargo.lock\n"
+                ),
+            "push-main and pull-request triggers must carry the declared paths: {workflow}"
+        );
+        assert!(
+            workflow.contains("      lanes:\n")
+                && workflow.contains("        default: github\n")
+                && workflow.contains("          - github\n          - velnor\n          - both\n"),
+            "the dispatch must offer the repository lanes: {workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
+            ),
+            "file concurrency cancels PR runs only: {workflow}"
+        );
+        let gate = yaml_job(&workflow, "validate-version");
+        assert!(
+            gate.contains("    if: ${{ github.event_name == 'pull_request' }}")
+                && gate.contains("fetch-depth: 0")
+                && gate.contains("run: mise run check-example-tool-version"),
+            "the gate is PR-only, full-history, and runs the declared task: {gate}"
+        );
+        let version = yaml_job(&workflow, "version");
+        assert!(
+            version.contains("runner-configs: ${{ steps.resolve.outputs.runner-configs }}")
+                && version.contains("s/^version = ")
+                && version.contains("configs='[{\"lane\":\"github\"")
+                && version.contains("velnor) configs='[{\"lane\":\"velnor\""),
+            "the version job resolves the manifest version and the lane configs: {version}"
+        );
+        let assert_job = yaml_job(&workflow, "assert-version");
+        assert!(
+            assert_job.contains("    needs: [version]")
+                && assert_job.contains("gh release view \"$tag\"")
+                && assert_job.contains("published=true")
+                && assert_job.contains("run: mise run assert-example-tool-published")
+                && assert_job.contains("if: ${{ github.ref == 'refs/heads/main' }}"),
+            "the assert job checks reuse and gates product tasks to main: {assert_job}"
+        );
+        let build = yaml_job(&workflow, "build");
+        assert!(
+            build.contains("    needs: [version, assert-version]")
+                && build.contains("github.event_name != 'pull_request' && needs.assert-version.outputs.published != 'true'")
+                && build.contains("runs-on: ${{ matrix.config.runner }}")
+                && build.contains("config: ${{ fromJSON(needs.version.outputs.runner-configs) }}")
+                && build.contains("run: mise run build-example-tool")
+                && build.contains("package-binary --target \"${{ matrix.target }}\" --version \"$VERSION\""),
+            "the build crosses targets with lane configs and packages the task output: {build}"
+        );
+        let publish = yaml_job(&workflow, "publish");
+        assert!(
+            publish.contains("    needs: [version, assert-version, build]")
+                && publish.contains("github.ref == 'refs/heads/main' && needs.assert-version.outputs.published != 'true'")
+                && publish.contains("      group: example-tap-publish")
+                && publish.contains("tag=\"example-tool-v$VERSION\"")
+                && publish.contains("gh release create \"$tag\" dist/* --target \"$COMMIT\" --title \"$tag\" --generate-notes"),
+            "the publish mints the immutable versioned release under its mutex: {publish}"
+        );
+        assert!(
+            !workflow.contains("verify-tag") && !workflow.contains("clobber"),
+            "no tag check and no clobber render for a main-branch lane: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The row's `name` overrides the file stem, so two files can still be
+    /// told apart when stems collide across extensions.
+    #[test]
+    fn versioned_tool_name_arg_overrides_the_file_stem() {
+        let root = scanned_root("versioned-tool-name");
+        let config = config(&[], None);
+        let row = versioned_tool_row("example-tool.yml").replace(
+            "kind = \"versioned-tool\"\n",
+            "kind = \"versioned-tool\"\nname = \"Example Tool\"\n",
+        );
+        let surface = generate(&root, &config, Some(&row));
+        let workflow = rendered(&surface, "example-tool.yml");
+        assert!(
+            workflow.contains("name: \"Example Tool\"\n"),
+            "the declared name must render: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Two versioned-tool rows render two identities: two files, two names,
+    /// two tag streams.
+    #[test]
+    fn second_versioned_tool_row_renders_its_own_identity() {
+        let root = scanned_root("versioned-tool-second");
+        let config = config(&[], None);
+        let other = versioned_tool_row("other-tool.yml").replace("example-tool", "other-tool");
+        let rows = format!("{}\n{}", versioned_tool_row("example-tool.yml"), other);
+        let surface = generate(&root, &config, Some(&rows));
+        let first = rendered(&surface, "example-tool.yml");
+        let second = rendered(&surface, "other-tool.yml");
+        assert!(
+            first.contains("name: example-tool\n")
+                && first.contains("tag=\"example-tool-v$VERSION\""),
+            "the first publisher keeps its identity: {first}"
+        );
+        assert!(
+            second.contains("name: other-tool\n")
+                && second.contains("tag=\"other-tool-v$VERSION\""),
+            "the second publisher renders its own identity: {second}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Two publishers under one workflow name fail closed: the shared name
+    /// would collapse two publishers into one status context.
+    #[test]
+    fn duplicate_versioned_tool_name_fails_closed() {
+        let root = scanned_root("versioned-tool-duplicate-name");
+        let config = config(&[], None);
+        let other = versioned_tool_row("other-tool.yml")
+            .replace(
+                "version_prefix = \"example-tool-v\"",
+                "version_prefix = \"other-tool-v\"",
+            )
+            .replace(
+                "kind = \"versioned-tool\"\n",
+                "kind = \"versioned-tool\"\nname = \"example-tool\"\n",
+            );
+        let rows = format!("{}\n{}", versioned_tool_row("example-tool.yml"), other);
+        let error = match try_generate(&root, &config, Some(&rows)) {
+            Ok(_) => panic!("a duplicate workflow name must fail closed, and did not"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("renders duplicate workflow name `example-tool`")
+                && error.contains("give each publisher its own `name`"),
+            "the duplicate name must name the problem: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Two publishers under one tag prefix fail closed: one tag stream
+    /// cannot have two lanes.
+    #[test]
+    fn duplicate_versioned_tool_prefix_fails_closed() {
+        let root = scanned_root("versioned-tool-duplicate-prefix");
+        let config = config(&[], None);
+        let rows = format!(
+            "{}\n{}",
+            versioned_tool_row("example-tool.yml"),
+            versioned_tool_row("other-tool.yml")
+        );
+        let error = match try_generate(&root, &config, Some(&rows)) {
+            Ok(_) => panic!("a duplicate tag prefix must fail closed, and did not"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("publishes tag prefix `example-tool-v`")
+                && error.contains("already owned by file `example-tool.yml`")
+                && error.contains("other-tool.yml"),
+            "the duplicate prefix must name both rows: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The pin stays for tag-triggered kinds: only main-branch-driven rows
+    /// may render outside `release.yml`.
+    #[test]
+    fn tag_triggered_release_row_stays_pinned() {
+        let root = scanned_root("versioned-tool-pin");
+        let config = config(&[], None);
+        let error = match try_generate(
+            &root,
+            &config,
+            Some(
+                "[[declare]]\nprimitive = \"release\"\nfile = \"other.yml\"\n\n\
+                 [declare.args]\nkind = \"rust-binary\"\npackage = \"example\"\n\
+                 binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
+            ),
+        ) {
+            Ok(_) => {
+                panic!("a tag-triggered row outside release.yml must fail closed, and did not")
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("must declare `release.yml`, not `other.yml`"),
+            "the pin must hold for tag-triggered kinds: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Declaring `release.yml` suppresses the default row: the declared row
+    /// renders the canonical file alone, and a versioned-tool row alongside
+    /// it renders its own file.
+    #[test]
+    fn declared_release_row_suppresses_the_default_row() {
+        let root = scanned_root("versioned-tool-suppression");
+        let config = config(&["release.yml"], Some(binary_spec()));
+        let rows = format!(
+            "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n{}",
+            versioned_tool_row("example-tool.yml")
+        );
+        let surface = generate(&root, &config, Some(&rows));
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("name: Release\n"),
+            "the declared row renders the canonical publisher: {release}"
+        );
+        let workflow = rendered(&surface, "example-tool.yml");
+        assert!(
+            workflow.contains("name: example-tool\n"),
+            "the versioned-tool row renders alongside: {workflow}"
+        );
+        assert_eq!(
+            surface
+                .files
+                .keys()
+                .filter(|path| path.ends_with("release.yml"))
+                .count(),
+            1,
+            "exactly one release.yml renders: {:?}",
+            surface.files.keys().collect::<Vec<_>>()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// An incomplete versioned-tool contract names its row and every missing
+    /// field at once.
+    #[test]
+    fn incomplete_versioned_tool_contract_names_every_missing_field() {
+        let root = scanned_root("versioned-tool-incomplete");
+        let config = config(&[], None);
+        let error = match try_generate(
+            &root,
+            &config,
+            Some(
+                "[[declare]]\nprimitive = \"release\"\nfile = \"example-tool.yml\"\n\n\
+                 [declare.args]\nkind = \"versioned-tool\"\npackage = \"example-tool\"\n",
+            ),
+        ) {
+            Ok(_) => panic!("an incomplete versioned-tool contract must fail closed, and did not"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains(
+                "`release` file `example-tool.yml` declares an incomplete versioned-tool contract"
+            ) && error.contains("`binary`")
+                && error.contains("`targets`")
+                && error.contains("`version_manifest`")
+                && error.contains("`version_prefix`")
+                && error.contains("`publish_group`")
+                && error.contains("`version_gate_tasks`")
+                && error.contains("`build_tasks`")
+                && error.contains("`push_paths`")
+                && error.contains("`pull_request_paths`")
+                && !error.contains("`package`"),
+            "every missing field — and only the missing ones — must be named: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Shape errors name the row: a bad prefix, a non-task ref, and empty
+    /// task and path lists each fail with the file that declares them.
+    #[test]
+    fn versioned_tool_shape_errors_name_the_row() {
+        let root = scanned_root("versioned-tool-shapes");
+        let config = config(&[], None);
+        for (name, from, to, expected) in [
+            (
+                "bad-prefix",
+                "version_prefix = \"example-tool-v\"",
+                "version_prefix = \"example-tool\"",
+                "must be a tag prefix ending in `-v`",
+            ),
+            (
+                "bad-gate-task",
+                "version_gate_tasks = [\"check-example-tool-version\"]",
+                "version_gate_tasks = [\"check example-tool\"]",
+                "not a plain task reference",
+            ),
+            (
+                "empty-gate-tasks",
+                "version_gate_tasks = [\"check-example-tool-version\"]",
+                "version_gate_tasks = []",
+                "`version_gate_tasks`",
+            ),
+            (
+                "empty-build-tasks",
+                "build_tasks = [\"build-example-tool\"]",
+                "build_tasks = []",
+                "`build_tasks`",
+            ),
+            (
+                "empty-push-paths",
+                "push_paths = [\"crates/example-tool/**\"]",
+                "push_paths = []",
+                "`push_paths`",
+            ),
+        ] {
+            let row = versioned_tool_row("example-tool.yml").replace(from, to);
+            let error = match try_generate(&root, &config, Some(&row)) {
+                Ok(_) => panic!("`{name}` must fail closed, and did not"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("example-tool.yml") && error.contains(expected),
+                "`{name}` must name the row and the problem: {error}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Without assert tasks the assert job still renders its generic
+    /// published-reuse check, and nothing product-shaped.
+    #[test]
+    fn versioned_tool_without_assert_tasks_keeps_the_generic_check() {
+        let root = scanned_root("versioned-tool-no-assert");
+        let config = config(&[], None);
+        let row = versioned_tool_row("example-tool.yml")
+            .replace("assert_tasks = [\"assert-example-tool-published\"]\n", "");
+        let surface = generate(&root, &config, Some(&row));
+        let workflow = rendered(&surface, "example-tool.yml");
+        let assert_job = yaml_job(&workflow, "assert-version");
+        assert!(
+            assert_job.contains("gh release view \"$tag\"")
+                && !assert_job.contains("mise run")
+                && !assert_job.contains("Checkout"),
+            "the assert job keeps only its generic check: {assert_job}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The workflow name generalizes per row: tag-driven publishers share
+    /// `Release`, versioned-tool rows take their name or file stem.
+    #[test]
+    fn release_workflow_name_generalizes_per_row() {
+        fn name_of(file: &str, pairs: &[(&str, &str)]) -> String {
+            let args: BTreeMap<String, toml::Value> = pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), toml::Value::String((*value).to_owned())))
+                .collect();
+            must(
+                release_workflow_name(file, &Args(&args)),
+                "resolve the workflow name",
+            )
+        }
+        assert_eq!(
+            name_of("release.yml", &[("kind", "rust-binary")]),
+            "Release"
+        );
+        assert_eq!(name_of("release.yml", &[]), "Release");
+        assert_eq!(
+            name_of("example-tool.yml", &[("kind", "versioned-tool")]),
+            "example-tool"
+        );
+        assert_eq!(
+            name_of("example-tool.yaml", &[("kind", "versioned-tool")]),
+            "example-tool"
+        );
+        assert_eq!(
+            name_of(
+                "example-tool.yml",
+                &[("kind", "versioned-tool"), ("name", "Example Tool")]
+            ),
+            "Example Tool"
+        );
+        assert!(is_main_branch_driven_release_kind("versioned-tool"));
+        assert!(!is_main_branch_driven_release_kind("rust-binary"));
+        assert!(!release_contract_complete(&ReleaseSpec {
+            kind: "versioned-tool".to_owned(),
+            ..ReleaseSpec::default()
+        }));
+    }
+
+    /// The dispatch lanes and runner-configs follow the repository lanes: one
+    /// lane renders one option and one config, two render both plus `both`.
+    #[test]
+    fn versioned_tool_lanes_follow_the_repository_lanes() {
+        let both = config(&[], None);
+        assert_eq!(
+            versioned_tool_lanes(&both),
+            vec!["github", "velnor", "both"]
+        );
+        let mut github = both.clone();
+        github.runners = crate::RunnerMode::Github;
+        assert_eq!(versioned_tool_lanes(&github), vec!["github"]);
+        let mut velnor = both.clone();
+        velnor.runners = crate::RunnerMode::Velnor;
+        assert_eq!(versioned_tool_lanes(&velnor), vec!["velnor"]);
+        assert!(
+            versioned_tool_lane_configs(&both, "both").contains("\"lane\":\"github\"")
+                && versioned_tool_lane_configs(&both, "both").contains("\"lane\":\"velnor\""),
+            "both lanes must fan out: {}",
+            versioned_tool_lane_configs(&both, "both")
+        );
+        assert!(
+            !versioned_tool_lane_configs(&both, "github").contains("\"lane\":\"velnor\""),
+            "one lane must not fan out: {}",
+            versioned_tool_lane_configs(&both, "github")
+        );
+    }
+
+    /// Exactly one lane uploads: in `both` mode the Velnor lane writes and
+    /// the GitHub lane does not, so two lanes never publish the same
+    /// per-target tarball name twice; a single lane always writes.
+    #[test]
+    fn versioned_tool_writer_is_single_and_velnor_preferred() {
+        let both = config(&[], None);
+        let configs = versioned_tool_lane_configs(&both, "both");
+        assert_eq!(
+            configs.matches("\"writer\":true").count(),
+            1,
+            "exactly one lane must write: {configs}"
+        );
+        assert_eq!(
+            configs.matches("\"writer\":false").count(),
+            1,
+            "the other lane must not write: {configs}"
+        );
+        let (github, velnor) = must_some(
+            configs.split_once("\"lane\":\"velnor\""),
+            "both mode must configure the velnor lane",
+        );
+        assert!(
+            github.contains("\"writer\":false"),
+            "the github lane must not write: {configs}"
+        );
+        assert!(
+            velnor.contains("\"writer\":true"),
+            "the velnor lane must write: {configs}"
+        );
+        for single in ["github", "velnor"] {
+            let configs = versioned_tool_lane_configs(&both, single);
+            assert_eq!(
+                configs.matches("\"writer\":true").count(),
+                1,
+                "a single lane must write: {configs}"
+            );
+            assert!(
+                !configs.contains("\"writer\":false"),
+                "a single lane has no non-writer: {configs}"
+            );
+        }
+    }
+
+    /// A declared tag filter reaches every release trigger, whichever kind
+    /// renders it: the base and docker renderers share one trigger block.
+    #[test]
+    fn declared_tag_pattern_flows_to_every_release_trigger() {
+        for (name, mut spec) in [("rust-binary", binary_spec()), ("docker", docker_spec())] {
+            spec.tag_pattern = "release-*".to_owned();
+            let root = scanned_root(&format!("tag-pattern-{name}"));
+            let config = config(&["release.yml"], Some(spec));
+            let surface = generate(&root, &config, None);
+            let release = rendered(&surface, "release.yml");
+            assert!(
+                release.contains("tags: [\"release-*\"]"),
+                "the {name} trigger must carry the declared pattern"
+            );
+            assert!(
+                !release.contains("tags: [\"v*\"]"),
+                "the declared pattern must replace the default: {release}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// An undeclared tag filter keeps the `v*` default: the shared trigger
+    /// block must render byte-identical output for existing contracts.
+    #[test]
+    fn absent_tag_pattern_keeps_default_v_star_trigger() {
+        for (name, spec) in [("rust-binary", binary_spec()), ("docker", docker_spec())] {
+            let root = scanned_root(&format!("tag-default-{name}"));
+            let config = config(&["release.yml"], Some(spec));
+            let surface = generate(&root, &config, None);
+            let release = rendered(&surface, "release.yml");
+            assert!(
+                release.contains("tags: [\"v*\"]"),
+                "the undeclared {name} trigger must keep the `v*` default"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// A declared pattern travels the declaration path end to end: the
+    /// ingest validator accepts it and the rendered trigger carries it.
+    #[test]
+    fn declared_tag_pattern_travels_the_declaration_path() {
+        let root = scanned_root("tag-declare");
+        let config = config(&[], None);
+        let surface = must(
+            try_generate(
+                &root,
+                &config,
+                Some(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"rust-binary\"\npackage = \"example\"\n\
+                     binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n\
+                     tag_pattern = \"release-*\"\n",
+                ),
+            ),
+            "generate release surface with a declared tag pattern",
+        );
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("tags: [\"release-*\"]"),
+            "the declared trigger must carry the declared pattern"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Every malformed tag filter fails closed at declaration time: an
+    /// empty, blank, or multi-line pattern never reaches a trigger.
+    #[test]
+    fn malformed_tag_patterns_fail_closed() {
+        let rows = |pattern: &str| {
+            format!(
+                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                 [declare.args]\nkind = \"rust-binary\"\npackage = \"example\"\n\
+                 binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n\
+                 tag_pattern = \"{pattern}\"\n"
+            )
+        };
+        for (name, pattern) in [
+            ("empty", String::new()),
+            ("whitespace", String::from("v 1")),
+            ("newline", String::from("v\\n1")),
+            ("leading space", String::from(" v*")),
+        ] {
+            let root = scanned_root("tag-invalid");
+            let config = config(&[], None);
+            let error = match try_generate(&root, &config, Some(&rows(&pattern))) {
+                Ok(_) => panic!("a {name} tag pattern must fail closed, and did not"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("tag_pattern"),
+                "a {name} pattern must name the problem: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// A declared registry triple reaches every docker login step:
+    /// admission, platform, and manifest all authenticate to the declared
+    /// host with the declared credential secrets.
+    #[test]
+    fn declared_registry_auth_reaches_every_docker_login() {
+        let mut spec = docker_spec();
+        spec.image = "example/app".to_owned();
+        spec.registry = "docker.io".to_owned();
+        spec.registry_username_secret = "REGISTRY_USERNAME".to_owned();
+        spec.registry_password_secret = "REGISTRY_PASSWORD".to_owned();
+        let root = scanned_root("registry-auth");
+        let config = config(&["release.yml"], Some(spec));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        assert_eq!(
+            release.matches("Log in to docker.io").count(),
+            3,
+            "admission, platform, and manifest must log in to the declared registry"
+        );
+        assert!(
+            !release.contains("Log in to GHCR"),
+            "the declared registry must replace the default login"
+        );
+        assert!(
+            release.contains("registry: docker.io")
+                && release.contains("secrets.REGISTRY_USERNAME")
+                && release.contains("secrets.REGISTRY_PASSWORD"),
+            "the login steps must carry the declared host and credential references"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// An undeclared registry keeps the GHCR automatic-token login in all
+    /// three docker jobs: the shared login step renders byte-identical
+    /// output for existing contracts.
+    #[test]
+    fn absent_registry_auth_keeps_ghcr_login_bytes() {
+        let root = scanned_root("registry-default");
+        let config = config(&["release.yml"], Some(docker_spec()));
+        let surface = generate(&root, &config, None);
+        let release = rendered(&surface, "release.yml");
+        assert_eq!(
+            release.matches("Log in to GHCR").count(),
+            3,
+            "all three docker jobs must keep the GHCR login"
+        );
+        assert_eq!(
+            release.matches("secrets.GITHUB_TOKEN").count(),
+            3,
+            "all three logins must keep the automatic token"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A declared triple travels the declaration path end to end: the
+    /// ingest validator accepts it and every login step carries it.
+    #[test]
+    fn declared_registry_auth_travels_the_declaration_path() {
+        let root = scanned_root("registry-declare");
+        let config = config(&[], None);
+        let surface = must(
+            try_generate(
+                &root,
+                &config,
+                Some(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"docker\"\nimage = \"example/app\"\n\
+                     platforms = [\"linux/amd64\", \"linux/arm64\"]\n\
+                     registry = \"docker.io\"\n\
+                     registry_username_secret = \"REGISTRY_USERNAME\"\n\
+                     registry_password_secret = \"REGISTRY_PASSWORD\"\n",
+                ),
+            ),
+            "generate release surface with declared registry auth",
+        );
+        let release = rendered(&surface, "release.yml");
+        assert_eq!(
+            release.matches("Log in to docker.io").count(),
+            3,
+            "every docker login must carry the declared registry"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The registry host alphabet: lowercase DNS with an optional port —
+    /// nothing that could smuggle credentials or break out of YAML.
+    #[test]
+    fn registry_host_validation_admits_hosts_and_rejects_injection() {
+        for host in [
+            "docker.io",
+            "ghcr.io",
+            "example-registry.local:5000",
+            "localhost:5000",
+        ] {
+            assert!(
+                crate::runtime::valid_registry_host(host),
+                "a usable host must validate: {host}"
+            );
+        }
+        for host in [
+            "",
+            "Docker.io",
+            "reg istry",
+            "host:abc",
+            "host:1:2",
+            "host:999999",
+            "..",
+            ".host",
+            "host-",
+            "user@host",
+            "host/path",
+        ] {
+            assert!(
+                !crate::runtime::valid_registry_host(host),
+                "an unusable host must fail: {host}"
+            );
+        }
+    }
+
+    /// Every malformed registry declaration fails closed: partial triples,
+    /// bad hosts, bad secret names, and triples on non-docker kinds.
+    #[test]
+    fn malformed_registry_auth_fails_closed() {
+        let triple = "registry = \"docker.io\"\n\
+             registry_username_secret = \"REGISTRY_USERNAME\"\n\
+             registry_password_secret = \"REGISTRY_PASSWORD\"\n";
+        let docker = |extra: &str| {
+            format!(
+                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                 [declare.args]\nkind = \"docker\"\nimage = \"example/app\"\n\
+                 platforms = [\"linux/amd64\", \"linux/arm64\"]\n{extra}"
+            )
+        };
+        let binary = |extra: &str| {
+            format!(
+                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                 [declare.args]\nkind = \"rust-binary\"\npackage = \"example\"\n\
+                 binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n{extra}"
+            )
+        };
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "registry without secrets",
+                docker("registry = \"docker.io\"\n"),
+                "`registry_username_secret` is missing",
+            ),
+            (
+                "secrets without registry",
+                docker(
+                    "registry_username_secret = \"REGISTRY_USERNAME\"\n\
+                     registry_password_secret = \"REGISTRY_PASSWORD\"\n",
+                ),
+                "`registry` is missing",
+            ),
+            (
+                "uppercase host",
+                docker(&triple.replace("docker.io", "Docker.io")),
+                "`registry` must be a lowercase host",
+            ),
+            (
+                "lowercase secret",
+                docker(&triple.replace("REGISTRY_USERNAME", "registry_username")),
+                "must be an uppercase secret name",
+            ),
+            (
+                "automatic token as password",
+                docker(&triple.replace("REGISTRY_PASSWORD", "GITHUB_TOKEN")),
+                "must name a dedicated secret, not GITHUB_TOKEN",
+            ),
+            (
+                "triple on a binary publisher",
+                binary(triple),
+                "renders only for kind `docker`",
+            ),
+        ];
+        for (name, rows, expected) in cases {
+            let root = scanned_root("registry-invalid");
+            let config = config(&[], None);
+            let error = match try_generate(&root, &config, Some(&rows)) {
+                Ok(_) => panic!("{name} must fail closed, and did not"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(expected),
+                "{name} must name the problem: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// A row naming only `lanes_input` rides the default contract: the flag
+    /// selects lanes, never a contract, so no incomplete-contract error.
+    #[test]
+    fn lanes_only_row_rides_the_default_contract() {
+        let root = scanned_root("lanes-default-row");
+        let config = config(&["preview.yml"], Some(binary_spec()));
+        let surface = must(
+            try_generate(
+                &root,
+                &config,
+                Some(
+                    "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+                     [declare.args]\nlanes_input = true\n",
+                ),
+            ),
+            "a lanes-only row must render the default contract",
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("      lanes:\n        description: github (default) | velnor"),
+            "the default contract must carry the lanes input"
+        );
+        assert!(
+            preview.contains("inputs.lanes == 'velnor'"),
+            "the default contract must thread the conditional"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Declared lanes thread every preview job — build, publish, and the
+    /// bound-producer source and gate — while matrix cells and artifact
+    /// names stay lane-neutral for the policy contract.
+    #[test]
+    fn declared_lanes_thread_every_preview_job() {
+        let root = scanned_root("lanes-thread");
+        let config = config(&[], None);
+        let surface = must(
+            try_generate(
+                &root,
+                &config,
+                Some(
+                    "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+                     [declare.args]\npackage = \"example\"\nbinary = \"example\"\n\
+                     targets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
+                     producer_workflow = \"CI\"\nproducer_conclusion = \"success\"\n\
+                     lanes_input = true\n",
+                ),
+            ),
+            "generate preview surface with declared lanes",
+        );
+        let preview = rendered(&surface, "preview.yml");
+        let runs: Vec<&str> = preview
+            .lines()
+            .filter(|line| line.starts_with("    runs-on: "))
+            .collect();
+        assert_eq!(runs.len(), 4, "source, gate, build, publish: {preview}");
+        for run in &runs {
+            assert!(
+                run.contains("inputs.lanes"),
+                "every job must thread lanes: {run}"
+            );
+        }
+        assert!(
+            preview.contains("options: [github, velnor]"),
+            "the lanes input offers exactly two legs"
+        );
+        assert!(
+            preview.contains("            runner: ubuntu-24.04\n"),
+            "matrix cells stay static for the policy contract"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Lanes render first when drill modes are also declared: one inputs
+    /// block, the lanes entry above the mode entry.
+    #[test]
+    fn lanes_render_above_drill_modes() {
+        let root = scanned_root("lanes-modes");
+        let config = config(&[], None);
+        let surface = must(
+            try_generate(
+                &root,
+                &config,
+                Some(
+                    "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+                     [declare.args]\npackage = \"example\"\nbinary = \"example\"\n\
+                     targets = [\"x86_64-unknown-linux-gnu\"]\n\
+                     modes = [\"validate\", \"build\", \"rehearse\"]\nlanes_input = true\n",
+                ),
+            ),
+            "generate preview surface with lanes and modes",
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert_eq!(
+            preview.matches("    inputs:\n").count(),
+            1,
+            "lanes and modes share one inputs block"
+        );
+        let lanes = must_some(preview.find("      lanes:\n"), "lanes entry renders");
+        let mode = must_some(preview.find("      mode:\n"), "mode entry renders");
+        assert!(lanes < mode, "lanes render above mode");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Lanes admit only a declared dual lane with selectable labels: a
+    /// single lane, a grouped runner, or missing labels all refuse.
+    #[test]
+    fn lanes_refuse_undeclared_lanes() {
+        let rows = "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+             [declare.args]\npackage = \"example\"\nbinary = \"example\"\n\
+             targets = [\"x86_64-unknown-linux-gnu\"]\nlanes_input = true\n";
+        let mut github_only = config(&[], None);
+        github_only.runners = crate::RunnerMode::Github;
+        let mut grouped = config(&[], None);
+        grouped.velnor_runner_group = Some("example-group".to_owned());
+        let mut unlabelled = config(&[], None);
+        unlabelled.velnor_labels = Vec::new();
+        for (name, config, expected) in [
+            (
+                "single lane",
+                github_only,
+                "needs `[workflow] runners = \"both\"`",
+            ),
+            (
+                "grouped runner",
+                grouped,
+                "cannot route a declared runner group",
+            ),
+            (
+                "missing labels",
+                unlabelled,
+                "needs `[workflow] velnor_labels`",
+            ),
+        ] {
+            let root = scanned_root("lanes-admission");
+            let error = match try_generate(&root, &config, Some(rows)) {
+                Ok(_) => panic!("{name} must fail closed, and did not"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(expected),
+                "{name} must name the problem: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// Lanes refuse routed jobs: macos runners, pinned matrix cells, and the
+    /// arch-pinned guest payload cannot dispatch across lanes.
+    #[test]
+    fn lanes_refuse_routed_jobs() {
+        let rows = |targets: &str| {
+            format!(
+                "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+                 [declare.args]\npackage = \"example\"\nbinary = \"example\"\n\
+                 targets = [{targets}]\nlanes_input = true\n"
+            )
+        };
+        let darwin = rows("\"aarch64-apple-darwin\"");
+        let mixed = rows("\"x86_64-unknown-linux-gnu\", \"aarch64-apple-darwin\"");
+        for (name, rows, expected) in [
+            ("macos runner", darwin, "routed outside the github lane"),
+            ("pinned matrix cell", mixed, "pinned cells cannot dispatch"),
+        ] {
+            let root = scanned_root("lanes-routing");
+            let config = config(&[], None);
+            let error = match try_generate(&root, &config, Some(&rows)) {
+                Ok(_) => panic!("{name} must fail closed, and did not"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(expected),
+                "{name} must name the problem: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+        // The guest payload renders from scanned units, so this case renders
+        // directly: a lanes selection cannot route its arch-pinned cells.
+        let mut guest = config(&[], None);
+        guest.units[0].watch.push("microvm/**".to_owned());
+        guest.analysis.detected = vec![
+            "guest-agent:example:example-guest-agent".to_owned(),
+            "guest-image:example:example-guest-image".to_owned(),
+        ];
+        let output = render_preview(&guest, Some(&binary_spec()));
+        assert!(
+            output.contains("  guest-payload:\n"),
+            "the fixture must render a guest job: {output}"
+        );
+        let error = match inject_preview_lanes(&output, &guest, PREVIEW) {
+            Ok(_) => panic!("guest payload must fail closed, and did not"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("cannot route the guest-payload job"),
+            "guest payload must name the problem: {error}"
+        );
+    }
+
+    /// Lanes on an omitted preview render the omission: no jobs, no lanes,
+    /// no error — admission applies to rendered jobs.
+    #[test]
+    fn lanes_on_an_omitted_preview_render_the_omission() {
+        for runners in [crate::RunnerMode::Both, crate::RunnerMode::Github] {
+            let root = scanned_root("lanes-omission");
+            let mut config = config(&["preview.yml"], Some(docker_spec()));
+            config.runners = runners;
+            let surface = must(
+                try_generate(
+                    &root,
+                    &config,
+                    Some(
+                        "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+                         [declare.args]\nlanes_input = true\n",
+                    ),
+                ),
+                "lanes on an omitted preview must render the omission",
+            );
+            let preview = rendered(&surface, "preview.yml");
+            assert!(
+                preview.contains("Preview is omitted"),
+                "the omission contract renders: {preview}"
+            );
+            assert!(
+                !preview.contains("lanes:"),
+                "no jobs means no lanes input: {preview}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// Lanes thread the native identity lane: the debian preview carries
+    /// the input and the conditional on every job.
+    #[test]
+    fn lanes_thread_the_native_preview() {
+        let root = scanned_root("lanes-native");
+        let config = native_identity_config(&["preview.yml"]);
+        let surface = must(
+            try_generate(
+                &root,
+                &config,
+                Some(
+                    "[[declare]]\nprimitive = \"preview\"\nfile = \"preview.yml\"\n\n\
+                     [declare.args]\nlanes_input = true\n",
+                ),
+            ),
+            "a lanes-only row must render the native contract",
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("      lanes:\n        description: github (default) | velnor"),
+            "the native contract must carry the lanes input"
+        );
+        let runs: Vec<&str> = preview
+            .lines()
+            .filter(|line| line.starts_with("    runs-on: "))
+            .collect();
+        assert!(
+            runs.len() >= 4,
+            "identity, debian, publish, and more: {preview}"
+        );
+        for run in &runs {
+            assert!(
+                run.contains("inputs.lanes"),
+                "every native job must thread lanes: {run}"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 }

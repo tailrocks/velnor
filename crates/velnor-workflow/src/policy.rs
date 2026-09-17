@@ -3033,6 +3033,14 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let velnor_dispatch_only_gate = format!(
         "github.ref=='refs/heads/{branch}'&&github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
     );
+    // The self-hosted writer gate (`trusted_renovate_gate`): scheduled runs
+    // plus default-branch dispatches, and nothing else. The writer's `on:`
+    // carries exactly these two triggers, so the gate admits every event the
+    // workflow can start from and no event it cannot — push and pull_request
+    // can never reach the job.
+    let writer_gate = format!(
+        "github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
+    );
     value == ci_gate
         || value == format!("always()&&{ci_gate}")
         || value == velnor_lane_gate
@@ -3041,6 +3049,8 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         || value == format!("always()&&{velnor_lane_gate_with_default_runner}")
         || value == velnor_dispatch_only_gate
         || value == format!("always()&&{velnor_dispatch_only_gate}")
+        || value == writer_gate
+        || value == format!("always()&&{writer_gate}")
         || value == release_gate
         || value
             .strip_suffix(&format!("&&{ci_gate}"))

@@ -3450,6 +3450,7 @@ mod tests {
             binary: FIXTURE_BINARY.to_owned(),
             targets: Vec::new(),
             image: String::new(),
+            image_package: String::new(),
             source_repository: FIXTURE_SOURCE.to_owned(),
             consumer_repository: "example/feed".to_owned(),
             artifact_path: String::new(),
@@ -3463,6 +3464,20 @@ mod tests {
             apt_identity_dir: String::new(),
             apt_feed_url: "https://feed.example.test".to_owned(),
             retention: 0,
+            dockerfile: String::new(),
+            context: String::new(),
+            platforms: Vec::new(),
+            producer_workflow: String::new(),
+            producer_conclusion: String::new(),
+            modes: Vec::new(),
+            archive_members: Vec::new(),
+            archive_checksum: String::new(),
+            archive_retention_days: 0,
+            credentials: Vec::new(),
+            tag_pattern: String::new(),
+            registry: String::new(),
+            registry_username_secret: String::new(),
+            registry_password_secret: String::new(),
         }
     }
 

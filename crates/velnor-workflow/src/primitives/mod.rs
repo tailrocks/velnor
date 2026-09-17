@@ -12,10 +12,13 @@
 
 mod aggregate;
 mod cache;
+pub(crate) mod check_profiles;
+pub(crate) mod docs_site;
 mod ir;
 mod lanes;
 mod pipeline;
 mod plan;
+pub(crate) mod prepared_tools;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
@@ -23,7 +26,8 @@ pub(crate) mod runtime_products;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::config::RepoGenerationConfig;
@@ -63,6 +67,10 @@ pub(crate) const OPENTOFU: &str = "opentofu-pipeline";
 pub(crate) const DOCKER_IMAGE: &str = "docker-image-pipeline";
 pub(crate) const HOMEBREW_TAP: &str = "homebrew-tap-pipeline";
 pub(crate) const DOCS_LINT: &str = "docs-lint-pipeline";
+/// The `docs.yml` documentation-site pipeline: build, link checks, spelling,
+/// Pages deployment, and post-deployment verification from one `[docs]`
+/// consumer contract.
+pub(crate) const DOCS_SITE: &str = "docs-site";
 /// The `release.yml` publisher: tag-triggered, verify-then-publish.
 pub(crate) const RELEASE: &str = "release";
 /// The `preview.yml` rolling artifact lane.
@@ -75,10 +83,17 @@ pub(crate) const RELEASE_SIGNER: &str = "release-signer";
 pub(crate) const RENOVATE: &str = "renovate";
 /// The Renovate configuration validation workflow.
 pub(crate) const RENOVATE_VALIDATE: &str = "renovate-validate";
+/// A scheduled workflow file rendered from composable check profiles.
+pub(crate) const SCHEDULED_CHECKS: &str = "scheduled-checks";
 /// A reviewed workflow body declared verbatim by the repository.
 pub(crate) const STATIC_WORKFLOW: &str = "static-workflow";
 /// The owner-only Stage-0 runtime-product producer.
 pub(crate) const RUNTIME_PRODUCTS: &str = "runtime-products";
+/// A repository's prepared tools: per-unit consumer needs the generator binds
+/// to governing lockfiles, recipe, and toolchain, and renders consumer steps
+/// for. A unit-contract row: it records needs on the scoped units before any
+/// file renders, and renders nothing itself.
+pub(crate) const PREPARED_TOOL: &str = "prepared-tool";
 
 /// The Dockerfile stage a mutable mount seed is injected through. The image
 /// declares it as an empty `FROM scratch` stage so a build without the
@@ -524,6 +539,15 @@ impl Args<'_> {
         }
     }
 
+    /// A boolean flag, false when the row does not declare it.
+    pub(crate) fn flag(&self, key: &str) -> Result<bool, GeneratorError> {
+        match self.0.get(key) {
+            None => Ok(false),
+            Some(toml::Value::Boolean(value)) => Ok(*value),
+            Some(other) => Err(unexpected(key, other, "a boolean")),
+        }
+    }
+
     /// A table of string arrays, the form per-unit additions take.
     pub(crate) fn string_tables(
         &self,
@@ -579,6 +603,112 @@ fn unexpected(key: &str, found: &toml::Value, expected: &str) -> GeneratorError 
     ))
 }
 
+/// A JSON string literal for embedding inside a single-quoted GitHub
+/// expression (`fromJSON('[…]')`): `'` escapes as `\u0027` so a label can
+/// never break out of the quoting, while JSON parsers decode it back.
+pub(crate) fn json_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\u0027"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if other.is_control() => {
+                let _ = write!(out, "\\u{:04x}", other as u32);
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A JSON label array for a dispatch-selected velnor leg.
+pub(crate) fn lanes_labels_json(labels: &[String]) -> String {
+    let mut out = String::from("[");
+    for (index, label) in labels.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(label));
+    }
+    out.push(']');
+    out
+}
+
+/// The `workflow_dispatch` lanes input block for a default lane: a choice
+/// between the default leg and its alternate. There is deliberately no
+/// `both`: a dispatch runs one leg, and a both-alias would silently behave
+/// as one leg while promising two.
+pub(crate) fn lanes_dispatch_inputs(default: RunnerMode) -> &'static str {
+    match default {
+        RunnerMode::Velnor => "\n    inputs:\n      lanes:\n        description: velnor (default) | github\n        type: choice\n        default: velnor\n        options: [velnor, github]",
+        RunnerMode::Github | RunnerMode::Both => "\n    inputs:\n      lanes:\n        description: github (default) | velnor\n        type: choice\n        default: github\n        options: [github, velnor]",
+    }
+}
+
+/// The lanes input entry without its `inputs:` wrapper, for triggers that
+/// already declare inputs: the lanes entry renders first, above the
+/// family's own inputs.
+pub(crate) fn lanes_input_entry(default: RunnerMode) -> &'static str {
+    match default {
+        RunnerMode::Velnor => "      lanes:\n        description: velnor (default) | github\n        type: choice\n        default: velnor\n        options: [velnor, github]\n",
+        RunnerMode::Github | RunnerMode::Both => "      lanes:\n        description: github (default) | velnor\n        type: choice\n        default: github\n        options: [github, velnor]\n",
+    }
+}
+
+/// Admit a `lanes_input` declaration: the repository must declare both
+/// lanes, name velnor labels to select, and route them by labels alone — a
+/// dispatch must never select an undeclared lane or silently drop a
+/// declared runner group.
+pub(crate) fn admit_lanes_input(
+    config: &ProjectConfig,
+    family: &str,
+) -> Result<(), GeneratorError> {
+    if config.runners != RunnerMode::Both {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` `lanes_input` needs `[workflow] runners = \"both\"`: a dispatch must never select an undeclared lane"
+        )));
+    }
+    if config.velnor_runner_group.is_some() {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` `lanes_input` cannot route a declared runner group: the dispatch expression selects labels only"
+        )));
+    }
+    if config.velnor_labels.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "`{family}` `lanes_input` needs `[workflow] velnor_labels`: a dispatch to velnor needs labels to select"
+        )));
+    }
+    Ok(())
+}
+
+/// A dispatch-conditional `runs-on`: the default leg everywhere except a
+/// manual dispatch that names the other lane. Non-dispatch events keep the
+/// static default exactly, so scheduled runs and pushes never drift lanes.
+pub(crate) fn lanes_runs_on(
+    config: &ProjectConfig,
+    family: &str,
+    default: RunnerMode,
+) -> Result<String, GeneratorError> {
+    admit_lanes_input(config, family)?;
+    match default {
+        RunnerMode::Velnor => Ok(format!(
+            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && {} || fromJSON('{}') }}}}",
+            json_string(&config.github_runner),
+            lanes_labels_json(&config.velnor_labels),
+        )),
+        RunnerMode::Github | RunnerMode::Both => Ok(format!(
+            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{}') || {} }}}}",
+            lanes_labels_json(&config.velnor_labels),
+            json_string(&config.github_runner),
+        )),
+    }
+}
+
 /// The unit kinds each per-unit pipeline primitive renders, in registry order.
 pub(crate) fn pipeline_id(kind: UnitKind) -> &'static str {
     match kind {
@@ -619,7 +749,10 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(release::StaticWorkflow),
         Box::new(renovate::Renovate),
         Box::new(renovate::RenovateValidate),
+        Box::new(check_profiles::ScheduledChecks),
+        Box::new(docs_site::DocsSite),
         Box::new(runtime_products::RuntimeProducts),
+        Box::new(prepared_tools::PreparedTool),
     ]
 }
 
@@ -798,6 +931,8 @@ pub(crate) fn generate(
         if row.unit_contract
             || (!release::is_release_side(&row.primitive)
                 && !renovate::is_renovate_side(&row.primitive)
+                && !docs_site::is_docs_site_side(&row.primitive)
+                && !check_profiles::is_scheduled_checks_side(&row.primitive)
                 && !runtime_products::is_runtime_products_side(&row.primitive))
         {
             continue;
@@ -912,6 +1047,35 @@ fn apply_units(
     Ok(())
 }
 
+/// Default rows for one side-file family: every owned file the config does not
+/// declare itself, when the family contract says the file applies.
+fn push_default_side_rows(
+    rows: &mut Vec<ResolvedRow>,
+    config: &ProjectConfig,
+    declared: &[Declaration],
+    side_files: &[(&str, &str)],
+    available: &dyn Fn(&str) -> bool,
+) {
+    for (file, family) in side_files {
+        if !config.workflow_files.iter().any(|owned| owned == file) {
+            continue;
+        }
+        if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
+            continue;
+        }
+        if !available(family) {
+            continue;
+        }
+        rows.push(ResolvedRow {
+            primitive: (*family).to_owned(),
+            units: Vec::new(),
+            file: Some((*file).to_owned()),
+            unit_contract: false,
+            args: BTreeMap::new(),
+        });
+    }
+}
+
 /// The resolved declaration rows: the repository's rows over the default rows.
 ///
 /// Defaults cover every family the generated surface owns, so a repository
@@ -979,6 +1143,8 @@ fn rows_for(
     for row in declared.iter().filter(|row| {
         release::is_release_side(&row.primitive)
             || renovate::is_renovate_side(&row.primitive)
+            || docs_site::is_docs_site_side(&row.primitive)
+            || check_profiles::is_scheduled_checks_side(&row.primitive)
             || runtime_products::is_runtime_products_side(&row.primitive)
     }) {
         rows.push(ResolvedRow::declared(row));
@@ -987,48 +1153,34 @@ fn rows_for(
     // same primitives a declared row uses, unless the config declares the
     // family itself.
     if !config.adopted_workflow_surface {
-        for (file, family) in release::RELEASE_SIDE_FILES {
-            if !config.workflow_files.iter().any(|owned| owned == file) {
-                continue;
-            }
-            if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
-                continue;
-            }
+        push_default_side_rows(
+            &mut rows,
+            config,
+            declared,
+            release::RELEASE_SIDE_FILES,
             // A repository without a release contract omits the publisher.
-            if *family == RELEASE && config.release.is_none() {
-                continue;
-            }
-            rows.push(ResolvedRow {
-                primitive: (*family).to_owned(),
-                units: Vec::new(),
-                file: Some((*file).to_owned()),
-                unit_contract: false,
-                args: BTreeMap::new(),
-            });
-        }
-        for (file, family) in renovate::RENOVATE_SIDE_FILES {
-            if !config.workflow_files.iter().any(|owned| owned == file) {
-                continue;
-            }
-            if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
-                continue;
-            }
-            if config.renovate.is_none() {
-                continue;
-            }
-            if *family == RENOVATE_VALIDATE
-                && !config.renovate.as_ref().is_some_and(|spec| spec.validate)
-            {
-                continue;
-            }
-            rows.push(ResolvedRow {
-                primitive: (*family).to_owned(),
-                units: Vec::new(),
-                file: Some((*file).to_owned()),
-                unit_contract: false,
-                args: BTreeMap::new(),
-            });
-        }
+            &|family| family != RELEASE || config.release.is_some(),
+        );
+        push_default_side_rows(
+            &mut rows,
+            config,
+            declared,
+            renovate::RENOVATE_SIDE_FILES,
+            &|family| {
+                config
+                    .renovate
+                    .as_ref()
+                    .is_some_and(|spec| family != RENOVATE_VALIDATE || spec.validate)
+            },
+        );
+        push_default_side_rows(
+            &mut rows,
+            config,
+            declared,
+            docs_site::DOCS_SITE_SIDE_FILES,
+            // A repository without a docs contract omits the pipeline.
+            &|_| config.docs.is_some(),
+        );
     }
     validate(config, declared, &rows)?;
     Ok(rows)
@@ -1054,7 +1206,7 @@ fn is_pipeline(primitive: &str) -> bool {
 
 /// Contract rows mutate unit contracts before any file is rendered.
 fn is_unit_contract(primitive: &str) -> bool {
-    matches!(primitive, WATCH_GRAPH | REGEN_GATE)
+    matches!(primitive, WATCH_GRAPH | REGEN_GATE | PREPARED_TOOL)
 }
 
 #[derive(Clone, Debug)]
@@ -1273,6 +1425,8 @@ fn validate(
     for row in declared.iter().filter(|row| {
         release::is_release_side(&row.primitive)
             || renovate::is_renovate_side(&row.primitive)
+            || docs_site::is_docs_site_side(&row.primitive)
+            || check_profiles::is_scheduled_checks_side(&row.primitive)
             || runtime_products::is_runtime_products_side(&row.primitive)
     }) {
         if !row.units.is_empty() {
@@ -1289,14 +1443,88 @@ fn validate(
         })?;
         let canonical = release::canonical_release_side_file(&row.primitive)
             .or_else(|| renovate::canonical_renovate_side_file(&row.primitive))
+            .or_else(|| docs_site::canonical_docs_site_side_file(&row.primitive))
             .or_else(|| runtime_products::canonical_runtime_products_side_file(&row.primitive));
+        // Only a main-branch-driven release row renders outside `release.yml`;
+        // tag-triggered kinds stay pinned to the canonical file.
+        let main_branch_driven = row.primitive == RELEASE
+            && Args(&row.args)
+                .string("kind")
+                .ok()
+                .flatten()
+                .is_some_and(|kind| release::is_main_branch_driven_release_kind(&kind));
         if let Some(canonical) = canonical
             && file != canonical
+            && !main_branch_driven
         {
             return Err(GeneratorError::usage(format!(
                 "`[[declare]]` primitive `{}` must declare `{canonical}`, not `{file}`",
                 row.primitive
             )));
+        }
+    }
+    // Release publishers render whole workflows, so two rows must share
+    // neither a workflow name nor a version tag prefix: the same name would
+    // collapse two publishers into one status context, and the same prefix
+    // would mint one tag stream from two lanes. The default row counts: a
+    // repository with a release contract already publishes `Release` from
+    // `release.yml`.
+    {
+        let mut names: BTreeMap<String, String> = BTreeMap::new();
+        let mut prefixes: BTreeMap<String, String> = BTreeMap::new();
+        for row in rows.iter().filter(|row| row.primitive == RELEASE) {
+            let Some(file) = row.file.as_deref() else {
+                continue;
+            };
+            let name = release::release_workflow_name(file, &row.args())?;
+            if names.insert(name.clone(), file.to_owned()).is_some() {
+                return Err(GeneratorError::usage(format!(
+                    "`[[declare]]` primitive `release` renders duplicate workflow name `{name}`; give each publisher its own `name`"
+                )));
+            }
+            if let Some(prefix) = row.args().string("version_prefix")? {
+                if prefix.is_empty() {
+                    continue;
+                }
+                if let Some(owner) = prefixes.insert(prefix.clone(), file.to_owned()) {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` primitive `release` file `{file}` publishes tag prefix `{prefix}`, already owned by file `{owner}`"
+                    )));
+                }
+            }
+        }
+    }
+    // Every configured check profile renders exactly once: an uncovered
+    // profile is a silent omission, and a doubly covered one would run the
+    // same check on two cadences.
+    {
+        let mut covered = BTreeSet::new();
+        for row in declared
+            .iter()
+            .filter(|row| check_profiles::is_scheduled_checks_side(&row.primitive))
+        {
+            // The label names the file, exactly like the render path: a
+            // shared-selection error must point at the declare row's file,
+            // not at the primitive every scheduled row shares.
+            let label = row.file.as_deref().unwrap_or(row.primitive.as_str());
+            for profile in
+                check_profiles::select_profiles(&config.check_profiles, &Args(&row.args), label)?
+            {
+                if !covered.insert(profile.id.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "`[[declare]]` primitive `{}` renders check profile `{}` twice; declare each profile in exactly one scheduled-checks file",
+                        row.primitive, profile.id
+                    )));
+                }
+            }
+        }
+        for profile in &config.check_profiles {
+            if !covered.contains(profile.id.as_str()) {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] `{}` is rendered by no `[[declare]] primitive = \"scheduled-checks\"` row; declare the file that renders it",
+                    profile.id
+                )));
+            }
         }
     }
     // Declaration order is canonical: the aggregate composes callers in the
@@ -1349,6 +1577,8 @@ mod tests {
             STATIC_WORKFLOW,
             RENOVATE,
             RENOVATE_VALIDATE,
+            SCHEDULED_CHECKS,
+            DOCS_SITE,
         ] {
             assert!(lookup(contract).is_ok(), "`{contract}` is not registered");
             ids.push(contract);
@@ -1412,5 +1642,46 @@ mod tests {
         };
         assert!(error.contains("watch-graph"), "{error}");
         assert!(error.contains("which the scan did not produce"), "{error}");
+    }
+
+    /// The lanes dispatch block offers exactly the two legs around the
+    /// default: no `both` alias that would silently behave as one leg.
+    #[test]
+    fn lanes_dispatch_inputs_offer_exactly_two_legs() {
+        for (default, name, alternate) in [
+            (RunnerMode::Github, "github", "velnor"),
+            (RunnerMode::Velnor, "velnor", "github"),
+        ] {
+            let inputs = lanes_dispatch_inputs(default);
+            assert!(
+                inputs.contains(&format!("description: {name} (default) | {alternate}"))
+                    && inputs.contains(&format!("default: {name}"))
+                    && inputs.contains("type: choice"),
+                "{inputs}"
+            );
+            assert!(!inputs.contains("both"), "{inputs}");
+            let entry = lanes_input_entry(default);
+            assert!(
+                entry.contains(&format!("description: {name} (default) | {alternate}"))
+                    && !entry.contains("both"),
+                "{entry}"
+            );
+        }
+    }
+
+    /// Expression-embedded strings cannot break out of the single-quoted
+    /// `fromJSON`: quotes, backslashes, and controls all escape.
+    #[test]
+    fn json_string_escapes_expression_breakouts() {
+        assert_eq!(json_string("ubuntu-24.04"), "\"ubuntu-24.04\"");
+        assert_eq!(
+            lanes_labels_json(&["self-hosted".to_owned(), "o'brien".to_owned()]),
+            "[\"self-hosted\",\"o\\u0027brien\"]"
+        );
+        assert_eq!(
+            json_string("a\"b\\c'd"),
+            "\"a\\\"b\\\\c\\u0027d\"",
+            "quotes, backslashes, and apostrophes escape"
+        );
     }
 }

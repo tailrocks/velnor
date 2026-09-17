@@ -103,6 +103,14 @@ pub(crate) struct RepoGenerationConfig {
     release: ReleaseSection,
     #[serde(default)]
     renovate: RenovateSection,
+    #[serde(default, skip_serializing_if = "MaintenanceSection::is_empty")]
+    maintenance: MaintenanceSection,
+    #[serde(default)]
+    docs: DocsSection,
+    /// Composable scheduled-check profiles. Skipped while empty so the
+    /// canonical form of a repository without profiles is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    check_profile: Vec<CheckProfileSection>,
     #[serde(default)]
     units: Vec<UnitSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -264,16 +272,101 @@ pub(crate) struct RenovateSection {
     enabled: Option<bool>,
     reason: Option<String>,
     schedule: Option<String>,
+    /// Additional cron schedules beside `schedule`, each a 5-field cron.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    schedules: Vec<String>,
     token: Option<String>,
     config: Option<String>,
     validate: Option<bool>,
     cache: Option<bool>,
+    /// Writer execution lanes, independent of CI unit lanes: `velnor`
+    /// (default), `github`, or `both` (Velnor default with a manual dispatch
+    /// override to GitHub). A scheduled writer must not force CI units onto
+    /// runners the repository deliberately avoids.
+    lanes: Option<String>,
+    /// Repository targets (`owner/repository`) the writer renovates instead
+    /// of autodiscovering. Empty keeps autodiscovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repositories: Vec<String>,
+    /// Secret holding the JSON `hostRules` array Renovate authenticates
+    /// private registries with. A name, never the credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_rules_secret: Option<String>,
+    /// The git author Renovate commits as (`Name <email>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    /// Append a `Signed-off-by` trailer for `author` to Renovate commits.
+    /// Requires `author`; the DCO check the repository gates on stays the
+    /// enforcement, this only makes the writer produce signed-off commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signoff: Option<bool>,
+    /// Regex allowlist for Renovate post-upgrade commands
+    /// (`allowedCommands`): execution allowances for self-hosted runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allowed_commands: Vec<String>,
+}
+
+/// Cache-hygiene maintenance overrides (`[maintenance]`). Generator-only:
+/// the rendered `maintenance.yml` carries the schedule, the producer gate,
+/// and the per-run delete bound, so the workflow needs no inputs of its own.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MaintenanceSection {
+    /// Cron schedule of the retention sweep. Absent keeps `31 3 * * *`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schedule: Option<String>,
+    /// Producer workflows whose in-progress runs defer retention. Absent
+    /// keeps `ci-main.yml` and `nightly.yml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producers: Option<Vec<String>>,
+    /// Per-run bound on cache deletes in any one maintenance job. A run that
+    /// reaches it fails with "rerun maintenance" instead of an unbounded
+    /// sweep. Absent keeps 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_deletes: Option<u32>,
+}
+
+impl MaintenanceSection {
+    /// Whether the repository declared any maintenance override. The whole
+    /// table is skipped in the canonical form when empty, so repositories
+    /// that do not use it keep their recorded config digest.
+    fn is_empty(&self) -> bool {
+        self.schedule.is_none() && self.producers.is_none() && self.max_deletes.is_none()
+    }
 }
 
 /// The release contract a repository declares for itself. `kind` names the
 /// publisher the renderer implements; every other field is the contract that
 /// publisher renders from, so an incomplete contract is a configuration error
 /// instead of a partially rendered workflow.
+/// One composable scheduled-check profile the repository declares for itself.
+///
+/// A profile is a named scheduled job: its cadence, its platform, the named
+/// tasks it runs, and the status it reports. The generator renders the
+/// schedule, the lane, and the job shell; the named tasks own every product
+/// assertion and threshold, so generic code never interprets a check result.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckProfileSection {
+    id: Option<String>,
+    name: Option<String>,
+    schedule: Option<String>,
+    runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tasks: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    needs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifacts: Option<Vec<String>>,
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseSection {
@@ -287,6 +380,11 @@ pub(crate) struct ReleaseSection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     targets: Vec<String>,
     image: Option<String>,
+    /// The workspace package the image lane compiles into the container
+    /// (`release-binaries/<arch>/<package>`, which the Dockerfile copies).
+    /// Empty selects `package`: repositories whose image embeds a different
+    /// binary than the shipped product declare it here.
+    image_package: Option<String>,
     source_repository: Option<String>,
     consumer_repository: Option<String>,
     artifact_path: Option<String>,
@@ -301,6 +399,138 @@ pub(crate) struct ReleaseSection {
     apt_identity_dir: Option<String>,
     apt_feed_url: Option<String>,
     retention: Option<i64>,
+    dockerfile: Option<String>,
+    context: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    platforms: Vec<String>,
+    /// The trusted producer workflow a `workflow_run` event must come from.
+    producer_workflow: Option<String>,
+    /// The producer conclusion the publish gate requires (`success`).
+    producer_conclusion: Option<String>,
+    /// The dispatch modes the workflows offer. `publish` is never a dispatch
+    /// option: publication stays tag-triggered (or admitted-producer).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    modes: Vec<String>,
+    /// Extra members packaged into each release archive next to the binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archive_members: Vec<String>,
+    /// The archive checksum sidecar algorithm (`sha256`).
+    archive_checksum: Option<String>,
+    /// The `retention-days` release artifacts upload with (1-90).
+    archive_retention_days: Option<i64>,
+    /// Credential setup/teardown pairs, one `[[release.credential]]` row per
+    /// credential the lane mounts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    credential: Vec<CredentialSection>,
+    /// The tag filter the release triggers match on. Empty selects `v*`:
+    /// repositories whose release tags share a narrower shape (a prefix, a
+    /// path) declare it here instead of triggering on every `v` tag.
+    tag_pattern: Option<String>,
+    /// The OCI registry host the docker publisher logs in to. Absent keeps
+    /// the GHCR automatic-token login; a declared host requires both
+    /// credential secret names, and the triple renders only for `kind =
+    /// "docker"`.
+    registry: Option<String>,
+    /// The secret holding the registry username. A name, never the value.
+    registry_username_secret: Option<String>,
+    /// The secret holding the registry password. A name, never the value.
+    registry_password_secret: Option<String>,
+}
+
+/// One credential the release lane mounts: the setup command that
+/// materializes it and the teardown command that restores the host. Both
+/// are required; a setup without a teardown is a configuration error.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CredentialSection {
+    name: Option<String>,
+    setup: Option<String>,
+    teardown: Option<String>,
+}
+
+/// The documentation-site contract a repository declares for itself. Every
+/// value is consumer-owned: the site address, the built output directory, the
+/// path filters that feed the reuse digest, and the commands that build and
+/// check the site. The generator renders only the pipeline structure — the
+/// event-split gates, the artifact-reuse lookups, the bounded deploy retry,
+/// and the failure reporting — never an address, mapping, or content rule.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DocsSection {
+    enabled: Option<bool>,
+    reason: Option<String>,
+    site_url: Option<String>,
+    site_dir: Option<String>,
+    sitemap_path: Option<String>,
+    schedule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_link_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site_link_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spell_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verify_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_link_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docs_paths: Option<Vec<String>>,
+}
+
+impl DocsSection {
+    pub(crate) fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    pub(crate) fn site_url(&self) -> Option<&str> {
+        self.site_url.as_deref()
+    }
+
+    pub(crate) fn site_dir(&self) -> Option<&str> {
+        self.site_dir.as_deref()
+    }
+
+    pub(crate) fn sitemap_path(&self) -> Option<&str> {
+        self.sitemap_path.as_deref()
+    }
+
+    pub(crate) fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
+    }
+
+    pub(crate) fn build_commands(&self) -> &[String] {
+        self.build_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn source_link_commands(&self) -> &[String] {
+        self.source_link_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn site_link_commands(&self) -> &[String] {
+        self.site_link_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn spell_commands(&self) -> &[String] {
+        self.spell_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn verify_commands(&self) -> &[String] {
+        self.verify_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn external_link_commands(&self) -> &[String] {
+        self.external_link_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn docs_paths(&self) -> Option<&[String]> {
+        self.docs_paths.as_deref()
+    }
 }
 
 /// One verification unit the repository adds to, or overrides in, the scanned
@@ -357,6 +587,62 @@ pub(crate) struct UnitSection {
     /// their recorded digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     requires_trusted: Option<bool>,
+    /// The operating system the unit needs: `any`, `linux`, or `macos`.
+    /// Absent keeps what the scan derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    os: Option<String>,
+    /// The architecture the unit needs: `any`, `x86_64`, or `aarch64`.
+    /// Absent keeps what the scan derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    arch: Option<String>,
+    /// The SDK capabilities the unit needs, replacing what the scan derived.
+    /// `xcode` and `xcframework` resolve to a macOS executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Vec<String>>,
+    /// Extra environment the unit's jobs export: build flags and product
+    /// outputs. Declared as `[units.env]`; replaces nothing, the scan
+    /// derives no env of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
+    /// Whether this Rust unit verifies under the object transport. Absent
+    /// keeps the default (on for Rust); `false` opts out. Meaningless — and
+    /// refused as `true` — on any other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mbx: Option<bool>,
+    /// Named build products this unit produces for consumers, as
+    /// `[[units.products]]` rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    products: Vec<ProductSection>,
+    /// Prerequisite edges this consumer declares, as
+    /// `[[units.prerequisites]]` rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    prerequisites: Vec<PrerequisiteSection>,
+}
+
+/// One named build product a `[[units]]` row declares: the product's name,
+/// the repository task that rebuilds it, and the task outputs consumers
+/// receive as environment.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProductSection {
+    name: Option<String>,
+    task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
+}
+
+/// One prerequisite edge a `[[units]]` row declares: the producer unit, the
+/// product it builds, an optional task override, and the task inputs the
+/// consumer's prepare step exports.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrerequisiteSection {
+    producer: Option<String>,
+    product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -436,6 +722,10 @@ impl RenovateSection {
         self.schedule.as_deref()
     }
 
+    pub(crate) fn schedules(&self) -> &[String] {
+        &self.schedules
+    }
+
     pub(crate) fn token(&self) -> Option<&str> {
         self.token.as_deref()
     }
@@ -450,6 +740,44 @@ impl RenovateSection {
 
     pub(crate) fn cache(&self) -> Option<bool> {
         self.cache
+    }
+
+    pub(crate) fn lanes(&self) -> Option<&str> {
+        self.lanes.as_deref()
+    }
+
+    pub(crate) fn repositories(&self) -> &[String] {
+        &self.repositories
+    }
+
+    pub(crate) fn host_rules_secret(&self) -> Option<&str> {
+        self.host_rules_secret.as_deref()
+    }
+
+    pub(crate) fn author(&self) -> Option<&str> {
+        self.author.as_deref()
+    }
+
+    pub(crate) fn signoff(&self) -> Option<bool> {
+        self.signoff
+    }
+
+    pub(crate) fn allowed_commands(&self) -> &[String] {
+        &self.allowed_commands
+    }
+}
+
+impl MaintenanceSection {
+    pub(crate) fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
+    }
+
+    pub(crate) fn producers(&self) -> Option<&[String]> {
+        self.producers.as_deref()
+    }
+
+    pub(crate) fn max_deletes(&self) -> Option<u32> {
+        self.max_deletes
     }
 }
 
@@ -484,6 +812,10 @@ impl ReleaseSection {
 
     pub(crate) fn image(&self) -> Option<&str> {
         self.image.as_deref()
+    }
+
+    pub(crate) fn image_package(&self) -> Option<&str> {
+        self.image_package.as_deref()
     }
 
     pub(crate) fn source_repository(&self) -> Option<&str> {
@@ -536,6 +868,122 @@ impl ReleaseSection {
 
     pub(crate) fn retention(&self) -> Option<i64> {
         self.retention
+    }
+
+    pub(crate) fn dockerfile(&self) -> Option<&str> {
+        self.dockerfile.as_deref()
+    }
+
+    pub(crate) fn context(&self) -> Option<&str> {
+        self.context.as_deref()
+    }
+
+    pub(crate) fn platforms(&self) -> &[String] {
+        &self.platforms
+    }
+
+    pub(crate) fn producer_workflow(&self) -> Option<&str> {
+        self.producer_workflow.as_deref()
+    }
+
+    pub(crate) fn producer_conclusion(&self) -> Option<&str> {
+        self.producer_conclusion.as_deref()
+    }
+
+    pub(crate) fn modes(&self) -> &[String] {
+        &self.modes
+    }
+
+    pub(crate) fn archive_members(&self) -> &[String] {
+        &self.archive_members
+    }
+
+    pub(crate) fn archive_checksum(&self) -> Option<&str> {
+        self.archive_checksum.as_deref()
+    }
+
+    pub(crate) fn archive_retention_days(&self) -> Option<i64> {
+        self.archive_retention_days
+    }
+
+    pub(crate) fn credentials(&self) -> &[CredentialSection] {
+        &self.credential
+    }
+
+    pub(crate) fn tag_pattern(&self) -> Option<&str> {
+        self.tag_pattern.as_deref()
+    }
+
+    pub(crate) fn registry(&self) -> Option<&str> {
+        self.registry.as_deref()
+    }
+
+    pub(crate) fn registry_username_secret(&self) -> Option<&str> {
+        self.registry_username_secret.as_deref()
+    }
+
+    pub(crate) fn registry_password_secret(&self) -> Option<&str> {
+        self.registry_password_secret.as_deref()
+    }
+}
+
+impl CredentialSection {
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub(crate) fn setup(&self) -> Option<&str> {
+        self.setup.as_deref()
+    }
+
+    pub(crate) fn teardown(&self) -> Option<&str> {
+        self.teardown.as_deref()
+    }
+}
+
+impl CheckProfileSection {
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub(crate) fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
+    }
+
+    pub(crate) fn runner(&self) -> Option<&str> {
+        self.runner.as_deref()
+    }
+
+    pub(crate) fn tools(&self) -> Option<&[String]> {
+        self.tools.as_deref()
+    }
+
+    pub(crate) fn tasks(&self) -> Option<&[String]> {
+        self.tasks.as_deref()
+    }
+
+    pub(crate) fn needs(&self) -> Option<&[String]> {
+        self.needs.as_deref()
+    }
+
+    pub(crate) fn timeout_minutes(&self) -> Option<i64> {
+        self.timeout_minutes
+    }
+
+    pub(crate) fn artifacts(&self) -> Option<&[String]> {
+        self.artifacts.as_deref()
+    }
+
+    pub(crate) fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    pub(crate) fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
     }
 }
 
@@ -614,6 +1062,189 @@ impl UnitSection {
 
     pub(crate) fn requires_trusted(&self) -> bool {
         self.requires_trusted == Some(true)
+    }
+
+    pub(crate) fn os(&self) -> Option<&str> {
+        self.os.as_deref()
+    }
+
+    pub(crate) fn arch(&self) -> Option<&str> {
+        self.arch.as_deref()
+    }
+
+    pub(crate) fn capabilities(&self) -> Option<&[String]> {
+        self.capabilities.as_deref()
+    }
+
+    pub(crate) fn mbx(&self) -> Option<bool> {
+        self.mbx
+    }
+
+    pub(crate) fn products(&self) -> &[ProductSection] {
+        &self.products
+    }
+
+    pub(crate) fn prerequisites(&self) -> &[PrerequisiteSection] {
+        &self.prerequisites
+    }
+
+    /// The platform requirement this row declares over `base`: the row
+    /// replaces the OS, architecture, and capability set it names and keeps
+    /// the rest.
+    ///
+    /// # Errors
+    /// Returns a usage error for an OS, architecture, or capability value
+    /// the platform vocabulary does not implement.
+    pub(crate) fn platform_requirement(
+        &self,
+        id: &str,
+        base: &crate::platform::PlatformRequirement,
+    ) -> Result<crate::platform::PlatformRequirement, GeneratorError> {
+        let mut requirement = base.clone();
+        if let Some(os) = self.os.as_deref() {
+            requirement.os =
+                crate::platform::PlatformRequirement::parse_os(os).map_err(|error| {
+                    GeneratorError::usage(format!("[[units]] {id} declares {error}"))
+                })?;
+        }
+        if let Some(arch) = self.arch.as_deref() {
+            requirement.arch =
+                crate::platform::PlatformRequirement::parse_arch(arch).map_err(|error| {
+                    GeneratorError::usage(format!("[[units]] {id} declares {error}"))
+                })?;
+        }
+        if let Some(capabilities) = self.capabilities.as_deref() {
+            let mut declared = BTreeSet::new();
+            for capability in capabilities {
+                if !crate::platform::PlatformRequirement::valid_capability(capability) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[units]] {id} declares capability `{capability}`, which is not a capability name; use lowercase letters, digits, dots, underscores, and dashes"
+                    )));
+                }
+                if !declared.insert(capability.clone()) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[units]] {id} declares capability `{capability}` more than once"
+                    )));
+                }
+            }
+            requirement.capabilities = declared;
+        }
+        Ok(requirement)
+    }
+
+    /// The validated env this row declares, when it declares any.
+    ///
+    /// # Errors
+    /// Returns a usage error for an env name or value that cannot render.
+    pub(crate) fn validated_env(
+        &self,
+        id: &str,
+    ) -> Result<Option<BTreeMap<String, String>>, GeneratorError> {
+        if let Some(env) = self.env.as_ref() {
+            crate::platform::validate_env(env, &format!("[[units]] {id}"))?;
+            return Ok(Some(env.clone()));
+        }
+        Ok(None)
+    }
+
+    /// The named products this row declares.
+    ///
+    /// # Errors
+    /// Returns a usage error for a product without a name, an invalid task
+    /// or env, or a name the row declares twice.
+    pub(crate) fn named_products(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::platform::NamedProduct>, GeneratorError> {
+        let mut products = Vec::new();
+        for product in &self.products {
+            let name = product.name.as_deref().unwrap_or_default();
+            if !crate::platform::valid_product_name(name) {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares a product without a valid name; name it with lowercase letters, digits, dots, underscores, and dashes"
+                )));
+            }
+            if products
+                .iter()
+                .any(|declared: &crate::platform::NamedProduct| declared.name == name)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares product `{name}` twice; one row per product"
+                )));
+            }
+            if let Some(task) = product.task.as_deref()
+                && !crate::platform::valid_task_name(task)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares product `{name}` with task `{task}`, which is not a repository task name; use letters, digits, and `_.:/-` without whitespace"
+                )));
+            }
+            if let Some(env) = product.env.as_ref() {
+                crate::platform::validate_env(env, &format!("[[units]] {id} product `{name}`"))?;
+            }
+            products.push(crate::platform::NamedProduct {
+                name: name.to_owned(),
+                task: product.task.clone(),
+                env: product.env.clone().unwrap_or_default(),
+            });
+        }
+        Ok(products)
+    }
+
+    /// The prerequisite edges this row declares.
+    ///
+    /// # Errors
+    /// Returns a usage error for an edge without a producer or product, an
+    /// invalid task or env, or an edge the row declares twice.
+    pub(crate) fn declared_prerequisites(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::platform::Prerequisite>, GeneratorError> {
+        let mut prerequisites = Vec::new();
+        for prerequisite in &self.prerequisites {
+            let producer = prerequisite.producer.as_deref().unwrap_or_default();
+            let product = prerequisite.product.as_deref().unwrap_or_default();
+            if producer.is_empty() || product.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares a prerequisite without both `producer` and `product`; name the unit that builds it and the product it builds"
+                )));
+            }
+            if !crate::platform::valid_product_name(product) {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares a prerequisite on product `{product}`, which is not a product name"
+                )));
+            }
+            if prerequisites
+                .iter()
+                .any(|declared: &crate::platform::Prerequisite| {
+                    declared.producer == producer && declared.product == product
+                })
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares the prerequisite `{producer}:{product}` twice; one row per edge"
+                )));
+            }
+            if let Some(task) = prerequisite.task.as_deref()
+                && !crate::platform::valid_task_name(task)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares prerequisite `{producer}:{product}` with task `{task}`, which is not a repository task name"
+                )));
+            }
+            if let Some(env) = prerequisite.env.as_ref() {
+                crate::platform::validate_env(
+                    env,
+                    &format!("[[units]] {id} prerequisite `{producer}:{product}`"),
+                )?;
+            }
+            prerequisites.push(crate::platform::Prerequisite {
+                producer: producer.to_owned(),
+                product: product.to_owned(),
+                task: prerequisite.task.clone(),
+                env: prerequisite.env.clone().unwrap_or_default(),
+            });
+        }
+        Ok(prerequisites)
     }
 }
 
@@ -844,6 +1475,22 @@ impl RepoGenerationConfig {
         &self.renovate
     }
 
+    /// The declared documentation-site contract.
+    pub(crate) fn docs(&self) -> &DocsSection {
+        &self.docs
+    }
+
+    /// The declared scheduled-check profiles, in the order the config declares
+    /// them.
+    pub(crate) fn check_profiles(&self) -> &[CheckProfileSection] {
+        &self.check_profile
+    }
+
+    /// The declared maintenance overrides.
+    pub(crate) fn maintenance(&self) -> &MaintenanceSection {
+        &self.maintenance
+    }
+
     /// The declared unit rows, in the order the config declares them.
     pub(crate) fn units(&self) -> &[UnitSection] {
         &self.units
@@ -873,6 +1520,16 @@ impl RepoGenerationConfig {
     /// Whether the generated CI aggregate should be required.
     pub(crate) fn ci_required(&self) -> Option<bool> {
         self.policy.ci_required
+    }
+
+    /// Whether every commit must carry a `Signed-off-by` trailer.
+    pub(crate) fn dco_required(&self) -> Option<bool> {
+        self.policy.dco_required
+    }
+
+    /// Admission rule for actions that are not pinned to a full commit SHA.
+    pub(crate) fn action_pin_admission(&self) -> Option<&str> {
+        self.policy.action_pin_admission.as_deref()
     }
 
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
@@ -983,6 +1640,10 @@ impl RepoGenerationConfig {
         validate_static_files(&self.static_files)?;
         self.validate_release()?;
         self.validate_renovate()?;
+        self.validate_docs()?;
+        self.validate_check_profiles(mise_lock_keys)?;
+        self.validate_maintenance()?;
+        self.validate_policy()?;
         Ok(())
     }
 
@@ -1102,6 +1763,20 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// A repeated list entry is a typo-class error: the render would carry it
+/// once, so the declaration must name it once.
+fn reject_duplicates(owner: &str, values: &[String]) -> Result<(), GeneratorError> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        if !seen.insert(value) {
+            return Err(GeneratorError::usage(format!(
+                "{owner} names `{value}` twice; list each entry once"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn automatic_fits_runners(runners: &str, automatic: &str) -> bool {
     match (runners, automatic) {
         ("both", "both") => true,
@@ -1120,6 +1795,13 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
         return Err(GeneratorError::usage(
             "[workflow] macos_runner must not be empty",
         ));
+    }
+    if let Some(branch) = workflow.default_branch.as_deref()
+        && !crate::runtime::valid_branch(branch)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] default_branch renders into trigger branches and `github.ref` guards; `{branch}` is outside the branch alphabet"
+        )));
     }
     if let Some(runners) = workflow.runners.as_deref()
         && !matches!(runners, "github" | "velnor" | "both")
@@ -1482,6 +2164,10 @@ fn validate_units(
                     "[[unit]] {id} declares `[unit.cache]` without both `key_files` and `paths`; a partial cache contract cannot be keyed"
                 )));
         }
+        row.platform_requirement(id, &crate::platform::PlatformRequirement::portable())?;
+        row.validated_env(id)?;
+        row.named_products(id)?;
+        row.declared_prerequisites(id)?;
         if let Some(tools) = row.mise_tools.as_deref() {
             if tools.is_empty() {
                 return Err(GeneratorError::usage(format!(
@@ -1553,6 +2239,11 @@ fn validate_unit_references(
         for id in row.depends_on.iter().flatten() {
             report("depends_on", id)?;
         }
+        for prerequisite in &row.prerequisites {
+            if let Some(producer) = prerequisite.producer.as_deref() {
+                report("prerequisite producer", producer)?;
+            }
+        }
     }
     for id in version_bump_units.into_iter().flatten() {
         report("version_bump_units", id)?;
@@ -1610,13 +2301,135 @@ const RELEASE_KINDS: &[&str] = &[
     "pages",
     "homebrew",
     "apt",
+    "docker",
 ];
 
+/// The OCI platforms the `docker` publisher builds. Native builders exist
+/// for exactly these; anything else fails closed instead of silently
+/// emulating an architecture under QEMU.
+pub(crate) const DOCKER_PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
+
+/// Whether every declared `docker` platform names a natively built Linux
+/// architecture. An empty list selects both; an unknown value is a
+/// configuration error, never a silently dropped platform.
+pub(crate) fn valid_docker_platforms(platforms: &[String]) -> bool {
+    platforms
+        .iter()
+        .all(|platform| DOCKER_PLATFORMS.contains(&platform.as_str()))
+}
+
+/// Whether `value` is a well-formed OCI image reference without a digest:
+/// `[host[:port]/]path[/path…][:tag]` over the lowercase OCI alphabet. The
+/// reference renders into YAML `env:` and shell-adjacent `with:` blocks, so
+/// anything outside this alphabet — whitespace, quotes, shell metacharacters,
+/// uppercase — fails closed here instead of reaching a render sink.
+pub(crate) fn valid_docker_image(value: &str) -> bool {
+    if value.is_empty() || value.len() > 255 {
+        return false;
+    }
+    let (name, tag) = match value.rsplit_once(':') {
+        // A colon after the last slash starts the tag; before it, a port.
+        Some((head, tag)) if !tag.contains('/') => (head, Some(tag)),
+        _ => (value, None),
+    };
+    if let Some(tag) = tag {
+        let mut bytes = tag.bytes();
+        let first = bytes.next();
+        if !first.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || tag.len() > 128
+            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return false;
+        }
+    }
+    let mut components = name.split('/');
+    let Some(first) = components.next() else {
+        return false;
+    };
+    // The first component may be a registry host (`ghcr.io`, `host:5000`);
+    // every later one is a repository path component.
+    let host = first.split(':').next().unwrap_or_default();
+    if !valid_docker_host(host) {
+        return false;
+    }
+    if name.contains(':') && !first.contains(':') {
+        return false;
+    }
+    if first.contains(':') {
+        let port = first.rsplit(':').next().unwrap_or_default();
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+    components.all(valid_docker_component)
+}
+
+fn valid_docker_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+}
+
+fn valid_docker_component(component: &str) -> bool {
+    !component.is_empty()
+        && component.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+        && !component.starts_with(['.', '-', '_'])
+        && !component.ends_with(['.', '-', '_'])
+}
+
 pub(crate) fn validate_renovate_token_name(token: &str) -> Result<(), GeneratorError> {
-    if token == "GITHUB_TOKEN" {
+    validate_secret_name("[renovate] token", token, "GH_RENOVATE_TOKEN")
+}
+
+/// The `[renovate]` credential/target contract: repository targets,
+/// host-rules secret, commit author/signoff, and execution allowances.
+fn validate_renovate_contract(renovate: &RenovateSection) -> Result<(), GeneratorError> {
+    for repository in &renovate.repositories {
+        validate_renovate_repository_target(repository)?;
+    }
+    reject_duplicates("[renovate] repositories", &renovate.repositories)?;
+    if let Some(secret) = renovate.host_rules_secret.as_deref() {
+        validate_renovate_host_rules_secret(secret)?;
+    }
+    if let Some(author) = renovate.author.as_deref() {
+        validate_renovate_git_author(author)?;
+    }
+    if renovate.signoff == Some(true) && renovate.author.is_none() {
         return Err(GeneratorError::usage(
-            "[renovate] token must name a dedicated PAT secret, not GITHUB_TOKEN",
+            "[renovate] signoff = true requires `author`: the Signed-off-by trailer names the author Renovate commits as",
         ));
+    }
+    for command in &renovate.allowed_commands {
+        validate_renovate_allowed_command(command)?;
+    }
+    reject_duplicates("[renovate] allowed_commands", &renovate.allowed_commands)?;
+    Ok(())
+}
+
+pub(crate) fn validate_renovate_host_rules_secret(secret: &str) -> Result<(), GeneratorError> {
+    validate_secret_name(
+        "[renovate] host_rules_secret",
+        secret,
+        "RENOVATE_HOST_RULES_JSON",
+    )
+}
+
+/// A credential reference: an uppercase secret name, never `GITHUB_TOKEN`
+/// (a declared credential needs a dedicated secret the automatic token must
+/// not silently stand in for) and never an empty or lowercase spelling a
+/// `secrets.` lookup would miss.
+pub(crate) fn validate_secret_name(
+    owner: &str,
+    token: &str,
+    example: &str,
+) -> Result<(), GeneratorError> {
+    if token == "GITHUB_TOKEN" {
+        return Err(GeneratorError::usage(format!(
+            "{owner} must name a dedicated secret, not GITHUB_TOKEN"
+        )));
     }
     let valid = !token.is_empty()
         && token.chars().all(|character| {
@@ -1628,17 +2441,113 @@ pub(crate) fn validate_renovate_token_name(token: &str) -> Result<(), GeneratorE
             .is_some_and(|character| character.is_ascii_uppercase());
     if !valid {
         return Err(GeneratorError::usage(format!(
-            "[renovate] token must be an uppercase secret name such as GH_RENOVATE_TOKEN, found `{token}`"
+            "{owner} must be an uppercase secret name such as {example}, found `{token}`"
         )));
     }
     Ok(())
 }
 
 pub(crate) fn validate_renovate_cron(schedule: &str) -> Result<(), GeneratorError> {
+    validate_cron_schedule("[renovate] schedule", schedule)
+}
+
+pub(crate) fn validate_maintenance_cron(schedule: &str) -> Result<(), GeneratorError> {
+    validate_cron_schedule("[maintenance] schedule", schedule)
+}
+
+fn validate_cron_schedule(owner: &str, schedule: &str) -> Result<(), GeneratorError> {
     let fields = schedule.split_whitespace().collect::<Vec<_>>();
     if fields.len() != 5 {
         return Err(GeneratorError::usage(format!(
-            "[renovate] schedule must be a 5-field cron expression, found `{schedule}`"
+            "{owner} must be a 5-field cron expression, found `{schedule}`"
+        )));
+    }
+    Ok(())
+}
+
+/// One `[renovate] repositories` target: an `owner/repository` slug with the
+/// same GitHub-name shape the generator's own repository slug carries.
+pub(crate) fn validate_renovate_repository_target(repository: &str) -> Result<(), GeneratorError> {
+    let valid = repository.split_once('/').is_some_and(|(owner, name)| {
+        !repository.contains("..")
+            && [owner, name].iter().all(|segment| {
+                !segment.is_empty()
+                    && segment.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_')
+                    })
+                    && !segment.starts_with('.')
+                    && !Path::new(segment)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("git"))
+            })
+    });
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] repositories must be `owner/repository` slugs, found `{repository}`"
+        )));
+    }
+    Ok(())
+}
+
+/// The `[renovate] author` Renovate commits as: a display name plus an
+/// angle-bracket email, the shape `gitAuthor` and the DCO trailer share.
+pub(crate) fn validate_renovate_git_author(author: &str) -> Result<(), GeneratorError> {
+    let valid = author
+        .rsplit_once('<')
+        .and_then(|(name, email)| email.strip_suffix('>').map(|email| (name, email)))
+        .is_some_and(|(name, email)| {
+            !name.trim().is_empty()
+                && !name.contains(['\n', '\r'])
+                && !email.contains(['\n', '\r', ' ', '<', '>'])
+                && email.split_once('@').is_some_and(|(user, host)| {
+                    !user.is_empty() && !host.is_empty() && host.contains('.')
+                })
+        });
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] author must be `Name <email>`, found `{author}`"
+        )));
+    }
+    Ok(())
+}
+
+/// One `[renovate] allowed_commands` entry: a single-line regex the rendered
+/// `RENOVATE_ALLOWED_COMMANDS` JSON array carries verbatim.
+pub(crate) fn validate_renovate_allowed_command(command: &str) -> Result<(), GeneratorError> {
+    if command.is_empty() || command.contains(['\n', '\r', '\0']) {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] allowed_commands must be single-line command patterns, found `{command}`"
+        )));
+    }
+    Ok(())
+}
+
+/// One `[maintenance] producers` entry: a bare `.yml` workflow basename the
+/// retention gate watches, never a path.
+pub(crate) fn validate_maintenance_producer(producer: &str) -> Result<(), GeneratorError> {
+    let valid = producer.len() > ".yml".len()
+        && Path::new(producer)
+            .extension()
+            .is_some_and(|extension| extension == "yml")
+        && !producer.contains(['/', '\\'])
+        && !producer.contains("..")
+        && Path::new(producer)
+            .file_stem()
+            .is_some_and(|stem| !stem.is_empty());
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[maintenance] producers must be bare `.yml` workflow file names, found `{producer}`"
+        )));
+    }
+    Ok(())
+}
+
+/// The `[maintenance] max_deletes` per-run bound: at least one delete, and
+/// small enough that one run cannot sweep the account in a single pass.
+pub(crate) fn validate_maintenance_max_deletes(max_deletes: u32) -> Result<(), GeneratorError> {
+    if !(1..=5000).contains(&max_deletes) {
+        return Err(GeneratorError::usage(format!(
+            "[maintenance] max_deletes must be between 1 and 5000, found `{max_deletes}`"
         )));
     }
     Ok(())
@@ -1652,6 +2561,154 @@ pub(crate) fn validate_renovate_config_path(config: &str) -> Result<(), Generato
     {
         return Err(GeneratorError::usage(format!(
             "[renovate] config must be a repository-relative Renovate config path, found `{config}`"
+        )));
+    }
+    Ok(())
+}
+
+/// A `[docs]` schedule is a 5-field cron expression, like the Renovate writer.
+pub(crate) fn validate_docs_cron(schedule: &str) -> Result<(), GeneratorError> {
+    let fields = schedule.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(GeneratorError::usage(format!(
+            "[docs] schedule must be a 5-field cron expression, found `{schedule}`"
+        )));
+    }
+    Ok(())
+}
+
+/// A `[docs]` site URL is the consumer-owned deployed address: an `https://`
+/// URL without whitespace or control characters.
+pub(crate) fn validate_docs_site_url(site_url: &str) -> Result<(), GeneratorError> {
+    let valid = site_url.starts_with("https://")
+        && site_url.len() > "https://".len()
+        && !site_url
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control());
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[docs] site_url must be an `https://` URL without whitespace, found `{site_url}`"
+        )));
+    }
+    Ok(())
+}
+
+/// A `[docs]` command renders verbatim into one workflow `run:` block, so it
+/// must be a single non-empty line without control characters.
+pub(crate) fn validate_docs_command(command: &str, field: &str) -> Result<(), GeneratorError> {
+    if command.is_empty()
+        || command.contains(['\n', '\r'])
+        || command
+            .chars()
+            .any(|character| character.is_control() && !character.is_whitespace())
+        || command.trim().is_empty()
+    {
+        return Err(GeneratorError::usage(format!(
+            "[docs] {field} must hold single-line shell commands, found an empty or multi-line entry"
+        )));
+    }
+    Ok(())
+}
+
+/// A `[docs]` repository path (output directory, sitemap) stays inside the
+/// repository: relative, no traversal, no separators that escape it.
+pub(crate) fn validate_docs_path(path: &str, field: &str) -> Result<(), GeneratorError> {
+    if !is_contained_repository_path(path) {
+        return Err(GeneratorError::usage(format!(
+            "[docs] {field} must be a repository-relative path without traversal, found `{path}`"
+        )));
+    }
+    Ok(())
+}
+
+/// Every `[docs]` command table holds single-line shell commands. The table
+/// shape is one loop so a new stage cannot forget its own validation.
+fn validate_docs_command_table(docs: &DocsSection) -> Result<(), GeneratorError> {
+    for (field, commands) in [
+        ("build_commands", docs.build_commands()),
+        ("source_link_commands", docs.source_link_commands()),
+        ("site_link_commands", docs.site_link_commands()),
+        ("spell_commands", docs.spell_commands()),
+        ("verify_commands", docs.verify_commands()),
+        ("external_link_commands", docs.external_link_commands()),
+    ] {
+        for command in commands {
+            validate_docs_command(command, field)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `[docs]` stage rules: at least one local check, and the schedule and
+/// the scheduled-external check come together or not at all.
+fn validate_docs_stages(docs: &DocsSection) -> Result<(), GeneratorError> {
+    let checks = docs.source_link_commands().len()
+        + docs.site_link_commands().len()
+        + docs.spell_commands().len();
+    if checks == 0 {
+        return Err(GeneratorError::usage(
+            "[docs] enabled = true requires at least one local check: `source_link_commands`, `site_link_commands`, or `spell_commands`",
+        ));
+    }
+    match (
+        !docs.external_link_commands().is_empty(),
+        docs.schedule(),
+    ) {
+        (true, Some(schedule)) => validate_docs_cron(schedule),
+        (true, None) => Err(GeneratorError::usage(
+            "[docs] external_link_commands requires `schedule`, the cron that runs the scheduled-external live-link check",
+        )),
+        (false, Some(_)) => Err(GeneratorError::usage(
+            "[docs] schedule without external_link_commands runs nothing; declare the scheduled-external check or drop the schedule",
+        )),
+        (false, None) => Ok(()),
+    }
+}
+
+/// Whether `id` is a valid scheduled-check profile id: a GitHub job id and an
+/// artifact name at once, so the rendered job and its uploaded bundle share
+/// one spelling.
+fn valid_check_profile_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// Whether `task` is a safe named-task reference: it renders verbatim into
+/// `mise run <task>`, so the first byte cannot be a flag and the rest cannot
+/// carry shell syntax. Shared with the versioned-tool release rows, whose
+/// gate, assert, and build task lists carry the same `mise run` shape.
+pub(crate) fn valid_check_profile_task(task: &str) -> bool {
+    let mut bytes = task.bytes();
+    bytes.next().is_some_and(|first| {
+        first.is_ascii_alphanumeric() || matches!(first, b'_' | b'.' | b':' | b'/' | b'+')
+    }) && bytes.all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'+')
+    })
+}
+
+/// Whether `key` is a valid environment threshold name: a shell identifier the
+/// rendered job exports for the named task to read.
+fn valid_check_profile_env_key(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn validate_check_profile_cron(id: &str, schedule: &str) -> Result<(), GeneratorError> {
+    if schedule.contains(['\n', '\r']) {
+        return Err(GeneratorError::usage(format!(
+            "[[check_profile]] {id} schedule must be one line, found a multi-line value"
+        )));
+    }
+    let fields = schedule.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(GeneratorError::usage(format!(
+            "[[check_profile]] {id} schedule must be a 5-field cron expression, found `{schedule}`"
         )));
     }
     Ok(())
@@ -1691,30 +2748,41 @@ impl RepoGenerationConfig {
                 "[renovate] validate = true requires `[[declare]] primitive = \"renovate-validate\" file = \"renovate-validate.yml\"`",
             ));
         }
-        if self.workflow.velnor_trusted_label.is_none() {
+        let lanes = renovate.lanes.as_deref().unwrap_or("velnor");
+        if !matches!(lanes, "velnor" | "github" | "both") {
+            return Err(GeneratorError::usage(format!(
+                "[renovate] lanes must be one of: velnor, github, both; found `{lanes}`"
+            )));
+        }
+        if lanes == "both" && self.workflow.velnor_runner_group.is_some() {
             return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires [workflow] velnor_trusted_label for the writer job",
+                "[renovate] lanes = \"both\" cannot select a runner group dynamically; declare lanes = \"velnor\" or drop [workflow] velnor_runner_group",
             ));
         }
-        if self.workflow.velnor_trusted_runner_available.is_none() {
-            return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires [workflow] velnor_trusted_runner_available",
-            ));
-        }
-        if self
-            .workflow
-            .velnor_labels
-            .as_ref()
-            .is_none_or(Vec::is_empty)
-        {
-            return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires [workflow] velnor_labels for the writer job",
-            ));
-        }
-        if self.workflow.runners.as_deref() == Some("github") {
-            return Err(GeneratorError::usage(
-                "[renovate] enabled = true requires a Velnor runner lane; [workflow] runners = \"github\" cannot execute the Renovate writer",
-            ));
+        // Writer execution is declared here, not inherited from CI unit lanes:
+        // a `runners = "github"` repository may still run its scheduled writer
+        // on Velnor runners without doubling its CI surface.
+        if lanes != "github" {
+            if self.workflow.velnor_trusted_label.is_none() {
+                return Err(GeneratorError::usage(
+                    "[renovate] enabled = true requires [workflow] velnor_trusted_label for the writer job",
+                ));
+            }
+            if self.workflow.velnor_trusted_runner_available.is_none() {
+                return Err(GeneratorError::usage(
+                    "[renovate] enabled = true requires [workflow] velnor_trusted_runner_available",
+                ));
+            }
+            if self
+                .workflow
+                .velnor_labels
+                .as_ref()
+                .is_none_or(Vec::is_empty)
+            {
+                return Err(GeneratorError::usage(
+                    "[renovate] enabled = true requires [workflow] velnor_labels for the writer job",
+                ));
+            }
         }
         if let Some(token) = renovate.token.as_deref() {
             validate_renovate_token_name(token)?;
@@ -1722,14 +2790,77 @@ impl RepoGenerationConfig {
         if let Some(schedule) = renovate.schedule.as_deref() {
             validate_renovate_cron(schedule)?;
         }
+        for schedule in &renovate.schedules {
+            validate_renovate_cron(schedule)?;
+        }
+        reject_duplicates("[renovate] schedules", &renovate.schedules)?;
+        if let Some(primary) = renovate.schedule.as_deref()
+            && renovate.schedules.iter().any(|extra| extra == primary)
+        {
+            return Err(GeneratorError::usage(format!(
+                "[renovate] schedules repeats the primary schedule `{primary}`; list each cron once"
+            )));
+        }
         if let Some(config) = renovate.config.as_deref() {
             validate_renovate_config_path(config)?;
+        }
+        validate_renovate_contract(renovate)?;
+        Ok(())
+    }
+
+    /// The `[maintenance]` overrides: a valid cron, producer basenames, and
+    /// a delete bound that keeps one run's sweep finite.
+    fn validate_maintenance(&self) -> Result<(), GeneratorError> {
+        let maintenance = &self.maintenance;
+        if let Some(schedule) = maintenance.schedule.as_deref() {
+            validate_maintenance_cron(schedule)?;
+        }
+        if let Some(producers) = maintenance.producers.as_deref() {
+            if producers.is_empty() {
+                return Err(GeneratorError::usage(
+                    "[maintenance] producers must name at least one producer workflow",
+                ));
+            }
+            for producer in producers {
+                validate_maintenance_producer(producer)?;
+            }
+            reject_duplicates("[maintenance] producers", producers)?;
+        }
+        if let Some(max_deletes) = maintenance.max_deletes {
+            validate_maintenance_max_deletes(max_deletes)?;
+        }
+        Ok(())
+    }
+
+    /// The `[policy]` compliance contract: the only implemented action-pin
+    /// admission is the reviewed allowlist — full-SHA pins and reviewed
+    /// local paths, exactly what the validator's `action-pins` rule admits —
+    /// and a required DCO sign-off needs the external DCO check that
+    /// enforces it.
+    fn validate_policy(&self) -> Result<(), GeneratorError> {
+        if let Some(admission) = self.action_pin_admission()
+            && admission != "reviewed-allowlist"
+        {
+            return Err(GeneratorError::usage(format!(
+                "[policy] action_pin_admission must be `reviewed-allowlist`, found `{admission}`: the validator admits only full-SHA pins and reviewed local paths"
+            )));
+        }
+        if self.dco_required() == Some(true)
+            && !self
+                .ruleset_external_status_checks()
+                .iter()
+                .any(|context| context == "DCO")
+        {
+            return Err(GeneratorError::usage(
+                "[policy] dco_required = true requires `DCO` in ruleset_external_status_checks: sign-off is enforced by the external DCO check, and without it the requirement is unenforced",
+            ));
         }
         Ok(())
     }
 
     fn validate_release(&self) -> Result<(), GeneratorError> {
         let release = &self.release;
+        validate_release_bindings(release)?;
         if release.enabled != Some(true) {
             return Ok(());
         }
@@ -1782,6 +2913,21 @@ impl RepoGenerationConfig {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
             }
+            "docker" => {
+                release
+                    .image
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && valid_docker_platforms(&release.platforms)
+                    && release
+                        .dockerfile
+                        .as_deref()
+                        .is_none_or(is_contained_repository_path)
+                    && release
+                        .context
+                        .as_deref()
+                        .is_none_or(is_contained_repository_path)
+            }
             _ => false,
         };
         if complete {
@@ -1800,6 +2946,502 @@ impl RepoGenerationConfig {
             crate::RELEASE_WORKFLOW
         )))
     }
+
+    fn validate_docs(&self) -> Result<(), GeneratorError> {
+        let docs = &self.docs;
+        if docs.enabled != Some(true) {
+            return Ok(());
+        }
+        if docs.reason.as_deref().unwrap_or_default().is_empty() {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `reason` documenting why this repository publishes a documentation site",
+            ));
+        }
+        if !self.declare.iter().any(|row| {
+            row.primitive() == crate::primitives::DOCS_SITE
+                && row.file.as_deref() == Some(crate::primitives::docs_site::DOCS_SITE_FILE)
+        }) {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `[[declare]] primitive = \"docs-site\" file = \"docs.yml\"`",
+            ));
+        }
+        let site_url = docs.site_url.as_deref().unwrap_or_default();
+        validate_docs_site_url(site_url)?;
+        let site_dir = docs.site_dir.as_deref().unwrap_or_default();
+        if site_dir.is_empty() {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `site_dir`, the built site directory the pipeline uploads to Pages",
+            ));
+        }
+        validate_docs_path(site_dir, "site_dir")?;
+        if let Some(sitemap) = docs.sitemap_path.as_deref() {
+            validate_docs_path(sitemap, "sitemap_path")?;
+        }
+        let build = docs.build_commands.as_deref().unwrap_or(&[]);
+        if build.is_empty() {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `build_commands`, the consumer-owned site build",
+            ));
+        }
+        validate_docs_command_table(docs)?;
+        validate_docs_stages(docs)?;
+        if let Some(paths) = docs.docs_paths.as_deref() {
+            for pattern in paths {
+                if pattern.is_empty() {
+                    return Err(GeneratorError::usage(
+                        "[docs] docs_paths must not contain an empty pattern",
+                    ));
+                }
+                if globset::Glob::new(pattern).is_err() {
+                    return Err(GeneratorError::usage(format!(
+                        "[docs] docs_paths is not a valid glob: {pattern}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_check_profiles(
+        &self,
+        mise_lock_keys: &BTreeSet<String>,
+    ) -> Result<(), GeneratorError> {
+        let mut ids = BTreeSet::new();
+        for row in &self.check_profile {
+            let id = row.id.as_deref().unwrap_or_default();
+            if id.is_empty() {
+                return Err(GeneratorError::usage(
+                    "[[check_profile]] is missing `id`; name the scheduled job the row declares",
+                ));
+            }
+            if !valid_check_profile_id(id) {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} must be a job id: start with a letter or underscore, then letters, digits, `-`, or `_`"
+                )));
+            }
+            if !ids.insert(id) {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} is declared twice; a profile renders exactly one scheduled job"
+                )));
+            }
+        }
+        for row in &self.check_profile {
+            let id = row.id.as_deref().unwrap_or_default();
+            validate_check_profile_row(self, row, id, &ids, mise_lock_keys)?;
+        }
+        Ok(())
+    }
+}
+
+/// One profile row against the repository around it: cadence, platform, task
+/// references, dependencies, timeout, artifacts, thresholds, and status.
+fn validate_check_profile_row(
+    config: &RepoGenerationConfig,
+    row: &CheckProfileSection,
+    id: &str,
+    ids: &BTreeSet<&str>,
+    mise_lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if let Some(name) = row.name.as_deref()
+        && (name.is_empty() || name.contains(['\n', '\r']))
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[check_profile]] {id} name must be one non-empty line"
+        )));
+    }
+    // A missing schedule is allowed here: cron-lessness is a file-level
+    // property ("schedule-less only in files whose row sets `events`"),
+    // enforced in `select_profiles` where file context exists.
+    if let Some(schedule) = row.schedule.as_deref() {
+        validate_check_profile_cron(id, schedule)?;
+    }
+    match row.runner.as_deref() {
+        None | Some("github" | "macos" | "velnor") => {}
+        Some(runner) => {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} runner must be one of: github, macos, velnor; found `{runner}`"
+            )));
+        }
+    }
+    if row.runner.as_deref().unwrap_or("github") == "velnor" {
+        if config.workflow.runners.as_deref() == Some("github") {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} runs on velnor, but [workflow] runners = \"github\" has no Velnor lane"
+            )));
+        }
+        if config
+            .workflow
+            .velnor_labels
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} runs on velnor, but [workflow] velnor_labels names no runner labels"
+            )));
+        }
+    }
+    if let Some(tools) = row.tools.as_deref() {
+        validate_check_profile_tools(id, tools, mise_lock_keys)?;
+    }
+    match row.tasks.as_deref() {
+        None => {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} is missing `tasks`; name the mise tasks the job runs"
+            )));
+        }
+        Some(tasks) => {
+            if tasks.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} declares an empty tasks; name the mise tasks the job runs"
+                )));
+            }
+            for task in tasks {
+                if !valid_check_profile_task(task) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[check_profile]] {id} names task `{task}`, which is not a plain task reference; use names such as check-smoke without whitespace or shell syntax"
+                    )));
+                }
+            }
+        }
+    }
+    validate_check_profile_result(row, id, ids)?;
+    Ok(())
+}
+
+/// A profile's dependency, timeout, artifact, threshold, and status contract.
+fn validate_check_profile_result(
+    row: &CheckProfileSection,
+    id: &str,
+    ids: &BTreeSet<&str>,
+) -> Result<(), GeneratorError> {
+    if let Some(needs) = row.needs.as_deref() {
+        for dependency in needs {
+            if dependency == id {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} needs itself; a job cannot wait on its own completion"
+                )));
+            }
+            if !ids.contains(dependency.as_str()) {
+                let known = ids.iter().copied().collect::<Vec<_>>().join(", ");
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} needs `{dependency}`, which no profile declares; declared profiles: {known}"
+                )));
+            }
+        }
+    }
+    if let Some(timeout) = row.timeout_minutes
+        && (timeout < 1 || u32::try_from(timeout).is_err())
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[check_profile]] {id} timeout_minutes must be a positive number of minutes, found {timeout}"
+        )));
+    }
+    if let Some(artifacts) = row.artifacts.as_deref() {
+        for artifact in artifacts {
+            if artifact.is_empty() || artifact.contains(['\n', '\r']) {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} declares an artifact path that is empty or multi-line; name the paths the job uploads"
+                )));
+            }
+        }
+    }
+    for (key, value) in &row.env {
+        if !valid_check_profile_env_key(key) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} env names `{key}`, which is not a threshold name; use shell identifiers such as MAX_SECONDS"
+            )));
+        }
+        if value.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} env `{key}` must be one line"
+            )));
+        }
+    }
+    match row.status.as_deref() {
+        None | Some("required" | "advisory") => {}
+        Some(status) => {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} status must be `required` or `advisory`, found `{status}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The declared tool ids against the root lock: shape first so a compromised
+/// lock can never smuggle shell syntax into `install_args` through membership.
+/// An empty key set means the scan root has no `mise.lock`, so identity has
+/// nothing to check against and shape alone rules.
+fn validate_check_profile_tools(
+    id: &str,
+    tools: &[String],
+    mise_lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if tools.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "[[check_profile]] {id} declares an empty tools; omit it or name the tools the job installs"
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for tool in tools {
+        if !valid_mise_tool_id(tool) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} declares tool {tool}, which is not a plain tool id; use ids such as cargo-binstall without versions, flags, whitespace, traversal, or shell metacharacters"
+            )));
+        }
+        if !mise_lock_keys.is_empty() && !mise_lock_keys.contains(tool) {
+            let known = mise_lock_keys
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} declares tool {tool}, which mise.lock does not pin; install_args must equal the lock keys, known keys: {known}"
+            )));
+        }
+        if !seen.insert(tool) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} declares tool {tool} more than once"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The dispatch modes a release contract may offer. `publish` is never a
+/// dispatch option: publication stays tag-triggered (stable) or
+/// admitted-producer-triggered (rolling).
+pub(crate) const RELEASE_MODES: &[&str] = &["validate", "build", "rehearse"];
+
+/// Whether `value` is a dispatch mode the release renderer offers.
+pub(crate) fn is_release_mode(value: &str) -> bool {
+    RELEASE_MODES.contains(&value)
+}
+
+/// Validate the shape of the release event bindings, modes, archive
+/// contract, and credential pairs. Shape errors fail closed whether or not
+/// the contract is enabled: a typo'd mode or an unpaired credential must
+/// never render a silently weaker lane.
+/// The `[release]` naming contract: `package`, `binary`, and `targets`
+/// render into shell double-quotes (`assemble-manifest --subjects`), YAML
+/// scalars, and glob patterns, so they must match the same alphabets the
+/// runtime verbs enforce — generation-time rejection is the only layer that
+/// runs before the shell parses. `image` renders into YAML `env:` and
+/// shell-adjacent `with:` blocks, so it must be a well-formed OCI reference.
+fn validate_release_naming(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    if let Some(package) = release.package.as_deref()
+        && !crate::runtime::valid_package(package)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] package must be ASCII alphanumeric with `-`/`_`, found `{package}`"
+        )));
+    }
+    if let Some(binary) = release.binary.as_deref()
+        && !crate::runtime::valid_binary(binary)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] binary must be ASCII alphanumeric with `.`/`-`/`_`, found `{binary}`"
+        )));
+    }
+    if let Some(package) = release.image_package.as_deref()
+        && !crate::runtime::valid_package(package)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] image_package must be ASCII alphanumeric with `-`/`_`, found `{package}`"
+        )));
+    }
+    for target in &release.targets {
+        if !crate::runtime::valid_target(target) {
+            return Err(GeneratorError::usage(format!(
+                "[release] targets must be ASCII alphanumeric with `.`/`-`/`_`, found `{target}`"
+            )));
+        }
+    }
+    if let Some(image) = release.image.as_deref()
+        && !valid_docker_image(image)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] image must be a lowercase OCI reference `[host[:port]/]path[:tag]`, found `{image}`"
+        )));
+    }
+    if let Some(pattern) = release.tag_pattern.as_deref()
+        && !crate::runtime::valid_tag_pattern(pattern)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] tag_pattern must be one non-empty line with no whitespace, found `{pattern}`"
+        )));
+    }
+    validate_release_registry(release)?;
+    Ok(())
+}
+
+/// The registry-auth triple: a declared host always travels with both
+/// credential secret names, and a declared credential always names its
+/// host. A partial triple is a usage error naming the missing member, never
+/// a login against the wrong registry with the wrong identity.
+fn validate_release_registry(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    let members = [
+        ("registry", release.registry.as_deref()),
+        (
+            "registry_username_secret",
+            release.registry_username_secret.as_deref(),
+        ),
+        (
+            "registry_password_secret",
+            release.registry_password_secret.as_deref(),
+        ),
+    ];
+    if members.iter().all(|(_, value)| value.is_none()) {
+        return Ok(());
+    }
+    for (name, value) in &members {
+        if value.is_none() {
+            return Err(GeneratorError::usage(format!(
+                "[release] {name} is missing: registry auth declares `registry`, `registry_username_secret`, and `registry_password_secret` together"
+            )));
+        }
+    }
+    let registry = release.registry.as_deref().unwrap_or_default();
+    if !crate::runtime::valid_registry_host(registry) {
+        return Err(GeneratorError::usage(format!(
+            "[release] registry must be a lowercase host with an optional `:port`, found `{registry}`"
+        )));
+    }
+    validate_secret_name(
+        "[release] registry_username_secret",
+        release
+            .registry_username_secret
+            .as_deref()
+            .unwrap_or_default(),
+        "REGISTRY_USERNAME",
+    )?;
+    validate_secret_name(
+        "[release] registry_password_secret",
+        release
+            .registry_password_secret
+            .as_deref()
+            .unwrap_or_default(),
+        "REGISTRY_PASSWORD",
+    )?;
+    Ok(())
+}
+
+/// Tarball bindings (producer bindings, dispatch modes, archive contracts,
+/// credential pairings) render only for the `rust-binary` and `native`
+/// publishers. Declaring them on any other kind is a usage error, not a
+/// silent omission: a typo'd `modes` on a `docker` contract must fail the
+/// generation, never drop the publisher.
+fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    let kind = release.kind.as_deref().unwrap_or_default();
+    let registry_auth = release.registry.is_some()
+        || release.registry_username_secret.is_some()
+        || release.registry_password_secret.is_some();
+    if registry_auth {
+        if kind.is_empty() {
+            return Err(GeneratorError::usage(
+                "[release] registry auth needs `kind = \"docker\"`: no publisher is declared to log in with it",
+            ));
+        }
+        if kind != "docker" {
+            return Err(GeneratorError::usage(format!(
+                "[release] registry auth renders only for kind `docker`, not `{kind}`"
+            )));
+        }
+    }
+    if kind.is_empty() || matches!(kind, "rust-binary" | "native") {
+        return Ok(());
+    }
+    let bound = release.producer_workflow.is_some()
+        || !release.modes.is_empty()
+        || release.archive_checksum.is_some()
+        || release.archive_retention_days.is_some()
+        || !release.archive_members.is_empty()
+        || !release.credential.is_empty();
+    if bound {
+        return Err(GeneratorError::usage(format!(
+            "[release] producer bindings, modes, archive contracts, and credential pairings render only for kind `rust-binary` or `native`, not `{kind}`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    validate_release_naming(release)?;
+    validate_release_binding_kind(release)?;
+    if let Some(conclusion) = release.producer_conclusion.as_deref()
+        && conclusion != "success"
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] producer_conclusion must be `success`, found `{conclusion}`"
+        )));
+    }
+    if release.producer_conclusion.is_some() && release.producer_workflow.is_none() {
+        return Err(GeneratorError::usage(
+            "[release] producer_conclusion needs producer_workflow: a required conclusion without a trusted producer binds nothing",
+        ));
+    }
+    for mode in &release.modes {
+        if !is_release_mode(mode) {
+            return Err(GeneratorError::usage(format!(
+                "[release] modes must be one of {}, found `{mode}`; publish is tag-triggered, never a dispatch option",
+                RELEASE_MODES.join(", ")
+            )));
+        }
+    }
+    if let Some(checksum) = release.archive_checksum.as_deref()
+        && checksum != "sha256"
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] archive_checksum must be `sha256`, found `{checksum}`"
+        )));
+    }
+    if let Some(retention) = release.archive_retention_days
+        && !(1..=90).contains(&retention)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] archive_retention_days must be 1-90, found `{retention}`"
+        )));
+    }
+    for member in &release.archive_members {
+        if !is_archive_member(member) {
+            return Err(GeneratorError::usage(format!(
+                "[release] archive_members must be portable file names without directories, found `{member}`"
+            )));
+        }
+    }
+    for credential in &release.credential {
+        let name = credential.name.as_deref().unwrap_or_default();
+        if name.is_empty() {
+            return Err(GeneratorError::usage(
+                "[release] every [[release.credential]] row needs `name`",
+            ));
+        }
+        if !crate::runtime::valid_package(name) {
+            return Err(GeneratorError::usage(format!(
+                "[release] credential names render into shell function names; `{name}` is outside the portable alphabet"
+            )));
+        }
+        if credential.setup.as_deref().is_none_or(str::is_empty) {
+            return Err(GeneratorError::usage(format!(
+                "[release] credential `{name}` needs `setup`"
+            )));
+        }
+        if credential.teardown.as_deref().is_none_or(str::is_empty) {
+            return Err(GeneratorError::usage(format!(
+                "[release] credential `{name}` needs `teardown`: a setup without a teardown leaks host state"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `value` is a portable archive member name: a bare file name over
+/// the portable asset alphabet, never a path.
+fn is_archive_member(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// The unit kinds the generator implements, as the `[[unit]]` `kind` strings.
@@ -1947,6 +3589,7 @@ mod tests {
              [policy]\n\
              dco_required = true\n\
              ci_required = true\n\
+             ruleset_external_status_checks = [\"DCO\"]\n\
              action_pin_admission = \"reviewed-allowlist\"\n\
              actionlint_config_variables_null = true\n\
              \n\
@@ -2013,6 +3656,196 @@ mod tests {
             must(
                 config.validate(&[], &[], &BTreeSet::new()),
                 "validate accepted workflow runner mode",
+            );
+        }
+    }
+
+    #[test]
+    fn docker_release_accepts_an_image_with_defaulted_build_inputs() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"docker\"\nimage = \"ghcr.io/example/app\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate minimal docker release",
+        );
+        let release = config.release();
+        assert_eq!(release.image(), Some("ghcr.io/example/app"));
+        assert!(release.platforms().is_empty());
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"docker\"\nimage = \"ghcr.io/example/app\"\ndockerfile = \"images/app/Dockerfile\"\ncontext = \"images/app\"\nplatforms = [\"linux/amd64\", \"linux/arm64\"]\n",
+        );
+        must(
+            declared.validate(&[], &[], &BTreeSet::new()),
+            "validate declared docker release",
+        );
+        assert_eq!(
+            declared.release().dockerfile(),
+            Some("images/app/Dockerfile")
+        );
+        assert_eq!(declared.release().context(), Some("images/app"));
+        assert_eq!(
+            declared.release().platforms(),
+            &["linux/amd64".to_owned(), "linux/arm64".to_owned()]
+        );
+    }
+
+    #[test]
+    fn docker_release_rejects_unknown_platforms_and_escaping_paths() {
+        for (name, release) in [
+            (
+                "platform",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\nplatforms = [\"linux/riscv64\"]\n",
+            ),
+            (
+                "image",
+                "kind = \"docker\"\nplatforms = [\"linux/amd64\"]\n",
+            ),
+            (
+                "dockerfile",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\ndockerfile = \"../Dockerfile\"\n",
+            ),
+            (
+                "context",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\ncontext = \"/tmp\"\n",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n{release}"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "an incomplete docker release must fail",
+            );
+            assert!(
+                error.to_string().contains("[release] enabled repositories"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_branch_outside_the_branch_alphabet_is_a_usage_error() {
+        for branch in ["main' || '1' == '1", "main\n  injected: true", ""] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ndefault_branch = {branch:?}\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "injection-shaped default_branch must fail",
+            );
+            assert!(
+                error.to_string().contains("[workflow] default_branch"),
+                "unexpected error for {branch:?}: {error}"
+            );
+        }
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ndefault_branch = \"trunk\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "plain default_branch validates",
+        );
+    }
+
+    #[test]
+    fn valid_docker_image_accepts_references_and_rejects_injection() {
+        for valid in [
+            "ghcr.io/example/app",
+            "ghcr.io/example/app:1.2.3",
+            "registry.example:5000/team/app:latest",
+            "example/app",
+            "library",
+        ] {
+            assert!(valid_docker_image(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "GHCR.IO/example/app",
+            "ghcr.io/example/app with space",
+            "ghcr.io/example/app\n  INJECTED: 1",
+            "ghcr.io/example/app\"; touch /tmp/pwned; echo \"",
+            "ghcr.io/example/app`id`",
+            "ghcr.io/example/app$(id)",
+            "ghcr.io/example/app@sha256:deadbeef",
+            "ghcr.io//app",
+            "/leading/slash",
+            "trailing/slash/",
+            "ghcr.io/.leading-dot",
+            "host:notaport/app",
+        ] {
+            assert!(!valid_docker_image(invalid), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn release_naming_outside_shell_safe_alphabets_is_a_usage_error() {
+        for (name, release) in [
+            (
+                "target",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = ['x-unknown-linux-gnu\"; touch /tmp/pwned; echo \"-unknown-linux-gnu']\n",
+            ),
+            (
+                "binary",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\\\"; touch /tmp/pwned; echo \\\"\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
+            ),
+            (
+                "package",
+                "kind = \"rust-binary\"\npackage = \"example/pkg\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
+            ),
+            (
+                "image_package",
+                "kind = \"native\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nimage = \"ghcr.io/example/app\"\nimage_package = \"example; touch /tmp/pwned\"\n",
+            ),
+            (
+                "image",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\\n  INJECTED: 1\"\n",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n{release}"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "injection-shaped release naming must fail",
+            );
+            assert!(
+                error.to_string().contains("[release]"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn tarball_bindings_on_other_kinds_are_a_usage_error() {
+        for (name, release) in [
+            (
+                "modes",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\nmodes = [\"validate\"]\n",
+            ),
+            (
+                "producer",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\nproducer_workflow = \"build.yml\"\n",
+            ),
+            (
+                "archive",
+                "kind = \"pages\"\nartifact_path = \"dist\"\narchive_members = [\"app.tar.gz\"]\n",
+            ),
+            (
+                "credential",
+                "kind = \"crates\"\npackages = [\"example\"]\n[[release.credential]]\nname = \"signing\"\nsetup = \"setup-signing\"\nteardown = \"teardown-signing\"\n",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n{release}"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "tarball bindings on another kind must fail",
+            );
+            assert!(
+                error.to_string().contains("render only for kind"),
+                "unexpected error for {name}: {error}"
             );
         }
     }
@@ -2810,5 +4643,861 @@ mod tests {
             "unknown renovate field must fail",
         );
         assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn renovate_lanes_rejects_unknown_values() {
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n\n\
+                 [renovate]\nenabled = true\nreason = \"test\"\nlanes = \"macos\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "unknown renovate lanes must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[renovate] lanes must be one of"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn renovate_lanes_both_rejects_runner_group() {
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+                 velnor_runner_group = \"example-group\"\n\
+                 velnor_trusted_label = \"example-trusted\"\n\
+                 velnor_trusted_runner_available = true\n\n\
+                 [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n\n\
+                 [renovate]\nenabled = true\nreason = \"test\"\nlanes = \"both\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "lanes=both with a runner group must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("cannot select a runner group dynamically"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn renovate_writer_lanes_ignore_ci_runners() {
+        must(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nrunners = \"github\"\n\
+                 velnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+                 velnor_trusted_label = \"example-trusted\"\n\
+                 velnor_trusted_runner_available = true\n\n\
+                 [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n\n\
+                 [renovate]\nenabled = true\nreason = \"test\"\nlanes = \"velnor\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "github-only CI must accept a velnor renovate writer",
+        );
+    }
+
+    #[test]
+    fn renovate_lanes_github_needs_no_velnor_declarations() {
+        must(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nrunners = \"github\"\n\n\
+                 [[declare]]\nprimitive = \"renovate\"\nfile = \"renovate.yml\"\n\n\
+                 [renovate]\nenabled = true\nreason = \"test\"\nlanes = \"github\"\n",
+            )
+            .validate(&[], &[], &BTreeSet::new()),
+            "github-lane writer must not require velnor declarations",
+        );
+    }
+
+    fn check_profile_config(body: &str) -> String {
+        format!("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n{body}")
+    }
+
+    #[test]
+    fn check_profile_rows_validate_and_leave_canonical_shape_without_them() {
+        let plain = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert!(plain.check_profiles().is_empty());
+        let canonical = must(
+            plain.canonical_json(),
+            "canonicalize config without profiles",
+        );
+        assert!(!canonical.contains("check_profile"), "{canonical}");
+
+        let config = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\n\n\
+             [[check_profile]]\nid = \"load\"\nname = \"Load probe\"\nschedule = \"23 2 * * *\"\n\
+             runner = \"velnor\"\ntasks = [\"check-load\"]\nneeds = [\"smoke\"]\n\
+             timeout_minutes = 90\nartifacts = [\"load-results/\"]\nstatus = \"advisory\"\n\
+             env = { MAX_SECONDS = \"300\" }\n\n\
+             [workflow]\nvelnor_labels = [\"self-hosted\"]\n",
+        ));
+        assert_eq!(config.check_profiles().len(), 2);
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "two coherent profiles validate",
+        );
+    }
+
+    #[test]
+    fn check_profile_rejects_bad_identity_cadence_and_contract() {
+        for (body, fragment) in [
+            (
+                "[[check_profile]]\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\n",
+                "missing `id`",
+            ),
+            (
+                "[[check_profile]]\nid = \"9smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\n",
+                "must be a job id",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\n\n\
+                 [[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\n",
+                "declared twice",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"daily\"\ntasks = [\"check-smoke\"]\n",
+                "5-field cron",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\nrunner = \"planetary\"\ntasks = [\"check-smoke\"]\n",
+                "runner must be",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\n",
+                "missing `tasks`",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke; rm -rf /\"]\n",
+                "not a plain task reference",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\nneeds = [\"ghost\"]\n",
+                "which no profile declares",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\nneeds = [\"smoke\"]\n",
+                "needs itself",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\ntimeout_minutes = 0\n",
+                "positive number of minutes",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\nstatus = \"optional\"\n",
+                "must be `required` or `advisory`",
+            ),
+            (
+                "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\nenv = { \"max seconds\" = \"300\" }\n",
+                "not a threshold name",
+            ),
+        ] {
+            let error = must_fail(
+                config_for(&check_profile_config(body)).validate(&[], &[], &BTreeSet::new()),
+                "an incoherent profile must fail validation",
+            );
+            assert!(
+                error.to_string().contains(fragment),
+                "expected `{fragment}`: {error}"
+            );
+        }
+    }
+
+    /// A schedule-less profile passes config validation: cron-lessness is
+    /// decided per file in `select_profiles`, which refuses schedule-less
+    /// profiles in cron files (`schedule_less_profile_in_cron_file_is_refused`).
+    #[test]
+    fn check_profile_without_schedule_passes_config_validation() {
+        let config = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"smoke\"\ntasks = [\"check-smoke\"]\n",
+        ));
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "a schedule-less profile validates; the file decides the trigger",
+        );
+    }
+
+    #[test]
+    fn check_profile_velnor_runner_needs_a_lane_and_labels() {
+        let github_only = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n\n\
+             [workflow]\nrunners = \"github\"\nvelnor_labels = [\"self-hosted\"]\n",
+        ));
+        let error = must_fail(
+            github_only.validate(&[], &[], &BTreeSet::new()),
+            "a Velnor profile on a GitHub-only surface must fail",
+        );
+        assert!(error.to_string().contains("has no Velnor lane"), "{error}");
+
+        let unlabeled = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n",
+        ));
+        let error = must_fail(
+            unlabeled.validate(&[], &[], &BTreeSet::new()),
+            "a Velnor profile without labels must fail",
+        );
+        assert!(error.to_string().contains("velnor_labels"), "{error}");
+    }
+
+    #[test]
+    fn check_profile_tools_match_lock_keys_by_exact_spelling() {
+        let keys = BTreeSet::from(["ripgrep".to_owned(), "cargo:example-tool".to_owned()]);
+        let pinned = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\ntools = [\"ripgrep\"]\n",
+        ));
+        must(
+            pinned.validate(&[], &[], &keys),
+            "a lock-pinned tool validates",
+        );
+        let unpinned = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\ntools = [\"cargo:example-missing\"]\n",
+        ));
+        let error = must_fail(
+            unpinned.validate(&[], &[], &keys),
+            "an unpinned tool must fail",
+        );
+        assert!(
+            error.to_string().contains("mise.lock does not pin"),
+            "{error}"
+        );
+        let unshaped = config_for(&check_profile_config(
+            "[[check_profile]]\nid = \"smoke\"\nschedule = \"23 2 * * *\"\ntasks = [\"check-smoke\"]\ntools = [\"ripgrep; evil\"]\n",
+        ));
+        let error = must_fail(
+            unshaped.validate(&[], &[], &BTreeSet::new()),
+            "a shell-shaped tool must fail without a lock",
+        );
+        assert!(error.to_string().contains("not a plain tool id"), "{error}");
+    }
+
+    const DOCS_DECLARE: &str = "[[declare]]\nprimitive = \"docs-site\"\nfile = \"docs.yml\"\n";
+
+    fn docs_config_text(body: &str) -> String {
+        format!(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[docs]\nenabled = true\n{body}\n{DOCS_DECLARE}",
+        )
+    }
+
+    fn validate_docs_text(body: &str) -> Result<(), crate::GeneratorError> {
+        let root = scanned_root("docs-validate-config");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let outcome =
+            config_for(&docs_config_text(body)).validate(&unit_ids, &[], &BTreeSet::new());
+        let _ = fs::remove_dir_all(root);
+        outcome
+    }
+
+    #[test]
+    fn docs_enabled_requires_declare_row() {
+        let root = scanned_root("docs-declare-config");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [docs]\nenabled = true\nreason = \"test\"\nsite_url = \"https://docs.example.com\"\n\
+                 site_dir = \"site\"\nbuild_commands = [\"mise run docs:build\"]\n\
+                 spell_commands = [\"mise run docs:spell\"]\n",
+            )
+            .validate(&unit_ids, &[], &BTreeSet::new()),
+            "enabled docs without declare must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[[declare]] primitive = \"docs-site\""),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn docs_enabled_requires_reason_address_build_and_a_check() {
+        let without_reason = must_fail(
+            validate_docs_text(
+                "site_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\nspell_commands = [\"mise run docs:spell\"]\n",
+            ),
+            "enabled docs without reason must fail",
+        );
+        assert!(
+            without_reason.to_string().contains("reason"),
+            "{without_reason}"
+        );
+        let without_check = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\n",
+            ),
+            "enabled docs without a local check must fail",
+        );
+        assert!(
+            without_check
+                .to_string()
+                .contains("at least one local check"),
+            "{without_check}"
+        );
+        let bad_url = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"http://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\nspell_commands = [\"mise run docs:spell\"]\n",
+            ),
+            "enabled docs with a non-https site_url must fail",
+        );
+        assert!(bad_url.to_string().contains("site_url"), "{bad_url}");
+    }
+
+    #[test]
+    fn docs_schedule_and_external_check_come_together() {
+        let external_without_schedule = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\nspell_commands = [\"mise run docs:spell\"]\n\
+                 external_link_commands = [\"mise run docs:check-live\"]\n",
+            ),
+            "external links without a schedule must fail",
+        );
+        assert!(
+            external_without_schedule.to_string().contains("schedule"),
+            "{external_without_schedule}"
+        );
+        let schedule_without_external = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 schedule = \"17 4 * * *\"\nbuild_commands = [\"mise run docs:build\"]\n\
+                 spell_commands = [\"mise run docs:spell\"]\n",
+            ),
+            "a schedule without external links must fail",
+        );
+        assert!(
+            schedule_without_external
+                .to_string()
+                .contains("without external_link_commands"),
+            "{schedule_without_external}"
+        );
+    }
+
+    #[test]
+    fn docs_complete_contract_validates() {
+        must(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 schedule = \"17 4 * * *\"\nbuild_commands = [\"mise run docs:build\"]\n\
+                 spell_commands = [\"mise run docs:spell\"]\n\
+                 external_link_commands = [\"mise run docs:check-live\"]\n",
+            ),
+            "a complete docs contract validates",
+        );
+    }
+
+    #[test]
+    fn docs_unknown_field_fails_closed() {
+        let error = must_some_error(
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [docs]\nenabled = true\nreason = \"test\"\nunknown = true\n",
+            )
+            .err(),
+            "unknown docs field must fail",
+        );
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
+    /// Release binding shapes fail closed whether or not the contract is
+    /// enabled: a typo'd mode or an unpaired credential must never render
+    /// a silently weaker lane.
+    #[test]
+    fn release_binding_shapes_fail_closed() {
+        let root = scanned_root("release-bindings-validate");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        for (name, release, expected) in [
+            (
+                "publish-mode",
+                "[release]\nmodes = [\"publish\"]\n",
+                "never a dispatch option",
+            ),
+            (
+                "bad-mode",
+                "[release]\nmodes = [\"ship\"]\n",
+                "must be one of",
+            ),
+            (
+                "bad-conclusion",
+                "[release]\nproducer_workflow = \"CI\"\nproducer_conclusion = \"completed\"\n",
+                "must be `success`",
+            ),
+            (
+                "lonely-conclusion",
+                "[release]\nproducer_conclusion = \"success\"\n",
+                "needs producer_workflow",
+            ),
+            (
+                "bad-checksum",
+                "[release]\narchive_checksum = \"sha512\"\n",
+                "must be `sha256`",
+            ),
+            (
+                "bad-retention",
+                "[release]\narchive_retention_days = 0\n",
+                "must be 1-90",
+            ),
+            (
+                "bad-member",
+                "[release]\narchive_members = [\"sub/dir\"]\n",
+                "portable file names",
+            ),
+            (
+                "nameless-credential",
+                "[release]\n[[release.credential]]\nsetup = \"mount\"\nteardown = \"unmount\"\n",
+                "needs `name`",
+            ),
+            (
+                "setup-without-teardown",
+                "[release]\n[[release.credential]]\nname = \"store\"\nsetup = \"mount\"\n",
+                "needs `teardown`",
+            ),
+        ] {
+            let error = must_fail(
+                config_for(&format!(
+                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n{release}"
+                ))
+                .validate(&unit_ids, &[], &BTreeSet::new()),
+                name,
+            );
+            assert!(
+                error.to_string().contains(expected),
+                "`{name}` must name the problem: {error}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A complete binding contract parses and validates: producer, modes,
+    /// archive members, retention, and paired credentials.
+    #[test]
+    fn release_bindings_parse_and_validate() {
+        let root = scanned_root("release-bindings-parse");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let parsed = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
+             binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n\
+             producer_workflow = \"CI\"\nproducer_conclusion = \"success\"\n\
+             modes = [\"validate\", \"build\", \"rehearse\"]\n\
+             archive_members = [\"example-role\"]\narchive_checksum = \"sha256\"\n\
+             archive_retention_days = 14\n\
+             [[release.credential]]\nname = \"store\"\nsetup = \"mount\"\nteardown = \"unmount\"\n",
+        );
+        must(
+            parsed.validate(&unit_ids, &[], &BTreeSet::new()),
+            "complete bindings must validate",
+        );
+        let release = parsed.release();
+        assert_eq!(release.producer_workflow(), Some("CI"));
+        assert_eq!(
+            release.modes(),
+            &[
+                "validate".to_owned(),
+                "build".to_owned(),
+                "rehearse".to_owned()
+            ]
+        );
+        assert_eq!(release.archive_members(), &["example-role".to_owned()]);
+        assert_eq!(release.archive_retention_days(), Some(14));
+        assert_eq!(release.credentials().len(), 1);
+        assert_eq!(release.credentials()[0].teardown(), Some("unmount"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The `[release]` registry triple: a complete docker triple validates;
+    /// partial triples, bad shapes, and non-docker triples fail closed
+    /// naming the gap.
+    #[test]
+    fn release_registry_auth_must_be_a_complete_docker_triple() {
+        let base = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n";
+        let contract = "kind = \"docker\"\nimage = \"example/app\"\nplatforms = [\"linux/amd64\", \"linux/arm64\"]\n";
+        let triple = "registry = \"docker.io\"\nregistry_username_secret = \"REGISTRY_USERNAME\"\nregistry_password_secret = \"REGISTRY_PASSWORD\"\n";
+        let valid = config_for(&format!("{base}{contract}{triple}"));
+        must(
+            valid.validate(&[], &[], &BTreeSet::new()),
+            "a complete docker triple must validate",
+        );
+        assert_eq!(valid.release().registry(), Some("docker.io"));
+        assert_eq!(
+            valid.release().registry_username_secret(),
+            Some("REGISTRY_USERNAME")
+        );
+        assert_eq!(
+            valid.release().registry_password_secret(),
+            Some("REGISTRY_PASSWORD")
+        );
+        let binary_contract = "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n";
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "registry without secrets",
+                format!("{base}{contract}registry = \"docker.io\"\n"),
+                "[release] registry_username_secret is missing",
+            ),
+            (
+                "uppercase host",
+                format!(
+                    "{base}{contract}{}",
+                    triple.replace("docker.io", "Docker.io")
+                ),
+                "[release] registry must be a lowercase host",
+            ),
+            (
+                "lowercase secret",
+                format!(
+                    "{base}{contract}{}",
+                    triple.replace("REGISTRY_USERNAME", "registry_username")
+                ),
+                "must be an uppercase secret name",
+            ),
+            (
+                "automatic token as password",
+                format!(
+                    "{base}{contract}{}",
+                    triple.replace("REGISTRY_PASSWORD", "GITHUB_TOKEN")
+                ),
+                "must name a dedicated secret, not GITHUB_TOKEN",
+            ),
+            (
+                "triple on a binary publisher",
+                format!("{base}{binary_contract}{triple}"),
+                "renders only for kind `docker`",
+            ),
+            (
+                "triple without a publisher",
+                format!("{base}{triple}"),
+                "needs `kind = \"docker\"`",
+            ),
+        ];
+        for (name, text, expected) in cases {
+            let parsed = config_for(&text);
+            let error = must_fail(
+                parsed.validate(&[], &[], &BTreeSet::new()),
+                &format!("{name} must fail"),
+            );
+            assert!(
+                error.to_string().contains(expected),
+                "{name} must name the problem: {error}"
+            );
+        }
+    }
+
+    /// The smallest config that enables Renovate: trusted Velnor runners plus
+    /// the writer declare row. Tests append contract fields to `[renovate]`.
+    const RENOVATE_CONTRACT_CONFIG: &str = "schema = 1\n\n\
+         [generator]\n\
+         repository = \"example/fixture\"\n\n\
+         [workflow]\n\
+         runners = \"velnor\"\n\
+         velnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+         velnor_trusted_label = \"example-trusted\"\n\
+         velnor_trusted_runner_available = true\n\n\
+         [renovate]\n\
+         enabled = true\n\
+         reason = \"Self-hosted Renovate for repository dependencies.\"\n\n\
+         [[declare]]\n\
+         primitive = \"renovate\"\n\
+         file = \"renovate.yml\"\n";
+
+    fn validate_renovate_contract(extra: &str) -> Result<RepoGenerationConfig, GeneratorError> {
+        let text = RENOVATE_CONTRACT_CONFIG.replace(
+            "reason = \"Self-hosted Renovate for repository dependencies.\"\n",
+            &format!("reason = \"Self-hosted Renovate for repository dependencies.\"\n{extra}"),
+        );
+        let config = config_for(&text);
+        config.validate(&[], &[], &BTreeSet::new()).map(|()| config)
+    }
+
+    #[test]
+    fn renovate_repository_targets_must_be_slugs() {
+        for repository in ["example/fixture", "Example-Name.Slug_1/repo.name-2", "a/b"] {
+            must(
+                validate_renovate_repository_target(repository),
+                "valid repository target",
+            );
+        }
+        for repository in [
+            "noslash",
+            "/empty-owner",
+            "empty-name/",
+            "three/slashes/here",
+            "a b/c",
+            "a/../c",
+            ".hidden/repo",
+            "owner/repo.git",
+        ] {
+            let error = must_fail(
+                validate_renovate_repository_target(repository),
+                "invalid repository target must fail",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be `owner/repository` slugs"),
+                "{error}"
+            );
+        }
+        must(
+            validate_renovate_contract("repositories = [\"example/one\", \"example/two\"]\n"),
+            "declared repository targets",
+        );
+        let error = must_fail(
+            validate_renovate_contract("repositories = [\"bogus\"]\n"),
+            "a non-slug repository target must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("must be `owner/repository` slugs"),
+            "{error}"
+        );
+        let error = must_fail(
+            validate_renovate_contract("repositories = [\"example/one\", \"example/one\"]\n"),
+            "a duplicated repository target must fail",
+        );
+        assert!(
+            error.to_string().contains("names `example/one` twice"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn renovate_git_author_must_name_an_email() {
+        for author in ["Renovate Bot <bot@example.com>", "R <r@example.co>"] {
+            must(validate_renovate_git_author(author), "valid git author");
+        }
+        for author in [
+            "no-email",
+            "Renovate Bot",
+            "Renovate Bot <>",
+            "<bot@example.com>",
+            "Renovate Bot <not-an-email>",
+            "Renovate Bot <bot@host>",
+            "Renovate Bot <bot @example.com>",
+            "Renovate\nBot <bot@example.com>",
+        ] {
+            let error = must_fail(
+                validate_renovate_git_author(author),
+                "invalid git author must fail",
+            );
+            assert!(
+                error.to_string().contains("must be `Name <email>`"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn renovate_signoff_requires_an_author() {
+        let error = must_fail(
+            validate_renovate_contract("signoff = true\n"),
+            "signoff without an author must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("signoff = true requires `author`"),
+            "{error}"
+        );
+        must(
+            validate_renovate_contract(
+                "author = \"Renovate Bot <bot@example.com>\"\nsignoff = true\n",
+            ),
+            "signoff with an author",
+        );
+    }
+
+    #[test]
+    fn renovate_allowed_commands_must_be_single_line_patterns() {
+        for command in ["^npm install --package-lock-only$", "^echo "] {
+            must(
+                validate_renovate_allowed_command(command),
+                "valid allowed command",
+            );
+        }
+        for command in ["", "first\nsecond", "null\0byte"] {
+            let error = must_fail(
+                validate_renovate_allowed_command(command),
+                "invalid allowed command must fail",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be single-line command patterns"),
+                "{error}"
+            );
+        }
+        let error = must_fail(
+            validate_renovate_contract("allowed_commands = [\"^echo \", \"^echo \"]\n"),
+            "a duplicated allowed command must fail",
+        );
+        assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn renovate_extra_schedules_must_be_unique_crons() {
+        must(
+            validate_renovate_contract("schedules = [\"0 18 * * *\"]\n"),
+            "a valid extra schedule",
+        );
+        let error = must_fail(
+            validate_renovate_contract("schedules = [\"hourly\"]\n"),
+            "a non-cron extra schedule must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("must be a 5-field cron expression"),
+            "{error}"
+        );
+        let error = must_fail(
+            validate_renovate_contract("schedules = [\"0 18 * * *\", \"0 18 * * *\"]\n"),
+            "a duplicated extra schedule must fail",
+        );
+        assert!(error.to_string().contains("twice"), "{error}");
+        let error = must_fail(
+            validate_renovate_contract("schedule = \"0 7 * * *\"\nschedules = [\"0 7 * * *\"]\n"),
+            "an extra schedule repeating the primary must fail",
+        );
+        assert!(
+            error.to_string().contains("repeats the primary schedule"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn renovate_host_rules_secret_must_be_a_secret_name() {
+        must(
+            validate_renovate_contract("host_rules_secret = \"RENOVATE_HOST_RULES_JSON\"\n"),
+            "a valid host-rules secret name",
+        );
+        for secret in ["GITHUB_TOKEN", "lowercase", ""] {
+            let error = must_fail(
+                validate_renovate_contract(&format!("host_rules_secret = \"{secret}\"\n")),
+                "an invalid host-rules secret name must fail",
+            );
+            assert!(
+                error.to_string().contains("[renovate] host_rules_secret"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_overrides_must_be_shaped() {
+        let valid = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [maintenance]\nschedule = \"17 4 * * *\"\nproducers = [\"ci-main.yml\"]\nmax_deletes = 50\n",
+        );
+        must(
+            valid.validate(&[], &[], &BTreeSet::new()),
+            "valid maintenance overrides",
+        );
+        for (name, body) in [
+            ("cron", "schedule = \"hourly\"\n"),
+            (
+                "empty producers",
+                "schedule = \"17 4 * * *\"\nproducers = []\n",
+            ),
+            ("producer path", "producers = [\"../ci-main.yml\"]\n"),
+            ("producer extension", "producers = [\"ci-main.yaml\"]\n"),
+            ("producer bare", "producers = [\"ci-main\"]\n"),
+            (
+                "duplicate producers",
+                "producers = [\"ci-main.yml\", \"ci-main.yml\"]\n",
+            ),
+            ("zero bound", "max_deletes = 0\n"),
+            ("oversized bound", "max_deletes = 5001\n"),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[maintenance]\n{body}"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "invalid maintenance override must fail",
+            );
+            assert!(
+                error.to_string().contains("[maintenance]"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_unknown_field_fails_closed() {
+        let error = must_some_error(
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [maintenance]\nschedule = \"17 4 * * *\"\nunknown = true\n",
+            )
+            .err(),
+            "unknown maintenance field must fail",
+        );
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn policy_dco_requires_the_external_dco_check() {
+        let enforced = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\ndco_required = true\nruleset_external_status_checks = [\"DCO\"]\n",
+        );
+        must(
+            enforced.validate(&[], &[], &BTreeSet::new()),
+            "DCO required with the DCO check",
+        );
+        let unenforced = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\ndco_required = true\n",
+        );
+        let error = must_fail(
+            unenforced.validate(&[], &[], &BTreeSet::new()),
+            "DCO required without the DCO check must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("requires `DCO` in ruleset_external_status_checks"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn policy_action_pin_admission_names_the_reviewed_allowlist() {
+        let admitted = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\naction_pin_admission = \"reviewed-allowlist\"\n",
+        );
+        must(
+            admitted.validate(&[], &[], &BTreeSet::new()),
+            "the reviewed allowlist admission",
+        );
+        let invented = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\naction_pin_admission = \"strict\"\n",
+        );
+        let error = must_fail(
+            invented.validate(&[], &[], &BTreeSet::new()),
+            "an unimplemented admission must fail",
+        );
+        assert!(
+            error.to_string().contains("must be `reviewed-allowlist`"),
+            "{error}"
+        );
     }
 }

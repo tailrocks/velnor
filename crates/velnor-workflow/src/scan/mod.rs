@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use crate::{
     default_workflow_files, identifier_suffix, AnalysisSummary, CacheSpec, GeneratorError,
-    ProjectConfig, RunnerMode, Unit, UnitKind,
+    MaintenanceSpec, ProjectConfig, RunnerMode, Unit, UnitKind,
 };
 
 /// Run the detector pipeline over `root` and return what it proved.
@@ -177,6 +177,12 @@ pub(crate) fn unit(
         services: Vec::new(),
         requires_trusted: false,
         workspace_check: false,
+        platform: crate::platform::PlatformRequirement::portable(),
+        products: Vec::new(),
+        prerequisites: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        mbx: None,
+        prepared_tools: Vec::new(),
     }
 }
 
@@ -219,6 +225,10 @@ impl From<RepositoryShape> for ProjectConfig {
             renovate_enabled: false,
             renovate_reason: "Renovate is fail-closed. Enable only after declaring a Renovate config, trusted Velnor runners, and a dedicated PAT secret.".to_owned(),
             renovate: None,
+            docs_enabled: false,
+            docs_reason: "Docs-site publishing is fail-closed. Enable only after declaring the site address, the built output directory, and the build and check commands.".to_owned(),
+            docs: None,
+            maintenance: MaintenanceSpec::default(),
             units: shape.units,
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
@@ -241,6 +251,7 @@ impl From<RepositoryShape> for ProjectConfig {
             mise_lock_keys: BTreeSet::new(),
             github_cache: crate::config::CacheGithubSection::default(),
             velnor_host_cache: crate::config::CacheVelnorSection::default(),
+            check_profiles: Vec::new(),
         }
     }
 }

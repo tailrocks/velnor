@@ -1148,7 +1148,7 @@ fn bootstrap_image(args: HostBootstrapImageArgs) -> Result<(), CommandError> {
         return Err(CommandError::new(
             ExitClass::Usage,
             "host.token_missing",
-            "GITHUB_TOKEN is unset. Export it for the Dockerfile mise_github_token secret; \
+            "GITHUB_TOKEN is unset. Export it for the Dockerfile github_token secret; \
              do not pass the token as a flag.",
         ));
     }
@@ -1322,7 +1322,7 @@ fn build_job_image(root: &Path, image: &str) -> Result<(), CommandError> {
             "--tag",
             image,
             "--secret",
-            "id=mise_github_token,env=GITHUB_TOKEN",
+            "id=github_token,env=GITHUB_TOKEN",
             ".",
         ])
         .current_dir(root)
