@@ -251,7 +251,7 @@ jobs:
             > dist/manifest.json
           for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
             jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
-              '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' dist/manifest.json >/dev/null
+              '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' dist/manifest.json >/dev/null
           done
           manifest_revision="$(jq -er '.revision' dist/manifest.json)"
           [[ "$manifest_revision" == "$HEAD_SHA" ]] || { echo "::error::assembled manifest names revision $manifest_revision, expected $HEAD_SHA" >&2; exit 1; }
@@ -275,7 +275,7 @@ jobs:
           gh attestation verify "dist/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
           gh attestation verify "dist/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
           jq -e --arg closure "$CLOSURE" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" \
-            '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "dist/manifest.json" >/dev/null
+            '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "dist/manifest.json" >/dev/null
           actual="$(sha256sum "dist/$asset" | awk '{print $1}')"
           expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "dist/manifest.json")"
           [[ "$actual" == "$expected" ]] || { echo "::error::smoke-test digest mismatch" >&2; exit 1; }
