@@ -948,6 +948,12 @@ mod tests {
             "the worktree is cleaned up on failure: {candidate}"
         );
         assert!(
+            candidate.contains(
+                "git worktree remove --force \"$worktree\"\n            trap - EXIT"
+            ),
+            "the explicit worktree removal disarms the EXIT trap so the step cannot double-remove: {candidate}"
+        );
+        assert!(
             candidate.contains("binary=\"$worktree/target/debug/velnor-workflow\"")
                 && candidate.contains("build_rev=\"$PR_HEAD\""),
             "the slow path records the head as the build revision: {candidate}"
@@ -1838,6 +1844,7 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
           if [[ "$worktree" != "" ]]; then
             git worktree remove --force "$worktree"
+            trap - EXIT
           fi
           echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
       - name: Publish candidate generator product
