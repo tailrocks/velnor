@@ -9868,21 +9868,12 @@ mod tests {
             "ci-unit-rust.yml",
         );
         // The plan's `units` output carries per-unit records; the gates
-        // select restricted units by their `unit_id` member.
+        // select restricted units by their `unit_id` member. Caller and
+        // callee spell one needle over different haystacks, so one parser
+        // covers both.
         let selectors = |gate: &str, units: &str| {
-            let prefix = format!("contains({units}, '\\\"unit_id\\\":\\\"");
+            let prefix = format!("contains({units}, '\"unit_id\":\"");
             gate.match_indices(&prefix)
-                .filter_map(|(start, _)| {
-                    let rest = &gate[start + prefix.len()..];
-                    rest.split_once("\\\"')").map(|(unit, _)| unit.to_owned())
-                })
-                .collect::<BTreeSet<_>>()
-        };
-        // The callee spells the same selector over its input with one less
-        // escape level.
-        let callee_selectors = |gate: &str| {
-            let prefix = "contains(inputs.selected_units, '\"unit_id\":\"";
-            gate.match_indices(prefix)
                 .filter_map(|(start, _)| {
                     let rest = &gate[start + prefix.len()..];
                     rest.split_once("\"')").map(|(unit, _)| unit.to_owned())
@@ -9902,7 +9893,7 @@ mod tests {
         ] {
             assert_eq!(
                 aggregate_units,
-                callee_selectors(&job_gate(callee, job)),
+                selectors(&job_gate(callee, job), "inputs.selected_units"),
                 "caller and callee `{job}` select the prerequisite on one set"
             );
         }
@@ -14413,7 +14404,7 @@ lockfile = true
         );
         assert!(root.contains("selected_units: ${{ needs.plan.outputs.units }}"));
         assert!(root.contains(&format!(
-            "contains(needs.plan.outputs.units, '\\\"unit_id\\\":\\\"{}\\\"')",
+            "contains(needs.plan.outputs.units, '\"unit_id\":\"{}\"')",
             rust_unit.id
         )));
         assert!(root.contains(&format!("  github-hosted-{}:", rust_unit.id)));
