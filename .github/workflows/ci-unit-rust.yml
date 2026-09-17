@@ -208,12 +208,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-40206d9fe60a8e0693046d1695762c62883a0578-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+          EXPECTED_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -227,7 +227,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+          EXPECTED_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
@@ -757,7 +757,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PINNED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+          PINNED_REVISION: 40206d9fe60a8e0693046d1695762c62883a0578
           CHECKOUT_PATH: ${{ github.workspace }}
         run: |
           set -euo pipefail
