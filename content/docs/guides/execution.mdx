@@ -268,15 +268,13 @@ combined. These limits operate inside Velnor's host disk accounting; they do
 not increase host capacity. Cargo registry and Git source persistence remain
 separate stores and are unaffected by Mr Boxington's GC.
 
-#### The per-job resource budget
+#### Unbounded execution
 
-Velnor derives one budget for the machine and gives each slot its share. The
-job container receives `--cpus` and the environment `CARGO_BUILD_JOBS`,
-`MAKEFLAGS`, `MBX_SCHEDULER_CPUS`, `MBX_SCHEDULER_MEMORY`, and
-`VELNOR_JOB_BUDGET`, appended after the workflow's own environment so a
-workflow cannot widen its share. A workflow value that was overridden is named
-in `VELNOR_JOB_BUDGET` rather than dropped silently. Full derivation:
-[Storage and resource budgets](/operations/storage-and-resources#the-host-budget).
+Jobs run unbounded: no `--cpus`/`--memory` flag, no slice CPU/RAM ceiling,
+and no compiler partition is ever imposed — builders see the whole
+machine. Host capacity is governed by the single host-wide `max_jobs=N`
+permit ledger. Full policy:
+[Storage and resource budgets](/operations/storage-and-resources).
 
 #### Choosing sccache instead
 

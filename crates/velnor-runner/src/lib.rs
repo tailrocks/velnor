@@ -64,6 +64,7 @@ mod mise;
 pub use mise::{is_valid_install_arg_token, lock_tool_keys, validate_install_args_against_lock};
 pub mod node;
 mod ops;
+mod permit_guard;
 mod plan;
 mod platform;
 mod preflight;

@@ -3,7 +3,6 @@
 use std::{
     fmt::Write as _,
     fs, io,
-    num::NonZeroU32,
     path::{Component, Path, PathBuf},
 };
 
@@ -12,12 +11,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use sha2::{Digest, Sha256};
 
-use crate::container::host_budget::{BuildkitSize, HostBudget, SlotBudget};
 use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
-
-/// One derived resource budget for the machine, and the share of it that
-/// belongs to a single runner slot. Every job container is sized from it.
-pub(crate) mod host_budget;
 
 pub use crate::docker_argv::PreparedDockerArgs;
 
@@ -67,117 +61,51 @@ fn is_docker_control_env(name: &str) -> bool {
         || name.eq_ignore_ascii_case("VELNOR_DOCKER_CONTEXT")
 }
 
-fn append_flags_without_limits(
-    command: &mut impl FlagSink,
-    options: &[String],
-    strip_cpu: bool,
-    strip_memory: bool,
-) {
+/// Docker flags that would impose a CPU/RAM/PID ceiling on the workload.
+/// Job containers run unbounded: these never reach `docker run`, however
+/// they arrived. Workflow `container.options` are already filtered at
+/// admission; this is the emission backstop. `--shm-size` is deliberately
+/// absent: shared-memory sizing is not a CPU/RAM ceiling, and browsers
+/// need it larger than Docker's default, not smaller.
+const QUOTA_FLAGS: [&str; 11] = [
+    "--cpus",
+    "--cpu-period",
+    "--cpu-quota",
+    "--cpu-shares",
+    "--cpuset-cpus",
+    "--cpuset-mems",
+    "--memory",
+    "--memory-reservation",
+    "--memory-swap",
+    "--memory-swappiness",
+    "--pids-limit",
+];
+
+fn is_quota_flag(option: &str) -> bool {
+    let name = option.split_once('=').map_or(option, |(name, _)| name);
+    QUOTA_FLAGS.contains(&name)
+}
+
+fn append_options_without_quota(command: &mut impl FlagSink, options: &[String]) {
     let mut index = 0;
     while index < options.len() {
         let option = &options[index];
-        if strip_cpu && option == "--cpus" {
+        if is_quota_flag(option) {
             index += 1;
-            if options
-                .get(index)
-                .is_some_and(|value| !value.starts_with('-'))
+            // `--flag value` form: skip the value too. `--flag=value` and a
+            // bare flag carry nothing further.
+            if !option.contains('=')
+                && options
+                    .get(index)
+                    .is_some_and(|value| !value.starts_with('-'))
             {
                 index += 1;
             }
-            continue;
-        }
-        if strip_cpu && option.starts_with("--cpus=") {
-            index += 1;
-            continue;
-        }
-        if strip_memory && option == "--memory" {
-            index += 1;
-            if options
-                .get(index)
-                .is_some_and(|value| !value.starts_with('-'))
-            {
-                index += 1;
-            }
-            continue;
-        }
-        if strip_memory && option.starts_with("--memory=") {
-            index += 1;
             continue;
         }
         command.flag(option.clone());
         index += 1;
     }
-}
-
-fn parse_memory_options(options: &[String]) -> io::Result<Vec<u64>> {
-    let mut limits = Vec::new();
-    let mut index = 0;
-    while index < options.len() {
-        let option = &options[index];
-        let value = if option == "--memory" {
-            let value = options.get(index + 1).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "docker --memory option is missing its value",
-                )
-            })?;
-            if value.starts_with('-') {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "docker --memory option has an invalid value",
-                ));
-            }
-            index += 2;
-            value.as_str()
-        } else if let Some(value) = option.strip_prefix("--memory=") {
-            index += 1;
-            value
-        } else {
-            index += 1;
-            continue;
-        };
-        let Some(bytes) = parse_docker_memory_bytes(value) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "docker --memory option has an invalid value",
-            ));
-        };
-        limits.push(bytes);
-    }
-    Ok(limits)
-}
-
-/// Parse the RAM units accepted by Docker's `--memory` flag. Normalize to
-/// bytes before comparing limits so a larger textual unit cannot bypass the
-/// derived per-slot cap.
-fn parse_docker_memory_bytes(value: &str) -> Option<u64> {
-    let value = value.trim();
-    let split = value
-        .find(|character: char| !character.is_ascii_digit() && character != '.')
-        .unwrap_or(value.len());
-    let (number, suffix) = value.split_at(split);
-    if number.is_empty() || number == "." || number.matches('.').count() > 1 {
-        return None;
-    }
-    let number = number.parse::<f64>().ok()?;
-    if !number.is_finite() || number <= 0.0 {
-        return None;
-    }
-    let multiplier = match suffix.to_ascii_lowercase().as_str() {
-        "" | "b" => 1_u64,
-        "k" | "kb" | "ki" | "kib" => 1_u64 << 10,
-        "m" | "mb" | "mi" | "mib" => 1_u64 << 20,
-        "g" | "gb" | "gi" | "gib" => 1_u64 << 30,
-        "t" | "tb" | "ti" | "tib" => 1_u64 << 40,
-        "p" | "pb" | "pi" | "pib" => 1_u64 << 50,
-        _ => return None,
-    };
-    let bytes = number * multiplier as f64;
-    if !bytes.is_finite() || bytes < 1.0 || bytes > u64::MAX as f64 {
-        return None;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some(bytes.floor() as u64)
 }
 
 #[derive(Debug, Clone)]
@@ -191,11 +119,8 @@ pub struct JobContainerSpec {
     pub actions_host: PathBuf,
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
-    /// Validated daemon slot count carried into this job. Resource budgeting
-    /// must not infer topology from this job's filesystem layout.
-    pub slot_count: NonZeroU32,
     /// The owning daemon slot's stable store key (`slot-N`), carried from
-    /// the slot's own configuration like `slot_count`. It scopes the
+    /// the slot's own configuration. It scopes the
     /// per-slot persistent stores (mise installs, the mbx cache and target
     /// tree). `None` means no slot owns this job (standalone `run`), and
     /// those stores stay job-ephemeral: persistence is never granted to a
@@ -206,10 +131,8 @@ pub struct JobContainerSpec {
     /// and on single-slot hosts.
     pub slot_store_key: Option<String>,
     pub env: Vec<(String, String)>,
-    /// Daemon-enforced Docker resource limits. CPU and memory limits are
-    /// normalized with workflow createOptions into runner-owned values before
-    /// emission.
-    pub resource_options: Vec<String>,
+    /// Admitted workflow `container.options`. Quota flags never survive to
+    /// emission: job containers run unbounded.
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
     pub node_action_image: String,
@@ -249,16 +172,6 @@ pub(crate) struct DockerLeasePaths {
     pub(crate) daemon_visible: PathBuf,
 }
 
-/// Job environment that carries the daemon's resource budget. A workflow that
-/// sets any of these is asking for a share of a machine it cannot see, so the
-/// daemon's derived value wins and the override is named in the notice.
-const BUDGET_ENV: [&str; 4] = [
-    "CARGO_BUILD_JOBS",
-    "MAKEFLAGS",
-    "MBX_SCHEDULER_CPUS",
-    "MBX_SCHEDULER_MEMORY",
-];
-
 const DEFAULT_CONTAINER_EXEC_PATH: &str =
     "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const MBX_CONTAINER_EXEC_PATH: &str =
@@ -281,205 +194,11 @@ impl JobContainerSpec {
             .collect()
     }
 
-    /// The tightest valid `--cpus` limit declared by the operator
-    /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or workflow createOptions.
-    fn declared_container_cpus(&self) -> Option<f64> {
-        [&self.resource_options, &self.options]
-            .into_iter()
-            .flat_map(|options| {
-                options
-                    .windows(2)
-                    .filter(|pair| pair[0] == "--cpus")
-                    .map(|pair| pair[1].as_str())
-                    .chain(
-                        options
-                            .iter()
-                            .filter_map(|option| option.strip_prefix("--cpus=")),
-                    )
-                    .collect::<Vec<_>>()
-            })
-            .filter_map(|value| value.trim().parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .min_by(f64::total_cmp)
-    }
-
-    /// The tightest valid Docker memory limit declared by the operator or
-    /// workflow createOptions. Invalid or incomplete limits are rejected by
-    /// `start_args` instead of being silently dropped while enforcing policy.
-    fn declared_container_memory(&self) -> io::Result<Option<u64>> {
-        let mut limits = Vec::new();
-        for options in [&self.options, &self.resource_options] {
-            limits.extend(parse_memory_options(options)?);
-        }
-        Ok(limits.into_iter().min())
-    }
-
-    /// The share of the machine this job may use.
-    ///
-    /// The packaged `velnor-jobs.slice` quota is an *aggregate* ceiling for
-    /// every job on the host, not a per-slot allowance. Nothing used to divide
-    /// it, so four slots each ran a Cargo build sized to the whole machine.
-    fn slot_budget(&self) -> SlotBudget {
-        HostBudget::observe_host()
-            .per_slot(self.slot_count)
-            .capped_by_container_cpus(self.declared_container_cpus())
-    }
-
-    /// This job's own BuildKit entitlement: its slot share narrowed by its
-    /// own declared limits. Recorded in the claim file at claim time; the
-    /// daemon ceiling is the sum of every holder's recording, never this
-    /// job's limits multiplied across strangers. The daemon used to be
-    /// created from the static `resource_options` spelling of operator
-    /// policy alone, so the derived budget sized every compiler except the
-    /// one inside buildkitd.
-    ///
-    /// # Errors
-    /// A declared `--memory` limit is present but malformed, the same
-    /// rejection `start_args` applies instead of silently dropping policy.
-    pub(crate) fn own_buildkit_entitlement(&self) -> io::Result<BuildkitSize> {
-        let budget = self.slot_budget();
-        let declared = self.declared_container_memory()?;
-        Ok(budget.own_buildkit_entitlement(declared))
-    }
-
-    /// CPU/memory ceiling for a shared buildkitd doing the compiling for
-    /// `entitlements`: the summed holder recordings, capped at the host
-    /// budget. Pure w.r.t. declared policy — every holder's limits already
-    /// narrowed its own recording — so the sizing (and releasing) job's
-    /// workflow limits cannot leak onto other holders.
-    pub(crate) fn buildkit_size_summed(&self, entitlements: &[BuildkitSize]) -> BuildkitSize {
-        self.slot_budget().buildkit_size_summed(entitlements)
-    }
-
-    /// Static daemon-wide ceilings from `resource_options` alone, for the
-    /// per-dimension fallback when the derived budget cannot observe a
-    /// dimension. Lenient where the create path is strict: unknown flags
-    /// and malformed values read as undeclared rather than failing the
-    /// resize — the create path already rejects a misspelled operator
-    /// policy loudly, and a best-effort resize must not fail twice.
-    /// Workflow createOptions are deliberately excluded: they differ per
-    /// job, so they cannot fill a dimension of a shared daemon's ceiling.
-    pub(crate) fn static_buildkit_fallback(&self) -> (Option<u64>, Option<u64>) {
-        let cpu_milli = self
-            .resource_options
-            .windows(2)
-            .filter(|pair| pair[0] == "--cpus")
-            .map(|pair| pair[1].as_str())
-            .chain(
-                self.resource_options
-                    .iter()
-                    .filter_map(|option| option.strip_prefix("--cpus=")),
-            )
-            .filter_map(|value| value.trim().parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .filter_map(crate::container::host_budget::cpu_milli_from_cpus)
-            .filter(|milli| *milli > 0)
-            .min();
-        let memory_bytes = self
-            .resource_options
-            .iter()
-            .enumerate()
-            .filter_map(|(index, option)| {
-                if option == "--memory" {
-                    self.resource_options.get(index + 1).map(String::as_str)
-                } else {
-                    option.strip_prefix("--memory=")
-                }
-            })
-            .filter_map(parse_docker_memory_bytes)
-            .min();
-        (cpu_milli, memory_bytes)
-    }
-
-    /// One line naming the budget, how it was derived, and any workflow value
-    /// it overrode. Resource policy that nobody can see is indistinguishable
-    /// from the mysterious idleness it is meant to remove.
-    pub fn resource_budget_notice(&self) -> String {
-        let budget = self.slot_budget();
-        budget.notice(&self.workflow_budget_overrides())
-    }
-
-    fn workflow_budget_overrides(&self) -> Vec<String> {
-        BUDGET_ENV
-            .iter()
-            .filter(|name| {
-                self.env
-                    .iter()
-                    .any(|(key, _)| key.eq_ignore_ascii_case(name))
-            })
-            .map(|name| (*name).to_owned())
-            .collect()
-    }
-
-    /// Append workflow and daemon flags while replacing every declared CPU
-    /// limit with the runner-derived hard cap. Docker's last duplicate flag
-    /// wins, so leaving an operator value in argv would let it silently defeat
-    /// the smaller per-slot limit.
-    fn append_container_options(
-        &self,
-        command: &mut DockerCommand,
-        budget: &SlotBudget,
-    ) -> io::Result<()> {
-        let cpu_option = budget.docker_cpu_option();
-        let memory_cap = budget
-            .memory_bytes
-            .value()
-            .copied()
-            .filter(|bytes| *bytes > 0);
-        let declared_memory = self.declared_container_memory()?;
-
-        if cpu_option.is_some() || memory_cap.is_some() {
-            append_flags_without_limits(
-                command,
-                &self.options,
-                cpu_option.is_some(),
-                memory_cap.is_some(),
-            );
-            append_flags_without_limits(
-                command,
-                &self.resource_options,
-                cpu_option.is_some(),
-                memory_cap.is_some(),
-            );
-        } else {
-            // No derived hard cap exists. Retain explicit policy instead of
-            // widening the container by deleting the only known limit.
-            command.flags(self.options.iter().cloned());
-            command.flags(self.resource_options.iter().cloned());
-        }
-
-        if let Some(cpu_option) = cpu_option {
-            command.flags(cpu_option);
-        }
-        if let Some(memory_cap) = memory_cap {
-            // An explicit operator/workflow value may narrow the derived
-            // share, never widen it. The final Docker flag is the one source
-            // of truth after all user options have been expanded.
-            let memory = declared_memory.map_or(memory_cap, |declared| declared.min(memory_cap));
-            command.flags(["--memory".to_owned(), memory.to_string()]);
-        }
-        Ok(())
-    }
-
-    /// Daemon-derived CPU and memory budget for this job.
-    ///
-    /// Appended after workflow environment and workflow createOptions, so a
-    /// workflow cannot widen its own share — the same precedence the
-    /// acceleration stores and `resource_options` already use. Cargo and
-    /// `make` are capped through `CARGO_BUILD_JOBS` and `MAKEFLAGS`, which is
-    /// also mbx's documented way to cap one build's permits without shrinking
-    /// the machine-wide pool its siblings share, and mbx's own scheduler is
-    /// sized through its documented `MBX_SCHEDULER_*` contract instead of its
-    /// "logical CPUs / 85% of physical memory" defaults, neither of which can
-    /// see the slice quota. An unobservable budget produces nothing at all.
-    fn append_resource_budget(&self, command: &mut DockerCommand, budget: &SlotBudget) {
-        for (name, value) in budget.job_env() {
-            command.env(name, value);
-        }
-        command.env(
-            "VELNOR_JOB_BUDGET",
-            budget.notice(&self.workflow_budget_overrides()),
-        );
+    /// Append admitted workflow container options. Quota flags are stripped
+    /// unconditionally: the container runs unbounded and no option spelling
+    /// may reintroduce a ceiling at emission.
+    fn append_container_options(&self, command: &mut DockerCommand) {
+        append_options_without_quota(command, &self.options);
     }
 
     fn append_rust_acceleration(&self, command: &mut DockerCommand) -> io::Result<()> {
@@ -675,12 +394,12 @@ impl JobContainerSpec {
             args.env(name.clone(), value.clone());
         }
         self.append_ownership_labels(args);
-        let budget = self.slot_budget();
-        self.append_container_options(args, &budget)?;
+        self.append_container_options(args);
         // Docker creates the actual workload in dockerd's cgroup, not in the
-        // Velnor worker process. Keep the outer job below the package-owned
-        // aggregate cap; the job lease proxy applies the same policy to
-        // containers created from inside the job.
+        // Velnor worker process. Place the outer job under the runner-owned
+        // identity cgroup (no ceiling); the job lease proxy applies the same
+        // placement — and the same unbounded policy — to containers created
+        // from inside the job.
         self.append_job_cgroup_parent(args);
 
         // Docker Engine 29 inherits systemd's 1024-file descriptor default
@@ -700,8 +419,8 @@ impl JobContainerSpec {
         self.append_packaged_workflow_cli_mounts(args)?;
 
         // The per-job network is runner policy. Keep it after expanded job
-        // and daemon resource options so the job cannot be displaced from the
-        // network shared with its workflow services.
+        // options so the job cannot be displaced from the network shared
+        // with its workflow services.
         args.pair("--network", self.network.clone());
 
         // Daemon-owned acceleration mounts and variables must follow both
@@ -709,11 +428,6 @@ impl JobContainerSpec {
         // may add options, but cannot redirect a persistent store or stack
         // sccache with the image's mbx shim.
         self.append_rust_acceleration(args)?;
-
-        // The machine budget divided by the number of provisioned slots. Last,
-        // so neither workflow environment nor workflow createOptions can widen
-        // this job's share of a host it cannot see.
-        self.append_resource_budget(args, &budget);
 
         // PID 1 supervises the live console tail. `tail -F` alone would
         // keep the container alive after the job is terminal; the supervisor
@@ -1816,7 +1530,10 @@ impl ServiceContainerSpec {
         for port in &self.ports {
             args.pair("-p", port.clone());
         }
-        args.flags(self.options.iter().cloned());
+        // Quota flags never reach `docker run`, however they arrived
+        // (admission already filtered workflow options; this is the
+        // emission backstop, same as the job container).
+        append_options_without_quota(args, &self.options);
         args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
         // Runner-owned network policy must win over any network-shaped token
         // present in the expanded service options. Docker uses the final
@@ -2292,11 +2009,9 @@ mod tests {
             actions_host: job.join("actions"),
             tools_host: job.join("tools"),
             mount_docker_socket: true,
-            slot_count: NonZeroU32::MIN,
             slot_store_key: None,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
-            resource_options: vec!["--memory".into(), "8g".into()],
-            options: vec!["--cpus".into(), "2".into()],
+            options: Vec::new(),
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
@@ -2399,37 +2114,6 @@ mod tests {
     }
 
     #[test]
-    fn slot_budget_uses_authoritative_count_for_nonstandard_job_paths() {
-        let mut job = spec();
-        job.temp_host = PathBuf::from("/not-a-slot-layout/jobs/job/temp");
-        job.slot_count = NonZeroU32::new(2).unwrap();
-
-        assert_eq!(job.slot_budget().slots, job.slot_count);
-    }
-
-    #[test]
-    fn static_daemon_fallback_reads_only_daemon_wide_policy() {
-        let mut job = spec();
-        // Workflow createOptions differ per job, so they cannot fill a
-        // shared daemon's ceiling — not even when resource_options say
-        // nothing in that dimension.
-        job.resource_options = vec!["--cpus".into(), "4".into()];
-        job.options = vec!["--memory".into(), "1g".into(), "--cpus".into(), "1".into()];
-        assert_eq!(job.static_buildkit_fallback(), (Some(4000), None));
-
-        job.resource_options = vec!["--memory".into(), "12g".into()];
-        assert_eq!(
-            job.static_buildkit_fallback(),
-            (None, Some(12 * 1024 * 1024 * 1024))
-        );
-
-        // Lenient where the create path is strict: garbage reads as
-        // undeclared rather than failing a best-effort resize.
-        job.resource_options = vec!["--cpus".into(), "bogus".into(), "--pids-limit".into()];
-        assert_eq!(job.static_buildkit_fallback(), (None, None));
-    }
-
-    #[test]
     fn job_network_carries_daemon_and_job_ownership_labels() {
         assert_eq!(
             spec().create_network_args(),
@@ -2484,171 +2168,92 @@ mod tests {
         assert!(policy_index > override_index);
     }
 
-    /// The budget the daemon derived for this job must reach the compilers
-    /// that would otherwise each size themselves to the whole machine.
+    /// Job containers run unbounded: no CPU/RAM/PID ceiling flag may reach
+    /// `docker run`, however it arrived. Admission filters workflow options;
+    /// emission strips them again as a backstop.
     #[test]
-    fn the_job_is_told_its_share_of_the_machine() {
+    fn job_containers_emit_no_cpu_ram_pid_ceiling() {
         let mut job = spec();
-        job.options.clear();
-        job.resource_options.clear();
-        let prepared = job.start_args().unwrap();
-        let args = rendered(&prepared);
-        let jobs = args
-            .iter()
-            .find_map(|arg| arg.strip_prefix("CARGO_BUILD_JOBS="))
-            .expect("a derivable host budget must reach Cargo")
-            .to_owned();
-        assert!(args.contains(&format!("MAKEFLAGS=-j{jobs}")));
-        assert!(args.contains(&format!("MBX_SCHEDULER_CPUS={jobs}")));
-        // No declared limit, so the daemon pins the container to the share.
-        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
-        let cpus_index = args.iter().position(|arg| arg == "--cpus").unwrap();
-        assert_eq!(args[cpus_index + 1], jobs);
-        if let Some(memory) = job.slot_budget().memory_bytes.value().copied() {
-            let memory_index = args.iter().position(|arg| arg == "--memory").unwrap();
-            assert_eq!(args[memory_index + 1], memory.to_string());
-        } else {
-            assert!(!args.iter().any(|arg| arg == "--memory"));
+        job.options = vec![
+            "--cpus".into(),
+            "2".into(),
+            "--memory=1g".into(),
+            "--cpu-quota".into(),
+            "50000".into(),
+            "--cpuset-cpus".into(),
+            "0-1".into(),
+            "--memory-swap".into(),
+            "2g".into(),
+            "--pids-limit".into(),
+            "512".into(),
+            "--label".into(),
+            "workflow".into(),
+        ];
+        let args = rendered(&job.start_args().unwrap());
+        for quota in [
+            "--cpus",
+            "--cpu-period",
+            "--cpu-quota",
+            "--cpu-shares",
+            "--cpuset-cpus",
+            "--cpuset-mems",
+            "--memory",
+            "--memory-reservation",
+            "--memory-swap",
+            "--memory-swappiness",
+            "--pids-limit",
+        ] {
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == quota || arg.starts_with(&format!("{quota}="))),
+                "unbounded emission must strip {quota}, got {args:?}"
+            );
         }
-        assert!(args.iter().any(|arg| arg.starts_with("VELNOR_JOB_BUDGET=")));
+        // The stripped values vanish with their flags; neighbors survive.
+        assert!(!args.iter().any(|arg| arg == "0-1" || arg == "512"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--label" && pair[1] == "workflow"),
+            "{args:?}"
+        );
+        // Placement and identity survive: cgroup parent, ulimit, sysctl.
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]),
+            "{args:?}"
+        );
     }
 
-    /// A workflow cannot widen its own share of a host it cannot see, and the
-    /// override is named rather than applied silently.
+    /// No disguised resource partition is injected into the build
+    /// environment: no `CARGO_BUILD_JOBS`, `MAKEFLAGS`, `MBX_SCHEDULER_*`,
+    /// or budget notice. A workflow that sets such a variable keeps its own
+    /// spelling — the daemon no longer overrides it with a share.
     #[test]
-    fn a_workflow_set_job_count_loses_to_the_daemon_budget_and_is_named() {
+    fn job_environment_carries_no_build_partition() {
         let mut job = spec();
-        job.env = vec![("CARGO_BUILD_JOBS".into(), "64".into())];
-        let prepared = job.start_args().unwrap();
-        let args = rendered(&prepared);
-        let workflow_index = args
-            .iter()
-            .position(|arg| arg == "CARGO_BUILD_JOBS=64")
-            .unwrap();
-        let policy_index = args
-            .iter()
-            .rposition(|arg| arg.starts_with("CARGO_BUILD_JOBS="))
-            .unwrap();
-        assert!(policy_index > workflow_index);
-        assert_ne!(args[policy_index], "CARGO_BUILD_JOBS=64");
-        let notice = args
-            .iter()
-            .find(|arg| arg.starts_with("VELNOR_JOB_BUDGET="))
-            .unwrap();
-        assert!(notice.contains("overrides workflow-set CARGO_BUILD_JOBS"));
-    }
-
-    /// A declared container limit is folded into the runner-owned cap and is
-    /// never joined by a second `--cpus`.
-    #[test]
-    fn a_declared_cpu_limit_narrows_the_share_and_stays_single() {
-        let mut job = spec();
-        job.options.clear();
-        job.resource_options = vec!["--cpus".into(), "1".into()];
-        let prepared = job.start_args().unwrap();
-        let args = rendered(&prepared);
-        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
-        assert!(args.contains(&"CARGO_BUILD_JOBS=1".to_owned()));
-        assert!(args.contains(&"MAKEFLAGS=-j1".to_owned()));
-    }
-
-    /// The tightest declared limit wins, whichever side declared it, while the
-    /// final argv contains one normalized runner-owned flag.
-    #[test]
-    fn the_tightest_declared_cpu_limit_sizes_the_job() {
-        let mut job = spec();
-        job.options = vec!["--cpus".into(), "2".into()];
-        job.resource_options = vec!["--cpus".into(), "1".into()];
-        let prepared = job.start_args().unwrap();
-        let args = rendered(&prepared);
-        assert!(args.contains(&"CARGO_BUILD_JOBS=1".to_owned()));
-        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
-        let cpus_index = args.iter().position(|arg| arg == "--cpus").unwrap();
-        assert_eq!(args[cpus_index + 1], "1");
-    }
-
-    #[test]
-    fn normalized_cpu_limit_preserves_other_workflow_and_daemon_flags() {
-        let mut job = spec();
-        job.options = vec!["--cpus=64".into(), "--label".into(), "workflow".into()];
-        job.resource_options = vec!["--memory".into(), "8g".into(), "--cpus".into(), "4".into()];
-        let expected = job
-            .slot_budget()
-            .docker_cpu_option()
-            .expect("the test host exposes a CPU budget");
-        let prepared = job.start_args().unwrap();
-        let args = rendered(&prepared);
-
-        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
-        assert!(args.windows(2).any(|pair| pair == expected.as_slice()));
-        assert!(!args.iter().any(|arg| arg == "--cpus=64"));
-        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
-            let expected_memory = derived_memory
-                .min(parse_docker_memory_bytes("8g").unwrap())
-                .to_string();
-            assert_eq!(args.iter().filter(|arg| *arg == "--memory").count(), 1);
-            assert!(args
-                .windows(2)
-                .any(|pair| pair[0] == "--memory" && pair[1] == expected_memory));
-        } else {
-            assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
-        }
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--label" && pair[1] == "workflow"));
-    }
-
-    #[test]
-    fn a_declared_memory_limit_narrows_the_share() {
-        let mut job = spec();
-        job.options = vec!["--memory=1m".into()];
-        job.resource_options.clear();
-        let prepared = job.start_args().unwrap();
-        let args = rendered(&prepared);
-        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
-            let expected = derived_memory.min(1 << 20).to_string();
-            assert_eq!(args.iter().filter(|arg| *arg == "--memory").count(), 1);
-            assert!(args
-                .windows(2)
-                .any(|pair| pair[0] == "--memory" && pair[1] == expected));
-        } else {
-            assert!(args.iter().any(|arg| arg == "--memory=1m"));
-        }
-    }
-
-    #[test]
-    fn a_large_declared_memory_limit_cannot_widen_the_share() {
-        let mut job = spec();
-        job.options = vec!["--memory".into(), "64t".into()];
-        job.resource_options.clear();
-        let expected = job.slot_budget().memory_bytes.value().copied();
-        let prepared = job.start_args().unwrap();
-        let args = rendered(&prepared);
-        if let Some(expected) = expected {
-            let memory_index = args.iter().position(|arg| arg == "--memory").unwrap();
-            assert_eq!(args[memory_index + 1], expected.to_string());
-        } else {
-            assert!(args.windows(2).any(|pair| pair == ["--memory", "64t"]));
-        }
-    }
-
-    #[test]
-    fn invalid_declared_memory_limit_fails_closed() {
-        let mut job = spec();
-        job.options = vec!["--memory".into(), "not-a-size".into()];
-        job.resource_options.clear();
-        let error = job.start_args().unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn docker_memory_units_normalize_before_comparison() {
-        assert_eq!(parse_docker_memory_bytes("123"), Some(123));
-        assert_eq!(parse_docker_memory_bytes("1.5g"), Some(1_610_612_736));
-        assert_eq!(parse_docker_memory_bytes("512MiB"), Some(536_870_912));
-        assert_eq!(parse_docker_memory_bytes("0"), None);
-        assert_eq!(parse_docker_memory_bytes("-1g"), None);
-        assert_eq!(parse_docker_memory_bytes("garbage"), None);
+        job.env = vec![
+            ("CARGO_BUILD_JOBS".into(), "64".into()),
+            ("MAKEFLAGS".into(), "-j64".into()),
+        ];
+        let args = rendered(&job.start_args().unwrap());
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.starts_with("CARGO_BUILD_JOBS="))
+                .count(),
+            1,
+            "only the workflow's own spelling survives: {args:?}"
+        );
+        assert!(args.contains(&"CARGO_BUILD_JOBS=64".to_owned()), "{args:?}");
+        assert!(args.contains(&"MAKEFLAGS=-j64".to_owned()), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("MBX_SCHEDULER_")),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("VELNOR_JOB_BUDGET=")),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -2940,11 +2545,28 @@ mod tests {
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
-        let expected_cpu = job
-            .slot_budget()
-            .docker_cpu_option()
-            .expect("the test host exposes a CPU budget");
-        assert!(args.windows(2).any(|pair| pair == expected_cpu.as_slice()));
+        // Unbounded: no CPU/RAM/PID ceiling flag is emitted. Placement and
+        // identity (cgroup parent, ulimit, sysctl) are not ceilings.
+        for quota in [
+            "--cpus",
+            "--cpu-period",
+            "--cpu-quota",
+            "--cpu-shares",
+            "--cpuset-cpus",
+            "--cpuset-mems",
+            "--memory",
+            "--memory-reservation",
+            "--memory-swap",
+            "--memory-swappiness",
+            "--pids-limit",
+        ] {
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == quota || arg.starts_with(&format!("{quota}="))),
+                "unbounded emission must not contain {quota}: {args:?}"
+            );
+        }
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
@@ -2954,14 +2576,6 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
-        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
-            let expected_memory = derived_memory.min(parse_docker_memory_bytes("8g").unwrap());
-            assert!(args
-                .windows(2)
-                .any(|pair| { pair[0] == "--memory" && pair[1] == expected_memory.to_string() }));
-        } else {
-            assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
-        }
         if JobContainerSpec::guest_can_connect_host_bound_unix_lease() {
             let lease_mount = format!(
                 "{}:/var/run/docker.sock",
@@ -4566,9 +4180,16 @@ mod tests {
             network: "velnor-net-1".into(),
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             ports: vec!["5432:5432".into()],
-            options: vec!["--health-cmd".into(), "pg_isready".into()],
+            options: vec![
+                "--cpus".into(),
+                "2".into(),
+                "--memory=1g".into(),
+                "--health-cmd".into(),
+                "pg_isready".into(),
+            ],
         };
 
+        // Quota flags are stripped at emission, like the job container.
         let prepared = service.start_args(&service_env_dir()).unwrap();
         assert_eq!(
             rendered(&prepared),

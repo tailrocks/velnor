@@ -12,7 +12,6 @@ use crate::{
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -55,8 +54,6 @@ pub fn github_job_container_spec(
     job: &AgentJobRequestMessage,
     paths: GitHubJobContainerPaths,
     docker_image: &str,
-    resource_options: Vec<String>,
-    slot_count: NonZeroU32,
     node_action_image: &str,
     daemon_id: String,
     trust_scope: &str,
@@ -108,10 +105,8 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
-        slot_count,
         slot_store_key: paths.slot_store_key,
         env: backend_advertising_env(job_container_env(job), paths.execution_backend),
-        resource_options,
         options: job_container_options(job, trust_scope),
         services: service_containers(job, trust_scope),
         node_action_image: node_action_image.to_string(),
@@ -757,6 +752,7 @@ fn filter_privileged_container_options(
     options: Vec<String>,
     allow_privileged: bool,
 ) -> Vec<String> {
+    let options = strip_quota_container_options(options);
     if allow_privileged {
         let mut filtered = Vec::with_capacity(options.len());
         let mut options = options.into_iter().peekable();
@@ -848,16 +844,64 @@ fn filter_privileged_container_options(
     filtered
 }
 
+/// Docker flags that would impose a CPU/RAM/PID ceiling on the workload.
+/// No HostConfig ceiling may arrive via workflow `container.options` on any
+/// trust path: these are stripped at admission (and again at emission).
+/// `--shm-size` stays allowed: shared-memory sizing is not a CPU/RAM
+/// ceiling, and browsers need it larger than Docker's default.
+const QUOTA_CONTAINER_OPTIONS: [&str; 11] = [
+    "--cpus",
+    "--cpu-period",
+    "--cpu-quota",
+    "--cpu-shares",
+    "--cpuset-cpus",
+    "--cpuset-mems",
+    "--memory",
+    "--memory-reservation",
+    "--memory-swap",
+    "--memory-swappiness",
+    "--pids-limit",
+];
+
+fn is_quota_container_option(option: &str) -> bool {
+    let name = option.split_once('=').map_or(option, |(name, _)| name);
+    QUOTA_CONTAINER_OPTIONS.contains(&name)
+}
+
+/// Drop quota flags (and their values) from admitted workflow options.
+/// Runs before the trust split so trusted and untrusted lanes strip
+/// identically; every drop is logged, never silent.
+fn strip_quota_container_options(options: Vec<String>) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(options.len());
+    let mut index = 0;
+    while index < options.len() {
+        let option = options[index].as_str();
+        if is_quota_container_option(option) {
+            // `--flag=value` carries its value inline; only the bare `--flag`
+            // form consumes the following token.
+            let consumed = if option.contains('=') {
+                option.to_owned()
+            } else {
+                option_with_optional_value(&options, index)
+            };
+            log_dropped_container_option(&consumed, "CPU/RAM/PID ceilings are not admitted");
+            index += if option.contains('=') {
+                1
+            } else {
+                consumed_option_count(&options, index)
+            };
+            continue;
+        }
+        stripped.push(options[index].clone());
+        index += 1;
+    }
+    stripped
+}
+
 fn safe_container_option(name: &str) -> bool {
     matches!(
         name,
-        "--cpus"
-            | "--cpu-period"
-            | "--cpu-quota"
-            | "--cpu-shares"
-            | "--cpuset-cpus"
-            | "--cpuset-mems"
-            | "--dns"
+        "--dns"
             | "--dns-option"
             | "--dns-search"
             | "--domainname"
@@ -871,12 +915,7 @@ fn safe_container_option(name: &str) -> bool {
             | "--health-timeout"
             | "--hostname"
             | "--init"
-            | "--memory"
-            | "--memory-reservation"
-            | "--memory-swap"
-            | "--memory-swappiness"
             | "--no-healthcheck"
-            | "--pids-limit"
             | "--read-only"
             | "--shm-size"
             | "--stop-signal"
@@ -1121,10 +1160,8 @@ mod tests {
             actions_host: root.join("actions"),
             tools_host: root.join("tools"),
             mount_docker_socket: true,
-            slot_count: NonZeroU32::MIN,
             slot_store_key: None,
             env: Vec::new(),
-            resource_options: Vec::new(),
             options: Vec::new(),
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
@@ -1218,8 +1255,6 @@ mod tests {
                 slot_store_key: None,
             },
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",
@@ -1306,8 +1341,6 @@ mod tests {
                 slot_store_key: None,
             },
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             resolved.as_str(),
@@ -1447,8 +1480,6 @@ mod tests {
                     slot_store_key: None,
                 },
                 "ubuntu:24.04",
-                Vec::new(),
-                NonZeroU32::MIN,
                 "",
                 "daemon".into(),
                 scope,
@@ -1517,8 +1548,6 @@ mod tests {
                     slot_store_key: None,
                 },
                 "ubuntu:24.04",
-                Vec::new(),
-                NonZeroU32::MIN,
                 "",
                 "daemon".into(),
                 admitted,
@@ -1721,8 +1750,6 @@ mod tests {
                 slot_store_key: None,
             },
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "public-forks",
@@ -1751,8 +1778,6 @@ mod tests {
                 slot_store_key: None,
             },
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",
@@ -1790,8 +1815,6 @@ mod tests {
                 slot_store_key: None,
             },
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",
@@ -1817,8 +1840,6 @@ mod tests {
             &microvm_job(),
             paths(),
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",
@@ -1842,8 +1863,6 @@ mod tests {
             &job,
             paths(),
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",
@@ -1873,8 +1892,6 @@ mod tests {
                 slot_store_key: None,
             },
             "ubuntu:24.04",
-            Vec::new(),
-            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",
@@ -2098,9 +2115,12 @@ mod tests {
         }))
         .unwrap();
 
+        // Quota flags are stripped at admission on every trust path:
+        // no HostConfig ceiling may arrive via workflow container.options.
+        assert_eq!(job_container_options(&job, "trusted"), Vec::<String>::new());
         assert_eq!(
-            job_container_options(&job, "trusted"),
-            vec!["--cpus", "2", "--memory", "4g"]
+            job_container_options(&job, "untrusted"),
+            Vec::<String>::new()
         );
     }
 
@@ -2133,8 +2153,38 @@ mod tests {
 
         assert_eq!(
             filter_privileged_container_options(options, false),
-            vec!["--hostname", "job-host", "--cpus", "2"]
+            vec!["--hostname", "job-host"]
         );
+    }
+
+    #[test]
+    fn container_options_strip_quota_flags_on_every_trust_path() {
+        for allow_privileged in [false, true] {
+            let options = vec![
+                "--cpus".to_string(),
+                "2".to_string(),
+                "--memory=4g".to_string(),
+                "--cpu-quota".to_string(),
+                "50000".to_string(),
+                "--cpuset-cpus".to_string(),
+                "0-1".to_string(),
+                "--memory-swap".to_string(),
+                "8g".to_string(),
+                "--pids-limit".to_string(),
+                "512".to_string(),
+                "--shm-size".to_string(),
+                "256m".to_string(),
+                "--hostname".to_string(),
+                "job-host".to_string(),
+            ];
+            // Quota flags and their values vanish; --shm-size (not a
+            // ceiling) and ordinary options survive.
+            assert_eq!(
+                filter_privileged_container_options(options, allow_privileged),
+                vec!["--shm-size", "256m", "--hostname", "job-host"],
+                "allow_privileged={allow_privileged}"
+            );
+        }
     }
 
     #[test]
@@ -2221,9 +2271,11 @@ mod tests {
             "nfs".into(),
         ];
 
+        // Quota flags (--cpus, --memory) are stripped before the
+        // allowlist runs; hostile flags are dropped by the allowlist.
         assert_eq!(
             filter_privileged_container_options(options, false),
-            vec!["--cpus", "2", "--memory=4g", "--health-cmd", "true"]
+            vec!["--health-cmd", "true"]
         );
     }
 
@@ -2264,15 +2316,10 @@ mod tests {
             "--env".into(),
         ];
 
+        // Quota flags are stripped on the trusted path too.
         assert_eq!(
             filter_privileged_container_options(options, true),
-            vec![
-                "--hostname",
-                "allowed",
-                "-malformed-name",
-                "--cpus=2",
-                "--memory=4g"
-            ]
+            vec!["--hostname", "allowed", "-malformed-name"]
         );
     }
 

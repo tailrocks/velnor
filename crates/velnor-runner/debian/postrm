@@ -1,8 +1,6 @@
 #!/bin/sh
 set -e
 
-JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
-JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
 PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
 WORKER_UNIT_GLOB=velnor-job@*.service
 
@@ -14,10 +12,10 @@ fail() {
 require_package_transaction_lock() {
   # The deployment wrapper takes an exclusive lock on the path with --no-fork,
   # so dpkg and this maintainer script remain inside one package transaction.
-  # Never remove the host quota without proving that outer lock is held.
+  # Never stop or disable the fleet without proving that outer lock is held.
   lock_inode=$(stat -c '%i' "$PACKAGE_TRANSACTION_LOCK" 2>/dev/null || true)
   [ -n "$lock_inode" ] \
-    || fail "cannot stat $PACKAGE_TRANSACTION_LOCK; keeping CPU quota"
+    || fail "cannot stat $PACKAGE_TRANSACTION_LOCK; aborting removal"
   lock_owner=$(awk -v inode="$lock_inode" '
     $2 == "FLOCK" {
       split($6, device_inode, ":")
@@ -28,7 +26,7 @@ require_package_transaction_lock() {
       }
     }' /proc/locks 2>/dev/null) || lock_owner=
   case "$lock_owner" in
-    ''|*[!0-9]*) fail "no exclusive lock owner for $PACKAGE_TRANSACTION_LOCK; keeping CPU quota" ;;
+    ''|*[!0-9]*) fail "no exclusive lock owner for $PACKAGE_TRANSACTION_LOCK; aborting removal" ;;
   esac
   current_pid=$$
   while [ "$current_pid" -gt 1 ]; do
@@ -41,7 +39,7 @@ require_package_transaction_lock() {
     [ "$parent_pid" = "$current_pid" ] && break
     current_pid=$parent_pid
   done
-  fail "exclusive lock owner is not an apt-wrapper ancestor; keeping CPU quota"
+  fail "exclusive lock owner is not an apt-wrapper ancestor; aborting removal"
 }
 
 verify_worker_units_inactive() {
@@ -79,21 +77,21 @@ case "$1" in
     if [ -d /run/systemd/system ]; then
       all_units=$(systemctl list-unit-files --no-legend --plain \
         'velnor*.service' 'velnor*.timer' 2>/dev/null) \
-        || fail "cannot enumerate Velnor units; keeping CPU quota"
+        || fail "cannot enumerate Velnor units; aborting removal"
 
       # Runtime masks close the activation race for every enumerated Velnor
-      # service and timer. They remain until the drop-in is removed, systemd
-      # is reloaded, and the final worker and slice proofs pass.
+      # service and timer. They remain until systemd is reloaded and the
+      # final worker and slice proofs pass.
       for unit in $(printf '%s\n' "$all_units" | awk '{print $1}'); do
         systemctl mask --runtime "$unit" \
-          || fail "cannot mask $unit; keeping CPU quota"
+          || fail "cannot mask $unit; aborting removal"
       done
 
       for unit in $(printf '%s\n' "$all_units" | awk '{print $1}'); do
         systemctl disable "$unit" \
-          || fail "cannot disable $unit; keeping CPU quota"
+          || fail "cannot disable $unit; aborting removal"
         systemctl reset-failed "$unit" \
-          || fail "cannot reset $unit; keeping CPU quota"
+          || fail "cannot reset $unit; aborting removal"
       done
 
       # With masks in place, disable first, then synchronously stop every
@@ -101,25 +99,21 @@ case "$1" in
       # check race before the final slice proof below.
       runtime_units=$(systemctl list-units --type=service --type=timer --all \
         --no-legend --plain 'velnor*.service' 'velnor*.timer' 2>/dev/null) \
-        || fail "cannot enumerate loaded Velnor units; keeping CPU quota"
+        || fail "cannot enumerate loaded Velnor units; aborting removal"
       for unit in $(printf '%s\n' "$runtime_units" | awk '{print $1}'); do
         systemctl stop "$unit" \
-          || fail "cannot stop $unit; keeping CPU quota"
+          || fail "cannot stop $unit; aborting removal"
       done
 
       verify_worker_units_inactive \
-        || fail "Velnor job worker is active or activating; keeping CPU quota"
+        || fail "Velnor job worker is active or activating; aborting removal"
 
-      # This is intentionally immediately before rm: a stale pre-stop check
-      # permits a job started in the gap to run outside its aggregate cap.
+      # This is intentionally immediately after the stop loop: a stale
+      # pre-stop check permits a job started in the gap to outlive removal.
       verify_jobs_slice_inactive \
-        || fail "velnor-jobs.slice is not provably inactive; keeping CPU quota"
-    fi
-    rm -f "$JOBS_SLICE_DROPIN"
-    rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
-    if [ -d /run/systemd/system ]; then
+        || fail "velnor-jobs.slice is not provably inactive; aborting removal"
       systemctl daemon-reload || {
-        echo "velnor-runner postrm: daemon-reload failed after removing the CPU quota" >&2
+        echo "velnor-runner postrm: daemon-reload failed after stopping the fleet" >&2
         exit 1
       }
 
@@ -129,7 +123,7 @@ case "$1" in
       # and disappear on reboot; a same-boot reinstall must explicitly unmask
       # the removed fleet before operator-controlled activation.
       verify_worker_units_inactive \
-        || fail "Velnor job worker became active or activating; CPU quota was removed"
+        || fail "Velnor job worker became active or activating after daemon-reload"
       verify_jobs_slice_inactive \
         || fail "velnor-jobs.slice is not provably inactive after daemon-reload"
     fi

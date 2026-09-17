@@ -268,18 +268,27 @@ fn packaged_units_have_no_controller_partof_to_workers() {
     let jobs_slice = include_str!("../debian/velnor-jobs.slice");
     assert!(jobs_slice.contains("job-worker slice"));
     assert!(!jobs_slice.contains("transitional Docker"));
-    for directive in ["MemoryHigh=90%", "MemoryMax=95%", "MemorySwapMax=0"] {
+    // The workload slice is identity-only: no ceiling, no quota drop-in pin.
+    for directive in [
+        "CPUQuota=",
+        "MemoryHigh=",
+        "MemoryMax=",
+        "MemorySwapMax=",
+        "TasksMax=",
+    ] {
         assert!(
-            jobs_slice.lines().any(|line| line == directive),
-            "velnor-jobs.slice must pin aggregate host budget: {directive}"
+            !jobs_slice.lines().any(|line| line.starts_with(directive)),
+            "velnor-jobs.slice must not pin {directive}"
         );
     }
-    // CPUQuota is host-specific: postinst derives it from the detected online
-    // logical CPUs and writes the required drop-in atomically, so the package
-    // slice must never pin a fixed default or run uncapped.
-    assert!(!jobs_slice.lines().any(|line| line.starts_with("CPUQuota=")));
-    assert!(jobs_slice
-        .contains("AssertPathExists=/etc/systemd/system/velnor-jobs.slice.d/10-host-cpu.conf"));
+    assert!(!jobs_slice.contains("AssertPathExists="));
+    assert!(
+        jobs_slice
+            .lines()
+            .filter(|line| line.contains("10-host-cpu.conf"))
+            .all(|line| line.trim_start().starts_with('#')),
+        "the stale drop-in must never be pinned"
+    );
     let control_slice = include_str!("../debian/velnor-control.slice");
     assert!(
         !control_slice
