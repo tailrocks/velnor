@@ -436,6 +436,31 @@ impl RetentionPolicy {
         }
     }
 
+    /// The prepared-tools class for a repository that declares them: rolling
+    /// state keyed under the prepared-tool namespace, bounded to the live
+    /// generation and one fallback — the exact hit and the historical
+    /// fallback the consumer restores. Idempotent: a policy that already
+    /// carries the class is returned unchanged. The default policy never
+    /// carries it, so repositories without a `prepared-tool` row keep
+    /// byte-identical retention behavior.
+    pub(crate) fn with_prepared_tools(mut self) -> Self {
+        if self
+            .classes
+            .iter()
+            .any(|class| class.id == "prepared-tools")
+        {
+            return self;
+        }
+        self.classes.push(ClassPolicy {
+            id: "prepared-tools",
+            purpose: CachePurpose::Generic,
+            markers: &[CacheKeyMatcher::Contains("prepared-tool-v1-")],
+            budget_bytes: GIBIBYTE / 4,
+            generation_bound: 2,
+        });
+        self
+    }
+
     /// Build the maintenance retention policy from `[cache.github]` overrides.
     /// Absent fields keep [`Self::default_policy`] values.
     pub(crate) fn from_config(config: &crate::config::CacheGithubSection) -> Self {
@@ -1279,6 +1304,53 @@ mod tests {
         let runtime = report_class(&report, "runtime-binary");
         assert_eq!(runtime.held_bytes, 300);
         assert_eq!(runtime.entry_count, 1);
+    }
+
+    #[test]
+    fn prepared_tools_class_bounds_the_key_namespace() {
+        let policy = RetentionPolicy::default_policy();
+        assert!(
+            !policy
+                .classes
+                .iter()
+                .any(|class| class.id == "prepared-tools"),
+            "the default policy never carries the prepared-tools class"
+        );
+        let extended = RetentionPolicy::default_policy().with_prepared_tools();
+        let class = policy_class(&extended, "prepared-tools");
+        assert_eq!(class.generation_bound, 2);
+        assert_eq!(
+            extended.clone().with_prepared_tools(),
+            extended,
+            "extending twice adds one class"
+        );
+        let entries = vec![
+            entry(
+                "a",
+                "prepared-tool-v1-test-runner-Linux-X64-0123456789ab-run-42",
+                100,
+                "2026-09-01T00:00:00Z",
+            ),
+            entry(
+                "b",
+                "prepared-tool-v1-test-runner-Linux-X64-0123456789ab-run-99",
+                200,
+                "2026-09-01T00:00:00Z",
+            ),
+        ];
+        let report = budget_report(&entries, &extended);
+        let tools = report_class(&report, "prepared-tools");
+        assert_eq!(tools.held_bytes, 300);
+        assert_eq!(tools.entry_count, 2);
+        // Without the class the same keys fall through to unclassified
+        // rolling state: bounded by the global sweep, reserved nothing.
+        let bare = budget_report(&entries, &policy);
+        assert!(
+            bare.classes
+                .iter()
+                .all(|class| class.id != "prepared-tools"),
+            "undeclared retention never names the class"
+        );
     }
 
     #[test]

@@ -112,12 +112,12 @@ RUN mkdir -p /opt/mise/bin \
 COPY --from=toolset-config /out/mise.toml /out/mise.lock /opt/mise/config/
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=secret,id=mise_github_token,required=true \
+    --mount=type=secret,id=github_token,required=true \
     : > /tmp/mise-empty.toml \
     && cd /opt/mise/config \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
     && mise trust /opt/mise/config/mise.toml \
-    && MISE_GITHUB_TOKEN="$(cat /run/secrets/mise_github_token)" \
+    && MISE_GITHUB_TOKEN="$(cat /run/secrets/github_token)" \
        mise install --locked --yes \
          'aqua:nextest-rs/nextest/cargo-nextest' \
          'aqua:opentofu/opentofu' \
@@ -144,13 +144,13 @@ COPY docker/job-mise.lock /opt/mise/config/mise.lock
 COPY rust-toolchain.toml /opt/mise/config/rust-toolchain.toml
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=secret,id=mise_github_token,required=true \
+    --mount=type=secret,id=github_token,required=true \
     cp /opt/mise/config/mise.toml /opt/mise/config/config.toml \
     && : > /tmp/mise-empty.toml \
     && cd /opt/mise/config \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
     && mise trust /opt/mise/config/mise.toml \
-    && MISE_GITHUB_TOKEN="$(cat /run/secrets/mise_github_token)" \
+    && MISE_GITHUB_TOKEN="$(cat /run/secrets/github_token)" \
        mise install --locked --yes rust 'cargo:cargo-deny' \
     && mise reshim \
     # Install upstream's stable Cargo launcher without activating an interactive
@@ -265,8 +265,8 @@ WORKDIR /__w
 # Release metadata must remain after every expensive filesystem layer. Putting
 # this ARG/LABEL near FROM makes each version bump invalidate the complete
 # dual-architecture toolchain build even though no installed byte changed.
-ARG VELNOR_IMAGE_VERSION=development
-LABEL org.opencontainers.image.version="${VELNOR_IMAGE_VERSION}" \
+ARG VERSION=development
+LABEL org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.source="https://github.com/tailrocks/velnor"
 
 FROM jobimage
