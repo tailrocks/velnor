@@ -4,7 +4,8 @@
 //! Consumers never compile: the setup action and the Velnor policy provisioner
 //! download `velnor-workflow-<RUNNER_OS>-<RUNNER_ARCH>` plus `manifest.json`
 //! from the immutable release the closure names, then prove attestation,
-//! manifest, digest, and the binary's own `--closure` report. This module
+//! manifest, digest, and the binary's own `--closure` and `--revision`
+//! reports. This module
 //! renders the workflow that publishes those releases. The consumer contract
 //! is the specification: the tag scheme, the manifest shape, the attestation
 //! subject, and the acceptance filter below mirror the setup action byte for
@@ -67,11 +68,19 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
-/// full closure, release profile, empty features, a 64-hex digest for the
-/// platform, and the asset name the platform expects. The publish job
-/// evaluates this same filter over the assembled manifest, so a manifest no
-/// consumer would accept never reaches a release.
-const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
+/// full closure, a well-formed source revision, release profile, empty
+/// features, a 64-hex digest for the platform, and the asset name the
+/// platform expects. The publish job evaluates this same filter over the
+/// assembled manifest, so a manifest no consumer would accept never reaches
+/// a release.
+///
+/// The revision clause is well-formedness, not equality with the requested
+/// revision: several commits can share one closure (and therefore one
+/// product), so the manifest names the commit the producer built from while
+/// the consumer requested another. Both consumers bind the binary to the
+/// manifest instead, requiring its `--revision` report to equal the
+/// manifest's `revision`.
+const MANIFEST_ACCEPT_FILTER: &str = ".closure == $closure and (.revision | test(\"^[0-9a-f]{40}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{64}$\")) and .products[$platform].asset == $asset";
 
 /// The isolated Cargo home the producer steps build under, as a rendered
 /// step-level `env:` value. The `runner` context is unavailable in job-level
@@ -216,7 +225,7 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
         );
     }
     let manifest_program = format!(
-        "{{closure: $closure, profile: \"release\", features: \"\", products: {{{manifest_products}}}}}"
+        "{{closure: $closure, revision: $revision, profile: \"release\", features: \"\", products: {{{manifest_products}}}}}"
     );
     let mut manifest_digests = String::new();
     for platform in &platforms {
@@ -248,10 +257,12 @@ pub(crate) fn runtime_products_content(config: &ProjectConfig) -> Option<String>
 # example for the zero closure: `{example_tag}`), so an unrelated monorepo
 # change never rebuilds the runtime. Each platform job builds natively with
 # `cargo build --locked --no-default-features --release`, proves the binary's
-# own `--closure` report equals the tag closure, attests the asset, and
-# uploads it; the publish job proves transport integrity, assembles
-# `manifest.json`, creates the release, and smoke-tests the exact consumer
-# flow (download, attestation, manifest, digest, self-report) before finishing.
+# own `--closure` report equals the tag closure and its `--revision` report
+# equals the build commit, attests the asset, and uploads it; the publish
+# job proves transport integrity, assembles `manifest.json` (naming the
+# source revision it built from), creates the release, and smoke-tests the
+# exact consumer flow (download, attestation, manifest, digest, self-report)
+# before finishing.
 #
 # The workflow never overwrites: when the tag already exists the run skips,
 # and the publish job re-checks immediately before creating the release.
@@ -372,6 +383,9 @@ jobs:
           test -x "$binary" || {{ echo "::error::no release binary at $binary" >&2; exit 1; }}
           reported="$("$binary" --closure)"
           [[ "$reported" == "$CLOSURE" ]] || {{ echo "::error::built binary reports closure $reported, expected $CLOSURE" >&2; exit 1; }}
+          head="$(git rev-parse HEAD)"
+          reported_revision="$("$binary" --revision)"
+          [[ "$reported_revision" == "$head" ]] || {{ echo "::error::built binary reports revision $reported_revision, expected $head" >&2; exit 1; }}
           asset="velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
           cp "$binary" "$asset"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -439,14 +453,19 @@ jobs:
           done
           reported="$(./dist/velnor-workflow-Linux-X64 --closure)"
           [[ "$reported" == "$CLOSURE" ]] || {{ echo "::error::published binary reports closure $reported, expected $CLOSURE" >&2; exit 1; }}
+          reported_revision="$(./dist/velnor-workflow-Linux-X64 --revision)"
+          [[ "$reported_revision" == "$HEAD_SHA" ]] || {{ echo "::error::published binary reports revision $reported_revision, expected $HEAD_SHA" >&2; exit 1; }}
           jq -n \
             --arg closure "$CLOSURE" \
+            --arg revision "$HEAD_SHA" \
 {manifest_digests}            '{manifest_products}' \
             > dist/manifest.json
           for platform in {platform_list}; do
             jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
               '{accept_filter}' dist/manifest.json >/dev/null
           done
+          manifest_revision="$(jq -er '.revision' dist/manifest.json)"
+          [[ "$manifest_revision" == "$HEAD_SHA" ]] || {{ echo "::error::assembled manifest names revision $manifest_revision, expected $HEAD_SHA" >&2; exit 1; }}
           if gh release view "$TAG" --repo {repository} >/dev/null 2>&1; then
             echo "::notice::release $TAG already exists; leaving it untouched"
             echo "skipped=true" >> "$GITHUB_OUTPUT"
@@ -492,6 +511,9 @@ jobs:
           chmod 0644 "$runtime/manifest.json"
           reported="$("$runtime/bin/velnor-workflow" --closure)"
           [[ "$reported" == "$CLOSURE" ]] || {{ echo "::error::installed runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }}
+          manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+          reported_revision="$("$runtime/bin/velnor-workflow" --revision)"
+          [[ "$reported_revision" == "$manifest_revision" ]] || {{ echo "::error::installed runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }}
 "#,
         header = GENERATED_HEADER,
         example_tag = example_tag(),
@@ -997,6 +1019,16 @@ mod tests {
             ),
             "a binary that misreports its closure fails the build: {content}"
         );
+        assert!(
+            content.contains("reported_revision=\"$(\"$binary\" --revision)\""),
+            "the build probes the binary's revision stamp: {content}"
+        );
+        assert!(
+            content.contains(
+                "[[ \"$reported_revision\" == \"$head\" ]] || { echo \"::error::built binary reports revision"
+            ),
+            "a binary that misreports its build commit fails the build: {content}"
+        );
     }
 
     #[test]
@@ -1011,6 +1043,34 @@ mod tests {
             content.matches(MANIFEST_ACCEPT_FILTER).count(),
             2,
             "assemble and smoke-test evaluate the consumer filter: {content}"
+        );
+        assert!(
+            MANIFEST_ACCEPT_FILTER.contains("(.revision | test(\"^[0-9a-f]{40}$\"))"),
+            "the consumer filter requires a well-formed source revision"
+        );
+        assert!(
+            content.contains("--arg revision \"$HEAD_SHA\""),
+            "the manifest names the commit the producer built from: {content}"
+        );
+        assert!(
+            content.contains("revision: $revision"),
+            "the manifest program carries the revision field: {content}"
+        );
+        assert!(
+            content.contains("manifest_revision=\"$(jq -er '.revision' dist/manifest.json)\""),
+            "the assembled manifest revision is read back: {content}"
+        );
+        assert!(
+            content.contains(
+                "[[ \"$manifest_revision\" == \"$HEAD_SHA\" ]] || { echo \"::error::assembled manifest names revision"
+            ),
+            "a manifest that names the wrong build commit fails the publish: {content}"
+        );
+        assert!(
+            content.contains(
+                "[[ \"$reported_revision\" == \"$HEAD_SHA\" ]] || { echo \"::error::published binary reports revision"
+            ),
+            "the publish spot check binds the binary stamp to the build commit: {content}"
         );
         for platform in ["Linux-X64", "Linux-ARM64", "macOS-ARM64"] {
             assert!(
@@ -1046,6 +1106,14 @@ mod tests {
         assert!(
             velnor.contains("\"$existing\" != \"$expected\""),
             "the Velnor consumer reuses its slot only on a manifest digest match"
+        );
+        assert!(
+            velnor.contains("reported_revision=\"$(\"$binary\" --revision)\""),
+            "the Velnor consumer probes the slot binary's revision stamp"
+        );
+        assert!(
+            velnor.contains("[[ \"$reported_revision\" == \"$manifest_revision\" ]]"),
+            "the Velnor consumer binds the stamp to the manifest revision"
         );
     }
 
@@ -1334,6 +1402,22 @@ mod tests {
             content.contains("\"$runtime/bin/velnor-workflow\" --closure"),
             "the smoke test self-reports from the install layout: {content}"
         );
+        assert!(
+            content.contains(
+                "manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\""
+            ),
+            "the smoke test reads the revision from the downloaded manifest: {content}"
+        );
+        assert!(
+            content.contains("\"$runtime/bin/velnor-workflow\" --revision"),
+            "the smoke test probes the installed revision stamp: {content}"
+        );
+        assert!(
+            content.contains(
+                "[[ \"$reported_revision\" == \"$manifest_revision\" ]] || { echo \"::error::installed runtime reports revision"
+            ),
+            "the smoke test binds the installed stamp to the manifest: {content}"
+        );
     }
 
     /// The rendered bytes, pinned to the digest of the reviewed render. The
@@ -1343,7 +1427,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "3f8641a7f2da9892976374183530beef7d4fd94d1d056cbbaf868e0336bf3e11";
+        const PINNED: &str = "f80fa05d7251c6c8d9ad2433a24fa97fe07cd6d613827fe8f2ef624403fab523";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

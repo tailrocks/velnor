@@ -705,7 +705,7 @@ jobs:
             exit 1
           fi
           gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
-          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
+          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
           expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
           existing=""
           if [[ -x "$binary" ]]; then
@@ -728,6 +728,9 @@ jobs:
           fi
           reported="$("$binary" --closure)"
           [[ "$reported" == "$closure" ]] || { echo "::error::pinned workflow policy runtime reports closure $reported, expected $closure" >&2; exit 1; }
+          manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+          reported_revision="$("$binary" --revision)"
+          [[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }
           echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
       - name: Install declared Mise tools
         if: ${{ inputs.mise_tools != '' }}

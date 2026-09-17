@@ -6,10 +6,12 @@
 # example for the zero closure: `velnor-workflow-runtime-v1-0000000000000000`), so an unrelated monorepo
 # change never rebuilds the runtime. Each platform job builds natively with
 # `cargo build --locked --no-default-features --release`, proves the binary's
-# own `--closure` report equals the tag closure, attests the asset, and
-# uploads it; the publish job proves transport integrity, assembles
-# `manifest.json`, creates the release, and smoke-tests the exact consumer
-# flow (download, attestation, manifest, digest, self-report) before finishing.
+# own `--closure` report equals the tag closure and its `--revision` report
+# equals the build commit, attests the asset, and uploads it; the publish
+# job proves transport integrity, assembles `manifest.json` (naming the
+# source revision it built from), creates the release, and smoke-tests the
+# exact consumer flow (download, attestation, manifest, digest, self-report)
+# before finishing.
 #
 # The workflow never overwrites: when the tag already exists the run skips,
 # and the publish job re-checks immediately before creating the release.
@@ -161,6 +163,9 @@ jobs:
           test -x "$binary" || { echo "::error::no release binary at $binary" >&2; exit 1; }
           reported="$("$binary" --closure)"
           [[ "$reported" == "$CLOSURE" ]] || { echo "::error::built binary reports closure $reported, expected $CLOSURE" >&2; exit 1; }
+          head="$(git rev-parse HEAD)"
+          reported_revision="$("$binary" --revision)"
+          [[ "$reported_revision" == "$head" ]] || { echo "::error::built binary reports revision $reported_revision, expected $head" >&2; exit 1; }
           asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
           cp "$binary" "$asset"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -228,17 +233,22 @@ jobs:
           done
           reported="$(./dist/velnor-workflow-Linux-X64 --closure)"
           [[ "$reported" == "$CLOSURE" ]] || { echo "::error::published binary reports closure $reported, expected $CLOSURE" >&2; exit 1; }
+          reported_revision="$(./dist/velnor-workflow-Linux-X64 --revision)"
+          [[ "$reported_revision" == "$HEAD_SHA" ]] || { echo "::error::published binary reports revision $reported_revision, expected $HEAD_SHA" >&2; exit 1; }
           jq -n \
             --arg closure "$CLOSURE" \
+            --arg revision "$HEAD_SHA" \
             --arg linux_x64 "$(cat dist/velnor-workflow-Linux-X64.sha256)" \
             --arg linux_arm64 "$(cat dist/velnor-workflow-Linux-ARM64.sha256)" \
             --arg macos_arm64 "$(cat dist/velnor-workflow-macOS-ARM64.sha256)" \
-            '{closure: $closure, profile: "release", features: "", products: {"Linux-X64": {binary: $linux_x64, asset: "velnor-workflow-Linux-X64"}, "Linux-ARM64": {binary: $linux_arm64, asset: "velnor-workflow-Linux-ARM64"}, "macOS-ARM64": {binary: $macos_arm64, asset: "velnor-workflow-macOS-ARM64"}}}' \
+            '{closure: $closure, revision: $revision, profile: "release", features: "", products: {"Linux-X64": {binary: $linux_x64, asset: "velnor-workflow-Linux-X64"}, "Linux-ARM64": {binary: $linux_arm64, asset: "velnor-workflow-Linux-ARM64"}, "macOS-ARM64": {binary: $macos_arm64, asset: "velnor-workflow-macOS-ARM64"}}}' \
             > dist/manifest.json
           for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
             jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "velnor-workflow-$platform" \
-              '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' dist/manifest.json >/dev/null
+              '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' dist/manifest.json >/dev/null
           done
+          manifest_revision="$(jq -er '.revision' dist/manifest.json)"
+          [[ "$manifest_revision" == "$HEAD_SHA" ]] || { echo "::error::assembled manifest names revision $manifest_revision, expected $HEAD_SHA" >&2; exit 1; }
           if gh release view "$TAG" --repo tailrocks/velnor >/dev/null 2>&1; then
             echo "::notice::release $TAG already exists; leaving it untouched"
             echo "skipped=true" >> "$GITHUB_OUTPUT"
@@ -272,7 +282,7 @@ jobs:
           gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
           gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
           jq -e --arg closure "$CLOSURE" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" \
-            '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
+            '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
           actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
           expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
           [[ "$actual" == "$expected" ]] || { echo "::error::smoke-test digest mismatch" >&2; exit 1; }
@@ -284,3 +294,6 @@ jobs:
           chmod 0644 "$runtime/manifest.json"
           reported="$("$runtime/bin/velnor-workflow" --closure)"
           [[ "$reported" == "$CLOSURE" ]] || { echo "::error::installed runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }
+          manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+          reported_revision="$("$runtime/bin/velnor-workflow" --revision)"
+          [[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::installed runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }
