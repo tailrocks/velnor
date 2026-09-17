@@ -10,8 +10,8 @@ generator	49
 .github/actions/setup-velnor-workflow/action.yml	e091e9e1bd171bf2
 .github/ci/project.toml	66d5af0f28309fd0
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-main.yml	7bb096218bad1460
-.github/workflows/ci-policy.yml	0091351886dd3f00
+.github/workflows/ci-main.yml	39f7f52110c2448f
+.github/workflows/ci-policy.yml	2d683aa0266d37d3
 .github/workflows/ci-pr.yml	cf9be5df6a545f3f
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-runtime-products.yml	96f29b76e5756893
