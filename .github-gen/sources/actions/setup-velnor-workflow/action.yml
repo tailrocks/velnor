@@ -15,7 +15,7 @@
 # recomputed, the binary's own `--closure` report must match the resolved
 # closure and its `--revision` report must match the manifest revision, and
 # the asset and manifest attestations must verify against the pinned
-# producer workflow.
+# producer workflow and default-branch ref.
 #
 # The Actions cache is a pure acceleration: the per-closure directory is
 # re-verified on every restore, and a cold cache costs one small download,
@@ -122,10 +122,12 @@ runs:
         fi
         gh attestation verify "$temporary/$asset" \
           --owner tailrocks \
-          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
+          --source-ref refs/heads/main
         gh attestation verify "$temporary/manifest.json" \
           --owner tailrocks \
-          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml
+          --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
+          --source-ref refs/heads/main
         jq -e \
           --arg closure "$CLOSURE" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \

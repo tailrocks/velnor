@@ -1178,14 +1178,17 @@ mod tests {
         let signer =
             format!("--signer-workflow {repository}/.github/workflows/{RUNTIME_PRODUCTS_FILE}");
         let owner_flag = format!("--owner {}", product_owner(repository));
-        for flag in [&signer, &owner_flag] {
+        // `--signer-ref` does not exist in gh: `--source-ref` is the flag
+        // that pins the producer run to the default branch.
+        let source_ref = "--source-ref refs/heads/main";
+        for flag in [signer.as_str(), owner_flag.as_str(), source_ref] {
             assert!(
                 content.contains(flag),
                 "the smoke test verifies {flag}: {content}"
             );
         }
         let action = setup_action_source();
-        for flag in [&signer, &owner_flag] {
+        for flag in [signer.as_str(), owner_flag.as_str(), source_ref] {
             assert!(
                 action.contains(flag),
                 "the setup action verifies the same {flag}"
@@ -1208,6 +1211,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn all_consumers_pin_the_same_producer_ref() {
+        // The setup action, the Velnor provisioner, and the producer smoke
+        // test verify the same two subjects under the same ref pin: an
+        // attestation minted anywhere but the default branch verifies
+        // nowhere.
+        let action = setup_action_source();
+        assert_eq!(
+            action.matches("--source-ref refs/heads/main").count(),
+            2,
+            "the setup action pins the ref on the asset and the manifest"
+        );
+        let velnor = crate::workflow_pinned_policy_runtime_velnor("checkout");
+        assert_eq!(
+            velnor.matches("--source-ref refs/heads/main").count(),
+            2,
+            "the Velnor provisioner pins the ref on the asset and the manifest"
+        );
+        let content = owner_content(&[]);
+        assert_eq!(
+            content.matches("--source-ref refs/heads/main").count(),
+            2,
+            "the producer smoke test pins the ref on the asset and the manifest: {content}"
+        );
     }
 
     #[test]
