@@ -2,7 +2,7 @@
 schema = 2
 [inputs]
 config	ecc45e65a67e674a
-scan	33f5782652175e4f
+scan	3924b522e3afa28c
 generator	50
 [outputs]
 .github/actionlint.yaml	db8adc5ad96ed4df
