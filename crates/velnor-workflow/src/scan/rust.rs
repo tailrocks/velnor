@@ -234,6 +234,7 @@ pub(crate) struct CargoManifestFacts {
     pub(crate) binary_targets: Vec<String>,
     pub(crate) test_targets: Vec<String>,
     pub(crate) features: Vec<String>,
+    pub(crate) crate_types: Vec<String>,
 }
 
 #[derive(Default)]
@@ -565,6 +566,16 @@ fn analyze_rust_manifests(
             "rust-toolchain.toml".to_owned(),
             "rust-toolchain".to_owned(),
         ];
+        // FFI shape is scan evidence (`rust-ffi:<name>`), never a placement
+        // need: the crate still verifies on any executor, and prerequisite
+        // wiring comes from the repository's own product declarations.
+        if crate::platform::is_ffi_crate_type(&manifest.crate_types) {
+            result.detected.push(format!(
+                "rust-ffi:{}",
+                manifest.package_name.as_deref().unwrap_or(&manifest.root)
+            ));
+        }
+        let platform = crate::platform::PlatformRequirement::portable();
         result.units.push(Unit {
             id: roots_by_manifest
                 .get(&manifest_path)
@@ -598,6 +609,12 @@ fn analyze_rust_manifests(
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform,
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
         });
     }
 
@@ -655,6 +672,12 @@ fn analyze_rust_manifests(
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::portable(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
+            prepared_tools: Vec::new(),
         });
     }
 
@@ -975,6 +998,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         binary_targets: Vec::new(),
         test_targets: Vec::new(),
         features: Vec::new(),
+        crate_types: Vec::new(),
     };
     let mut section = String::new();
     let lines = contents.lines().collect::<Vec<_>>();
@@ -1028,6 +1052,10 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
                 if let Some(name) = toml_string_value(&value) {
                     facts.test_targets.push(name);
                 }
+            }
+            "lib" if key == "crate-type" => {
+                facts.crate_types = toml_string_value(&value)
+                    .map_or_else(|| toml_array_values(&value), |single| vec![single]);
             }
             "features" => facts.features.push(key),
             section if is_cargo_dependency_section(section) => {
@@ -1192,11 +1220,33 @@ pub(crate) fn detect(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::include_str_paths;
+    use super::{include_str_paths, parse_cargo_manifest};
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+
+    #[test]
+    fn lib_crate_types_mark_ffi_evidence() {
+        let facts = parse_cargo_manifest(
+            "crates/ffi",
+            "[package]\nname = \"ffi\"\nversion = \"0.1.0\"\n\n[lib]\ncrate-type = [\"staticlib\", \"rlib\"]\n",
+        );
+        assert_eq!(facts.crate_types, vec!["staticlib", "rlib"]);
+        assert!(crate::platform::is_ffi_crate_type(&facts.crate_types));
+        let single = parse_cargo_manifest(
+            "crates/ffi",
+            "[package]\nname = \"ffi\"\nversion = \"0.1.0\"\n\n[lib]\ncrate-type = \"cdylib\"\n",
+        );
+        assert_eq!(single.crate_types, vec!["cdylib"]);
+        assert!(crate::platform::is_ffi_crate_type(&single.crate_types));
+        let plain = parse_cargo_manifest(
+            "crates/plain",
+            "[package]\nname = \"plain\"\nversion = \"0.1.0\"\n",
+        );
+        assert!(plain.crate_types.is_empty());
+        assert!(!crate::platform::is_ffi_crate_type(&plain.crate_types));
+    }
 
     #[expect(
         clippy::panic,

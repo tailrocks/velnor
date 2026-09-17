@@ -126,6 +126,7 @@ on:
       - "crates/velnor-workflow/templates/**"
       - "crates/velnor-workflow/templates/release-package-signer.yml"
       - "crates/velnor-workflow/tests/**"
+      - "crates/velnor-workflow/tests/generic_surface_literals.rs"
       - "crates/velnorctl/**"
       - "crates/velnorctl/**/*.rs"
       - "crates/velnorctl/Cargo.toml"
@@ -204,9 +205,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+          rev: 12b2570072a6294395c87ddea2b785750adfc3ed
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=7341ef4bdf750c1fbe419e94fb3848c5b8dde718" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=12b2570072a6294395c87ddea2b785750adfc3ed" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -333,7 +334,7 @@ jobs:
           if [[ ! -s "$archive" ]]; then
             temporary="$archive.download"
             trap 'rm -f "$temporary"' EXIT
-            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+            curl --fail --show-error --silent --location --http1.1 --continue-at - --retry 20 --retry-all-errors --retry-delay 5 --retry-max-time 1800 --connect-timeout 30 --max-time 900 \
               --output "$temporary" \
               "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
             printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
@@ -483,9 +484,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+          rev: 12b2570072a6294395c87ddea2b785750adfc3ed
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=7341ef4bdf750c1fbe419e94fb3848c5b8dde718" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=12b2570072a6294395c87ddea2b785750adfc3ed" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -543,7 +544,7 @@ jobs:
           if [[ ! -s "$archive" ]]; then
             temporary="$archive.download"
             trap 'rm -f "$temporary"' EXIT
-            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+            curl --fail --show-error --silent --location --http1.1 --continue-at - --retry 20 --retry-all-errors --retry-delay 5 --retry-max-time 1800 --connect-timeout 30 --max-time 900 \
               --output "$temporary" \
               "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
             printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
@@ -625,9 +626,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+          rev: 12b2570072a6294395c87ddea2b785750adfc3ed
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=7341ef4bdf750c1fbe419e94fb3848c5b8dde718" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=12b2570072a6294395c87ddea2b785750adfc3ed" >> "$GITHUB_ENV"
       - name: Restore Rust toolchain
         id: rustup-toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -685,7 +686,7 @@ jobs:
           if [[ ! -s "$archive" ]]; then
             temporary="$archive.download"
             trap 'rm -f "$temporary"' EXIT
-            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+            curl --fail --show-error --silent --location --http1.1 --continue-at - --retry 20 --retry-all-errors --retry-delay 5 --retry-max-time 1800 --connect-timeout 30 --max-time 900 \
               --output "$temporary" \
               "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
             printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
@@ -913,7 +914,7 @@ jobs:
   publish:
     needs: [identity, debian, sign-deb]
     name: Replace the rolling preview release
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     timeout-minutes: 20
     runs-on: ubuntu-24.04
     permissions:
