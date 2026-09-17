@@ -336,8 +336,8 @@ fn render_checks_file(
     let _ = writeln!(output, "name: {}", yaml_scalar(&name));
     let _ = writeln!(
         output,
-        "run-name: {} · ${{{{ github.event_name }}}}",
-        yaml_scalar(&name)
+        "run-name: {}",
+        yaml_scalar(&format!("{name} · ${{{{ github.event_name }}}}"))
     );
     output.push_str("\non:\n");
     for event in events {
@@ -958,6 +958,26 @@ mod tests {
         );
         let workflow = render(&config, Some("Daily probes".to_owned()), &selected);
         assert!(workflow.contains("name: \"Daily probes\""), "{workflow}");
+    }
+
+    #[test]
+    fn multi_word_name_renders_one_valid_run_name_scalar() {
+        let smoke = profile("smoke");
+        let config = profile_config(vec![smoke]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select every profile",
+        );
+        let workflow = render(&config, Some("Daily probes".to_owned()), &selected);
+        assert!(
+            workflow.contains("run-name: \"Daily probes · ${{ github.event_name }}\""),
+            "the composed value must be quoted as one scalar: {workflow}"
+        );
+        assert!(
+            !workflow.contains("\"Daily probes\" · "),
+            "a quoted part followed by more content is not valid YAML: {workflow}"
+        );
     }
 
     fn unscheduled(id: &str) -> CheckProfileSpec {
