@@ -24,6 +24,7 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest as _, Sha256};
 
@@ -527,6 +528,8 @@ pub(crate) struct AptContract {
     pub(crate) signer: String,
     /// The environment secret holding the signing passphrase (name only).
     pub(crate) passphrase_secret: String,
+    /// The environment secret holding the signing-key material (name only).
+    pub(crate) signing_key_secret: String,
     /// The repository-local keyring the live fingerprint is read from.
     pub(crate) keyring: String,
     /// The `Origin`/`Label` stamped into suite metadata.
@@ -594,6 +597,11 @@ impl AptContract {
                 "apt passphrase_secret must name an environment secret (uppercase identifier), never a value",
             ));
         }
+        if !valid_secret_ref(&spec.signing_key_secret) {
+            return Err(GeneratorError::usage(
+                "apt signing_key_secret must name an environment secret (uppercase identifier), never a value",
+            ));
+        }
         let keyring = default_keyring(spec)?;
         let origin = default_origin(spec)?;
         let identity_dir = default_identity_dir(spec)?;
@@ -613,6 +621,7 @@ impl AptContract {
             manifest_schema: spec.manifest_schema.clone(),
             signer: normalize_fingerprint(&spec.signer_fingerprint),
             passphrase_secret: spec.passphrase_secret.clone(),
+            signing_key_secret: spec.signing_key_secret.clone(),
             keyring,
             origin,
             identity_dir,
@@ -920,7 +929,7 @@ pub(crate) fn run_resolve_commit(
     let source_git = source_git_url(source_repo)?;
     for peeled in [true, false] {
         let argv = resolve_commit_argv(&source_git, tag, peeled);
-        let Ok(stdout) = run_fixed("git", &argv[1..], None, path_overlay) else {
+        let Ok(stdout) = run_fixed("git", &argv, None, path_overlay) else {
             continue;
         };
         let text = String::from_utf8_lossy(&stdout);
@@ -2087,6 +2096,13 @@ pub(crate) struct PublishInputs<'a> {
     /// The resolved signing passphrase, read by the caller from the
     /// `package-feed` environment. `None` means the secret is unset.
     pub(crate) passphrase: Option<String>,
+    /// The environment secret name the signing-key material was resolved
+    /// from. Names the secret in diagnostics; the material itself never
+    /// appears in errors.
+    pub(crate) key_env: String,
+    /// The resolved signing-key material, read by the caller from the
+    /// `package-feed` environment. `None` means the secret is unset.
+    pub(crate) key_material: Option<String>,
     /// The `.deb` read backend.
     pub(crate) backend: DebBackend,
     /// Test-only `PATH` overlay resolving fixed tool names.
@@ -2140,6 +2156,16 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             inputs.passphrase_env
         )));
     }
+    let key_material = inputs
+        .key_material
+        .as_deref()
+        .ok_or_else(|| GeneratorError::usage(format!("publish: {} is unset", inputs.key_env)))?;
+    if key_material.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "publish: {} is empty",
+            inputs.key_env
+        )));
+    }
     let Some(staging_name) = inputs.staging.to_str() else {
         return Err(GeneratorError::usage("staging directory is not UTF-8"));
     };
@@ -2148,19 +2174,29 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             "staging directory must be a relative path without traversal",
         ));
     }
-    match inputs.suite {
-        Suite::Stable => publish_stable(inputs, passphrase),
-        Suite::Preview => publish_preview(inputs, passphrase),
-    }?;
-    // Best-effort agent shutdown after the last signature, mirroring the
-    // oracle's exit trap: a lingering unlocked agent must not outlive the run.
-    let _ = run_fixed(
-        "gpgconf",
-        &["--kill".to_owned(), "gpg-agent".to_owned()],
-        None,
+    // The signing key is imported and proven before any mutation or signing:
+    // a missing, unimportable, or disagreeing key fails here, never mid-run.
+    let homedir = import_signing_key(
+        &inputs.contract.signer,
+        &inputs.key_env,
+        key_material,
         inputs.path_overlay,
-    );
-    Ok(())
+    )?;
+    let Some(homedir_name) = homedir.to_str() else {
+        // The import succeeded, so the agent holds the key: tear down before
+        // refusing, like every other exit path from the import flow.
+        teardown_signing_homedir(&homedir, inputs.path_overlay);
+        return Err(GeneratorError::usage(
+            "publish: signing keyring path is not UTF-8",
+        ));
+    };
+    let outcome = match inputs.suite {
+        Suite::Stable => publish_stable(inputs, passphrase, homedir_name),
+        Suite::Preview => publish_preview(inputs, passphrase, homedir_name),
+    };
+    // The isolated keyring leaves with the run, success or failure.
+    teardown_signing_homedir(&homedir, inputs.path_overlay);
+    outcome
 }
 
 /// The pool subdirectory for a package: the first letter, or the first four
@@ -2336,9 +2372,17 @@ pub(crate) fn apt_release_argv(contract: &AptContract, suite: Suite) -> Vec<Stri
 }
 
 /// The fixed `gpg --detach-sign` argument vector.
-fn gpg_detach_argv(signer: &str, output: &str, input: &str, armor: bool) -> Vec<String> {
+fn gpg_detach_argv(
+    signer: &str,
+    homedir: &str,
+    output: &str,
+    input: &str,
+    armor: bool,
+) -> Vec<String> {
     let mut argv = vec![
         "--batch".to_owned(),
+        "--homedir".to_owned(),
+        homedir.to_owned(),
         "--yes".to_owned(),
         "--pinentry-mode".to_owned(),
         "loopback".to_owned(),
@@ -2358,9 +2402,11 @@ fn gpg_detach_argv(signer: &str, output: &str, input: &str, armor: bool) -> Vec<
 }
 
 /// The fixed `gpg --clearsign` argument vector.
-fn gpg_clearsign_argv(signer: &str, output: &str, input: &str) -> Vec<String> {
+fn gpg_clearsign_argv(signer: &str, homedir: &str, output: &str, input: &str) -> Vec<String> {
     vec![
         "--batch".to_owned(),
+        "--homedir".to_owned(),
+        homedir.to_owned(),
         "--yes".to_owned(),
         "--pinentry-mode".to_owned(),
         "loopback".to_owned(),
@@ -2427,11 +2473,156 @@ fn run_in(
     Ok(output.stdout)
 }
 
+/// Process-local sequence distinguishing isolated signing keyrings created
+/// within one publisher process.
+static SIGNING_KEYRING_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Create the isolated keyring directory the publisher imports the signing
+/// key into. The directory lives outside the staging tree — key material
+/// must never enter the published bytes — and starts empty: stale state
+/// from a crashed run is wiped before creation.
+fn create_signing_homedir() -> Result<PathBuf, GeneratorError> {
+    let seq = SIGNING_KEYRING_SEQ.fetch_add(1, Ordering::SeqCst);
+    let dir =
+        std::env::temp_dir().join(format!("velnor-feed-signing-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|error| GeneratorError::io("create", &dir, &error))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&dir).map_err(|error| GeneratorError::io("create", &dir, &error))?;
+    }
+    Ok(dir)
+}
+
+/// The first secret-key fingerprint a `gpg --with-colons --list-secret-keys`
+/// listing carries: the tenth field of the first `fpr:` record.
+fn secret_key_fingerprint(listing: &str) -> Option<String> {
+    for line in listing.lines() {
+        let mut fields = line.split(':');
+        if fields.next() != Some("fpr") {
+            continue;
+        }
+        if let Some(fingerprint) = fields.nth(8)
+            && !fingerprint.is_empty()
+        {
+            return Some(fingerprint.to_owned());
+        }
+    }
+    None
+}
+
+/// Import the signing-key material into the isolated keyring and prove the
+/// private key agrees with the pinned publisher fingerprint — the same
+/// identity the verify step read from the committed public keyring.
+fn agree_imported_key(
+    homedir_name: &str,
+    signer: &str,
+    key_env: &str,
+    key_material: &str,
+    path_overlay: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    run_fixed(
+        "gpg",
+        &[
+            "--batch".to_owned(),
+            "--homedir".to_owned(),
+            homedir_name.to_owned(),
+            "--import".to_owned(),
+        ],
+        Some(key_material.as_bytes()),
+        path_overlay,
+    )
+    .map_err(|_| {
+        GeneratorError::usage(format!(
+            "publish: {key_env} did not import as a signing key"
+        ))
+    })?;
+    let listing = run_fixed(
+        "gpg",
+        &[
+            "--batch".to_owned(),
+            "--homedir".to_owned(),
+            homedir_name.to_owned(),
+            "--with-colons".to_owned(),
+            "--list-secret-keys".to_owned(),
+        ],
+        None,
+        path_overlay,
+    )
+    .map_err(|_| {
+        GeneratorError::usage(format!("publish: {key_env} carries no listable secret key"))
+    })?;
+    let imported = secret_key_fingerprint(&String::from_utf8_lossy(&listing)).ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "publish: {key_env} carries no secret-key fingerprint"
+        ))
+    })?;
+    if !fingerprints_match(&imported, signer) {
+        return Err(GeneratorError::usage(
+            "publish: imported signing key disagrees with the pinned publisher key",
+        ));
+    }
+    Ok(())
+}
+
+/// Tear down an isolated signing keyring: shut down the agent it spawned,
+/// then wipe the directory — best-effort, mirroring the oracle's exit trap.
+/// A lingering unlocked agent must not outlive the run, and key material
+/// must not linger in the temp tree either. Every exit path from the
+/// import/agreement flow funnels through here, success or refusal alike.
+fn teardown_signing_homedir(homedir: &Path, path_overlay: Option<&Path>) {
+    let _ = run_fixed(
+        "gpgconf",
+        &[
+            "--homedir".to_owned(),
+            homedir.to_string_lossy().into_owned(),
+            "--kill".to_owned(),
+            "gpg-agent".to_owned(),
+        ],
+        None,
+        path_overlay,
+    );
+    let _ = std::fs::remove_dir_all(homedir);
+}
+
+/// Import the signing-key material into an isolated keyring and prove the
+/// private key agrees with the pinned publisher fingerprint. A failed import
+/// tears down the keyring it created: no agent survives the refusal, and key
+/// material never lingers in the temp tree. Diagnostics name the secret,
+/// never the material.
+fn import_signing_key(
+    signer: &str,
+    key_env: &str,
+    key_material: &str,
+    path_overlay: Option<&Path>,
+) -> Result<PathBuf, GeneratorError> {
+    let homedir = create_signing_homedir()?;
+    let Some(homedir_name) = homedir.to_str() else {
+        teardown_signing_homedir(&homedir, path_overlay);
+        return Err(GeneratorError::usage(
+            "publish: signing keyring path is not UTF-8",
+        ));
+    };
+    let outcome = agree_imported_key(homedir_name, signer, key_env, key_material, path_overlay);
+    if outcome.is_err() {
+        teardown_signing_homedir(&homedir, path_overlay);
+    }
+    outcome.map(|()| homedir)
+}
+
 /// Unlock and cache the exact signing key with one discarded signature after
 /// validation and before signing, so the publisher fails on a locked key
 /// before it signs — but never masks an input defect with a key error.
 fn prime_signer_agent(
     signer: &str,
+    homedir: &str,
     passphrase: &str,
     path_overlay: Option<&Path>,
 ) -> Result<(), GeneratorError> {
@@ -2439,6 +2630,8 @@ fn prime_signer_agent(
         "gpg",
         &[
             "--batch".to_owned(),
+            "--homedir".to_owned(),
+            homedir.to_owned(),
             "--yes".to_owned(),
             "--pinentry-mode".to_owned(),
             "loopback".to_owned(),
@@ -2567,7 +2760,11 @@ fn build_strict_indexes(
 
 /// Publish the stable suite: wipe and rebuild the staging tree with the
 /// deterministic candidate-plus-rollback pool, then sign and record.
-fn publish_stable(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), GeneratorError> {
+fn publish_stable(
+    inputs: &PublishInputs<'_>,
+    passphrase: &str,
+    homedir: &str,
+) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     let tag = parse_stable_tag(&inputs.version)?;
     // Malformed pointers are rejected before any mutation or signing: only
@@ -2627,12 +2824,13 @@ fn publish_stable(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), Ge
         inputs.path_overlay,
     )?;
     check_stable_pointer(inputs.previous_pointer, &format!("v{rollback}"))?;
-    prime_signer_agent(&contract.signer, passphrase, inputs.path_overlay)?;
+    prime_signer_agent(&contract.signer, homedir, passphrase, inputs.path_overlay)?;
     sign_suite_release(
         inputs.staging,
         Suite::Stable,
         contract,
         passphrase,
+        homedir,
         inputs.path_overlay,
     )?;
     let source_record = sidecar_digest(&inputs.incoming.join(RECORD_SIDECAR))?;
@@ -2646,6 +2844,7 @@ fn publish_stable(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), Ge
         inputs.previous_pointer,
         inputs.path_overlay,
         passphrase,
+        homedir,
     )?;
     std::fs::write(
         inputs.staging.join("last-publish"),
@@ -2657,7 +2856,11 @@ fn publish_stable(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), Ge
 
 /// Publish the preview suite into the shared tree without wiping: only the
 /// preview pool, indexes, and metadata are written.
-fn publish_preview(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), GeneratorError> {
+fn publish_preview(
+    inputs: &PublishInputs<'_>,
+    passphrase: &str,
+    homedir: &str,
+) -> Result<(), GeneratorError> {
     let contract = &inputs.contract;
     let parsed = parse_preview_version(&inputs.version)?;
     if !inputs.bootstrap && inputs.prev_dir.is_none() {
@@ -2715,12 +2918,13 @@ fn publish_preview(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), G
             )));
         }
     }
-    prime_signer_agent(&contract.signer, passphrase, inputs.path_overlay)?;
+    prime_signer_agent(&contract.signer, homedir, passphrase, inputs.path_overlay)?;
     sign_suite_release(
         inputs.staging,
         Suite::Preview,
         contract,
         passphrase,
+        homedir,
         inputs.path_overlay,
     )?;
     let source_manifest = sha256_file(&inputs.incoming.join(PREVIEW_MANIFEST_FILE))?;
@@ -2734,6 +2938,7 @@ fn publish_preview(inputs: &PublishInputs<'_>, passphrase: &str) -> Result<(), G
         inputs.previous_pointer,
         inputs.path_overlay,
         passphrase,
+        homedir,
     )?;
     std::fs::write(
         inputs.staging.join(Suite::Preview.last_publish_file()),
@@ -2886,6 +3091,7 @@ fn sign_suite_release(
     suite: Suite,
     contract: &AptContract,
     passphrase: &str,
+    homedir: &str,
     path_overlay: Option<&Path>,
 ) -> Result<(), GeneratorError> {
     let dir = staging.join(format!("dists/{}", suite.as_str()));
@@ -2909,6 +3115,7 @@ fn sign_suite_release(
         "gpg",
         &gpg_detach_argv(
             &contract.signer,
+            homedir,
             &format!("{dists}/Release.gpg"),
             &format!("{dists}/Release"),
             true,
@@ -2921,6 +3128,7 @@ fn sign_suite_release(
         "gpg",
         &gpg_clearsign_argv(
             &contract.signer,
+            homedir,
             &format!("{dists}/InRelease"),
             &format!("{dists}/Release"),
         ),
@@ -3168,6 +3376,7 @@ fn emit_publication_record(
     previous_pointer: &Path,
     path_overlay: Option<&Path>,
     passphrase: &str,
+    homedir: &str,
 ) -> Result<(), GeneratorError> {
     let inrelease = sha256_file(&staging.join(format!("dists/{}/InRelease", suite.as_str())))?;
     let mut packages = Vec::new();
@@ -3226,7 +3435,13 @@ fn emit_publication_record(
     run_in(
         staging,
         "gpg",
-        &gpg_detach_argv(&contract.signer, &format!("{file}.sig"), file, false),
+        &gpg_detach_argv(
+            &contract.signer,
+            homedir,
+            &format!("{file}.sig"),
+            file,
+            false,
+        ),
         Some(passphrase.as_bytes()),
         path_overlay,
     )?;
@@ -3553,6 +3768,7 @@ mod tests {
             apt_arches: Vec::new(),
             signer_fingerprint: FIXTURE_FPR.to_owned(),
             passphrase_secret: "B1_TEST_PASSPHRASE".to_owned(),
+            signing_key_secret: "B1_TEST_SIGNING_KEY".to_owned(),
             keyring_path: String::new(),
             apt_origin: String::new(),
             apt_identity_dir: String::new(),
@@ -3740,6 +3956,20 @@ mod tests {
             FIXTURE_FPR,
             "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
         ));
+    }
+
+    #[test]
+    fn secret_key_fingerprint_reads_the_first_fpr_record() {
+        let listing = "sec:-:2048:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:0:\n\
+             fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n\
+             uid:::::::::Example <example@test>:\n";
+        assert_eq!(
+            secret_key_fingerprint(listing).as_deref(),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+        assert_eq!(secret_key_fingerprint(""), None);
+        assert_eq!(secret_key_fingerprint("tru::1:0:0:0:0:\n"), None);
+        assert_eq!(secret_key_fingerprint("fpr::::::::::\n"), None);
     }
 
     #[test]
@@ -3985,6 +4215,7 @@ mod tests {
         spec.signer_fingerprint = FIXTURE_FPR.to_ascii_lowercase();
         spec.retention = 1;
         let contract = must(AptContract::resolve(&spec), "resolve explicit");
+        assert_eq!(contract.signing_key_secret, "B1_TEST_SIGNING_KEY");
         assert_eq!(contract.arches, ["amd64".to_owned(), "arm64".to_owned()]);
         assert_eq!(contract.keyring, "keys/feed.gpg");
         assert_eq!(contract.origin, "Example Feed");
@@ -4027,6 +4258,14 @@ mod tests {
             (
                 "secret-value",
                 Box::new(|spec| spec.passphrase_secret = "s3cret!".to_owned()),
+            ),
+            (
+                "key-secret",
+                Box::new(|spec| spec.signing_key_secret = "lowercase".to_owned()),
+            ),
+            (
+                "key-secret-empty",
+                Box::new(|spec| spec.signing_key_secret = String::new()),
             ),
             (
                 "keyring",
@@ -4169,6 +4408,40 @@ mod tests {
         );
         let error = must_fail(source_git_url("https://evil.example/x"), "evil slug");
         assert!(error.contains("owner/name"), "{error}");
+    }
+
+    #[test]
+    fn resolve_commit_invokes_git_ls_remote() {
+        // The resolver must hand git the full fixed argv — `ls-remote` first.
+        // Slicing the subcommand off makes git read the URL as its command,
+        // so every scheduled and empty-commit discovery fails closed while
+        // the explicit-commit path (which never calls the resolver) works.
+        let dir = fixture_dir("resolve-commit-git");
+        let bin = dir.join("bin");
+        must(std::fs::create_dir_all(&bin), "stub bin");
+        write_bytes(
+            &bin.join("git"),
+            format!(
+                "#!/bin/sh\n[ \"$1\" = \"ls-remote\" ] || exit 1\nprintf '%s\\n' \"git $*\" >> \"{}/git.log\"\nprintf '{FIXTURE_COMMIT}\\trefs/tags/v1.2.3^{{}}'\\n",
+                dir.display()
+            )
+            .as_bytes(),
+        );
+        make_executable(&bin.join("git"));
+        let commit = must(
+            run_resolve_commit(FIXTURE_SOURCE, "v1.2.3", Some(&bin)),
+            "resolve the tag commit",
+        );
+        assert_eq!(commit, FIXTURE_COMMIT);
+        let log = must(
+            std::fs::read_to_string(dir.join("git.log")),
+            "read the git log",
+        );
+        assert!(
+            log.contains("git ls-remote https://github.com/example/app.git refs/tags/v1.2.3^{}"),
+            "{log}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Craft a minimal but valid `.deb` with portable `ar`/`tar`/`gzip` so
@@ -5165,6 +5438,14 @@ mod tests {
                 concat!(
                     "#!/bin/sh\n",
                     "printf '%s\\n' \"gpg $*\" >> \"{0}/gpg.log\"\n",
+                    "case \" $* \" in\n",
+                    "  *\" --import \"*) cat >/dev/null; exit 0 ;;\n",
+                    "  *\" --list-secret-keys \"*) printf 'sec:-:2048:1:{1}:0:\\n'; printf 'fpr:::::::::{1}:\\n'; exit 0 ;;\n",
+                    "esac\n",
+                    "# Every remaining shape carries piped stdin (passphrase on\n",
+                    "# fd 0): drain it like the real tool so the parent's write\n",
+                    "# never EPIPEs against an already-exited stub.\n",
+                    "cat >/dev/null\n",
                     "output=\"\"; input=\"\"; clearsign=0; prev=\"\"\n",
                     "for arg in \"$@\"; do\n",
                     "  case \"$prev\" in\n",
@@ -5184,7 +5465,8 @@ mod tests {
                     "fi\n",
                     "exit 0\n",
                 ),
-                log.display()
+                log.display(),
+                FIXTURE_FPR
             )
             .as_bytes(),
         );
@@ -5200,6 +5482,92 @@ mod tests {
         make_executable(&bin.join("gpg"));
         make_executable(&bin.join("gpgconf"));
         ToolStubs { bin, log }
+    }
+
+    /// Prove no signature was attempted: the key import and agreement listing
+    /// are pre-mutation validation and may have run, but no signing verb may
+    /// appear in the stub log.
+    fn assert_no_signing_attempted(stubs: &ToolStubs) {
+        let log_path = stubs.log.join("gpg.log");
+        if !log_path.exists() {
+            return;
+        }
+        let log = must(std::fs::read_to_string(&log_path), "read gpg log");
+        assert!(
+            !log.contains("--detach-sign") && !log.contains("--clearsign"),
+            "no signing may be attempted: {log}"
+        );
+    }
+
+    #[test]
+    fn gpg_stub_drains_piped_standard_input() {
+        // The stub must consume stdin exactly like the real tool: `gpg
+        // --import` reads key material to EOF and `--passphrase-fd 0`
+        // reads the passphrase. A stub that exits without reading races
+        // the parent's write — under CI load the write lands after the
+        // exit, EPIPEs, and the publish flow fails spuriously ("gpg
+        // refused standard input"). Input past the 64 KiB pipe buffer
+        // makes the race deterministic: the buffer fills and the rest
+        // has nowhere to go once a non-draining stub exits.
+        let stubs = tool_stubs("gpg-stub-drains-stdin");
+        let flood = vec![b'k'; 1024 * 1024];
+        must(
+            run_fixed(
+                "gpg",
+                &[
+                    "--batch".to_owned(),
+                    "--homedir".to_owned(),
+                    "unused".to_owned(),
+                    "--import".to_owned(),
+                ],
+                Some(&flood),
+                Some(&stubs.bin),
+            ),
+            "the import stub drains stdin",
+        );
+        must(
+            run_fixed(
+                "gpg",
+                &[
+                    "--batch".to_owned(),
+                    "--homedir".to_owned(),
+                    "unused".to_owned(),
+                    "--yes".to_owned(),
+                    "--pinentry-mode".to_owned(),
+                    "loopback".to_owned(),
+                    "--passphrase-fd".to_owned(),
+                    "0".to_owned(),
+                    "--local-user".to_owned(),
+                    FIXTURE_IDENTITY.to_owned(),
+                    "--output".to_owned(),
+                    "/dev/null".to_owned(),
+                    "--detach-sign".to_owned(),
+                    "/dev/null".to_owned(),
+                ],
+                Some(&flood),
+                Some(&stubs.bin),
+            ),
+            "the prime stub drains stdin",
+        );
+        // The file-signing shape drains too: passphrase on stdin, the
+        // release on a file argument.
+        let input = stubs.log.join("Release");
+        write_bytes(&input, b"release-bytes");
+        let output = stubs.log.join("Release.gpg");
+        let input_name = must(input.to_str().ok_or("input utf8"), "input utf8");
+        let output_name = must(output.to_str().ok_or("output utf8"), "output utf8");
+        must(
+            run_fixed(
+                "gpg",
+                &gpg_detach_argv(FIXTURE_IDENTITY, "unused", output_name, input_name, true),
+                Some(&flood),
+                Some(&stubs.bin),
+            ),
+            "the signing stub drains stdin",
+        );
+        assert!(output.is_file(), "the stub still signs");
+        let base = must(stubs.log.parent().ok_or("stub base"), "stub base").to_path_buf();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn canned_packages(package: &str, arch: &str, versions: &[&str]) -> String {
@@ -5365,6 +5733,7 @@ mod tests {
         path_overlay: Option<&'a Path>,
     ) -> PublishInputs<'a> {
         let passphrase_env = contract.passphrase_secret.clone();
+        let key_env = contract.signing_key_secret.clone();
         PublishInputs {
             suite,
             contract,
@@ -5376,6 +5745,8 @@ mod tests {
             bootstrap,
             passphrase_env,
             passphrase: Some("fixture-passphrase-value".to_owned()),
+            key_env,
+            key_material: Some("fixture-key-material".to_owned()),
             backend: DebBackend::Auto,
             path_overlay,
         }
@@ -5423,6 +5794,14 @@ mod tests {
         assert!(
             !gpg_log.contains("fixture-passphrase-value"),
             "passphrase must never appear in argv: {gpg_log}"
+        );
+        assert!(
+            !gpg_log.contains("fixture-key-material"),
+            "key material must never appear in argv: {gpg_log}"
+        );
+        assert!(
+            gpg_log.contains("--homedir"),
+            "every signing call must run in the isolated keyring: {gpg_log}"
         );
         let _ = std::fs::remove_dir_all(&incoming.dir);
         let _ = std::fs::remove_dir_all(&root);
@@ -5517,6 +5896,58 @@ mod tests {
         assert!(error.contains("only to --suite preview"), "{error}");
         let _ = std::fs::remove_dir_all(&incoming.dir);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Publish with the key material overridden: the key-secret negatives
+    /// fail pre-mutation, naming the secret — never the material.
+    fn publish_key_material_error(name: &str, material: Option<String>) -> String {
+        let incoming = stable_incoming(name);
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify first",
+        );
+        let stubs = tool_stubs(&format!("{name}-tools"));
+        let root = fixture_dir(&format!("{name}-root"));
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let mut inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &incoming.dir,
+                None,
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            inputs.key_material = material;
+            must_fail(publish_suite(&inputs), name)
+        });
+        assert!(
+            !stubs.log.join("gpg.log").exists(),
+            "no key import attempted: {name}"
+        );
+        assert!(
+            !root.join("public").exists(),
+            "rejected pre-mutation: {name}"
+        );
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+        error
+    }
+
+    #[test]
+    fn stable_publish_refuses_without_key_material() {
+        let error = publish_key_material_error("pub-no-key-unset", None);
+        assert!(error.contains("B1_TEST_SIGNING_KEY is unset"), "{error}");
+    }
+
+    #[test]
+    fn stable_publish_refuses_empty_key_material() {
+        let error = publish_key_material_error("pub-no-key-empty", Some(String::new()));
+        assert!(error.contains("B1_TEST_SIGNING_KEY is empty"), "{error}");
     }
 
     #[test]
@@ -5723,7 +6154,166 @@ mod tests {
             error.contains("disagrees with retained rollback"),
             "{error}"
         );
-        assert!(!stubs.log.join("gpg.log").exists(), "no signing attempted");
+        assert_no_signing_attempted(&stubs);
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stable_publish_refuses_a_disagreeing_signing_key() {
+        // The import succeeds but the private key is not the pinned
+        // publisher identity: publication fails pre-mutation, before any
+        // signature, naming the disagreement — never the material.
+        let incoming = stable_incoming("pub-key-disagree");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify first",
+        );
+        let stubs = tool_stubs("pub-key-disagree-tools");
+        let script = must(
+            std::fs::read_to_string(stubs.bin.join("gpg")),
+            "read the gpg stub",
+        );
+        assert!(
+            script.contains(FIXTURE_FPR),
+            "the stub lists the pinned key"
+        );
+        must(
+            std::fs::write(
+                stubs.bin.join("gpg"),
+                script.replace(FIXTURE_FPR, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+            ),
+            "re-point the stub at a foreign key",
+        );
+        let root = fixture_dir("pub-key-disagree-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        stable_pointer_file(&root, "v1.2.2");
+        can_both_arches(&stubs, &["1.2.3", "1.2.2"]);
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &incoming.dir,
+                Some(&prev),
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must_fail(publish_suite(&inputs), "disagreeing key")
+        });
+        assert!(
+            error.contains("disagrees with the pinned publisher key"),
+            "{error}"
+        );
+        let log = must(
+            std::fs::read_to_string(stubs.log.join("gpg.log")),
+            "read the gpg log",
+        );
+        assert!(
+            log.contains("--import"),
+            "the flow must reach the key import: {log}"
+        );
+        assert_no_signing_attempted(&stubs);
+        assert!(
+            !root.join("public").exists(),
+            "disagreement rejected pre-mutation"
+        );
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disagreeing_key_refusal_leaves_no_agent_or_key_residue() {
+        // The refusal path must tear down the isolated keyring exactly like
+        // the success path: the agent holding the imported key is killed,
+        // then the directory is wiped. A bare directory wipe would orphan a
+        // live gpg-agent/scdaemon pair holding key material.
+        let incoming = stable_incoming("pub-key-residue");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify first",
+        );
+        let stubs = tool_stubs("pub-key-residue-tools");
+        let script = must(
+            std::fs::read_to_string(stubs.bin.join("gpg")),
+            "read the gpg stub",
+        );
+        assert!(
+            script.contains(FIXTURE_FPR),
+            "the stub lists the pinned key"
+        );
+        must(
+            std::fs::write(
+                stubs.bin.join("gpg"),
+                script.replace(FIXTURE_FPR, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+            ),
+            "re-point the stub at a foreign key",
+        );
+        let root = fixture_dir("pub-key-residue-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        stable_pointer_file(&root, "v1.2.2");
+        can_both_arches(&stubs, &["1.2.3", "1.2.2"]);
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &incoming.dir,
+                Some(&prev),
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must_fail(publish_suite(&inputs), "disagreeing key")
+        });
+        assert!(
+            error.contains("disagrees with the pinned publisher key"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("fixture-key-material"),
+            "the refusal names the secret, never the material: {error}"
+        );
+        let gpg_log = must(
+            std::fs::read_to_string(stubs.log.join("gpg.log")),
+            "read the gpg log",
+        );
+        let homedir = must(
+            gpg_log
+                .lines()
+                .find(|line| line.contains("--import"))
+                .and_then(|line| {
+                    let mut args = line.split_whitespace();
+                    args.position(|arg| arg == "--homedir")
+                        .and_then(|_| args.next())
+                })
+                .ok_or_else(|| format!("the flow must reach the key import: {gpg_log}")),
+            "locate the imported keyring",
+        );
+        let kill_log = must(
+            std::fs::read_to_string(stubs.log.join("gpgconf.log")),
+            "the refusal must kill the agent it spawned",
+        );
+        assert!(
+            kill_log.contains(&format!("--homedir {homedir} --kill gpg-agent")),
+            "the refusal must kill this run's agent: {kill_log}"
+        );
+        assert!(
+            !Path::new(homedir).exists(),
+            "the refusal must wipe the keyring holding the material"
+        );
+        assert_no_signing_attempted(&stubs);
+        assert!(
+            !root.join("public").exists(),
+            "disagreement rejected pre-mutation"
+        );
         let _ = std::fs::remove_dir_all(&incoming.dir);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -5763,7 +6353,7 @@ mod tests {
             must_fail(publish_suite(&inputs), "pointer keys")
         });
         assert!(error.contains("previous pointer is malformed"), "{error}");
-        assert!(!stubs.log.join("gpg.log").exists(), "no signing attempted");
+        assert_no_signing_attempted(&stubs);
         assert!(
             root.join("public/junk").is_file(),
             "malformed pointer rejected pre-mutation"
@@ -5806,7 +6396,7 @@ mod tests {
             error.contains("preview previous pointer must be"),
             "{error}"
         );
-        assert!(!stubs.log.join("gpg.log").exists(), "no signing attempted");
+        assert_no_signing_attempted(&stubs);
         assert!(
             !root.join("public").exists(),
             "preview pointer rejected pre-mutation"

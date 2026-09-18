@@ -431,6 +431,7 @@ pub(crate) struct ReleaseSection {
     apt_arches: Vec<String>,
     signer_fingerprint: Option<String>,
     passphrase_secret: Option<String>,
+    signing_key_secret: Option<String>,
     keyring_path: Option<String>,
     apt_origin: Option<String>,
     apt_identity_dir: Option<String>,
@@ -890,6 +891,10 @@ impl ReleaseSection {
 
     pub(crate) fn passphrase_secret(&self) -> Option<&str> {
         self.passphrase_secret.as_deref()
+    }
+
+    pub(crate) fn signing_key_secret(&self) -> Option<&str> {
+        self.signing_key_secret.as_deref()
     }
 
     pub(crate) fn keyring_path(&self) -> Option<&str> {
