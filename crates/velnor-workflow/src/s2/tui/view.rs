@@ -725,6 +725,7 @@ mod tests {
             workspace_check: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
+            docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
