@@ -5439,9 +5439,13 @@ mod tests {
                     "#!/bin/sh\n",
                     "printf '%s\\n' \"gpg $*\" >> \"{0}/gpg.log\"\n",
                     "case \" $* \" in\n",
-                    "  *\" --import \"*) exit 0 ;;\n",
+                    "  *\" --import \"*) cat >/dev/null; exit 0 ;;\n",
                     "  *\" --list-secret-keys \"*) printf 'sec:-:2048:1:{1}:0:\\n'; printf 'fpr:::::::::{1}:\\n'; exit 0 ;;\n",
                     "esac\n",
+                    "# Every remaining shape carries piped stdin (passphrase on\n",
+                    "# fd 0): drain it like the real tool so the parent's write\n",
+                    "# never EPIPEs against an already-exited stub.\n",
+                    "cat >/dev/null\n",
                     "output=\"\"; input=\"\"; clearsign=0; prev=\"\"\n",
                     "for arg in \"$@\"; do\n",
                     "  case \"$prev\" in\n",
@@ -5493,6 +5497,77 @@ mod tests {
             !log.contains("--detach-sign") && !log.contains("--clearsign"),
             "no signing may be attempted: {log}"
         );
+    }
+
+    #[test]
+    fn gpg_stub_drains_piped_standard_input() {
+        // The stub must consume stdin exactly like the real tool: `gpg
+        // --import` reads key material to EOF and `--passphrase-fd 0`
+        // reads the passphrase. A stub that exits without reading races
+        // the parent's write — under CI load the write lands after the
+        // exit, EPIPEs, and the publish flow fails spuriously ("gpg
+        // refused standard input"). Input past the 64 KiB pipe buffer
+        // makes the race deterministic: the buffer fills and the rest
+        // has nowhere to go once a non-draining stub exits.
+        let stubs = tool_stubs("gpg-stub-drains-stdin");
+        let flood = vec![b'k'; 1024 * 1024];
+        must(
+            run_fixed(
+                "gpg",
+                &[
+                    "--batch".to_owned(),
+                    "--homedir".to_owned(),
+                    "unused".to_owned(),
+                    "--import".to_owned(),
+                ],
+                Some(&flood),
+                Some(&stubs.bin),
+            ),
+            "the import stub drains stdin",
+        );
+        must(
+            run_fixed(
+                "gpg",
+                &[
+                    "--batch".to_owned(),
+                    "--homedir".to_owned(),
+                    "unused".to_owned(),
+                    "--yes".to_owned(),
+                    "--pinentry-mode".to_owned(),
+                    "loopback".to_owned(),
+                    "--passphrase-fd".to_owned(),
+                    "0".to_owned(),
+                    "--local-user".to_owned(),
+                    FIXTURE_IDENTITY.to_owned(),
+                    "--output".to_owned(),
+                    "/dev/null".to_owned(),
+                    "--detach-sign".to_owned(),
+                    "/dev/null".to_owned(),
+                ],
+                Some(&flood),
+                Some(&stubs.bin),
+            ),
+            "the prime stub drains stdin",
+        );
+        // The file-signing shape drains too: passphrase on stdin, the
+        // release on a file argument.
+        let input = stubs.log.join("Release");
+        write_bytes(&input, b"release-bytes");
+        let output = stubs.log.join("Release.gpg");
+        let input_name = must(input.to_str().ok_or("input utf8"), "input utf8");
+        let output_name = must(output.to_str().ok_or("output utf8"), "output utf8");
+        must(
+            run_fixed(
+                "gpg",
+                &gpg_detach_argv(FIXTURE_IDENTITY, "unused", output_name, input_name, true),
+                Some(&flood),
+                Some(&stubs.bin),
+            ),
+            "the signing stub drains stdin",
+        );
+        assert!(output.is_file(), "the stub still signs");
+        let base = must(stubs.log.parent().ok_or("stub base"), "stub base").to_path_buf();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn canned_packages(package: &str, arch: &str, versions: &[&str]) -> String {
