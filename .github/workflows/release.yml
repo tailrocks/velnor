@@ -36,6 +36,11 @@ jobs:
         run: |
           echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2
           exit 1
+      - name: Reject local providers on tag dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && (contains(format(',{0},', github.event.inputs.providers), ',velnor,') || contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) }}
+        run: |
+          echo 'tag dispatch publishes github-hosted only; use a tag push for full provider scope' >&2
+          exit 1
       - name: Declare release provider scope
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
@@ -45,8 +50,8 @@ jobs:
           scope="${PROVIDERS:-github-hosted}"
           echo "release provider scope: $scope"
           case ",$scope," in
-            *,velnor,*) echo 'full provider scope includes velnor' ;;
-            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (velnor qualification deferred)' ;;
+            *,velnor,*|*,github-self-hosted,*) echo 'full provider scope includes local lanes' ;;
+            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (local qualification deferred)' ;;
           esac
 
   verify:
@@ -1849,7 +1854,7 @@ jobs:
 
   release-velnor-bun-velnor:
     name: "velnor / Bun / bun-velnor"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -1871,7 +1876,7 @@ jobs:
 
   release-velnor-docker:
     name: "velnor / Docker / docker"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -1894,7 +1899,7 @@ jobs:
 
   release-velnor-docs:
     name: "velnor / Documentation / docs"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -1916,7 +1921,7 @@ jobs:
 
   release-velnor-opentofu:
     name: "velnor / OpenTofu / opentofu"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -1938,7 +1943,7 @@ jobs:
 
   release-velnor-rust-policy:
     name: "velnor / Rust / rust-policy"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -1969,7 +1974,7 @@ jobs:
 
   release-velnor-rust-unit-collector:
     name: "velnor / Rust / rust-unit-collector"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2017,7 +2022,7 @@ jobs:
 
   release-velnor-rust-velnor-bench:
     name: "velnor / Rust / rust-velnor-bench"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model, release-velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2065,7 +2070,7 @@ jobs:
 
   release-velnor-rust-velnor-client:
     name: "velnor / Rust / rust-velnor-client"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2113,7 +2118,7 @@ jobs:
 
   release-velnor-rust-velnor-control:
     name: "velnor / Rust / rust-velnor-control"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2161,7 +2166,7 @@ jobs:
 
   release-velnor-rust-velnor-model:
     name: "velnor / Rust / rust-velnor-model"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2209,7 +2214,7 @@ jobs:
 
   release-velnor-rust-velnor-render:
     name: "velnor / Rust / rust-velnor-render"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2257,7 +2262,7 @@ jobs:
 
   release-velnor-rust-velnor-runner:
     name: "velnor / Rust / rust-velnor-runner"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2305,7 +2310,7 @@ jobs:
 
   release-velnor-rust-velnor-tools:
     name: "velnor / Rust / rust-velnor-tools"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2353,7 +2358,7 @@ jobs:
 
   release-velnor-rust-velnor-workflow:
     name: "velnor / Rust / rust-velnor-workflow"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2453,7 +2458,7 @@ jobs:
 
   release-velnor-rust-velnor-workflow-contract:
     name: "velnor / Rust / rust-velnor-workflow-contract"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2501,7 +2506,7 @@ jobs:
 
   release-velnor-rust-velnorctl:
     name: "velnor / Rust / rust-velnorctl"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify, release-velnor-rust-velnor-client, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model, release-velnor-rust-velnor-render, release-velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2549,7 +2554,7 @@ jobs:
 
   release-velnor-rust-production-topology:
     name: "velnor / Rust / rust-production-topology"
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) }}
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     needs: [verify]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 60
@@ -2606,7 +2611,7 @@ jobs:
             provider: github-hosted
             runner: ubuntu-24.04
     runs-on: ubuntu-24.04
-    if: ${{ always() && needs.verify.result == 'success' && ((github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && !contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (needs.release-github-hosted-bun-velnor.result == 'success' && needs.release-github-hosted-docker.result == 'success' && needs.release-github-hosted-docs.result == 'success' && needs.release-github-hosted-opentofu.result == 'success' && needs.release-github-hosted-rust-policy.result == 'success' && needs.release-github-hosted-rust-unit-collector.result == 'success' && needs.release-github-hosted-rust-velnor-bench.result == 'success' && needs.release-github-hosted-rust-velnor-client.result == 'success' && needs.release-github-hosted-rust-velnor-control.result == 'success' && needs.release-github-hosted-rust-velnor-model.result == 'success' && needs.release-github-hosted-rust-velnor-render.result == 'success' && needs.release-github-hosted-rust-velnor-runner.result == 'success' && needs.release-github-hosted-rust-velnor-tools.result == 'success' && needs.release-github-hosted-rust-velnor-workflow.result == 'success' && needs.release-github-hosted-rust-velnor-workflow-contract.result == 'success' && needs.release-github-hosted-rust-velnorctl.result == 'success' && needs.release-github-hosted-rust-production-topology.result == 'success')) && ((github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && !contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (needs.release-velnor-bun-velnor.result == 'success' && needs.release-velnor-docker.result == 'success' && needs.release-velnor-docs.result == 'success' && needs.release-velnor-opentofu.result == 'success' && needs.release-velnor-rust-policy.result == 'success' && needs.release-velnor-rust-unit-collector.result == 'success' && needs.release-velnor-rust-velnor-bench.result == 'success' && needs.release-velnor-rust-velnor-client.result == 'success' && needs.release-velnor-rust-velnor-control.result == 'success' && needs.release-velnor-rust-velnor-model.result == 'success' && needs.release-velnor-rust-velnor-render.result == 'success' && needs.release-velnor-rust-velnor-runner.result == 'success' && needs.release-velnor-rust-velnor-tools.result == 'success' && needs.release-velnor-rust-velnor-workflow.result == 'success' && needs.release-velnor-rust-velnor-workflow-contract.result == 'success' && needs.release-velnor-rust-velnorctl.result == 'success' && needs.release-velnor-rust-production-topology.result == 'success')) && (github.event_name != 'workflow_dispatch' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
+    if: ${{ always() && needs.verify.result == 'success' && (needs.release-github-hosted-bun-velnor.result == 'success' && needs.release-github-hosted-docker.result == 'success' && needs.release-github-hosted-docs.result == 'success' && needs.release-github-hosted-opentofu.result == 'success' && needs.release-github-hosted-rust-policy.result == 'success' && needs.release-github-hosted-rust-unit-collector.result == 'success' && needs.release-github-hosted-rust-velnor-bench.result == 'success' && needs.release-github-hosted-rust-velnor-client.result == 'success' && needs.release-github-hosted-rust-velnor-control.result == 'success' && needs.release-github-hosted-rust-velnor-model.result == 'success' && needs.release-github-hosted-rust-velnor-render.result == 'success' && needs.release-github-hosted-rust-velnor-runner.result == 'success' && needs.release-github-hosted-rust-velnor-tools.result == 'success' && needs.release-github-hosted-rust-velnor-workflow.result == 'success' && needs.release-github-hosted-rust-velnor-workflow-contract.result == 'success' && needs.release-github-hosted-rust-velnorctl.result == 'success' && needs.release-github-hosted-rust-production-topology.result == 'success') && (github.event_name == 'workflow_dispatch' || (needs.release-velnor-bun-velnor.result == 'success' && needs.release-velnor-docker.result == 'success' && needs.release-velnor-docs.result == 'success' && needs.release-velnor-opentofu.result == 'success' && needs.release-velnor-rust-policy.result == 'success' && needs.release-velnor-rust-unit-collector.result == 'success' && needs.release-velnor-rust-velnor-bench.result == 'success' && needs.release-velnor-rust-velnor-client.result == 'success' && needs.release-velnor-rust-velnor-control.result == 'success' && needs.release-velnor-rust-velnor-model.result == 'success' && needs.release-velnor-rust-velnor-render.result == 'success' && needs.release-velnor-rust-velnor-runner.result == 'success' && needs.release-velnor-rust-velnor-tools.result == 'success' && needs.release-velnor-rust-velnor-workflow.result == 'success' && needs.release-velnor-rust-velnor-workflow-contract.result == 'success' && needs.release-velnor-rust-velnorctl.result == 'success' && needs.release-velnor-rust-production-topology.result == 'success')) && (github.event_name != 'workflow_dispatch' || (github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,') && !contains(format(',{0},', github.event.inputs.providers), ',velnor,'))) && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
     timeout-minutes: 90
     permissions:
       contents: read

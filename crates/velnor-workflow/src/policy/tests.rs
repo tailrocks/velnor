@@ -1594,30 +1594,3 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
         "the sibling checkout carries no reusable workflows"
     );
 }
-
-/// A release lane additionally runs when an operator dispatches the release
-/// workflow at a tag with its provider selected: dispatch requires write
-/// access and tags are immutable, so the arm is as trusted as the tag-push
-/// arm it extends. Unknown providers, a missing tag check, a renamed
-/// input, and trailing disjuncts stay rejected.
-#[test]
-fn release_dispatch_provider_arm_is_trusted_and_nothing_else_is() {
-    let gate = "(github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')";
-    let armed = format!(
-        "${{{{ {gate} || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) }}}}"
-    );
-    assert!(has_trusted_runner_gate(&armed), "{armed}");
-    let hosted_arm = armed.replace("',velnor,'", "',github-self-hosted,'");
-    assert!(has_trusted_runner_gate(&hosted_arm), "{hosted_arm}");
-    for bad in [
-        armed.replace("',velnor,'", "',github-hosted,'"),
-        armed.replace(" && github.ref_type == 'tag'", ""),
-        armed.replace(
-            "github.event.inputs.providers",
-            "github.event.inputs.runner",
-        ),
-        format!("{armed} || github.event_name == 'push'"),
-    ] {
-        assert!(!has_trusted_runner_gate(&bad), "{bad}");
-    }
-}

@@ -3064,25 +3064,6 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         || value
             .strip_prefix(&format!("{release_gate}&&"))
             .is_some_and(is_safe_trusted_gate_conjunction)
-        || has_release_dispatch_provider_arm(&value, &release_gate)
-}
-
-/// A release lane additionally runs when an operator dispatches the
-/// release workflow at a tag with its provider selected. Dispatch
-/// requires write access and tags are immutable under the tag ruleset,
-/// so the arm is as trusted as the tag-push arm it extends; the
-/// provider must be a known local lane, and nothing may follow it.
-fn has_release_dispatch_provider_arm(value: &str, release_gate: &str) -> bool {
-    let Some(arm) = value.strip_prefix(release_gate) else {
-        return false;
-    };
-    let Some(provider) = arm
-        .strip_prefix("||(github.event_name=='workflow_dispatch'&&github.ref_type=='tag'&&contains(format(',{0},',github.event.inputs.providers),',")
-        .and_then(|arm| arm.strip_suffix(",'))"))
-    else {
-        return false;
-    };
-    matches!(provider, "velnor" | "github-self-hosted")
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {

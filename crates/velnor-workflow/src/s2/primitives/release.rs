@@ -3133,25 +3133,7 @@ fn render_release_unit_job(
     let job_name = yaml_scalar(&crate::s2::comparison_job_name(provider, unit));
     let verify_name = yaml_scalar(&unit.label);
     let dispatch_gate = if provider.is_local() {
-        let mut gate = trusted_release_runner_gate(&config.default_branch);
-        // Native releases declare the `providers` dispatch input: a tag
-        // dispatch runs a local lane only when the operator selected it,
-        // so a declared github-hosted bootstrap visibly skips (never
-        // greenwashes) the local lanes. Tag pushes keep the full gate;
-        // publishers without the input keep the legacy gate so no
-        // dangling input reference renders.
-        if config
-            .release
-            .as_ref()
-            .is_some_and(|release| release.kind == "native")
-        {
-            let _ = write!(
-                gate,
-                " || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{{0}},', github.event.inputs.providers), ',{},'))",
-                provider.as_str()
-            );
-        }
-        gate
+        trusted_release_runner_gate(&config.default_branch)
     } else {
         String::new()
     };
@@ -3345,36 +3327,74 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
 }
 
 /// The `build` job gate for native releases: `always()` plus explicit
-/// result checks, so a tag dispatch can declare a provider subset while
-/// tag pushes keep the full gate. Every provider lane present in the
-/// configuration constrains the build on pushes; on a tag dispatch a
-/// lane is required only when the `providers` input selects it, and the
-/// build additionally requires the github-hosted lane in scope (mirroring
-/// the admit job) plus an adoptable image index (so a fresh-version
-/// dispatch fails closed at the build instead of after an hour of
-/// wasted binaries). A provider with no rendered lanes constrains
-/// nothing. Rehearse drills keep their arm verbatim inside the gate.
+/// result checks, so a tag dispatch can declare the github-hosted
+/// bootstrap scope while tag pushes keep the full gate. Hosted lanes
+/// are ungated (they run on every event) and required on every event;
+/// local lanes are trusted-gated (they skip a tag dispatch) and
+/// required off dispatches. A dispatch additionally declares
+/// github-hosted-only scope (the admit job rejects anything else
+/// loudly) plus an adoptable image index, so a fresh-version dispatch
+/// fails closed at the build instead of after an hour of wasted
+/// binaries. Without rendered hosted lanes no dispatch scope can
+/// satisfy the gate, so a local-only publisher cannot bootstrap past
+/// zero qualification. Rehearse drills keep their arm verbatim inside
+/// the gate.
 fn native_release_build_gate(
     config: &ProjectConfig,
     unit_job_ids: &[String],
     release: &ReleaseSpec,
 ) -> String {
-    let mut clauses = vec!["needs.verify.result == 'success'".to_owned()];
-    for provider in &config.providers {
-        let prefix = format!("release-{}-", provider.as_str());
-        let required: Vec<String> = unit_job_ids
+    fn lane_results(
+        providers: &crate::s2::provider::ProviderSet,
+        unit_job_ids: &[String],
+        local: bool,
+    ) -> String {
+        let required: Vec<String> = providers
             .iter()
-            .filter(|id| id.starts_with(&prefix))
-            .map(|id| format!("needs.{id}.result == 'success'"))
+            .filter(|provider| provider.is_local() == local)
+            .flat_map(|provider| {
+                let prefix = format!("release-{}-", provider.as_str());
+                unit_job_ids
+                    .iter()
+                    .filter(move |id| id.starts_with(&prefix))
+                    .map(|id| format!("needs.{id}.result == 'success'"))
+            })
             .collect();
-        let required = if required.is_empty() {
+        if required.is_empty() {
             "true".to_owned()
         } else {
             required.join(" && ")
-        };
-        clauses.push(format!("((github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && !contains(format(',{{0}},', github.event.inputs.providers), ',{},')) || ({}))", provider.as_str(), required));
+        }
     }
-    clauses.push("(github.event_name != 'workflow_dispatch' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,'))".to_owned());
+    let hosted = lane_results(&config.providers, unit_job_ids, false);
+    let local = lane_results(&config.providers, unit_job_ids, true);
+    let has_hosted_lanes = hosted != "true";
+    let mut clauses = vec![
+        "needs.verify.result == 'success'".to_owned(),
+        format!("({hosted})"),
+        format!("(github.event_name == 'workflow_dispatch' || ({local}))"),
+    ];
+    if has_hosted_lanes {
+        let mut scope = vec![
+            "github.ref_type == 'tag'".to_owned(),
+            "contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')"
+                .to_owned(),
+        ];
+        for provider in &config.providers {
+            if provider.is_local() {
+                scope.push(format!(
+                    "!contains(format(',{{0}},', github.event.inputs.providers), ',{},')",
+                    provider.as_str()
+                ));
+            }
+        }
+        clauses.push(format!(
+            "(github.event_name != 'workflow_dispatch' || ({}))",
+            scope.join(" && ")
+        ));
+    } else {
+        clauses.push("(github.event_name != 'workflow_dispatch')".to_owned());
+    }
     clauses.push("(github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true')".to_owned());
     let core = clauses.join(" && ");
     if has_release_modes(release) {
@@ -3987,7 +4007,7 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         output = inject_native_binary_digest(&output, release);
     }
     let admit = format!(
-        "  admit-provider:\n    name: Control / Admit release\n    runs-on: {hosted_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n      - name: Declare release provider scope\n        if: ${{{{ github.event_name == 'workflow_dispatch' }}}}\n        env:\n          PROVIDERS: ${{{{ github.event.inputs.providers }}}}\n        run: |\n          set -euo pipefail\n          scope=\"${{PROVIDERS:-github-hosted}}\"\n          echo \"release provider scope: $scope\"\n          case \",$scope,\" in\n            *,velnor,*) echo 'full provider scope includes velnor' ;;\n            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (velnor qualification deferred)' ;;\n          esac\n"
+        "  admit-provider:\n    name: Control / Admit release\n    runs-on: {hosted_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n      - name: Reject local providers on tag dispatch\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && (contains(format(',{{0}},', github.event.inputs.providers), ',velnor,') || contains(format(',{{0}},', github.event.inputs.providers), ',github-self-hosted,')) }}}}\n        run: |\n          echo 'tag dispatch publishes github-hosted only; use a tag push for full provider scope' >&2\n          exit 1\n      - name: Declare release provider scope\n        if: ${{{{ github.event_name == 'workflow_dispatch' }}}}\n        env:\n          PROVIDERS: ${{{{ github.event.inputs.providers }}}}\n        run: |\n          set -euo pipefail\n          scope=\"${{PROVIDERS:-github-hosted}}\"\n          echo \"release provider scope: $scope\"\n          case \",$scope,\" in\n            *,velnor,*|*,github-self-hosted,*) echo 'full provider scope includes local lanes' ;;\n            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (local qualification deferred)' ;;\n          esac\n"
     );
     output = output.replace("jobs:\n  verify:", &format!("jobs:\n{admit}\n  verify:"));
     output = output.replace(
@@ -5309,7 +5329,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "7f5e0ae0d512a0fe1ac38f13336a6677be0151ba3db83eda3317849cf487ccf0",
+                "1be4221cb821d29cde4cbe0706fe8622c1bc85b6bb33571df739228b4203695d",
             ),
             (
                 "preview.yml",
@@ -6776,20 +6796,18 @@ mod tests {
         clippy::panic,
         reason = "the fixture construction must fail loudly if it loses its release contract"
     )]
-    fn native_release_local_lanes_honor_the_dispatch_provider_subset() {
+    fn native_release_local_lanes_keep_the_legacy_trusted_gate() {
         let config = native_identity_config(&["release.yml", "preview.yml"]);
         let Some(release) = config.release.as_ref() else {
             panic!("identity fixture must carry a release contract")
         };
         let workflow = super::render_release(&config, release);
-        // A tag dispatch runs a local lane only when the operator selected
-        // its provider, so a declared github-hosted bootstrap visibly
-        // skips (never greenwashes) the local lanes.
+        // Local lanes never read the dispatch provider subset: they run
+        // on tag pushes via the trusted gate and skip tag dispatches, so
+        // a dispatch can only ever declare the github-hosted scope. The
+        // admit job rejects anything else loudly.
         let velnor = yaml_job(&workflow, "release-velnor-rust-example");
-        assert!(
-            velnor.contains("github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')"),
-            "{velnor}"
-        );
+        assert!(!velnor.contains("event.inputs.providers"), "{velnor}");
         // Tag pushes keep the trusted gate.
         assert!(velnor.contains("(github.event_name == 'push'"), "{velnor}");
         // Hosted lanes stay ungated: the build gate enforces their scope.
@@ -6812,33 +6830,41 @@ mod tests {
         let build = yaml_job(&workflow, "build");
         // always() plus explicit result checks (the image job's
         // established pattern): static needs cannot express a declared
-        // provider subset.
+        // provider scope.
         assert!(
             build.contains("always() && needs.verify.result == 'success'"),
             "{build}"
         );
-        // Every configured provider lane constrains the build; on a tag
-        // dispatch a lane is required only when selected.
-        for (id, provider) in [
-            ("release-github-hosted-rust-example", "github-hosted"),
-            ("release-velnor-rust-example", "velnor"),
+        // Hosted lanes run on every event and are required on every
+        // event; local lanes skip tag dispatches and are required off
+        // dispatches.
+        assert!(
+            build.contains("(needs.release-github-hosted-rust-example.result == 'success')"),
+            "{build}"
+        );
+        assert!(
+            build.contains("(github.event_name == 'workflow_dispatch' || ("),
+            "{build}"
+        );
+        for id in [
+            "release-velnor-rust-example",
+            "release-github-self-hosted-rust-example",
         ] {
             assert!(
                 build.contains(&format!("needs.{id}.result == 'success'")),
                 "{build}"
             );
-            assert!(
-                build.contains(&format!(
-                    "!contains(format(',{{0}},', github.event.inputs.providers), ',{provider},')"
-                )),
-                "{build}"
-            );
         }
-        // A dispatch additionally requires github-hosted in scope
-        // (mirroring the admit job) plus an adoptable image index, so a
-        // fresh-version dispatch fails closed at the build.
+        // A dispatch declares github-hosted-only scope at a tag (the
+        // admit job rejects anything else loudly) plus an adoptable
+        // image index, so a fresh-version dispatch fails closed at the
+        // build.
         assert!(
-            build.contains("(github.event_name != 'workflow_dispatch' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')"),
+            build.contains("github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')"),
+            "{build}"
+        );
+        assert!(
+            build.contains("!contains(format(',{0},', github.event.inputs.providers), ',velnor,')"),
             "{build}"
         );
         assert!(
@@ -6896,9 +6922,21 @@ mod tests {
             admit.contains("Reject Velnor-only native release"),
             "{admit}"
         );
+        // Local lanes on a tag dispatch fail loudly (local lanes skip
+        // dispatches, so a silent skip would greenwash the request).
+        assert!(
+            admit.contains("Reject local providers on tag dispatch"),
+            "{admit}"
+        );
+        assert!(
+            admit.contains(
+                "tag dispatch publishes github-hosted only; use a tag push for full provider scope"
+            ),
+            "{admit}"
+        );
         assert!(admit.contains("Declare release provider scope"), "{admit}");
         assert!(
-            admit.contains("::notice::BOOTSTRAP release scope: github-hosted only (velnor qualification deferred)"),
+            admit.contains("::notice::BOOTSTRAP release scope: github-hosted only (local qualification deferred)"),
             "{admit}"
         );
     }
