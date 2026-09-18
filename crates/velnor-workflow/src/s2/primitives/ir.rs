@@ -1879,6 +1879,14 @@ pub(crate) fn unit_runs_workflow_plain_check(unit: &Unit) -> bool {
     unit_commands(unit).any(|command| command.contains("--plain --check"))
 }
 
+/// The D19 pin-fetch commands every hosted job that runs the generator's
+/// `--plain --check` renders before its checks: resolve the declared pin
+/// from the generation config and fetch the commit when the shallow
+/// checkout lacks it, so the guard's `closure_of_tree(pin)` reads from
+/// local history. The collapsed provider job and the release legs share
+/// these lines so the two paths cannot drift.
+pub(crate) const D19_PIN_FETCH_COMMANDS: &str = "          pin=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{40})\".*/\\1/p' .github-gen/velnor-workflow.toml | head -n 1)\"\n          test \"$pin\" != '' || { echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }\n          if ! git cat-file -e \"$pin^{commit}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\"\n          fi";
+
 /// Whether the unit owns the generator crate itself: a Rust unit rooted at
 /// the generator crate's manifest directory. The scan mints one unit per
 /// manifest root, so at most one unit per repository matches; the owner
@@ -2526,6 +2534,26 @@ fn render_mutable_mount_seed_restore_from_input(
         "            {}",
         provider_input::expression(provider_input::CACHE_PATHS)
     );
+    render_seed_restore_steps(output, ir, &paths, &key, &restore_keys, checks_env);
+}
+
+/// The seed restore for a concrete `(provider, unit)` job such as a release
+/// leg: the same steps and the same snapshot grammar as the collapsed
+/// provider job's input-driven restore, with the paths and all three
+/// segments rendered literally from the unit. The key matches the unit
+/// provider job's key for the same pair, so release legs share its seed.
+pub(crate) fn render_mutable_mount_seed_restore_for_unit(
+    output: &mut String,
+    ir: &WorkflowIr,
+    provider: ProviderId,
+    unit: &Unit,
+    checks_env: &str,
+) {
+    let Some(cache) = unit.cache.as_ref() else {
+        return;
+    };
+    let (key, restore_keys) = unit_snapshot(ir, unit, provider, DOCKER_SEED_SNAPSHOT_NAMESPACE);
+    let (paths, _) = crate::s2::rendered_cache_values(cache);
     render_seed_restore_steps(output, ir, &paths, &key, &restore_keys, checks_env);
 }
 
@@ -4776,7 +4804,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             let _ = writeln!(
                 output,
-                "      - name: Fetch D19 pin history\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for pin fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          pin=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' .github-gen/velnor-workflow.toml | head -n 1)\"\n          test \"$pin\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          if ! git cat-file -e \"$pin^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\"\n          fi",
+                "      - name: Fetch D19 pin history\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for pin fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n{D19_PIN_FETCH_COMMANDS}",
             );
         }
 
