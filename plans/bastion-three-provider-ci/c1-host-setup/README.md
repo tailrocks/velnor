@@ -75,8 +75,8 @@ Optional flags (env on the target command line, e.g.
 Pre-flight (read-only, always first): OS/arch gate → route read + pool
 conflict record → running-containers/velnor-units read → cgroup/APT/lsblk
 baseline. Core: B1 timezone UTC → B2 base APT set present-only (never
-upgrade) → B4 git-lfs + bat symlink → C2 docker key (fingerprint fail-closed)
-+ repo file + stale `docker-ce.list` removal → C3 pinned docker set behind
+upgrade) → B4 git-lfs + bat symlink → C2 docker key (fingerprint fail-closed) +
+repo file + stale `docker-ce.list` removal → C3 pinned docker set behind
 the drain gate → holds on the docker set (+ `velnor-runner` if installed) →
 C5 `daemon.json` (log `max-size: 10m`; pools only if requested and
 route-clear) with restart behind the drain gate → C4 service enable+start.
