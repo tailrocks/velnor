@@ -173,7 +173,10 @@ mod tests {
     fn providers_flag_routes_schema2_without_a_target() {
         assert!(wants_s2(&args(&["--providers", "github-hosted"])));
         assert!(wants_s2(&args(&["--providers=github-hosted"])));
-        assert!(!wants_s2(&args(&["--runners", "both"])));
+        // A legacy flag must not force a schema-1 parse of the local
+        // schema-2 repository. Target detection keeps the typed parser in
+        // control; it then rejects the unknown legacy option fail-closed.
+        assert!(wants_s2(&args(&["--runners", "both"])));
     }
 
     #[test]
