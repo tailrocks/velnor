@@ -3,7 +3,8 @@
 //! No live calls: GitHub API and Actions Service are both `wiremock` doubles.
 //! Each test pins one upstream behavior from `actions/scaleset` @
 //! `e6daac70` (session create/refresh/close, long poll + capacity header,
-//! 202/401 handling, AcquireJobs queue-token auth, JIT config, ACK).
+//! 202/401 handling, AcquireJobs queue-token auth, JIT config, ACK,
+//! PAT + App token chains, runner get/lookup).
 
 #![allow(
     clippy::unwrap_used,
@@ -16,23 +17,67 @@
 )]
 #![cfg(feature = "test-support")]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use velnor_model::{
-    AcquireJobsResponse, RunnerScaleSetJitRunnerConfig, RunnerScaleSetJitRunnerSetting,
-    RunnerScaleSetMessageResponse, ScaleSetSession,
+    AcquireJobsResponse, RunnerReference, RunnerScaleSetJitRunnerConfig,
+    RunnerScaleSetJitRunnerSetting, RunnerScaleSetMessageResponse, ScaleSetSession,
 };
 use velnor_runner::scaleset::{
-    ActionsAuth, Fixtures, MessageSessionClient, RetryPolicy, ScaleSetClient, ScaleSetFault,
-    SystemInfo,
+    credentials::InstallationAccessToken, ActionsAuth, Fixtures, FnJwtProvider, JwtProvider,
+    MessageSessionClient, RetryPolicy, ScaleSetClient, ScaleSetFault, SystemInfo,
 };
 use wiremock::{
     matchers::{body_json, body_string_contains, header, method, path, query_param},
-    Mock, MockServer, ResponseTemplate,
+    Match, Mock, MockServer, Request, ResponseTemplate,
 };
 
 const SCALE_SET_ID: i32 = 7;
 const OWNER: &str = "octo-org";
+/// `exp` of the unsigned test admin JWT served by the token-chain mocks.
+const ADMIN_JWT_EXP: u64 = 2_000_000_000;
+
+/// Upstream `getMessage` sets `lastMessageId` only when > 0
+/// (`session_client.go`); `wiremock::matchers::path` ignores the query
+/// string, so omission needs an explicit matcher — without it a client
+/// that always sent `lastMessageId=0` would still pass.
+struct NoLastMessageId;
+
+impl Match for NoLastMessageId {
+    fn matches(&self, request: &Request) -> bool {
+        !request
+            .url
+            .query_pairs()
+            .any(|(key, _)| key == "lastMessageId")
+    }
+}
+
+/// Upstream sends the JSON `userAgent` (`system`, `version`, `commit_sha`,
+/// `scale_set_id`, `subsystem`, `build_*`, `kind: "scaleset"`) on every
+/// queue request (`setUserAgent`); parse the header and pin its shape.
+struct ScaleSetUserAgent;
+
+impl Match for ScaleSetUserAgent {
+    fn matches(&self, request: &Request) -> bool {
+        let Some(value) = request.headers.get("user-agent") else {
+            return false;
+        };
+        let Ok(text) = value.to_str() else {
+            return false;
+        };
+        let Ok(agent) = serde_json::from_str::<serde_json::Value>(text) else {
+            return false;
+        };
+        agent.get("kind").and_then(serde_json::Value::as_str) == Some("scaleset")
+            && agent.get("system").and_then(serde_json::Value::as_str) == Some("velnor")
+            && agent
+                .get("scale_set_id")
+                .and_then(serde_json::Value::as_i64)
+                == Some(i64::from(SCALE_SET_ID))
+            && agent.get("subsystem").and_then(serde_json::Value::as_str) == Some("listener")
+    }
+}
 
 fn fixture_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -84,35 +129,51 @@ fn session_json(server: &MockServer, token: &str) -> serde_json::Value {
     })
 }
 
-/// Mount the token chain: registration-token (201) → admin connection (200).
-async fn mount_token_chain(server: &MockServer) {
+/// Mount the admin handshake: `RemoteAuth <registration token>` (from the
+/// recorded registration-token bytes) → admin connection (200).
+///
+/// `admin_connection.json` pins the upstream handshake response shape
+/// (`actionsServiceAdminConnection`: exactly `{url, token}`); only the
+/// environment-dependent values are substituted for the mock server.
+async fn mount_admin_handshake(server: &MockServer, fixtures: &Fixtures) {
+    let mut admin: serde_json::Value = fixtures.parse("admin_connection.json").unwrap();
+    let fields = admin.as_object().unwrap();
+    assert_eq!(fields.len(), 2, "handshake shape is exactly {{url, token}}");
+    assert!(fields.contains_key("url") && fields.contains_key("token"));
+    admin["url"] = serde_json::Value::String(format!("{}/tenant", server.uri()));
+    admin["token"] = serde_json::Value::String(admin_jwt(ADMIN_JWT_EXP));
+    Mock::given(method("POST"))
+        .and(path("/api/v3/actions/runner-registration"))
+        .and(header("Authorization", "RemoteAuth REDACTED"))
+        .and(header("Content-Type", "application/json"))
+        .and(body_string_contains(OWNER))
+        .and(body_string_contains("register"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(admin))
+        .mount(server)
+        .await;
+}
+
+/// Mount the token chain: registration-token (201, recorded bytes) →
+/// admin connection (200). The recorded registration token (`REDACTED`)
+/// flows into the handshake's `RemoteAuth` header exactly like live.
+async fn mount_token_chain(server: &MockServer, fixtures: &Fixtures) {
     Mock::given(method("POST"))
         .and(path(
             "/api/v3/orgs/octo-org/actions/runners/registration-token",
         ))
         .and(header("Authorization", "Bearer test-pat"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-            "token": "reg-token",
-            "expires_at": "2026-09-17T00:05:00Z"
-        })))
+        .and(header("Content-Type", "application/vnd.github.v3+json"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_string(fixtures.read("registration_token.json").unwrap()),
+        )
         .mount(server)
         .await;
-    let admin_url = format!("{}/tenant", server.uri());
-    Mock::given(method("POST"))
-        .and(path("/api/v3/actions/runner-registration"))
-        .and(header("Authorization", "RemoteAuth reg-token"))
-        .and(body_string_contains(OWNER))
-        .and(body_string_contains("register"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "url": admin_url,
-            "token": admin_jwt(2_000_000_000)
-        })))
-        .mount(server)
-        .await;
+    mount_admin_handshake(server, fixtures).await;
 }
 
-async fn test_client(server: &MockServer) -> ScaleSetClient {
-    mount_token_chain(server).await;
+async fn test_client(server: &MockServer, fixtures: &Fixtures) -> ScaleSetClient {
+    mount_token_chain(server, fixtures).await;
     ScaleSetClient::new_with_pat(
         &format!("{}/octo-org", server.uri()),
         "test-pat",
@@ -152,13 +213,36 @@ async fn fixtures_verify_pin_hashes_and_redaction() {
 
     let jit: RunnerScaleSetJitRunnerConfig = fixtures.parse("jit_runner_config.json").unwrap();
     assert_eq!(jit.encoded_jit_config, "REDACTED");
+
+    // Token-chain shapes (`registrationToken`, `accessToken`,
+    // `actionsServiceAdminConnection` in `client.go`): the wire tests serve
+    // these bytes, so pin their fields here too.
+    let registration: serde_json::Value = fixtures.parse("registration_token.json").unwrap();
+    assert_eq!(registration["token"], "REDACTED");
+    assert_eq!(registration["expires_at"], "2026-09-17T00:05:00Z");
+    let installation: InstallationAccessToken = fixtures.parse("installation_token.json").unwrap();
+    assert_eq!(installation.expires_at, "2026-09-17T01:00:00Z");
+    let admin: serde_json::Value = fixtures.parse("admin_connection.json").unwrap();
+    assert_eq!(admin.as_object().unwrap().len(), 2);
+
+    let runner: RunnerReference = fixtures.parse("runner_reference.json").unwrap();
+    assert_eq!(runner.id, 11);
+    assert_eq!(runner.name, "velnor-set-0007");
+    assert_eq!(runner.runner_scale_set_id, SCALE_SET_ID);
+
+    // Session responses may embed the set (`runnerScaleSet`,
+    // `omitempty`-present): the create/refresh decode path must accept it.
+    let mut created: serde_json::Value = fixtures.parse("session_created.json").unwrap();
+    created["runnerScaleSet"] = fixtures.parse("runner_scale_set.json").unwrap();
+    let with_set: ScaleSetSession = serde_json::from_value(created).unwrap();
+    assert_eq!(with_set.runner_scale_set.unwrap().id, SCALE_SET_ID);
 }
 
 #[tokio::test]
 async fn session_create_polls_with_capacity_header_and_last_message_id() {
     let server = MockServer::start().await;
-    let client = test_client(&server).await;
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let client = test_client(&server, &fixtures).await;
     let batch = fixtures.read("message_batch.json").unwrap();
 
     Mock::given(method("POST"))
@@ -178,6 +262,7 @@ async fn session_create_polls_with_capacity_header_and_last_message_id() {
         .and(query_param("lastMessageId", "8"))
         .and(header("X-ScaleSetMaxCapacity", "10"))
         .and(header("Authorization", "Bearer queue-token-1"))
+        .and(ScaleSetUserAgent)
         .and(header(
             "Accept",
             "application/json; api-version=6.0-preview",
@@ -199,7 +284,8 @@ async fn session_create_polls_with_capacity_header_and_last_message_id() {
 #[tokio::test]
 async fn poll_without_last_message_id_omits_query_and_202_is_none() {
     let server = MockServer::start().await;
-    let client = test_client(&server).await;
+    let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let client = test_client(&server, &fixtures).await;
 
     Mock::given(method("POST"))
         .and(path(format!(
@@ -210,13 +296,14 @@ async fn poll_without_last_message_id_omits_query_and_202_is_none() {
         )
         .mount(&server)
         .await;
-    // No `lastMessageId` matcher: upstream only sets the query when > 0.
-    // wiremock matches path-only here; the query assertion lives in the
-    // companion test above. 202 (timeout, no message) → None.
+    // Upstream only sets the query when > 0 (`session_client.go`); the
+    // matcher below fails the test if `lastMessageId` is sent at all.
+    // 202 (timeout, no message) → None.
     Mock::given(method("GET"))
         .and(path(format!(
             "/tenant/_apis/runtime/runnerscalesets/{SCALE_SET_ID}/messages/session-1"
         )))
+        .and(NoLastMessageId)
         .respond_with(ResponseTemplate::new(202))
         .mount(&server)
         .await;
@@ -231,8 +318,8 @@ async fn poll_without_last_message_id_omits_query_and_202_is_none() {
 #[tokio::test]
 async fn expired_queue_token_refreshes_once_then_retries() {
     let server = MockServer::start().await;
-    let client = test_client(&server).await;
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let client = test_client(&server, &fixtures).await;
     let batch = fixtures.read("message_batch.json").unwrap();
 
     Mock::given(method("POST"))
@@ -276,7 +363,8 @@ async fn expired_queue_token_refreshes_once_then_retries() {
 #[tokio::test]
 async fn acquire_jobs_uses_queue_token_and_returns_subset() {
     let server = MockServer::start().await;
-    let client = test_client(&server).await;
+    let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let client = test_client(&server, &fixtures).await;
 
     Mock::given(method("POST"))
         .and(path(format!(
@@ -310,8 +398,8 @@ async fn acquire_jobs_uses_queue_token_and_returns_subset() {
 #[tokio::test]
 async fn jit_config_ack_and_close_follow_upstream_contract() {
     let server = MockServer::start().await;
-    let client = test_client(&server).await;
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let client = test_client(&server, &fixtures).await;
 
     Mock::given(method("POST"))
         .and(path(format!(
@@ -335,10 +423,14 @@ async fn jit_config_ack_and_close_follow_upstream_contract() {
         )
         .mount(&server)
         .await;
+    // Upstream ACKs with the queue token + JSON content type
+    // (`deleteMessage`); the session close reuses the admin bearer.
     Mock::given(method("DELETE"))
         .and(path(format!(
             "/tenant/_apis/runtime/runnerscalesets/{SCALE_SET_ID}/messages/session-1/9"
         )))
+        .and(header("Content-Type", "application/json"))
+        .and(header("Authorization", "Bearer queue-token-1"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&server)
         .await;
@@ -346,6 +438,10 @@ async fn jit_config_ack_and_close_follow_upstream_contract() {
         .and(path(format!(
             "/tenant/_apis/runtime/runnerscalesets/{SCALE_SET_ID}/sessions/3fa85f64-5717-4562-b3fc-2c963f66afa6"
         )))
+        .and(header(
+            "Authorization",
+            format!("Bearer {}", admin_jwt(ADMIN_JWT_EXP)),
+        ))
         .respond_with(ResponseTemplate::new(204))
         .mount(&server)
         .await;
@@ -371,8 +467,8 @@ async fn jit_config_ack_and_close_follow_upstream_contract() {
 #[tokio::test]
 async fn scale_set_and_runner_reads_match_upstream_shapes() {
     let server = MockServer::start().await;
-    let client = test_client(&server).await;
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let client = test_client(&server, &fixtures).await;
 
     Mock::given(method("GET"))
         .and(path(format!(
@@ -419,6 +515,104 @@ async fn scale_set_and_runner_reads_match_upstream_shapes() {
     let error = client.get_runner(11).await.unwrap_err();
     assert_eq!(error.fault(), Some(ScaleSetFault::NotFound));
     assert!(error.to_string().contains("runner not found"), "{error}");
+}
+
+#[tokio::test]
+async fn runner_reference_shapes_pin_get_and_lookup() {
+    let server = MockServer::start().await;
+    let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let client = test_client(&server, &fixtures).await;
+
+    // `GetRunner` (200 → `RunnerReference`, verbatim recorded bytes).
+    Mock::given(method("GET"))
+        .and(path("/tenant/_apis/distributedtask/pools/0/agents/11"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(fixtures.read("runner_reference.json").unwrap()),
+        )
+        .mount(&server)
+        .await;
+    // `GetRunnerByName` count-1 → first entry; the list envelope
+    // (`{count, value}`) wraps the same recorded reference bytes.
+    let reference: serde_json::Value = fixtures.parse("runner_reference.json").unwrap();
+    Mock::given(method("GET"))
+        .and(path("/tenant/_apis/distributedtask/pools/0/agents"))
+        .and(query_param("agentName", "velnor-set-0007"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1, "value": [reference]
+        })))
+        .mount(&server)
+        .await;
+
+    let runner = client.get_runner(11).await.unwrap();
+    assert_eq!(runner.name, "velnor-set-0007");
+    assert_eq!(runner.runner_scale_set_id, SCALE_SET_ID);
+    let found = client
+        .get_runner_by_name("velnor-set-0007")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.id, 11);
+}
+
+#[tokio::test]
+async fn github_app_chain_fetches_installation_token_first() {
+    let server = MockServer::start().await;
+    let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    const INSTALLATION_ID: i64 = 42;
+
+    // Upstream `fetchAccessToken`: App JWT Bearer → 201 `accessToken`
+    // (recorded `installation_token.json` bytes verbatim).
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/api/v3/app/installations/{INSTALLATION_ID}/access_tokens"
+        )))
+        .and(header("Authorization", "Bearer test-app-jwt"))
+        .and(header("Content-Type", "application/vnd.github+json"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_string(fixtures.read("installation_token.json").unwrap()),
+        )
+        .mount(&server)
+        .await;
+    // The installation token authorizes the registration-token call.
+    Mock::given(method("POST"))
+        .and(path(
+            "/api/v3/orgs/octo-org/actions/runners/registration-token",
+        ))
+        .and(header("Authorization", "Bearer REDACTED"))
+        .and(header("Content-Type", "application/vnd.github.v3+json"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_string(fixtures.read("registration_token.json").unwrap()),
+        )
+        .mount(&server)
+        .await;
+    mount_admin_handshake(&server, &fixtures).await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/tenant/_apis/runtime/runnerscalesets/{SCALE_SET_ID}/sessions"
+        )))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(session_json(&server, "queue-token-1")),
+        )
+        .mount(&server)
+        .await;
+
+    let provider: Arc<dyn JwtProvider> = Arc::new(FnJwtProvider(|| Ok("test-app-jwt".to_string())));
+    let client = ScaleSetClient::new_with_jwt_provider(
+        &format!("{}/octo-org", server.uri()),
+        INSTALLATION_ID,
+        provider,
+        system_info(),
+        test_retry(),
+    )
+    .unwrap();
+    let session = MessageSessionClient::create(&client, SCALE_SET_ID, OWNER)
+        .await
+        .unwrap();
+    assert_eq!(session.scale_set_id(), SCALE_SET_ID);
+    assert_eq!(session.owner(), OWNER);
 }
 
 #[tokio::test]
